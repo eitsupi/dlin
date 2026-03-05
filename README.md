@@ -1,13 +1,6 @@
-# dbt-lineage
+# dlin
 
-[![CI](https://github.com/sipemu/dbt-lineage-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/dbt-lineage-viewer/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/dbt-lineage)](https://crates.io/crates/dbt-lineage)
-[![docs.rs](https://img.shields.io/docsrs/dbt-lineage)](https://docs.rs/dbt-lineage)
-[![codecov](https://codecov.io/gh/sipemu/dbt-lineage-viewer/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/dbt-lineage-viewer)
-
-![TUI Demo](assets/tui-demo.gif)
-
-A fast Rust CLI tool for visualizing [dbt](https://www.getdbt.com/) model lineage. Parses SQL files directly to extract `ref()` and `source()` dependencies, builds a DAG, and renders it as ASCII art, Graphviz DOT, SVG, interactive HTML, or a terminal UI.
+A fast Rust CLI tool for analyzing [dbt](https://www.getdbt.com/) model lineage. Parses SQL files directly to extract `ref()` and `source()` dependencies, builds a DAG, and renders it as ASCII art, Graphviz DOT, SVG, interactive HTML, or a terminal UI.
 
 Supports both direct SQL parsing (no dbt compilation or Python runtime needed) and `manifest.json` for full-fidelity graphs.
 
@@ -16,8 +9,8 @@ Supports both direct SQL parsing (no dbt compilation or Python runtime needed) a
 - **Direct SQL parsing** — extracts `ref()` and `source()` calls via regex, no `dbt compile` needed
 - **Manifest support** — optionally read `manifest.json` for column metadata, materializations, and full graph fidelity
 - **Interactive TUI** — navigate, search, and explore lineage in a terminal UI (ratatui) with Unicode box-drawing nodes, orthogonal edge routing, and full mouse support
-- **Impact analysis** — `dbt-lineage impact <model>` computes downstream impact with severity scoring (Critical/High/Medium/Low)
-- **Lineage diff** — `dbt-lineage diff --base <ref>` compares lineage between git refs, showing added/removed/modified nodes and edges
+- **Impact analysis** — `dlin impact <model>` computes downstream impact with severity scoring (Critical/High/Medium/Low)
+- **Lineage diff** — `dlin diff --base <ref>` compares lineage between git refs, showing added/removed/modified nodes and edges
 - **Column-level lineage** — trace column provenance through the DAG with confidence levels (Direct, Aliased, Derived, Star)
 - **6 output formats** — ASCII, Graphviz DOT, JSON, Mermaid, self-contained SVG, and interactive HTML (pan/zoom/search)
 - **Run dbt from TUI** — execute `dbt run` / `dbt test` on selected models with scope control (`+upstream`, `downstream+`, `+all+`) via keyboard menu or right-click context menu
@@ -31,18 +24,18 @@ Supports both direct SQL parsing (no dbt compilation or Python runtime needed) a
 ### From crates.io
 
 ```sh
-cargo install dbt-lineage
+cargo install dlin
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/sipemu/dbt-lineage-viewer.git
-cd dbt-lineage-viewer
+git clone https://github.com/eitsupi/dlin.git
+cd dlin
 cargo install --path .
 ```
 
-The binary is installed to `~/.cargo/bin/dbt-lineage`.
+The binary is installed to `~/.cargo/bin/dlin`.
 
 ## Usage
 
@@ -50,40 +43,40 @@ The binary is installed to `~/.cargo/bin/dbt-lineage`.
 
 ```sh
 # Full lineage of current directory's dbt project
-dbt-lineage
+dlin
 
 # Focus on a specific model
-dbt-lineage stg_orders
+dlin stg_orders
 
 # Point at a different project directory
-dbt-lineage -p path/to/dbt/project
+dlin -p path/to/dbt/project
 
 # Show 2 levels upstream, 1 downstream
-dbt-lineage stg_orders -u 2 -d 1
+dlin stg_orders -u 2 -d 1
 
 # Include seeds, tests, snapshots, exposures
-dbt-lineage --include-seeds --include-tests --include-snapshots --include-exposures
+dlin --include-seeds --include-tests --include-snapshots --include-exposures
 
 # Selector expressions
-dbt-lineage -s tag:finance,path:marts
+dlin -s tag:finance,path:marts
 
 # Use manifest.json instead of parsing SQL
-dbt-lineage --manifest target/manifest.json
+dlin --manifest target/manifest.json
 
 # Output formats
-dbt-lineage -o dot > lineage.dot        # Graphviz DOT
-dbt-lineage -o json                      # JSON graph
-dbt-lineage -o mermaid                   # Mermaid diagram
-dbt-lineage -o svg > lineage.svg         # Self-contained SVG
-dbt-lineage -o html > lineage.html       # Interactive HTML (pan/zoom/search)
+dlin -o dot > lineage.dot        # Graphviz DOT
+dlin -o json                      # JSON graph
+dlin -o mermaid                   # Mermaid diagram
+dlin -o svg > lineage.svg         # Self-contained SVG
+dlin -o html > lineage.html       # Interactive HTML (pan/zoom/search)
 ```
 
 ### Interactive TUI
 
 ```sh
-dbt-lineage -i
-dbt-lineage -i -p path/to/dbt/project
-dbt-lineage -i stg_orders -u 3 -d 3
+dlin -i
+dlin -i -p path/to/dbt/project
+dlin -i stg_orders -u 3 -d 3
 ```
 
 ### Impact analysis
@@ -91,9 +84,9 @@ dbt-lineage -i stg_orders -u 3 -d 3
 Compute downstream impact for a model with severity scoring:
 
 ```sh
-dbt-lineage impact orders -p path/to/project          # text report
-dbt-lineage impact orders -o json                      # JSON for CI
-dbt-lineage impact orders --manifest target/manifest.json
+dlin impact orders -p path/to/project          # text report
+dlin impact orders -o json                      # JSON for CI
+dlin impact orders --manifest target/manifest.json
 ```
 
 Severity levels:
@@ -107,9 +100,9 @@ Severity levels:
 Compare lineage between git refs to see what changed:
 
 ```sh
-dbt-lineage diff --base main                           # compare main to working tree
-dbt-lineage diff --base main --head feature-branch     # compare two branches
-dbt-lineage diff --base HEAD~1 -o json                 # JSON for CI integration
+dlin diff --base main                           # compare main to working tree
+dlin diff --base main --head feature-branch     # compare two branches
+dlin diff --base HEAD~1 -o json                 # JSON for CI integration
 ```
 
 Shows added, removed, and modified nodes and edges with a summary of changes.
@@ -117,7 +110,7 @@ Shows added, removed, and modified nodes and edges with a summary of changes.
 ## CLI Reference
 
 ```
-Usage: dbt-lineage [OPTIONS] [MODEL] [COMMAND]
+Usage: dlin [OPTIONS] [MODEL] [COMMAND]
 
 Commands:
   impact  Compute downstream impact analysis for a model
@@ -263,6 +256,10 @@ The TUI is enabled by default. To build a minimal binary with only static output
 ```sh
 cargo build --release --no-default-features
 ```
+
+## Credits
+
+This project is a hard fork of [dbt-lineage-viewer](https://github.com/sipemu/dbt-lineage-viewer) by Simon Müller, originally released under the MIT license.
 
 ## License
 

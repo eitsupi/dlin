@@ -141,7 +141,7 @@ mod cli {
         let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("target");
         path.push("debug");
-        path.push("dbt-lineage");
+        path.push("dlin");
         path
     }
 
@@ -154,7 +154,7 @@ mod cli {
 
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("dbt-lineage"));
+        assert!(stdout.contains("dlin"));
         assert!(stdout.contains("--project-dir"));
         assert!(stdout.contains("--interactive"));
     }

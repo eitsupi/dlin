@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use dbt_lineage::graph::types::*;
-use dbt_lineage::parser::artifacts::RunStatusMap;
-use dbt_lineage::tui::app::{App, AppMode, DbtRunState, DragState, NodeListEntry};
-use dbt_lineage::tui::graph_widget::{hit_test_node, GraphWidget};
-use dbt_lineage::tui::ui::draw_ui;
+use dlin::graph::types::*;
+use dlin::parser::artifacts::RunStatusMap;
+use dlin::tui::app::{App, AppMode, DbtRunState, DragState, NodeListEntry};
+use dlin::tui::graph_widget::{hit_test_node, GraphWidget};
+use dlin::tui::ui::draw_ui;
 
 use jugar_probar::tui::{expect_frame, TuiFrame};
 use ratatui::backend::TestBackend;
@@ -315,9 +315,9 @@ fn test_full_ui_run_confirm() {
     let graph = build_two_node_graph();
     let mut app = make_app(graph);
     app.mode = AppMode::RunConfirm;
-    app.pending_run = Some(dbt_lineage::tui::runner::DbtRunRequest {
-        command: dbt_lineage::tui::runner::DbtCommand::Run,
-        scope: dbt_lineage::tui::runner::SelectionScope::Single,
+    app.pending_run = Some(dlin::tui::runner::DbtRunRequest {
+        command: dlin::tui::runner::DbtCommand::Run,
+        scope: dlin::tui::runner::SelectionScope::Single,
         model_name: "orders".into(),
         project_dir: PathBuf::from("/tmp"),
         use_uv: false,
@@ -523,7 +523,7 @@ fn test_toggle_group_collapse_by_index() {
 #[test]
 fn test_right_click_opens_context_menu() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use dbt_lineage::tui::event::handle_mouse_event;
+    use dlin::tui::event::handle_mouse_event;
 
     let graph = build_two_node_graph();
     let mut app = make_app(graph);
@@ -546,7 +546,7 @@ fn test_right_click_opens_context_menu() {
 #[test]
 fn test_right_click_empty_space_does_nothing() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use dbt_lineage::tui::event::handle_mouse_event;
+    use dlin::tui::event::handle_mouse_event;
 
     let graph = build_two_node_graph();
     let mut app = make_app(graph);
@@ -567,7 +567,7 @@ fn test_right_click_empty_space_does_nothing() {
 #[test]
 fn test_context_menu_dismissed_by_click() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    use dbt_lineage::tui::event::handle_mouse_event;
+    use dlin::tui::event::handle_mouse_event;
 
     let graph = build_two_node_graph();
     let mut app = make_app(graph);

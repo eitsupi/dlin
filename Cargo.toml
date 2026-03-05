@@ -1,17 +1,17 @@
 [package]
-name = "dbt-lineage"
-version = "0.2.0"
+name = "dlin"
+version = "0.1.0"
 edition = "2021"
-description = "A Rust CLI tool for visualizing dbt model lineage"
+description = "A fast CLI tool for dbt model lineage analysis"
 license = "MIT"
-repository = "https://github.com/sipemu/dbt-lineage-viewer"
-homepage = "https://github.com/sipemu/dbt-lineage-viewer"
+repository = "https://github.com/eitsupi/dlin"
+homepage = "https://github.com/eitsupi/dlin"
 readme = "README.md"
-keywords = ["dbt", "lineage", "dag", "sql", "tui"]
+keywords = ["dbt", "lineage", "dag", "sql", "cli"]
 categories = ["command-line-utilities", "visualization"]
 
 [[bin]]
-name = "dbt-lineage"
+name = "dlin"
 path = "src/main.rs"
 
 [features]

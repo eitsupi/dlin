@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dbt_lineage::cli::{self, Cli, Command};
-use dbt_lineage::graph;
-use dbt_lineage::parser;
-use dbt_lineage::render;
+use dlin::cli::{self, Cli, Command};
+use dlin::graph;
+use dlin::parser;
+use dlin::render;
 
 #[cfg(not(tarpaulin_include))]
 fn main() -> Result<()> {
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     // Render
     #[cfg(feature = "tui")]
     if cli.interactive {
-        dbt_lineage::tui::run_tui(filtered, project_dir.clone())?;
+        dlin::tui::run_tui(filtered, project_dir.clone())?;
         return Ok(());
     }
 
@@ -153,25 +153,25 @@ fn run_diff_command(
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    if !dbt_lineage::git::is_git_repo(&project_dir) {
+    if !dlin::git::is_git_repo(&project_dir) {
         anyhow::bail!("Not a git repository: {}", project_dir.display());
     }
 
     // Validate base ref
-    dbt_lineage::git::validate_ref(&project_dir, base)?;
+    dlin::git::validate_ref(&project_dir, base)?;
 
     // Build base graph from git ref
     let base_graph = graph::diff::build_graph_from_ref(&project_dir, base)?;
 
     // Build head graph (from git ref or working tree)
     let (head_graph, head_label) = if let Some(head_ref) = head {
-        dbt_lineage::git::validate_ref(&project_dir, head_ref)?;
+        dlin::git::validate_ref(&project_dir, head_ref)?;
         let g = graph::diff::build_graph_from_ref(&project_dir, head_ref)?;
         (g, head_ref.to_string())
     } else {
         // Use current working tree
         let g = build_working_tree_graph(&project_dir)?;
-        let label = dbt_lineage::git::current_ref(&project_dir).unwrap_or_else(|_| "HEAD".into());
+        let label = dlin::git::current_ref(&project_dir).unwrap_or_else(|_| "HEAD".into());
         (g, label)
     };
 

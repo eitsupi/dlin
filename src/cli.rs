@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "dbt-lineage", about = "Visualize dbt model lineage")]
+#[command(name = "dlin", about = "A fast CLI tool for dbt model lineage analysis")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_default_args() {
-        let cli = Cli::try_parse_from(["dbt-lineage"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin"]).unwrap();
         assert!(cli.model.is_none());
         assert!(cli.command.is_none());
         assert!(!cli.interactive);
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_all_flags() {
         let cli = Cli::try_parse_from([
-            "dbt-lineage",
+            "dlin",
             "my_model",
             "-p",
             "/path/to/project",
@@ -179,58 +179,58 @@ mod tests {
 
     #[test]
     fn test_select_short_flag() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "-s", "orders,tag:nightly"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-s", "orders,tag:nightly"]).unwrap();
         assert_eq!(cli.select.as_deref(), Some("orders,tag:nightly"));
     }
 
     #[test]
     fn test_select_long_flag() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "--select", "path:models/staging"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "--select", "path:models/staging"]).unwrap();
         assert_eq!(cli.select.as_deref(), Some("path:models/staging"));
     }
 
     #[test]
     fn test_manifest_flag() {
         let cli =
-            Cli::try_parse_from(["dbt-lineage", "--manifest", "/path/to/manifest.json"]).unwrap();
+            Cli::try_parse_from(["dlin", "--manifest", "/path/to/manifest.json"]).unwrap();
         assert_eq!(cli.manifest, Some(PathBuf::from("/path/to/manifest.json")));
     }
 
     #[test]
     fn test_manifest_flag_directory() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "--manifest", "/path/to/project"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "--manifest", "/path/to/project"]).unwrap();
         assert_eq!(cli.manifest, Some(PathBuf::from("/path/to/project")));
     }
 
     #[test]
     fn test_output_format_parsing() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "ascii"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "ascii"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Ascii));
 
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "dot"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "dot"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Dot));
 
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "json"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "json"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Json));
 
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "mermaid"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "mermaid"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Mermaid));
 
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "svg"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "svg"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Svg));
 
-        let cli = Cli::try_parse_from(["dbt-lineage", "-o", "html"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "-o", "html"]).unwrap();
         assert!(matches!(cli.output, OutputFormat::Html));
 
         // Invalid format
-        let result = Cli::try_parse_from(["dbt-lineage", "-o", "yaml"]);
+        let result = Cli::try_parse_from(["dlin", "-o", "yaml"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_impact_subcommand() {
         let cli =
-            Cli::try_parse_from(["dbt-lineage", "impact", "orders", "-p", "/path/to/project"])
+            Cli::try_parse_from(["dlin", "impact", "orders", "-p", "/path/to/project"])
                 .unwrap();
         match cli.command {
             Some(Command::Impact {
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_impact_subcommand_json() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "impact", "orders", "-o", "json"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "impact", "orders", "-o", "json"]).unwrap();
         match cli.command {
             Some(Command::Impact { ref output, .. }) => {
                 assert!(matches!(output, ImpactOutputFormat::Json));
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_diff_subcommand() {
-        let cli = Cli::try_parse_from(["dbt-lineage", "diff", "--base", "main"]).unwrap();
+        let cli = Cli::try_parse_from(["dlin", "diff", "--base", "main"]).unwrap();
         match cli.command {
             Some(Command::Diff {
                 ref base, ref head, ..
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn test_diff_subcommand_with_head() {
         let cli =
-            Cli::try_parse_from(["dbt-lineage", "diff", "--base", "main", "--head", "feature"])
+            Cli::try_parse_from(["dlin", "diff", "--base", "main", "--head", "feature"])
                 .unwrap();
         match cli.command {
             Some(Command::Diff {
