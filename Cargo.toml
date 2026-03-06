@@ -23,7 +23,7 @@ clap = { version = "4", features = ["derive"] }
 petgraph = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = "0.0"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
@@ -42,5 +42,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 [dev-dependencies]
 tempfile = "3"
 regex = "1"
-serde_yaml = "0.9"
 jugar-probar = { version = "1.0.2", default-features = false, features = ["tui"] }

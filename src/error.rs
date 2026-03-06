@@ -16,7 +16,7 @@ pub enum DbtLineageError {
     #[error("failed to parse YAML in {path}: {source}")]
     YamlParseError {
         path: PathBuf,
-        source: serde_yaml::Error,
+        source: serde_saphyr::Error,
     },
 
     #[error("model not found: {0}")]

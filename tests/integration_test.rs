@@ -18,7 +18,7 @@ mod parsing {
     fn test_load_project() {
         let dir = fixture_dir();
         let content = std::fs::read_to_string(dir.join("dbt_project.yml")).unwrap();
-        let project: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        let project: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
         assert_eq!(project["name"].as_str().unwrap(), "simple_project");
     }
 
@@ -63,11 +63,11 @@ mod parsing {
         let content =
             std::fs::read_to_string(fixture_dir().join("models/staging/schema.yml")).unwrap();
 
-        let schema: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
-        let sources = schema["sources"].as_sequence().unwrap();
+        let schema: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
+        let sources = schema["sources"].as_array().unwrap();
         assert_eq!(sources.len(), 1);
 
-        let tables = sources[0]["tables"].as_sequence().unwrap();
+        let tables = sources[0]["tables"].as_array().unwrap();
         assert_eq!(tables.len(), 3);
     }
 
@@ -76,8 +76,8 @@ mod parsing {
         let content =
             std::fs::read_to_string(fixture_dir().join("models/marts/schema.yml")).unwrap();
 
-        let schema: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
-        let exposures = schema["exposures"].as_sequence().unwrap();
+        let schema: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
+        let exposures = schema["exposures"].as_array().unwrap();
         assert_eq!(exposures.len(), 1);
         assert_eq!(exposures[0]["name"].as_str().unwrap(), "weekly_report");
     }

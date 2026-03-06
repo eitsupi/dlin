@@ -51,7 +51,7 @@ impl DbtProject {
                 source: e,
             })?;
 
-        let project: DbtProject = serde_yaml::from_str(&content)
+        let project: DbtProject = serde_saphyr::from_str(&content)
             .context(format!("Failed to parse {}", project_file.display()))?;
 
         Ok(project)
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn test_defaults() {
         let yaml = "name: my_project\n";
-        let project: DbtProject = serde_yaml::from_str(yaml).unwrap();
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(project.name, "my_project");
         assert_eq!(project.model_paths, vec!["models"]);
         assert_eq!(project.seed_paths, vec!["seeds"]);
@@ -114,7 +114,7 @@ name: my_project
 model-paths: ["models", "extra_models"]
 seed-paths: ["data"]
 "#;
-        let project: DbtProject = serde_yaml::from_str(yaml).unwrap();
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(project.model_paths, vec!["models", "extra_models"]);
         assert_eq!(project.seed_paths, vec!["data"]);
         assert_eq!(project.snapshot_paths, vec!["snapshots"]); // default
@@ -150,7 +150,7 @@ seed-paths: ["data"]
     #[test]
     fn test_resolve_paths() {
         let yaml = "name: my_project\n";
-        let project: DbtProject = serde_yaml::from_str(yaml).unwrap();
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
         let paths = project.resolve_paths(Path::new("/proj"));
         assert_eq!(paths.model_paths, vec![PathBuf::from("/proj/models")]);
         assert_eq!(paths.seed_paths, vec![PathBuf::from("/proj/seeds")]);

@@ -36,7 +36,7 @@ pub struct ColumnDefinition {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "data_tests")]
     pub tests: Vec<TestDefinition>,
 }
 
@@ -45,7 +45,7 @@ pub struct ColumnDefinition {
 #[serde(untagged)]
 pub enum TestDefinition {
     Simple(String),
-    Complex(serde_yaml::Value),
+    Complex(serde_json::Value),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -89,8 +89,8 @@ pub struct ExposureOwner {
 }
 
 /// Parse a schema YAML file
-pub fn parse_schema_file(content: &str) -> Result<SchemaFile, serde_yaml::Error> {
-    serde_yaml::from_str(content)
+pub fn parse_schema_file(content: &str) -> Result<SchemaFile, serde_saphyr::Error> {
+    serde_saphyr::from_str(content)
 }
 
 #[cfg(test)]
@@ -123,7 +123,7 @@ models:
     description: Staged orders
     columns:
       - name: order_id
-        tests:
+        data_tests:
           - not_null
           - unique
 "#;
@@ -131,6 +131,65 @@ models:
         assert_eq!(schema.models.len(), 1);
         assert_eq!(schema.models[0].name, "stg_orders");
         assert_eq!(schema.models[0].columns.len(), 1);
+        assert_eq!(schema.models[0].columns[0].tests.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_data_tests_all_formats() {
+        let yaml = r#"
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique:
+              config:
+                where: "order_id > 21"
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - placed
+                  - shipped
+                  - completed
+                  - returned
+              config:
+                severity: warn
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: id
+          - name: custom_test_name
+            test_name: accepted_values
+            arguments:
+              values:
+                - 1
+                - 2
+                - 3
+            config:
+              where: "order_date = current_date"
+"#;
+        let schema = parse_schema_file(yaml).unwrap();
+        let model = &schema.models[0];
+        assert_eq!(model.columns.len(), 3);
+
+        // Simple + map with config
+        assert_eq!(model.columns[0].tests.len(), 2);
+        assert!(matches!(model.columns[0].tests[0], TestDefinition::Simple(ref s) if s == "not_null"));
+        assert!(matches!(model.columns[0].tests[1], TestDefinition::Complex(_)));
+
+        // accepted_values with arguments + config
+        assert_eq!(model.columns[1].tests.len(), 1);
+        assert!(matches!(model.columns[1].tests[0], TestDefinition::Complex(_)));
+
+        // relationships + alternative name/test_name format
+        assert_eq!(model.columns[2].tests.len(), 2);
+        assert!(matches!(model.columns[2].tests[0], TestDefinition::Complex(_)));
+        assert!(matches!(model.columns[2].tests[1], TestDefinition::Complex(_)));
     }
 
     #[test]
