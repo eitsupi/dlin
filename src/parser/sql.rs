@@ -71,21 +71,13 @@ pub fn extract_refs_and_sources(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
 }
 
 /// Extract all ref() calls from SQL content.
-/// Tries minijinja rendering first; falls back to regex on failure.
 pub fn extract_refs(sql: &str) -> Vec<RefCall> {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
-        return ext.refs;
-    }
-    extract_refs_regex(sql)
+    extract_refs_and_sources(sql).0
 }
 
 /// Extract all source() calls from SQL content.
-/// Tries minijinja rendering first; falls back to regex on failure.
 pub fn extract_sources(sql: &str) -> Vec<SourceCall> {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
-        return ext.sources;
-    }
-    extract_sources_regex(sql)
+    extract_refs_and_sources(sql).1
 }
 
 /// Regex fallback for extracting ref() calls

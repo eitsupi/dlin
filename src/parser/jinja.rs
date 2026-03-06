@@ -14,8 +14,38 @@ pub struct JinjaExtraction {
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.
+/// Renders twice (with `is_incremental()` returning both false and true) and
+/// merges results to capture refs/sources from all conditional branches.
 /// Returns `None` if the template fails to render (caller should fall back to regex).
 pub fn extract_via_jinja(sql: &str) -> Option<JinjaExtraction> {
+    // Render with is_incremental=false first (full-load path)
+    let mut result = render_with_incremental(sql, false)?;
+
+    // Render again with is_incremental=true to capture incremental-only refs
+    if let Some(incr) = render_with_incremental(sql, true) {
+        merge_extraction(&mut result, incr);
+    }
+
+    Some(result)
+}
+
+/// Merge `other` into `base`, adding only deduplicated refs and sources
+fn merge_extraction(base: &mut JinjaExtraction, other: JinjaExtraction) {
+    for r in other.refs {
+        if !base.refs.contains(&r) {
+            base.refs.push(r);
+        }
+    }
+    for s in other.sources {
+        if !base.sources.contains(&s) {
+            base.sources.push(s);
+        }
+    }
+    // config from first render takes precedence
+}
+
+/// Render a dbt SQL template once with the given `is_incremental` value.
+fn render_with_incremental(sql: &str, is_incremental: bool) -> Option<JinjaExtraction> {
     let extraction = Arc::new(Mutex::new(JinjaExtraction::default()));
 
     let mut env = Environment::new();
@@ -76,6 +106,7 @@ pub fn extract_via_jinja(sql: &str) -> Option<JinjaExtraction> {
     );
 
     // config(materialized='...', tags=[...], ...)
+    // Unknown kwargs (schema, alias, unique_key, etc.) are silently ignored.
     let ext = extraction.clone();
     env.add_function(
         "config",
@@ -89,15 +120,14 @@ pub fn extract_via_jinja(sql: &str) -> Option<JinjaExtraction> {
                     ext.config.tags = iter.map(|v| v.to_string()).collect();
                 }
             }
-            kwargs.assert_all_used()?;
             Ok(Value::from(""))
         },
     );
 
-    // is_incremental() → false (captures the full-load path)
+    // is_incremental() → parameterized
     env.add_function(
         "is_incremental",
-        || -> Result<Value, minijinja::Error> { Ok(Value::from(false)) },
+        move || -> Result<Value, minijinja::Error> { Ok(Value::from(is_incremental)) },
     );
 
     // this → dummy relation object
@@ -175,7 +205,7 @@ pub fn extract_via_jinja(sql: &str) -> Option<JinjaExtraction> {
             let result = Arc::try_unwrap(extraction)
                 .expect("single owner")
                 .into_inner()
-                .unwrap();
+                .unwrap_or_else(|e| e.into_inner());
             Some(result)
         }
         Err(_) => None,
@@ -249,16 +279,21 @@ mod tests {
     }
 
     #[test]
-    fn test_is_incremental_false_branch() {
+    fn test_is_incremental_both_branches() {
         let sql = r#"
-            SELECT * FROM {{ ref('stg_orders') }}
             {% if is_incremental() %}
+            SELECT * FROM {{ ref('stg_orders') }}
             WHERE updated_at > (SELECT max(updated_at) FROM {{ this }})
+            {% else %}
+            SELECT * FROM {{ ref('stg_orders') }}
+            JOIN {{ ref('stg_history') }}
             {% endif %}
         "#;
         let ext = extract_via_jinja(sql).unwrap();
-        assert_eq!(ext.refs.len(), 1);
-        assert_eq!(ext.refs[0].name, "stg_orders");
+        // Both branches are rendered: stg_orders (deduped) + stg_history
+        assert_eq!(ext.refs.len(), 2);
+        assert!(ext.refs.iter().any(|r| r.name == "stg_orders"));
+        assert!(ext.refs.iter().any(|r| r.name == "stg_history"));
     }
 
     #[test]
@@ -283,9 +318,9 @@ mod tests {
     #[test]
     fn test_var_with_default() {
         let sql = "SELECT * FROM {{ ref('model_' ~ var('suffix', 'default')) }}";
-        // The concatenated ref arg will be "model_default" - captured by jinja
-        let result = extract_via_jinja(sql);
-        assert!(result.is_some());
+        let ext = extract_via_jinja(sql).unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "model_default");
     }
 
     #[test]
@@ -298,6 +333,18 @@ mod tests {
         "#;
         let ext = extract_via_jinja(sql).unwrap();
         assert_eq!(ext.sources.len(), 2);
+        assert_eq!(ext.sources[0].source_name, "raw");
+        assert_eq!(ext.sources[0].table_name, "orders");
+        assert_eq!(ext.sources[1].source_name, "raw");
+        assert_eq!(ext.sources[1].table_name, "customers");
+    }
+
+    #[test]
+    fn test_config_with_extra_kwargs() {
+        let sql = "{{ config(materialized='incremental', schema='analytics', unique_key='id', tags=['nightly']) }}\nSELECT 1";
+        let ext = extract_via_jinja(sql).unwrap();
+        assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
+        assert_eq!(ext.config.tags, vec!["nightly"]);
     }
 
     #[test]
