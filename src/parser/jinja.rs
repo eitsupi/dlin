@@ -282,18 +282,17 @@ mod tests {
     fn test_is_incremental_both_branches() {
         let sql = r#"
             {% if is_incremental() %}
-            SELECT * FROM {{ ref('stg_orders') }}
+            SELECT * FROM {{ ref('stg_incremental_orders') }}
             WHERE updated_at > (SELECT max(updated_at) FROM {{ this }})
             {% else %}
-            SELECT * FROM {{ ref('stg_orders') }}
-            JOIN {{ ref('stg_history') }}
+            SELECT * FROM {{ ref('stg_full_orders') }}
             {% endif %}
         "#;
         let ext = extract_via_jinja(sql).unwrap();
-        // Both branches are rendered: stg_orders (deduped) + stg_history
+        // Both branches are rendered: unique refs from each branch
         assert_eq!(ext.refs.len(), 2);
-        assert!(ext.refs.iter().any(|r| r.name == "stg_orders"));
-        assert!(ext.refs.iter().any(|r| r.name == "stg_history"));
+        assert!(ext.refs.iter().any(|r| r.name == "stg_full_orders"));
+        assert!(ext.refs.iter().any(|r| r.name == "stg_incremental_orders"));
     }
 
     #[test]
