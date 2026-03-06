@@ -148,7 +148,7 @@ mod cli {
     #[test]
     fn test_help_flag() {
         let output = Command::new(binary_path())
-            .arg("--help")
+            .args(["graph", "--help"])
             .output()
             .expect("Failed to run binary");
 
@@ -160,9 +160,24 @@ mod cli {
     }
 
     #[test]
+    fn test_no_subcommand_shows_help() {
+        let output = Command::new(binary_path())
+            .output()
+            .expect("Failed to run binary");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // clap prints usage/help to stderr when no subcommand is given
+        assert!(
+            stderr.contains("Usage") || stderr.contains("dlin"),
+            "Should show usage info: {}",
+            stderr
+        );
+    }
+
+    #[test]
     fn test_nonexistent_project() {
         let output = Command::new(binary_path())
-            .args(["--project-dir", "/nonexistent/path"])
+            .args(["graph", "--project-dir", "/nonexistent/path"])
             .output()
             .expect("Failed to run binary");
 
@@ -175,7 +190,7 @@ mod cli {
     fn test_run_on_fixture_project() {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
-            .args(["--project-dir", fixture.to_str().unwrap()])
+            .args(["graph", "--project-dir", fixture.to_str().unwrap()])
             .output()
             .expect("Failed to run binary");
 
@@ -197,6 +212,7 @@ mod cli {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
             .args([
+                "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
                 "--output",
@@ -217,6 +233,7 @@ mod cli {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
             .args([
+                "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
                 "stg_orders",
@@ -243,6 +260,7 @@ mod cli {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
             .args([
+                "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
                 "nonexistent_model",
@@ -260,6 +278,7 @@ mod cli {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
             .args([
+                "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
                 "--include-seeds",
@@ -279,6 +298,7 @@ mod cli {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())
             .args([
+                "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
                 "--include-tests",
