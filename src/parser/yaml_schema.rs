@@ -40,7 +40,10 @@ pub struct ColumnDefinition {
     pub tests: Vec<TestDefinition>,
 }
 
-/// Tests can be either a string or a map
+/// Tests can be either a string or a map.
+/// Complex variants are deserialized into `serde_json::Value` because serde-saphyr
+/// has no intermediate Value type. This is safe for dbt schema files which use
+/// JSON-compatible YAML.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TestDefinition {
@@ -116,7 +119,7 @@ sources:
     }
 
     #[test]
-    fn test_parse_models() {
+    fn test_parse_models_with_data_tests() {
         let yaml = r#"
 models:
   - name: stg_orders
@@ -131,6 +134,21 @@ models:
         assert_eq!(schema.models.len(), 1);
         assert_eq!(schema.models[0].name, "stg_orders");
         assert_eq!(schema.models[0].columns.len(), 1);
+        assert_eq!(schema.models[0].columns[0].tests.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_models_with_legacy_tests_key() {
+        let yaml = r#"
+models:
+  - name: stg_orders
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+"#;
+        let schema = parse_schema_file(yaml).unwrap();
         assert_eq!(schema.models[0].columns[0].tests.len(), 2);
     }
 

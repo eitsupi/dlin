@@ -17,9 +17,8 @@ mod parsing {
     #[test]
     fn test_load_project() {
         let dir = fixture_dir();
-        let content = std::fs::read_to_string(dir.join("dbt_project.yml")).unwrap();
-        let project: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
-        assert_eq!(project["name"].as_str().unwrap(), "simple_project");
+        let project = dlin::parser::project::DbtProject::load(&dir).unwrap();
+        assert_eq!(project.name, "simple_project");
     }
 
     #[test]
