@@ -120,7 +120,6 @@ fn draw_detail_panel(f: &mut Frame, app: &App, area: Rect) {
     let run_status = app.node_run_status(&node.unique_id);
 
     let mut lines = detail_basic_lines(node, run_status);
-    lines.extend(detail_column_lineage_lines(app, node));
     lines.extend(detail_neighbors_lines(app, selected));
     lines.extend(detail_impact_lines(app, selected));
 
@@ -223,48 +222,6 @@ fn detail_basic_lines<'a>(node: &'a NodeData, run_status: &'a RunStatus) -> Vec<
         }
     }
 
-    lines
-}
-
-/// Build column lineage lines (when enabled)
-fn detail_column_lineage_lines<'a>(app: &'a App, node: &'a NodeData) -> Vec<Line<'a>> {
-    let mut lines = Vec::new();
-    if !app.show_column_lineage {
-        return lines;
-    }
-
-    let col_edges = app.column_lineage.edges_for_target(&node.unique_id);
-    if col_edges.is_empty() {
-        return lines;
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        format!("Column Lineage ({}):", col_edges.len()),
-        Style::default().bold(),
-    )]));
-    for edge in &col_edges {
-        let conf_color = match edge.confidence {
-            crate::parser::column_lineage::ColumnConfidence::Direct => Color::Green,
-            crate::parser::column_lineage::ColumnConfidence::Aliased => Color::Yellow,
-            crate::parser::column_lineage::ColumnConfidence::Derived => Color::Magenta,
-            crate::parser::column_lineage::ColumnConfidence::Star => Color::Cyan,
-        };
-        let source = if edge.source_column.is_empty() {
-            edge.source_node.clone()
-        } else {
-            format!("{}.{}", edge.source_node, edge.source_column)
-        };
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {} ", edge.target_column)),
-            Span::styled("\u{2190} ", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("{} ", source)),
-            Span::styled(
-                format!("[{}]", edge.confidence.label()),
-                Style::default().fg(conf_color),
-            ),
-        ]));
-    }
     lines
 }
 
@@ -410,10 +367,7 @@ fn build_normal_help_text(app: &App) -> String {
     if !app.highlighted_path.is_empty() {
         help.push_str(" | [path]");
     }
-    if app.show_column_lineage {
-        help.push_str(" | [columns]");
-    }
-    help.push_str(" | C: columns | q: quit");
+    help.push_str(" | q: quit");
     help
 }
 

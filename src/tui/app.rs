@@ -12,7 +12,6 @@ use ratatui::widgets::ListState;
 use crate::graph::impact::ImpactReport;
 use crate::graph::types::{LineageGraph, NodeType};
 use crate::parser::artifacts::{self, RunStatus, RunStatusMap};
-use crate::parser::column_lineage::ColumnLineage;
 use crate::render::layout::{sugiyama_layout, LayoutResult};
 
 use super::runner::{spawn_dbt_run, DbtRunMessage, DbtRunRequest};
@@ -123,9 +122,6 @@ pub struct App {
     // Impact analysis (computed when path is highlighted)
     pub impact_report: Option<ImpactReport>,
 
-    // Column-level lineage
-    pub column_lineage: ColumnLineage,
-    pub show_column_lineage: bool,
 }
 
 impl App {
@@ -206,8 +202,6 @@ impl App {
             highlighted_path: HashSet::new(),
             path_highlight_source: None,
             impact_report: None,
-            column_lineage: ColumnLineage::default(),
-            show_column_lineage: false,
         }
     }
 
@@ -724,17 +718,6 @@ impl App {
 
         // Also compute impact report for downstream analysis
         self.impact_report = Some(crate::graph::impact::compute_impact(&self.graph, selected));
-    }
-
-    /// Toggle column-level lineage display. Resolves lazily on first toggle.
-    pub fn toggle_column_lineage(&mut self) {
-        self.show_column_lineage = !self.show_column_lineage;
-
-        // Resolve column lineage lazily on first enable
-        if self.show_column_lineage && self.column_lineage.edges.is_empty() {
-            self.column_lineage =
-                crate::parser::column_lineage::resolve_column_lineage(&self.graph);
-        }
     }
 
     /// Whether a dbt run is currently in progress
@@ -1792,26 +1775,9 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_column_lineage() {
-        let mut app = test_app();
-        assert!(!app.show_column_lineage);
-        assert!(app.column_lineage.edges.is_empty());
-
-        // Toggle on (will resolve, but test graph has no SQL files so edges stay empty)
-        app.toggle_column_lineage();
-        assert!(app.show_column_lineage);
-
-        // Toggle off
-        app.toggle_column_lineage();
-        assert!(!app.show_column_lineage);
-    }
-
-    #[test]
     fn test_new_app_fields_initialized() {
         let app = test_app();
         assert!(app.impact_report.is_none());
-        assert!(app.column_lineage.edges.is_empty());
-        assert!(!app.show_column_lineage);
     }
 
     #[test]

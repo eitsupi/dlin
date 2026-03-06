@@ -134,7 +134,6 @@ fn handle_normal_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Char('o') if app.has_run_output() => app.mode = AppMode::RunOutput,
         KeyCode::Char('f') => app.mode = AppMode::Filter,
         KeyCode::Char('p') => app.toggle_path_highlight(),
-        KeyCode::Char('C') => app.toggle_column_lineage(),
         _ => {}
     }
     false
@@ -1748,18 +1747,6 @@ mod tests {
         app.selected_node = None;
         assert!(!handle_key_event(&mut app, key(KeyCode::Char('p'))));
         assert!(app.highlighted_path.is_empty());
-    }
-
-    // ─── Column lineage tests ───
-
-    #[test]
-    fn test_shift_c_toggles_column_lineage() {
-        let mut app = test_app();
-        assert!(!app.show_column_lineage);
-        assert!(!handle_key_event(&mut app, key_shift(KeyCode::Char('C'))));
-        assert!(app.show_column_lineage);
-        assert!(!handle_key_event(&mut app, key_shift(KeyCode::Char('C'))));
-        assert!(!app.show_column_lineage);
     }
 
     // ─── Impact report via path highlight tests ───
