@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
-use crate::parser::sql::{extract_config, extract_refs, extract_sources};
+use crate::parser::sql::{extract_config, extract_refs_and_sources};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
 use super::types::*;
@@ -319,7 +319,9 @@ fn process_sql_edges(
             None => continue,
         };
 
-        for ref_call in extract_refs(&content) {
+        let (refs, sources) = extract_refs_and_sources(&content);
+
+        for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
             gb.graph.add_edge(
                 dep_idx,
@@ -330,7 +332,7 @@ fn process_sql_edges(
             );
         }
 
-        for source_call in extract_sources(&content) {
+        for source_call in sources {
             let source_idx = gb.get_or_create_phantom_source(
                 &source_call.source_name,
                 &source_call.table_name,

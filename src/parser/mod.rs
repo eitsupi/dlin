@@ -1,6 +1,7 @@
 pub mod artifacts;
 pub mod columns;
 pub mod discovery;
+pub mod jinja;
 pub mod manifest;
 pub mod project;
 pub mod sql;

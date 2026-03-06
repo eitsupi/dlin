@@ -61,20 +61,45 @@ fn strip_jinja_comments(sql: &str) -> String {
     JINJA_COMMENT.replace_all(sql, "").to_string()
 }
 
-/// Extract all ref() calls from SQL content
+/// Extract all ref() and source() calls from SQL content in a single pass.
+/// Tries minijinja rendering first; falls back to regex on failure.
+pub fn extract_refs_and_sources(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
+        return (ext.refs, ext.sources);
+    }
+    (extract_refs_regex(sql), extract_sources_regex(sql))
+}
+
+/// Extract all ref() calls from SQL content.
+/// Tries minijinja rendering first; falls back to regex on failure.
 pub fn extract_refs(sql: &str) -> Vec<RefCall> {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
+        return ext.refs;
+    }
+    extract_refs_regex(sql)
+}
+
+/// Extract all source() calls from SQL content.
+/// Tries minijinja rendering first; falls back to regex on failure.
+pub fn extract_sources(sql: &str) -> Vec<SourceCall> {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
+        return ext.sources;
+    }
+    extract_sources_regex(sql)
+}
+
+/// Regex fallback for extracting ref() calls
+fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     let cleaned = strip_jinja_comments(sql);
     let mut refs = Vec::new();
 
     for cap in REF_PATTERN.captures_iter(&cleaned) {
         if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
-            // Two-argument form
             refs.push(RefCall {
                 package: Some(pkg.as_str().to_string()),
                 name: name.as_str().to_string(),
             });
         } else if let Some(name) = cap.get(3) {
-            // Single-argument form
             refs.push(RefCall {
                 package: None,
                 name: name.as_str().to_string(),
@@ -85,8 +110,8 @@ pub fn extract_refs(sql: &str) -> Vec<RefCall> {
     refs
 }
 
-/// Extract all source() calls from SQL content
-pub fn extract_sources(sql: &str) -> Vec<SourceCall> {
+/// Regex fallback for extracting source() calls
+fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
     let cleaned = strip_jinja_comments(sql);
     let mut sources = Vec::new();
 
@@ -132,8 +157,17 @@ static TAGS_PATTERN: LazyLock<Regex> =
 // Matches individual tag values inside the tags list
 static TAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"['"]([^'"]+)['"]"#).unwrap());
 
-/// Extract config() block settings from SQL content
+/// Extract config() block settings from SQL content.
+/// Tries minijinja rendering first; falls back to regex on failure.
 pub fn extract_config(sql: &str) -> SqlConfig {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql) {
+        return ext.config;
+    }
+    extract_config_regex(sql)
+}
+
+/// Regex fallback for extracting config() settings
+fn extract_config_regex(sql: &str) -> SqlConfig {
     let cleaned = strip_jinja_comments(sql);
     let mut config = SqlConfig::default();
 
