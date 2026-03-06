@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, Cli, Command};
+use dlin::cli::{self, Cli, Command, GraphArgs};
 use dlin::graph;
 use dlin::parser;
 use dlin::render;
@@ -13,33 +13,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Graph {
-            model,
-            project_dir,
-            upstream,
-            downstream,
-            interactive,
-            output,
-            include_tests,
-            include_seeds,
-            include_snapshots,
-            include_exposures,
-            select,
-            manifest,
-        } => run_graph_command(
-            model.as_deref(),
-            &project_dir,
-            upstream,
-            downstream,
-            interactive,
-            &output,
-            include_tests,
-            include_seeds,
-            include_snapshots,
-            include_exposures,
-            select.as_deref(),
-            manifest.as_ref(),
-        ),
+        Command::Graph(args) => run_graph_command(args),
         Command::Impact {
             model,
             project_dir,
@@ -57,60 +31,49 @@ fn main() -> Result<()> {
 
 /// Run the `graph` subcommand
 #[cfg(not(tarpaulin_include))]
-#[allow(clippy::too_many_arguments)]
-fn run_graph_command(
-    model: Option<&str>,
-    project_dir: &Path,
-    upstream: Option<usize>,
-    downstream: Option<usize>,
-    interactive: bool,
-    output: &cli::OutputFormat,
-    include_tests: bool,
-    include_seeds: bool,
-    include_snapshots: bool,
-    include_exposures: bool,
-    select: Option<&str>,
-    manifest: Option<&PathBuf>,
-) -> Result<()> {
-    let project_dir = project_dir
+fn run_graph_command(args: GraphArgs) -> Result<()> {
+    let project_dir = args
+        .project_dir
         .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
+        .unwrap_or(args.project_dir);
 
-    let dag = build_dag(&project_dir, manifest)?;
+    let dag = build_dag(&project_dir, args.manifest.as_ref())?;
 
     // Parse selectors
-    let selectors = select
+    let selectors = args
+        .select
+        .as_deref()
         .map(graph::filter::parse_selectors)
         .unwrap_or_default();
 
     // Filter graph
     let filtered = graph::filter::filter_graph(
         &dag,
-        model,
-        upstream,
-        downstream,
+        args.model.as_deref(),
+        args.upstream,
+        args.downstream,
         &graph::filter::NodeTypeFilter {
-            include_tests,
-            include_seeds,
-            include_snapshots,
-            include_exposures,
+            include_tests: args.include_tests,
+            include_seeds: args.include_seeds,
+            include_snapshots: args.include_snapshots,
+            include_exposures: args.include_exposures,
         },
         &selectors,
     )?;
 
     // Render
     #[cfg(feature = "tui")]
-    if interactive {
-        dlin::tui::run_tui(filtered, project_dir.clone())?;
+    if args.interactive {
+        dlin::tui::run_tui(filtered, project_dir)?;
         return Ok(());
     }
 
     #[cfg(not(feature = "tui"))]
-    if interactive {
+    if args.interactive {
         anyhow::bail!("TUI feature not enabled. Rebuild with --features tui");
     }
 
-    render_output(output, &filtered);
+    render_output(&args.output, &filtered);
 
     Ok(())
 }
