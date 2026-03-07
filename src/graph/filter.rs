@@ -187,15 +187,38 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
     new_graph
 }
 
+/// Known node type labels for validation.
+const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
+
+/// Return unrecognized node type names from the given list.
+pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
+    type_names
+        .iter()
+        .filter(|t| !KNOWN_NODE_TYPE_LABELS.iter().any(|k| k.eq_ignore_ascii_case(t)))
+        .cloned()
+        .collect()
+}
+
 /// Filter graph to keep only nodes whose type label matches one of the given names.
 /// If `type_names` is empty, the graph is returned unchanged.
+/// Comparison is case-insensitive.
+///
+/// Note: edges between kept nodes that pass through filtered-out intermediaries
+/// are dropped. For example, `A → B → C` filtered to only A and C will show them
+/// as disconnected nodes.
 pub fn filter_output_node_types(graph: &LineageGraph, type_names: &[String]) -> LineageGraph {
     if type_names.is_empty() {
         return graph.clone();
     }
+    for t in &validate_node_type_names(type_names) {
+        eprintln!("Warning: unknown node type '{}'. Known types: {}", t, KNOWN_NODE_TYPE_LABELS.join(", "));
+    }
     let keep: HashSet<NodeIndex> = graph
         .node_indices()
-        .filter(|&idx| type_names.iter().any(|t| t == graph[idx].node_type.label()))
+        .filter(|&idx| {
+            let label = graph[idx].node_type.label();
+            type_names.iter().any(|t| t.eq_ignore_ascii_case(label))
+        })
         .collect();
     build_subgraph(graph, &keep)
 }
@@ -786,6 +809,34 @@ mod tests {
         let g = make_test_graph();
         let filtered = filter_output_node_types(&g, &["test".into()]);
         assert_eq!(filtered.node_count(), 0);
+    }
+
+    #[test]
+    fn test_validate_node_type_names_valid() {
+        let result = validate_node_type_names(&["model".into(), "source".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_validate_node_type_names_invalid() {
+        let result = validate_node_type_names(&["model".into(), "modell".into(), "foo".into()]);
+        assert_eq!(result, vec!["modell".to_string(), "foo".to_string()]);
+    }
+
+    #[test]
+    fn test_validate_node_type_names_case_insensitive() {
+        let result = validate_node_type_names(&["Model".into(), "SOURCE".into()]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_output_node_types_case_insensitive() {
+        let g = make_test_graph();
+        let filtered = filter_output_node_types(&g, &["Model".into()]);
+        assert_eq!(filtered.node_count(), 2);
+        for idx in filtered.node_indices() {
+            assert_eq!(filtered[idx].node_type, NodeType::Model);
+        }
     }
 
     #[test]
