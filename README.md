@@ -275,6 +275,16 @@ Run menu / context menu options:
 7. **Layout** using a Sugiyama-style layered algorithm (longest-path layering + barycenter ordering)
 8. **Render** as ASCII, DOT, JSON, Mermaid, Plain, SVG, HTML, or interactive TUI
 
+## Limitations of SQL parse mode
+
+When using `--source sql` (the default), dlin extracts dependencies via regex without executing Jinja or Python. This means some patterns cannot be fully resolved:
+
+- **`var()` dynamic references** — `{{ ref(var('model_name')) }}` or `source(var('schema'), var('table'))` cannot be traced because variable values are only known at dbt runtime
+- **Runtime context** — expressions like `target.type`, `target.name`, or `env_var()` are not evaluated, so conditional branches depending on them may produce incomplete results
+- **Conditional Jinja blocks** — `{% if var('flag') %}...{% endif %}` blocks are evaluated with default values via minijinja; refs inside branches that require non-default values may be missed
+
+For full-fidelity graphs, use `--source manifest --manifest-path target/manifest.json` with a pre-compiled manifest.
+
 ## uv / virtualenv support
 
 When running dbt from the TUI, the tool auto-detects whether to use `uv run dbt` or plain `dbt`:
