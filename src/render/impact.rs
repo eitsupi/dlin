@@ -310,6 +310,17 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_impact_json_single_line() {
+        let report = make_report();
+        let mut buf = Vec::new();
+        render_impact_json_to_writer(&[report], &mut buf, false);
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 1, "compact JSON should be a single line");
+        let _: serde_json::Value = serde_json::from_str(&output).unwrap();
+    }
+
+    #[test]
     fn test_render_impact_json_empty() {
         let mut buf = Vec::new();
         render_impact_json_to_writer(&[], &mut buf, true);

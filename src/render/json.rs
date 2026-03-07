@@ -294,6 +294,20 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_json_single_line() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData { edge_type: EdgeType::Ref });
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &mut buf, false);
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 1, "compact JSON should be a single line");
+        let _: serde_json::Value = serde_json::from_str(&output).unwrap();
+    }
+
+    #[test]
     fn test_node_with_materialization_tags_columns() {
         let mut graph = LineageGraph::new();
         graph.add_node(NodeData {
