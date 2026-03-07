@@ -293,6 +293,39 @@ mod cli {
     }
 
     #[test]
+    fn test_ref_resolves_to_seed() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--include-seeds",
+                "--output",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success());
+
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let edges = json["edges"].as_array().unwrap();
+
+        // customers model refs the countries seed
+        let has_seed_edge = edges.iter().any(|e| {
+            e["source"].as_str() == Some("seed.countries")
+                && e["target"].as_str() == Some("model.customers")
+        });
+        assert!(
+            has_seed_edge,
+            "Should have edge from seed 'countries' to model 'customers', edges: {:?}",
+            edges
+        );
+    }
+
+    #[test]
     fn test_include_tests() {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())

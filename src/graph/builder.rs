@@ -711,6 +711,43 @@ exposures:
     }
 
     #[test]
+    fn test_build_graph_ref_resolves_to_seed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+
+        let models_dir = project_dir.join("models");
+        let seeds_dir = project_dir.join("seeds");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::create_dir_all(&seeds_dir).unwrap();
+
+        fs::write(seeds_dir.join("countries.csv"), "id,name\n1,US\n").unwrap();
+        fs::write(
+            models_dir.join("stg_countries.sql"),
+            "SELECT * FROM {{ ref('countries') }}",
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/stg_countries.sql")],
+            seed_files: vec![project_dir.join("seeds/countries.csv")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files).unwrap();
+        // seed + model = 2 nodes (no phantom)
+        assert_eq!(graph.node_count(), 2);
+        // ref edge: countries → stg_countries
+        assert_eq!(graph.edge_count(), 1);
+
+        // Verify the seed node is properly typed (not phantom)
+        let seed_node = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "countries")
+            .unwrap();
+        assert_eq!(graph[seed_node].node_type, NodeType::Seed);
+    }
+
+    #[test]
     fn test_build_graph_phantom_node_for_unresolved_ref() {
         let (_tmp, project_dir) = setup_temp_project();
 
