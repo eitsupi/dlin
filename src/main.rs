@@ -64,6 +64,9 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Apply output node-type filter
     let filtered = if let Some(ref type_names) = args.node_types {
+        for t in &graph::filter::validate_node_type_names(type_names) {
+            eprintln!("Warning: unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+        }
         graph::filter::filter_output_node_types(&filtered, type_names)
     } else {
         filtered

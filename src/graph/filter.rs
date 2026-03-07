@@ -188,7 +188,7 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
 }
 
 /// Known node type labels for validation.
-const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
+pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
 
 /// Return unrecognized node type names from the given list.
 pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
@@ -209,9 +209,6 @@ pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
 pub fn filter_output_node_types(graph: &LineageGraph, type_names: &[String]) -> LineageGraph {
     if type_names.is_empty() {
         return graph.clone();
-    }
-    for t in &validate_node_type_names(type_names) {
-        eprintln!("Warning: unknown node type '{}'. Known types: {}", t, KNOWN_NODE_TYPE_LABELS.join(", "));
     }
     let keep: HashSet<NodeIndex> = graph
         .node_indices()
@@ -809,6 +806,32 @@ mod tests {
         let g = make_test_graph();
         let filtered = filter_output_node_types(&g, &["test".into()]);
         assert_eq!(filtered.node_count(), 0);
+    }
+
+    #[test]
+    fn test_known_node_type_labels_matches_node_type_variants() {
+        // Ensure KNOWN_NODE_TYPE_LABELS stays in sync with NodeType variants.
+        // Phantom is excluded because it's internal, not user-facing.
+        let all_types = [
+            NodeType::Model,
+            NodeType::Source,
+            NodeType::Seed,
+            NodeType::Snapshot,
+            NodeType::Test,
+            NodeType::Exposure,
+        ];
+        for nt in &all_types {
+            assert!(
+                KNOWN_NODE_TYPE_LABELS.contains(&nt.label()),
+                "NodeType::{:?} label '{}' missing from KNOWN_NODE_TYPE_LABELS",
+                nt,
+                nt.label()
+            );
+        }
+        // Phantom should NOT be in the list
+        assert!(!KNOWN_NODE_TYPE_LABELS.contains(&NodeType::Phantom.label()));
+        // No extra entries
+        assert_eq!(KNOWN_NODE_TYPE_LABELS.len(), all_types.len());
     }
 
     #[test]
