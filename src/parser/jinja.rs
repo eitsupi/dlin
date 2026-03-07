@@ -461,52 +461,33 @@ mod tests {
     #[test]
     fn test_build_macro_prefix_skips_invalid() {
         let sources = vec![
-            // Valid macro
             "{% macro good() %}SELECT 1{% endmacro %}".to_string(),
-            // Invalid macro (unsupported block tag)
+            // Invalid: unsupported block tag
             "{% materialization custom %} stuff {% endmaterialization %}".to_string(),
-            // Another valid macro
             "{% macro also_good() %}SELECT 2{% endmacro %}".to_string(),
+            // Invalid: unclosed raw block
+            "{% raw %}unclosed raw content".to_string(),
         ];
         let prefix = build_macro_prefix(&sources);
-        // Bad macro is skipped, good macros are included
         assert!(prefix.contains("{% macro good() %}"));
         assert!(prefix.contains("{% macro also_good() %}"));
         assert!(!prefix.contains("materialization"));
+        assert!(!prefix.contains("{% raw %}"));
     }
 
     #[test]
-    fn test_build_macro_prefix_skips_combined_conflict() {
-        // Each is individually valid, but combining them creates a conflict:
-        // macro_a defines "inner" and macro_b also defines "inner".
-        // We use {% block %} which is valid alone but combining two
-        // same-named blocks can cause issues. Instead, test with a macro
-        // whose output when concatenated breaks parsing.
+    fn test_build_macro_prefix_includes_compatible_macros() {
         let env = Environment::new();
 
-        // Individually valid
         let macro_a = "{% macro a() %}ok{% endmacro %}".to_string();
         let macro_b = "{% macro b() %}ok{% endmacro %}".to_string();
         assert!(env.template_from_str(&macro_a).is_ok());
         assert!(env.template_from_str(&macro_b).is_ok());
 
-        // Both should be included since they don't conflict
         let sources = vec![macro_a, macro_b];
         let prefix = build_macro_prefix(&sources);
         assert!(prefix.contains("{% macro a() %}"));
         assert!(prefix.contains("{% macro b() %}"));
-    }
-
-    #[test]
-    fn test_build_macro_prefix_skips_individually_invalid() {
-        // Unclosed raw block is invalid on its own and should be skipped
-        let sources = vec![
-            "{% raw %}unclosed raw content".to_string(),
-            "{% macro ok() %}SELECT 1{% endmacro %}".to_string(),
-        ];
-        let prefix = build_macro_prefix(&sources);
-        assert!(!prefix.contains("{% raw %}"));
-        assert!(prefix.contains("{% macro ok() %}"));
     }
 
     #[test]
