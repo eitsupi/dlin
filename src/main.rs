@@ -147,7 +147,12 @@ fn run_impact_command(
         .node_indices()
         .find(|&idx| {
             let node = &dag[idx];
-            node.label == model || node.unique_id.ends_with(&format!(".{}", model))
+            node.label == model || node.unique_id == model
+        })
+        .or_else(|| {
+            let suffix = format!(".{}", model);
+            dag.node_indices()
+                .find(|&idx| dag[idx].unique_id.ends_with(&suffix))
         })
         .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in the graph", model))?;
 

@@ -88,12 +88,18 @@ pub fn filter_graph(
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
 
     if let Some(model_name) = focus_model {
-        // Find the focus node
+        // Find the focus node: prefer exact label/unique_id match, fall back to suffix
         let focus_idx = graph
             .node_indices()
             .find(|&idx| {
                 let node = &graph[idx];
-                node.label == model_name || node.unique_id == format!("model.{}", model_name)
+                node.label == model_name || node.unique_id == model_name
+            })
+            .or_else(|| {
+                let suffix = format!(".{}", model_name);
+                graph
+                    .node_indices()
+                    .find(|&idx| graph[idx].unique_id.ends_with(&suffix))
             })
             .ok_or_else(|| DbtLineageError::ModelNotFound(model_name.to_string()))?;
 
@@ -385,6 +391,44 @@ mod tests {
         };
         let result = filter_graph(&g, Some("nonexistent"), None, None, &filter, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_filter_focus_source_by_label() {
+        let g = make_test_graph();
+        // Focus on source node using its label "raw.orders"
+        let filtered =
+            filter_graph(&g, Some("raw.orders"), None, Some(1), &default_type_filter(), &[])
+                .unwrap();
+        // raw.orders + stg_orders (1 downstream)
+        assert_eq!(filtered.node_count(), 2);
+    }
+
+    #[test]
+    fn test_filter_focus_source_by_unique_id() {
+        let g = make_test_graph();
+        // Focus on source node using full unique_id
+        let filtered = filter_graph(
+            &g,
+            Some("source.raw.orders"),
+            None,
+            Some(1),
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        // source.raw.orders + stg_orders (1 downstream)
+        assert_eq!(filtered.node_count(), 2);
+    }
+
+    #[test]
+    fn test_filter_focus_exposure_by_label() {
+        let g = make_test_graph();
+        let filtered =
+            filter_graph(&g, Some("dashboard"), Some(1), None, &default_type_filter(), &[])
+                .unwrap();
+        // dashboard + orders (1 upstream)
+        assert_eq!(filtered.node_count(), 2);
     }
 
     // -- Selector parsing tests -----------------------------------------------
