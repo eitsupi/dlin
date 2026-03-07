@@ -85,13 +85,15 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     writeln!(w).unwrap();
 }
 
-/// Render impact report as JSON to stdout
-pub fn render_impact_json(report: &ImpactReport) {
-    render_impact_json_to_writer(report, &mut std::io::stdout().lock());
+/// Render impact reports as JSON to stdout.
+/// A single report is serialized as a plain object for backward compatibility;
+/// multiple reports are serialized as an array.
+pub fn render_impact_json(reports: &[ImpactReport]) {
+    render_impact_json_to_writer(reports, &mut std::io::stdout().lock());
 }
 
-pub fn render_impact_json_to_writer<W: Write>(report: &ImpactReport, w: &mut W) {
-    serde_json::to_writer_pretty(&mut *w, report).unwrap();
+pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W) {
+    serde_json::to_writer_pretty(&mut *w, reports).unwrap();
     writeln!(w).unwrap();
 }
 
@@ -165,16 +167,19 @@ mod tests {
     fn test_render_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&report, &mut buf);
+        render_impact_json_to_writer(&[report], &mut buf);
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(parsed["source_model"], "stg_orders");
-        assert_eq!(parsed["overall_severity"], "critical");
-        assert_eq!(parsed["affected_models"], 1);
-        assert_eq!(parsed["impacted_nodes"].as_array().unwrap().len(), 3);
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let first = &arr[0];
+        assert_eq!(first["source_model"], "stg_orders");
+        assert_eq!(first["overall_severity"], "critical");
+        assert_eq!(first["affected_models"], 1);
+        assert_eq!(first["impacted_nodes"].as_array().unwrap().len(), 3);
 
-        let paths = parsed["exposure_paths"].as_array().unwrap();
+        let paths = first["exposure_paths"].as_array().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0]["exposure"], "dashboard");
         assert_eq!(
@@ -259,9 +264,43 @@ mod tests {
     fn test_snapshot_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&report, &mut buf);
+        render_impact_json_to_writer(&[report], &mut buf);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_render_impact_json_multiple() {
+        let report1 = make_report();
+        let report2 = ImpactReport {
+            source_model: "orders".to_string(),
+            overall_severity: ImpactSeverity::Low,
+            affected_models: 0,
+            affected_tests: 0,
+            affected_exposures: 0,
+            exposure_paths: vec![],
+            exposure_paths_truncated: false,
+            impacted_nodes: vec![],
+        };
+        let mut buf = Vec::new();
+        render_impact_json_to_writer(&[report1, report2], &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["source_model"], "stg_orders");
+        assert_eq!(arr[1]["source_model"], "orders");
+    }
+
+    #[test]
+    fn test_render_impact_json_empty() {
+        let mut buf = Vec::new();
+        render_impact_json_to_writer(&[], &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 0);
     }
 
     #[test]

@@ -68,6 +68,27 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
     }
 }
 
+/// Resolve a node by name, returning `Some(index)` or `None` with a warning.
+/// Unlike [`resolve_node_by_name`], this does not return an error for missing
+/// nodes, making it suitable for batch lookups where skipping is preferred.
+pub fn try_resolve_node(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
+    match find_node_by_name(graph, name) {
+        NodeLookupResult::Found(idx) => Some(idx),
+        NodeLookupResult::Ambiguous(idx, ids) => {
+            eprintln!(
+                "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+                name,
+                ids.join(", ")
+            );
+            Some(idx)
+        }
+        NodeLookupResult::NotFound => {
+            eprintln!("Warning: '{}' not found in the graph, skipping.", name);
+            None
+        }
+    }
+}
+
 /// Configuration for which node types to include
 pub struct NodeTypeFilter {
     pub include_tests: bool,
@@ -131,10 +152,10 @@ pub fn apply_selectors(graph: &LineageGraph, selectors: &[Selector]) -> HashSet<
         .collect()
 }
 
-/// Filter the graph based on focus model, distance, selectors, and node types
+/// Filter the graph based on focus models, distance, selectors, and node types
 pub fn filter_graph(
     graph: &LineageGraph,
-    focus_model: Option<&str>,
+    focus_models: &[String],
     upstream: Option<usize>,
     downstream: Option<usize>,
     type_filter: &NodeTypeFilter,
@@ -147,44 +168,48 @@ pub fn filter_graph(
 
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
 
-    if let Some(model_name) = focus_model {
-        let focus_idx = resolve_node_by_name(graph, model_name)?;
+    if !focus_models.is_empty() {
+        for model_name in focus_models {
+            let Some(focus_idx) = try_resolve_node(graph, model_name) else {
+                continue;
+            };
 
-        keep_nodes.insert(focus_idx);
+            keep_nodes.insert(focus_idx);
 
-        // BFS upstream (predecessors)
-        bfs_collect(
-            graph,
-            focus_idx,
-            Direction::Incoming,
-            upstream,
-            &mut keep_nodes,
-        );
+            // BFS upstream (predecessors)
+            bfs_collect(
+                graph,
+                focus_idx,
+                Direction::Incoming,
+                upstream,
+                &mut keep_nodes,
+            );
 
-        // BFS downstream (successors)
-        bfs_collect(
-            graph,
-            focus_idx,
-            Direction::Outgoing,
-            downstream,
-            &mut keep_nodes,
-        );
+            // BFS downstream (successors)
+            bfs_collect(
+                graph,
+                focus_idx,
+                Direction::Outgoing,
+                downstream,
+                &mut keep_nodes,
+            );
+        }
     } else {
-        // No focus model -- keep all nodes
+        // No focus models -- keep all nodes
         keep_nodes.extend(graph.node_indices());
     }
 
     // Apply selector filter: intersect with BFS results (or use as base set)
     if !selectors.is_empty() {
         let selector_matches = apply_selectors(graph, selectors);
-        if focus_model.is_some() {
+        if !focus_models.is_empty() {
             // Intersect: keep only nodes that match both BFS and selectors
             keep_nodes = keep_nodes
                 .intersection(&selector_matches)
                 .copied()
                 .collect();
         } else {
-            // No focus model: use selectors as the base set
+            // No focus models: use selectors as the base set
             keep_nodes = selector_matches;
         }
     }
@@ -394,7 +419,7 @@ mod tests {
             include_snapshots: false,
             include_exposures: true,
         };
-        let filtered = filter_graph(&g, None, None, None, &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -408,7 +433,7 @@ mod tests {
             include_exposures: true,
         };
         // Focus on "orders" with 1 upstream, 0 downstream
-        let filtered = filter_graph(&g, Some("orders"), Some(1), Some(0), &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &filter, &[]).unwrap();
         // Should have: orders + stg_orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -422,13 +447,13 @@ mod tests {
             include_snapshots: false,
             include_exposures: false,
         };
-        let filtered = filter_graph(&g, None, None, None, &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
         // Exposure should be excluded
         assert_eq!(filtered.node_count(), 3);
     }
 
     #[test]
-    fn test_filter_model_not_found() {
+    fn test_filter_model_not_found_skips_with_warning() {
         let g = make_test_graph();
         let filter = NodeTypeFilter {
             include_tests: false,
@@ -436,8 +461,10 @@ mod tests {
             include_snapshots: false,
             include_exposures: true,
         };
-        let result = filter_graph(&g, Some("nonexistent"), None, None, &filter, &[]);
-        assert!(result.is_err());
+        // Not-found models are skipped, resulting in an empty graph
+        let filtered =
+            filter_graph(&g, &["nonexistent".into()], None, None, &filter, &[]).unwrap();
+        assert_eq!(filtered.node_count(), 0);
     }
 
     #[test]
@@ -445,7 +472,7 @@ mod tests {
         let g = make_test_graph();
         // Focus on source node using its label "raw.orders"
         let filtered =
-            filter_graph(&g, Some("raw.orders"), None, Some(1), &default_type_filter(), &[])
+            filter_graph(&g, &["raw.orders".into()], None, Some(1), &default_type_filter(), &[])
                 .unwrap();
         // raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
@@ -457,7 +484,7 @@ mod tests {
         // Focus on source node using full unique_id
         let filtered = filter_graph(
             &g,
-            Some("source.raw.orders"),
+            &["source.raw.orders".into()],
             None,
             Some(1),
             &default_type_filter(),
@@ -472,10 +499,110 @@ mod tests {
     fn test_filter_focus_exposure_by_label() {
         let g = make_test_graph();
         let filtered =
-            filter_graph(&g, Some("dashboard"), Some(1), None, &default_type_filter(), &[])
+            filter_graph(&g, &["dashboard".into()], Some(1), None, &default_type_filter(), &[])
                 .unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
+    }
+
+    #[test]
+    fn test_filter_multiple_focus_models() {
+        let g = make_test_graph();
+        // Focus on both "raw.orders" and "dashboard" with 0 upstream/downstream
+        let filtered = filter_graph(
+            &g,
+            &["raw.orders".into(), "dashboard".into()],
+            Some(0),
+            Some(0),
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        // Should have exactly the two focus nodes
+        assert_eq!(filtered.node_count(), 2);
+        let labels: Vec<String> = filtered
+            .node_indices()
+            .map(|i| filtered[i].label.clone())
+            .collect();
+        assert!(labels.contains(&"raw.orders".to_string()));
+        assert!(labels.contains(&"dashboard".to_string()));
+    }
+
+    #[test]
+    fn test_filter_multiple_focus_models_with_depth() {
+        let g = make_test_graph();
+        // Focus on "raw.orders" (downstream 1) and "dashboard" (upstream 1)
+        // raw.orders -> stg_orders (1 downstream), dashboard <- orders (1 upstream)
+        let filtered = filter_graph(
+            &g,
+            &["raw.orders".into(), "dashboard".into()],
+            Some(1),
+            Some(1),
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        // All 4 nodes should be included
+        assert_eq!(filtered.node_count(), 4);
+    }
+
+    #[test]
+    fn test_filter_multiple_focus_mixed_valid_invalid() {
+        let g = make_test_graph();
+        // "orders" exists, "nonexistent" does not — should skip the invalid one
+        let filtered = filter_graph(
+            &g,
+            &["orders".into(), "nonexistent".into()],
+            Some(0),
+            Some(0),
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        // Only "orders" should remain
+        assert_eq!(filtered.node_count(), 1);
+        assert_eq!(filtered[filtered.node_indices().next().unwrap()].label, "orders");
+    }
+
+    #[test]
+    fn test_filter_multiple_focus_all_invalid() {
+        let g = make_test_graph();
+        let filtered = filter_graph(
+            &g,
+            &["no_such_a".into(), "no_such_b".into()],
+            None,
+            None,
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(filtered.node_count(), 0);
+    }
+
+    #[test]
+    fn test_filter_multiple_focus_overlapping_neighborhoods() {
+        let g = make_test_graph();
+        // stg_orders (downstream 1 = orders) and orders (upstream 1 = stg_orders)
+        // Neighborhoods overlap — union should be 2 nodes, not 4
+        let filtered = filter_graph(
+            &g,
+            &["stg_orders".into(), "orders".into()],
+            Some(1),
+            Some(1),
+            &default_type_filter(),
+            &[],
+        )
+        .unwrap();
+        let labels: HashSet<String> = filtered
+            .node_indices()
+            .map(|i| filtered[i].label.clone())
+            .collect();
+        // stg_orders (focus) + orders (focus) + raw.orders (upstream of stg) + dashboard (downstream of orders)
+        assert!(labels.contains("stg_orders"));
+        assert!(labels.contains("orders"));
+        assert!(labels.contains("raw.orders"));
+        assert!(labels.contains("dashboard"));
+        assert_eq!(filtered.node_count(), 4);
     }
 
     // -- Selector parsing tests -----------------------------------------------
@@ -611,7 +738,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nightly");
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -625,7 +752,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("path:models/staging");
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
         // Should match: raw.orders (schema.yml in models/staging) and stg_orders
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
@@ -641,7 +768,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -656,7 +783,7 @@ mod tests {
         // tag:nightly matches stg_orders, model name "orders" matches orders
         let selectors = parse_selectors("tag:nightly,orders");
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -671,7 +798,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nonexistent");
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -686,7 +813,7 @@ mod tests {
         let selectors = parse_selectors("tag:nightly");
         let filtered = filter_graph(
             &g,
-            Some("orders"),
+            &["orders".into()],
             None,
             None,
             &default_type_filter(),
@@ -706,7 +833,7 @@ mod tests {
         let g = make_tagged_graph();
         let no_selectors: Vec<Selector> = vec![];
         let filtered =
-            filter_graph(&g, None, None, None, &default_type_filter(), &no_selectors).unwrap();
+            filter_graph(&g, &[], None, None, &default_type_filter(), &no_selectors).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -847,7 +974,7 @@ mod tests {
             include_snapshots: false,
             include_exposures: false,
         };
-        let filtered = filter_graph(&g, None, None, None, &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
         assert_eq!(filtered.node_count(), 1); // Only the model remains
         let labels: Vec<String> = filtered
             .node_indices()
@@ -862,7 +989,7 @@ mod tests {
             include_snapshots: false,
             include_exposures: false,
         };
-        let filtered2 = filter_graph(&g, None, None, None, &filter2, &[]).unwrap();
+        let filtered2 = filter_graph(&g, &[], None, None, &filter2, &[]).unwrap();
         assert_eq!(filtered2.node_count(), 2); // model + test
     }
 
@@ -974,7 +1101,7 @@ mod tests {
             },
         );
 
-        let result = filter_graph(&g, None, None, None, &default_type_filter(), &[]);
+        let result = filter_graph(&g, &[], None, None, &default_type_filter(), &[]);
         assert!(result.is_err());
     }
 }

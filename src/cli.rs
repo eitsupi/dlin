@@ -10,8 +10,8 @@ pub struct Cli {
 
 #[derive(Debug, clap::Args)]
 pub struct GraphArgs {
-    /// Model name to focus on (shows full lineage if omitted)
-    pub model: Option<String>,
+    /// Model names to focus on (shows full lineage if omitted)
+    pub model: Vec<String>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -73,8 +73,8 @@ pub enum Command {
 
     /// Compute downstream impact analysis for a model
     Impact {
-        /// Model name to analyze impact for
-        model: String,
+        /// Model names to analyze impact for
+        model: Vec<String>,
 
         /// Path to dbt project directory
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_graph_default_args() {
         let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
-        assert!(args.model.is_none());
+        assert!(args.model.is_empty());
         assert!(!args.interactive);
         assert!(args.upstream.is_none());
         assert!(args.downstream.is_none());
@@ -190,7 +190,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.model.as_deref(), Some("my_model"));
+        assert_eq!(args.model, vec!["my_model"]);
         assert_eq!(args.project_dir, PathBuf::from("/path/to/project"));
         assert_eq!(args.upstream, Some(2));
         assert_eq!(args.downstream, Some(3));
@@ -204,6 +204,16 @@ mod tests {
             args.select.as_deref(),
             Some("tag:nightly,path:models/staging")
         );
+    }
+
+    #[test]
+    fn test_graph_multiple_models() {
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "stg_orders", "raw.orders", "-u", "0"])
+                .unwrap(),
+        );
+        assert_eq!(args.model, vec!["stg_orders", "raw.orders"]);
+        assert_eq!(args.upstream, Some(0));
     }
 
     #[test]
@@ -300,7 +310,7 @@ mod tests {
                 ref project_dir,
                 ..
             } => {
-                assert_eq!(model, "orders");
+                assert_eq!(model, &["orders"]);
                 assert_eq!(project_dir, &PathBuf::from("/path/to/project"));
             }
             _ => panic!("Expected Impact subcommand"),
@@ -313,6 +323,25 @@ mod tests {
         match cli.command {
             Command::Impact { ref output, .. } => {
                 assert!(matches!(output, ImpactOutputFormat::Json));
+            }
+            _ => panic!("Expected Impact subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_impact_multiple_models() {
+        let cli = Cli::try_parse_from([
+            "dlin", "impact", "orders", "stg_orders", "-p", "/path/to/project",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Impact {
+                ref model,
+                ref project_dir,
+                ..
+            } => {
+                assert_eq!(model, &["orders", "stg_orders"]);
+                assert_eq!(project_dir, &PathBuf::from("/path/to/project"));
             }
             _ => panic!("Expected Impact subcommand"),
         }

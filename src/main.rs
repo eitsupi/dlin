@@ -21,6 +21,7 @@ fn main() -> Result<()> {
             source,
             manifest_path,
         } => run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref()),
+
     }
 }
 
@@ -50,7 +51,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Filter graph
     let filtered = graph::filter::filter_graph(
         &dag,
-        args.model.as_deref(),
+        &args.model,
         args.upstream,
         args.downstream,
         &graph::filter::NodeTypeFilter {
@@ -129,7 +130,7 @@ fn render_output(format: &cli::OutputFormat, graph: &graph::types::LineageGraph)
 /// Run the `impact` subcommand
 #[cfg(not(tarpaulin_include))]
 fn run_impact_command(
-    model: &str,
+    models: &[String],
     project_dir: &Path,
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
@@ -142,14 +143,21 @@ fn run_impact_command(
     validate_source_flags(source, manifest_path)?;
     let dag = build_dag(&project_dir, source, manifest_path)?;
 
-    // Find the source model node
-    let source_idx = graph::filter::resolve_node_by_name(&dag, model)?;
-
-    let report = graph::impact::compute_impact(&dag, source_idx);
+    let reports: Vec<_> = models
+        .iter()
+        .filter_map(|model| {
+            let source_idx = graph::filter::try_resolve_node(&dag, model)?;
+            Some(graph::impact::compute_impact(&dag, source_idx))
+        })
+        .collect();
 
     match output {
-        cli::ImpactOutputFormat::Text => render::impact::render_impact_text(&report),
-        cli::ImpactOutputFormat::Json => render::impact::render_impact_json(&report),
+        cli::ImpactOutputFormat::Text => {
+            for report in &reports {
+                render::impact::render_impact_text(report);
+            }
+        }
+        cli::ImpactOutputFormat::Json => render::impact::render_impact_json(&reports),
     }
 
     Ok(())
