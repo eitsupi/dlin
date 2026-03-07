@@ -76,8 +76,8 @@ impl DbtProject {
                         .nth(1)
                         .and_then(|s| s.split(',').next())
                         .unwrap_or("unknown");
-                    eprintln!(
-                        "Warning: duplicate YAML key '{}' in {} (using last value)",
+                    crate::warn!(
+                        "duplicate YAML key '{}' in {} (using last value)",
                         key_info,
                         project_file.display(),
                     );

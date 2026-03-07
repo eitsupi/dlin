@@ -15,7 +15,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Graph(args) => run_graph_command(args),
+        Command::Graph(args) => {
+            dlin::set_quiet(args.quiet);
+            run_graph_command(args)
+        }
         Command::Impact {
             model,
             project_dir,
@@ -23,8 +26,11 @@ fn main() -> Result<()> {
             source,
             manifest_path,
             show_sql,
-        } => run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql),
-
+            quiet,
+        } => {
+            dlin::set_quiet(quiet);
+            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql)
+        }
     }
 }
 
@@ -39,7 +45,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
     if args.source == SourceType::Sql && args.include_tests {
-        eprintln!("Warning: --include-tests has no effect with --source sql; tests are only available with --source manifest");
+        dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
 
     let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
@@ -83,7 +89,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Apply output node-type filter
     let filtered = if let Some(ref type_names) = args.node_types {
         for t in &graph::filter::validate_node_type_names(type_names) {
-            eprintln!("Warning: unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+            dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
         }
         graph::filter::filter_output_node_types(&filtered, type_names)
     } else {
@@ -170,7 +176,7 @@ fn collect_sql_contents(
                     map.insert(node.unique_id.clone(), content);
                 }
                 Err(e) => {
-                    eprintln!("Warning: could not read {}: {}", full_path.display(), e);
+                    dlin::warn!("could not read {}: {}", full_path.display(), e);
                 }
             }
         }

@@ -55,8 +55,8 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
     match find_node_by_name(graph, name) {
         NodeLookupResult::Found(idx) => Ok(idx),
         NodeLookupResult::Ambiguous(idx, ids) => {
-            eprintln!(
-                "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+            crate::warn!(
+                "'{}' matched multiple nodes: {}. Using the first match.",
                 name,
                 ids.join(", ")
             );
@@ -75,7 +75,7 @@ pub fn try_resolve_node(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
     match resolve_node_by_name(graph, name) {
         Ok(idx) => Some(idx),
         Err(e) => {
-            eprintln!("Warning: {}, skipping.", e);
+            crate::warn!("{}, skipping.", e);
             None
         }
     }

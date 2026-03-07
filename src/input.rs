@@ -186,8 +186,8 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     let content = match std::fs::read_to_string(abs_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "Warning: could not read {}: {}",
+            crate::warn!(
+                "could not read {}: {}",
                 abs_path.display(),
                 e
             );
@@ -198,8 +198,8 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     let schema = match yaml_schema::parse_schema_file(&content, Some(abs_path)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "Warning: could not parse {}: {}",
+            crate::warn!(
+                "could not parse {}: {}",
                 abs_path.display(),
                 e
             );
@@ -243,8 +243,8 @@ pub fn resolve_stdin_inputs(
                         names.push(label);
                     }
                 } else {
-                    eprintln!(
-                        "Warning: no node found for file {}, skipping.",
+                    crate::warn!(
+                        "no node found for file {}, skipping.",
                         abs_path.display()
                     );
                 }

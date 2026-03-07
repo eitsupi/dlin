@@ -23,8 +23,8 @@ fn warn_if_too_wide(graph: &LineageGraph) {
         col_widths.iter().sum::<usize>() + col_spacing * col_widths.len().saturating_sub(1);
     if let Some((term_width, _)) = term_size() {
         if total_width > term_width {
-            eprintln!(
-                "Warning: graph width ({}) exceeds terminal width ({}). Consider using --output dot or filtering with -u/-d.",
+            crate::warn!(
+                "graph width ({}) exceeds terminal width ({}). Consider using --output dot or filtering with -u/-d.",
                 total_width, term_width
             );
         }

@@ -17,7 +17,7 @@ fn load_macro_prefix(files: &DiscoveredFiles) -> String {
         .filter_map(|path| match std::fs::read_to_string(path) {
             Ok(content) => Some(content),
             Err(e) => {
-                eprintln!("Warning: could not read macro file {}: {}", path.display(), e);
+                crate::warn!("could not read macro file {}: {}", path.display(), e);
                 None
             }
         })
@@ -55,8 +55,8 @@ impl GraphBuilder {
         if let Some(&idx) = self.node_map.get(&dep_id) {
             return idx;
         }
-        eprintln!(
-            "Warning: unresolved ref '{}' in {}",
+        crate::warn!(
+            "unresolved ref '{}' in {}",
             ref_name,
             sql_path.display()
         );
@@ -84,8 +84,8 @@ impl GraphBuilder {
         if let Some(&idx) = self.node_map.get(&source_id) {
             return idx;
         }
-        eprintln!(
-            "Warning: unresolved source '{}.{}' in {}",
+        crate::warn!(
+            "unresolved source '{}.{}' in {}",
             source_name,
             table_name,
             sql_path.display()
@@ -218,8 +218,8 @@ fn process_model_files(
         let model_name = file_stem_str(sql_path);
 
         if let Some(existing_path) = model_name_paths.get(&model_name) {
-            eprintln!(
-                "Warning: duplicate model name '{}' in {} and {}",
+            crate::warn!(
+                "duplicate model name '{}' in {} and {}",
                 model_name,
                 existing_path.display(),
                 sql_path.display()

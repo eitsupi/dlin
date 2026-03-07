@@ -68,6 +68,10 @@ pub struct GraphArgs {
     /// [Experimental] Include SQL file contents for each node in JSON and plain output
     #[arg(long)]
     pub show_sql: bool,
+
+    /// Suppress warning messages
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -100,6 +104,10 @@ pub enum Command {
         /// [Experimental] Include SQL file contents for each impacted node in the output
         #[arg(long)]
         show_sql: bool,
+
+        /// Suppress warning messages
+        #[arg(short = 'q', long)]
+        quiet: bool,
     },
 
 }
@@ -172,6 +180,26 @@ mod tests {
         assert_eq!(args.source, SourceType::Sql);
         assert!(args.manifest_path.is_none());
         assert!(matches!(args.output, OutputFormat::Ascii));
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_graph_quiet_flag() {
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-q"]).unwrap());
+        assert!(args.quiet);
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--quiet"]).unwrap());
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_impact_quiet_flag() {
+        let cli = Cli::try_parse_from(["dlin", "impact", "orders", "-q"]).unwrap();
+        match cli.command {
+            Command::Impact { quiet, .. } => assert!(quiet),
+            _ => panic!("Expected Impact subcommand"),
+        }
     }
 
     #[test]
