@@ -88,7 +88,8 @@ fn build_dag(
 ) -> Result<graph::types::LineageGraph> {
     match source {
         SourceType::Manifest => {
-            let path = manifest_path.expect("validate_source_flags should be called before build_dag");
+            let path = manifest_path
+                .ok_or_else(|| anyhow::anyhow!("manifest_path is required for SourceType::Manifest (call validate_source_flags first)"))?;
             let resolved = resolve_manifest_path(path)?;
             parser::manifest::build_graph_from_manifest(&resolved)
         }
