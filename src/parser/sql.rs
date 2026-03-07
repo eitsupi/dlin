@@ -61,6 +61,22 @@ fn strip_jinja_comments(sql: &str) -> String {
     JINJA_COMMENT.replace_all(sql, "").to_string()
 }
 
+/// Extract all refs, sources, and config from SQL content in a single pass.
+/// Tries minijinja rendering first; falls back to regex on failure.
+///
+/// `macro_prefix` is the pre-built concatenation of valid macro SQL files
+/// so that custom macros containing ref()/source() are expanded and tracked.
+pub fn extract_all(sql: &str, macro_prefix: &str) -> super::jinja::JinjaExtraction {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
+        return ext;
+    }
+    super::jinja::JinjaExtraction {
+        refs: extract_refs_regex(sql),
+        sources: extract_sources_regex(sql),
+        config: extract_config_regex(sql),
+    }
+}
+
 /// Extract all ref() and source() calls from SQL content in a single pass.
 /// Tries minijinja rendering first; falls back to regex on failure.
 ///

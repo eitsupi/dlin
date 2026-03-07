@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
-use crate::parser::sql::{extract_config, extract_refs_and_sources};
+use crate::parser::sql::{extract_all, extract_refs_and_sources};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -204,15 +204,23 @@ fn process_yaml_files(
     Ok((model_meta, exposures))
 }
 
-/// Create nodes for model SQL files (with duplicate detection)
+/// Cached extraction result for a model SQL file (refs and sources).
+/// Avoids re-running minijinja in `process_sql_edges`.
+type ExtractionCache =
+    HashMap<std::path::PathBuf, (Vec<crate::parser::sql::RefCall>, Vec<crate::parser::sql::SourceCall>)>;
+
+/// Create nodes for model SQL files (with duplicate detection).
+/// Returns a cache of refs/sources extracted per file so that
+/// `process_sql_edges` can reuse them instead of re-rendering.
 fn process_model_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
     model_meta: &HashMap<String, YamlModelMeta>,
     macro_prefix: &str,
-) {
+) -> ExtractionCache {
     let mut model_name_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
+    let mut cache: ExtractionCache = HashMap::new();
 
     for sql_path in &files.model_sql_files {
         let model_name = file_stem_str(sql_path);
@@ -227,14 +235,23 @@ fn process_model_files(
         }
         model_name_paths.insert(model_name.clone(), sql_path.clone());
 
-        // Read SQL content once for config extraction and column extraction
+        // Read SQL content once for extraction and column extraction
         let sql_content = std::fs::read_to_string(sql_path).ok();
 
-        // Extract config from SQL
-        let sql_config = sql_content
+        // Extract config, refs, and sources in a single minijinja pass
+        let extraction = sql_content
             .as_ref()
-            .map(|content| extract_config(content, macro_prefix))
+            .map(|content| extract_all(content, macro_prefix));
+
+        let sql_config = extraction
+            .as_ref()
+            .map(|ext| ext.config.clone())
             .unwrap_or_default();
+
+        // Cache refs/sources for process_sql_edges
+        if let Some(ext) = extraction {
+            cache.insert(sql_path.clone(), (ext.refs, ext.sources));
+        }
 
         let yaml_meta = model_meta.get(&model_name);
 
@@ -273,6 +290,8 @@ fn process_model_files(
             columns,
         });
     }
+
+    cache
 }
 
 /// Create nodes for simple file-based resources (seeds, snapshots)
@@ -301,12 +320,15 @@ fn process_simple_nodes(
     }
 }
 
-/// Parse SQL files for ref()/source() calls and add edges
+/// Parse SQL files for ref()/source() calls and add edges.
+/// `extraction_cache` contains pre-extracted refs/sources for model files
+/// (from `process_model_files`) to avoid redundant minijinja renders.
 fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
     macro_prefix: &str,
+    extraction_cache: &ExtractionCache,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -317,7 +339,6 @@ fn process_sql_edges(
         .collect();
 
     for (sql_path, file_type) in &all_sql_files {
-        let content = read_file(sql_path)?;
         let node_name = file_stem_str(sql_path);
         let node_unique_id = format!("{}.{}", file_type, node_name);
 
@@ -344,7 +365,13 @@ fn process_sql_edges(
             None => continue,
         };
 
-        let (refs, sources) = extract_refs_and_sources(&content, macro_prefix);
+        // Use cached extraction for model files; extract fresh for others
+        let (refs, sources) = if let Some(cached) = extraction_cache.get(*sql_path) {
+            (cached.0.clone(), cached.1.clone())
+        } else {
+            let content = read_file(sql_path)?;
+            extract_refs_and_sources(&content, macro_prefix)
+        };
 
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
@@ -414,7 +441,8 @@ pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<Lineag
     let macro_prefix = load_macro_prefix(files);
 
     let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
-    process_model_files(&mut gb, files, project_dir, &model_meta, &macro_prefix);
+    let extraction_cache =
+        process_model_files(&mut gb, files, project_dir, &model_meta, &macro_prefix);
     process_simple_nodes(
         &mut gb,
         &files.seed_files,
@@ -429,7 +457,7 @@ pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<Lineag
         "snapshot",
         NodeType::Snapshot,
     );
-    process_sql_edges(&mut gb, files, project_dir, &macro_prefix)?;
+    process_sql_edges(&mut gb, files, project_dir, &macro_prefix, &extraction_cache)?;
     process_exposures(&mut gb, &exposures);
 
     Ok(gb.graph)
