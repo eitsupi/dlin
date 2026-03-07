@@ -298,10 +298,10 @@ fn detail_impact_lines(app: &App, selected: petgraph::stable_graph::NodeIndex) -
         "  Affected: {} models, {} tests, {} exposures",
         report.affected_models, report.affected_tests, report.affected_exposures
     )));
-    if report.longest_path_length > 0 {
+    for ep in &report.exposure_paths {
         lines.push(Line::from(format!(
-            "  Longest path: {} hops",
-            report.longest_path_length
+            "  → {}",
+            ep.path.join(" → ")
         )));
     }
     lines

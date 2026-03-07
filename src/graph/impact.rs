@@ -28,6 +28,13 @@ impl ImpactSeverity {
     }
 }
 
+/// Path from source model to an exposure
+#[derive(Debug, Clone, Serialize)]
+pub struct ExposurePath {
+    pub exposure: String,
+    pub path: Vec<String>,
+}
+
 /// A single impacted node with its severity
 #[derive(Debug, Clone, Serialize)]
 pub struct ImpactedNode {
@@ -46,8 +53,7 @@ pub struct ImpactReport {
     pub affected_models: usize,
     pub affected_tests: usize,
     pub affected_exposures: usize,
-    pub longest_path_length: usize,
-    pub longest_path: Vec<String>,
+    pub exposure_paths: Vec<ExposurePath>,
     pub impacted_nodes: Vec<ImpactedNode>,
 }
 
@@ -77,38 +83,6 @@ pub fn classify_severity(node: &NodeData) -> ImpactSeverity {
     }
 }
 
-/// Find the longest path from the source node going downstream using BFS/DFS
-pub fn find_longest_path(graph: &LineageGraph, start: NodeIndex) -> Vec<String> {
-    let mut best_path: Vec<NodeIndex> = vec![start];
-    let mut stack: Vec<(NodeIndex, Vec<NodeIndex>)> = vec![(start, vec![start])];
-
-    while let Some((current, path)) = stack.pop() {
-        let neighbors: Vec<NodeIndex> = graph
-            .edges_directed(current, Direction::Outgoing)
-            .map(|e| e.target())
-            .collect();
-
-        if neighbors.is_empty() {
-            if path.len() > best_path.len() {
-                best_path = path;
-            }
-        } else {
-            for neighbor in neighbors {
-                if !path.contains(&neighbor) {
-                    let mut new_path = path.clone();
-                    new_path.push(neighbor);
-                    stack.push((neighbor, new_path));
-                }
-            }
-        }
-    }
-
-    best_path
-        .iter()
-        .map(|&idx| graph[idx].label.clone())
-        .collect()
-}
-
 /// Compute the full impact report for a given model
 pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactReport {
     let source_node = &graph[source_idx];
@@ -117,6 +91,8 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     // BFS downstream to find all impacted nodes with distances
     let mut visited: HashSet<NodeIndex> = HashSet::new();
     let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+    let mut parents: std::collections::HashMap<NodeIndex, NodeIndex> =
+        std::collections::HashMap::new();
     visited.insert(source_idx);
     queue.push_back((source_idx, 0));
 
@@ -124,11 +100,13 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     let mut affected_models = 0usize;
     let mut affected_tests = 0usize;
     let mut affected_exposures = 0usize;
+    let mut exposure_indices: Vec<NodeIndex> = Vec::new();
 
     while let Some((current, distance)) = queue.pop_front() {
         for edge in graph.edges_directed(current, Direction::Outgoing) {
             let neighbor = edge.target();
             if visited.insert(neighbor) {
+                parents.insert(neighbor, current);
                 let node = &graph[neighbor];
                 let severity = classify_severity(node);
                 let next_distance = distance + 1;
@@ -136,7 +114,10 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                 match node.node_type {
                     NodeType::Model => affected_models += 1,
                     NodeType::Test => affected_tests += 1,
-                    NodeType::Exposure => affected_exposures += 1,
+                    NodeType::Exposure => {
+                        affected_exposures += 1;
+                        exposure_indices.push(neighbor);
+                    }
                     _ => {}
                 }
 
@@ -153,6 +134,23 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         }
     }
 
+    // Reconstruct paths to exposures
+    let mut exposure_paths: Vec<ExposurePath> = Vec::new();
+    for &exp_idx in &exposure_indices {
+        let mut path = vec![exp_idx];
+        let mut current = exp_idx;
+        while let Some(&parent) = parents.get(&current) {
+            path.push(parent);
+            current = parent;
+        }
+        path.reverse();
+        exposure_paths.push(ExposurePath {
+            exposure: graph[exp_idx].label.clone(),
+            path: path.iter().map(|&idx| graph[idx].label.clone()).collect(),
+        });
+    }
+    exposure_paths.sort_by(|a, b| a.exposure.cmp(&b.exposure));
+
     // Sort by severity (descending), then distance
     impacted_nodes.sort_by(|a, b| {
         b.severity
@@ -166,17 +164,13 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         .max()
         .unwrap_or(ImpactSeverity::Low);
 
-    let longest_path = find_longest_path(graph, source_idx);
-    let longest_path_length = longest_path.len().saturating_sub(1);
-
     ImpactReport {
         source_model,
         overall_severity,
         affected_models,
         affected_tests,
         affected_exposures,
-        longest_path_length,
-        longest_path,
+        exposure_paths,
         impacted_nodes,
     }
 }
@@ -345,8 +339,15 @@ mod tests {
         assert_eq!(report.affected_tests, 1); // orders_positive
         assert_eq!(report.affected_exposures, 1); // dashboard
         assert_eq!(report.overall_severity, ImpactSeverity::Critical);
-        assert!(report.longest_path_length >= 2);
         assert_eq!(report.impacted_nodes.len(), 3);
+
+        // Exposure path: stg_orders -> orders -> dashboard
+        assert_eq!(report.exposure_paths.len(), 1);
+        assert_eq!(report.exposure_paths[0].exposure, "dashboard");
+        assert_eq!(
+            report.exposure_paths[0].path,
+            vec!["stg_orders", "orders", "dashboard"]
+        );
     }
 
     #[test]
@@ -363,19 +364,7 @@ mod tests {
         assert_eq!(report.affected_tests, 0);
         assert_eq!(report.affected_exposures, 0);
         assert!(report.impacted_nodes.is_empty());
-    }
-
-    #[test]
-    fn test_find_longest_path() {
-        let (g, _) = make_test_graph();
-        let src = g
-            .node_indices()
-            .find(|&i| g[i].label == "raw.orders")
-            .unwrap();
-        let path = find_longest_path(&g, src);
-        // src -> stg -> mart -> (test or exp) = 4 nodes
-        assert!(path.len() >= 4);
-        assert_eq!(path[0], "raw.orders");
+        assert!(report.exposure_paths.is_empty());
     }
 
     #[test]
@@ -394,7 +383,6 @@ mod tests {
         assert_eq!(report.affected_tests, 0);
         assert_eq!(report.affected_exposures, 0);
         assert!(report.impacted_nodes.is_empty());
-        assert_eq!(report.longest_path_length, 0);
     }
 
     #[test]

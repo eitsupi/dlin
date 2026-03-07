@@ -41,17 +41,13 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     writeln!(w, "  Affected models:    {}", report.affected_models).unwrap();
     writeln!(w, "  Affected tests:     {}", report.affected_tests).unwrap();
     writeln!(w, "  Affected exposures: {}", report.affected_exposures).unwrap();
-    writeln!(
-        w,
-        "  Longest path:       {} hops",
-        report.longest_path_length
-    )
-    .unwrap();
     writeln!(w).unwrap();
 
-    if !report.longest_path.is_empty() {
-        writeln!(w, "{}", "Longest Path:".bold()).unwrap();
-        writeln!(w, "  {}", report.longest_path.join(" -> ")).unwrap();
+    if !report.exposure_paths.is_empty() {
+        writeln!(w, "{}", "Exposure Paths:".bold()).unwrap();
+        for ep in &report.exposure_paths {
+            writeln!(w, "  {}", ep.path.join(" -> ")).unwrap();
+        }
         writeln!(w).unwrap();
     }
 
@@ -84,7 +80,7 @@ pub fn render_impact_json_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::impact::{ImpactReport, ImpactSeverity, ImpactedNode};
+    use crate::graph::impact::{ExposurePath, ImpactReport, ImpactSeverity, ImpactedNode};
 
     fn make_report() -> ImpactReport {
         ImpactReport {
@@ -93,12 +89,14 @@ mod tests {
             affected_models: 1,
             affected_tests: 1,
             affected_exposures: 1,
-            longest_path_length: 3,
-            longest_path: vec![
-                "stg_orders".to_string(),
-                "orders".to_string(),
-                "dashboard".to_string(),
-            ],
+            exposure_paths: vec![ExposurePath {
+                exposure: "dashboard".to_string(),
+                path: vec![
+                    "stg_orders".to_string(),
+                    "orders".to_string(),
+                    "dashboard".to_string(),
+                ],
+            }],
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -136,7 +134,7 @@ mod tests {
         assert!(output.contains("Affected models:    1"));
         assert!(output.contains("Affected tests:     1"));
         assert!(output.contains("Affected exposures: 1"));
-        assert!(output.contains("Longest Path:"));
+        assert!(output.contains("Exposure Paths:"));
         assert!(output.contains("stg_orders -> orders -> dashboard"));
         assert!(output.contains("Impacted Nodes:"));
     }
@@ -153,6 +151,14 @@ mod tests {
         assert_eq!(parsed["overall_severity"], "critical");
         assert_eq!(parsed["affected_models"], 1);
         assert_eq!(parsed["impacted_nodes"].as_array().unwrap().len(), 3);
+
+        let paths = parsed["exposure_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0]["exposure"], "dashboard");
+        assert_eq!(
+            paths[0]["path"].as_array().unwrap(),
+            &["stg_orders", "orders", "dashboard"]
+        );
     }
 
     #[test]
@@ -163,8 +169,7 @@ mod tests {
             affected_models: 0,
             affected_tests: 0,
             affected_exposures: 0,
-            longest_path_length: 0,
-            longest_path: vec![],
+            exposure_paths: vec![],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -196,8 +201,7 @@ mod tests {
             affected_models: 2,
             affected_tests: 0,
             affected_exposures: 0,
-            longest_path_length: 2,
-            longest_path: vec!["stg_payments".to_string(), "payments".to_string()],
+            exposure_paths: vec![],
             impacted_nodes: vec![ImpactedNode {
                 unique_id: "model.payments".to_string(),
                 label: "payments".to_string(),
@@ -212,8 +216,6 @@ mod tests {
         assert!(output.contains("Impact Analysis: stg_payments"));
         assert!(output.contains("MEDIUM"));
         assert!(output.contains("Affected models:    2"));
-        assert!(output.contains("Longest Path:"));
-        assert!(output.contains("stg_payments -> payments"));
         assert!(output.contains("Impacted Nodes:"));
         assert!(output.contains("payments"));
     }
