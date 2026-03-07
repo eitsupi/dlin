@@ -67,11 +67,23 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
                 InputLine::Ignore
             }
         }
-        _ => {
-            // Lines with a path separator (e.g. "README.md", ".github/ci.yml")
-            // that don't match .sql/.yml/.yaml are non-dbt files → ignore.
-            // Lines without separators (e.g. "stg_orders", "raw.orders")
-            // are treated as model/source names.
+        Some(ext) => {
+            // Has a non-dbt file extension. If it has a path separator it's
+            // clearly a file path → ignore.  Without a separator it could be
+            // a dbt source name like "raw.orders" (extension = "orders") or a
+            // root-level file like "README.md".  We distinguish them by
+            // checking against common file extensions.
+            if line.contains('/') || line.contains('\\') {
+                InputLine::Ignore
+            } else if is_common_file_extension(ext) {
+                InputLine::Ignore
+            } else {
+                InputLine::ModelName(line.to_string())
+            }
+        }
+        None => {
+            // No extension at all (e.g. "stg_orders", "Makefile").
+            // Lines with a path separator are non-dbt paths → ignore.
             if line.contains('/') || line.contains('\\') {
                 InputLine::Ignore
             } else {
@@ -79,6 +91,57 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
             }
         }
     }
+}
+
+/// Common file extensions that are NOT dbt source/model names.
+/// Used to distinguish root-level files (e.g. "README.md") from dbt source
+/// references (e.g. "raw.orders") when there is no path separator.
+fn is_common_file_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "md" | "txt"
+            | "py"
+            | "csv"
+            | "json"
+            | "toml"
+            | "cfg"
+            | "ini"
+            | "rst"
+            | "lock"
+            | "xml"
+            | "html"
+            | "htm"
+            | "js"
+            | "ts"
+            | "sh"
+            | "bat"
+            | "rs"
+            | "go"
+            | "java"
+            | "rb"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "swift"
+            | "kt"
+            | "log"
+            | "env"
+            | "gitignore"
+    )
+}
+
+/// Check whether any of the given input strings look like file paths rather
+/// than bare model names.  Used to decide whether to load `DbtProject` for
+/// path resolution.
+pub fn has_path_like_input(inputs: &[String]) -> bool {
+    inputs.iter().any(|s| {
+        s.contains('/')
+            || s.contains('\\')
+            || s.ends_with(".sql")
+            || s.ends_with(".yml")
+            || s.ends_with(".yaml")
+    })
 }
 
 /// Check if an absolute path falls under any of the configured dbt project directories.
@@ -150,23 +213,29 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     names
 }
 
-/// Process stdin lines and resolve them to model/source names suitable for
+/// Process input lines and resolve them to model/source names suitable for
 /// use as focus models in `filter_graph`.
+///
+/// `cwd` is the working directory used to resolve relative file paths (e.g.
+/// paths from `git diff --name-only`).  This may differ from `project_dir`
+/// when the dbt project lives in a subdirectory of the git repository.
 pub fn resolve_stdin_inputs(
     lines: &[String],
     graph: &LineageGraph,
     resolved_paths: &ResolvedPaths,
     project_dir: &Path,
+    cwd: &Path,
 ) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     let mut names = Vec::new();
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-
     for line in lines {
-        match classify_line(line, resolved_paths, &cwd) {
+        match classify_line(line, resolved_paths, cwd) {
             InputLine::SqlFile(abs_path) => {
                 if let Some(label) = resolve_sql_to_label(&abs_path, graph, project_dir) {
-                    names.push(label);
+                    if seen.insert(label.clone()) {
+                        names.push(label);
+                    }
                 } else {
                     eprintln!(
                         "Warning: no node found for file {}, skipping.",
@@ -175,10 +244,16 @@ pub fn resolve_stdin_inputs(
                 }
             }
             InputLine::YamlFile(abs_path) => {
-                names.extend(expand_yaml_names(&abs_path));
+                for name in expand_yaml_names(&abs_path) {
+                    if seen.insert(name.clone()) {
+                        names.push(name);
+                    }
+                }
             }
             InputLine::ModelName(name) => {
-                names.push(name);
+                if seen.insert(name.clone()) {
+                    names.push(name);
+                }
             }
             InputLine::Ignore => {}
         }
@@ -296,11 +371,18 @@ mod tests {
     fn test_classify_non_dbt_extension_without_separator() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = make_resolved_paths(tmp.path());
-        // Files without path separators are treated as model names
-        // (the downstream try_resolve_node will handle unknown names)
+        // Root-level files with common extensions are ignored
         assert!(matches!(
             classify_line("README.md", &paths, tmp.path()),
-            InputLine::ModelName(ref n) if n == "README.md"
+            InputLine::Ignore
+        ));
+        assert!(matches!(
+            classify_line("Cargo.toml", &paths, tmp.path()),
+            InputLine::Ignore
+        ));
+        assert!(matches!(
+            classify_line("setup.py", &paths, tmp.path()),
+            InputLine::Ignore
         ));
     }
 
@@ -449,11 +531,22 @@ models:
         assert!(names.is_empty());
     }
 
+    // --- has_path_like_input tests ---
+
+    #[test]
+    fn test_has_path_like_input_with_paths() {
+        assert!(has_path_like_input(&["models/foo.sql".into()]));
+        assert!(has_path_like_input(&["stg_orders".into(), "models/bar.yml".into()]));
+        assert!(has_path_like_input(&["schema.yaml".into()]));
+    }
+
+    #[test]
+    fn test_has_path_like_input_model_names_only() {
+        assert!(!has_path_like_input(&["stg_orders".into()]));
+        assert!(!has_path_like_input(&["raw.orders".into(), "customers".into()]));
+    }
+
     // --- resolve_stdin_inputs integration tests ---
-    // resolve_stdin_inputs uses std::env::current_dir() internally.
-    // For these tests we use absolute paths (via tempdir) in the input lines
-    // to avoid CWD dependency. Alternatively we test classify_line directly
-    // with explicit cwd.
 
     #[test]
     fn test_resolve_stdin_model_name() {
@@ -462,7 +555,7 @@ models:
         let graph = LineageGraph::new();
 
         let lines = vec!["stg_orders".to_string()];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path());
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
         assert_eq!(result, vec!["stg_orders"]);
     }
 
@@ -477,8 +570,44 @@ models:
             "docs/README.md".to_string(),
             "seeds/data.csv".to_string(),
         ];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path());
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_stdin_deduplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = make_resolved_paths(tmp.path());
+        let mut graph = LineageGraph::new();
+        let mut node = make_node("model.stg_orders", "stg_orders", NodeType::Model);
+        node.file_path = Some(PathBuf::from("models/stg_orders.sql"));
+        graph.add_node(node);
+
+        // Same model referenced both as file path and model name
+        let models_dir = tmp.path().join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        let lines = vec![
+            "models/stg_orders.sql".to_string(),
+            "stg_orders".to_string(),
+        ];
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
+        assert_eq!(result, vec!["stg_orders"]);
+    }
+
+    #[test]
+    fn test_resolve_stdin_ignores_root_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = make_resolved_paths(tmp.path());
+        let graph = LineageGraph::new();
+
+        // Root-level files with common extensions are ignored (no separator)
+        let lines = vec![
+            "README.md".to_string(),
+            "Cargo.toml".to_string(),
+            "stg_orders".to_string(),
+        ];
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
+        assert_eq!(result, vec!["stg_orders"]);
     }
 
     // --- classify_line + resolve integration (cwd-aware) ---

@@ -44,14 +44,15 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
-    let mut all_inputs = args.model;
-    all_inputs.extend(stdin_lines);
-    let models = if all_inputs.iter().any(|s| s.contains('/') || s.contains('\\') || s.ends_with(".sql") || s.ends_with(".yml") || s.ends_with(".yaml")) {
+    let mut raw_inputs = args.model;
+    raw_inputs.extend(stdin_lines);
+    let models = if input::has_path_like_input(&raw_inputs) {
+        let cwd = std::env::current_dir()?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
-        input::resolve_stdin_inputs(&all_inputs, &dag, &resolved_paths, &project_dir)
+        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
-        all_inputs
+        raw_inputs
     };
 
     // Parse selectors
