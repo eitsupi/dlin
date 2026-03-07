@@ -267,9 +267,13 @@ mod cli {
             .output()
             .expect("Failed to run binary");
 
-        assert!(!output.status.success());
+        assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("not found") || stderr.contains("nonexistent_model"));
+        assert!(
+            stderr.contains("not found") || stderr.contains("nonexistent_model"),
+            "Expected warning on stderr, got: {}",
+            stderr
+        );
     }
 
     #[test]
@@ -402,6 +406,196 @@ mod cli {
             stderr.contains("--manifest-path cannot be used with --source sql"),
             "Should reject --manifest-path with --source sql: {}",
             stderr
+        );
+    }
+
+    #[test]
+    fn test_file_path_as_positional_arg() {
+        let fixture = super::fixture_dir();
+        let sql_path = fixture.join("models/staging/stg_customers.sql");
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "plain",
+                "--upstream",
+                "0",
+                "--downstream",
+                "0",
+                sql_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Failed with stderr: {}", stderr);
+        assert!(
+            stdout.contains("stg_customers"),
+            "File path should resolve to model name: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_mixed_model_name_and_file_path() {
+        let fixture = super::fixture_dir();
+        let sql_path = fixture.join("models/staging/stg_customers.sql");
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "plain",
+                "--upstream",
+                "0",
+                "--downstream",
+                "0",
+                "stg_orders",
+                sql_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Failed with stderr: {}", stderr);
+        assert!(
+            stdout.contains("stg_orders"),
+            "Should contain model name arg: {}",
+            stdout
+        );
+        assert!(
+            stdout.contains("stg_customers"),
+            "Should contain file-path-resolved model: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_stdin_file_path() {
+        let fixture = super::fixture_dir();
+        let sql_path = fixture.join("models/staging/stg_customers.sql");
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "plain",
+                "--upstream",
+                "0",
+                "--downstream",
+                "0",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn binary");
+
+        use std::io::Write;
+        let mut child = output;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{}\n", sql_path.display()).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Failed with stderr: {}", stderr);
+        assert!(
+            stdout.contains("stg_customers"),
+            "Stdin file path should resolve to model: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_stdin_model_name() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "plain",
+                "--upstream",
+                "0",
+                "--downstream",
+                "0",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn binary");
+
+        use std::io::Write;
+        let mut child = output;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"stg_orders\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "Failed with stderr: {}", stderr);
+        assert!(
+            stdout.contains("stg_orders"),
+            "Stdin model name should be used as focus: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_stdin_ignores_non_dbt_files() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "plain",
+                "--upstream",
+                "0",
+                "--downstream",
+                "0",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn binary");
+
+        use std::io::Write;
+        let mut child = output;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"docs/README.md\nsome/config.toml\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success());
+        // All inputs were ignored, so with no focus models, full graph is shown
+        assert!(
+            stdout.contains("stg_orders"),
+            "Should show full graph when all stdin lines are ignored: {}",
+            stdout
         );
     }
 

@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod error;
 pub mod graph;
+pub mod input;
 pub mod parser;
 pub mod render;
 #[cfg(feature = "tui")]

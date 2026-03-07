@@ -5,6 +5,7 @@ use clap::Parser;
 
 use dlin::cli::{self, Cli, Command, GraphArgs, SourceType};
 use dlin::graph;
+use dlin::input;
 use dlin::parser;
 use dlin::render;
 
@@ -41,6 +42,18 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
 
+    // Merge CLI positional args and stdin, then resolve file paths to node names
+    let stdin_lines = input::read_stdin_lines();
+    let mut all_inputs = args.model;
+    all_inputs.extend(stdin_lines);
+    let models = if all_inputs.iter().any(|s| s.contains('/') || s.contains('\\') || s.ends_with(".sql") || s.ends_with(".yml") || s.ends_with(".yaml")) {
+        let project = parser::project::DbtProject::load(&project_dir)?;
+        let resolved_paths = project.resolve_paths(&project_dir);
+        input::resolve_stdin_inputs(&all_inputs, &dag, &resolved_paths, &project_dir)
+    } else {
+        all_inputs
+    };
+
     // Parse selectors
     let selectors = args
         .select
@@ -51,7 +64,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Filter graph
     let filtered = graph::filter::filter_graph(
         &dag,
-        &args.model,
+        &models,
         args.upstream,
         args.downstream,
         &graph::filter::NodeTypeFilter {
