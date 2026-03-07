@@ -2,7 +2,8 @@ use std::io::Write;
 
 use crate::graph::types::*;
 
-/// Render the lineage graph as plain text (one label per line) to stdout
+/// Render the lineage graph as plain text (one label per line) to stdout.
+/// Output order follows graph insertion order (not alphabetical or topological).
 pub fn render_plain(graph: &LineageGraph) {
     render_plain_to_writer(graph, &mut std::io::stdout().lock());
 }
@@ -16,19 +17,7 @@ pub fn render_plain_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_node(unique_id: &str, label: &str, node_type: NodeType) -> NodeData {
-        NodeData {
-            unique_id: unique_id.into(),
-            label: label.into(),
-            node_type,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        }
-    }
+    use crate::render::test_helpers::make_node;
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
