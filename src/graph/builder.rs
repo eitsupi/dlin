@@ -8,14 +8,21 @@ use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::sql::{extract_config, extract_refs_and_sources};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
-/// Read all macro SQL files and return their contents as strings.
-/// Files that fail to read are silently skipped.
-fn load_macro_sources(files: &DiscoveredFiles) -> Vec<String> {
-    files
+/// Read all macro SQL files, filter out unparseable ones, and return a
+/// pre-built prefix string for prepending to model templates.
+fn load_macro_prefix(files: &DiscoveredFiles) -> String {
+    let sources: Vec<String> = files
         .macro_sql_files
         .iter()
-        .filter_map(|path| std::fs::read_to_string(path).ok())
-        .collect()
+        .filter_map(|path| match std::fs::read_to_string(path) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                eprintln!("Warning: could not read macro file {}: {}", path.display(), e);
+                None
+            }
+        })
+        .collect();
+    crate::parser::jinja::build_macro_prefix(&sources)
 }
 
 use super::types::*;
@@ -197,7 +204,7 @@ fn process_model_files(
     files: &DiscoveredFiles,
     project_dir: &Path,
     model_meta: &HashMap<String, YamlModelMeta>,
-    macro_sources: &[String],
+    macro_prefix: &str,
 ) {
     let mut model_name_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
 
@@ -220,7 +227,7 @@ fn process_model_files(
         // Extract config from SQL
         let sql_config = sql_content
             .as_ref()
-            .map(|content| extract_config(content, macro_sources))
+            .map(|content| extract_config(content, macro_prefix))
             .unwrap_or_default();
 
         let yaml_meta = model_meta.get(&model_name);
@@ -293,7 +300,7 @@ fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-    macro_sources: &[String],
+    macro_prefix: &str,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -331,7 +338,7 @@ fn process_sql_edges(
             None => continue,
         };
 
-        let (refs, sources) = extract_refs_and_sources(&content, macro_sources);
+        let (refs, sources) = extract_refs_and_sources(&content, macro_prefix);
 
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
@@ -398,10 +405,10 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 /// Build the lineage graph from discovered files
 pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
-    let macro_sources = load_macro_sources(files);
+    let macro_prefix = load_macro_prefix(files);
 
     let (model_meta, exposures) = process_yaml_files(&mut gb, files)?;
-    process_model_files(&mut gb, files, project_dir, &model_meta, &macro_sources);
+    process_model_files(&mut gb, files, project_dir, &model_meta, &macro_prefix);
     process_simple_nodes(
         &mut gb,
         &files.seed_files,
@@ -416,7 +423,7 @@ pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<Lineag
         "snapshot",
         NodeType::Snapshot,
     );
-    process_sql_edges(&mut gb, files, project_dir, &macro_sources)?;
+    process_sql_edges(&mut gb, files, project_dir, &macro_prefix)?;
     process_exposures(&mut gb, &exposures);
 
     Ok(gb.graph)

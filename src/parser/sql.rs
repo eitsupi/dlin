@@ -64,13 +64,10 @@ fn strip_jinja_comments(sql: &str) -> String {
 /// Extract all ref() and source() calls from SQL content in a single pass.
 /// Tries minijinja rendering first; falls back to regex on failure.
 ///
-/// `macro_sources` contains raw contents of macro SQL files so that
-/// custom macros containing ref()/source() are expanded and tracked.
-pub fn extract_refs_and_sources(
-    sql: &str,
-    macro_sources: &[String],
-) -> (Vec<RefCall>, Vec<SourceCall>) {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_sources) {
+/// `macro_prefix` is the pre-built concatenation of valid macro SQL files
+/// so that custom macros containing ref()/source() are expanded and tracked.
+pub fn extract_refs_and_sources(sql: &str, macro_prefix: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
         return (ext.refs, ext.sources);
     }
     (extract_refs_regex(sql), extract_sources_regex(sql))
@@ -78,12 +75,12 @@ pub fn extract_refs_and_sources(
 
 /// Extract all ref() calls from SQL content.
 pub fn extract_refs(sql: &str) -> Vec<RefCall> {
-    extract_refs_and_sources(sql, &[]).0
+    extract_refs_and_sources(sql, "").0
 }
 
 /// Extract all source() calls from SQL content.
 pub fn extract_sources(sql: &str) -> Vec<SourceCall> {
-    extract_refs_and_sources(sql, &[]).1
+    extract_refs_and_sources(sql, "").1
 }
 
 /// Regex fallback for extracting ref() calls
@@ -157,8 +154,8 @@ static TAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"['"]([^'"]+)[
 
 /// Extract config() block settings from SQL content.
 /// Tries minijinja rendering first; falls back to regex on failure.
-pub fn extract_config(sql: &str, macro_sources: &[String]) -> SqlConfig {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_sources) {
+pub fn extract_config(sql: &str, macro_prefix: &str) -> SqlConfig {
+    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
         return ext.config;
     }
     extract_config_regex(sql)
@@ -302,7 +299,7 @@ mod tests {
     #[test]
     fn test_config_materialized() {
         let sql = "{{ config(materialized='incremental') }}\nSELECT 1";
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.materialized.as_deref(), Some("incremental"));
         assert!(config.tags.is_empty());
     }
@@ -310,21 +307,21 @@ mod tests {
     #[test]
     fn test_config_materialized_double_quotes() {
         let sql = r#"{{ config(materialized="table") }}"#;
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.materialized.as_deref(), Some("table"));
     }
 
     #[test]
     fn test_config_tags() {
         let sql = "{{ config(tags=['nightly', 'finance']) }}\nSELECT 1";
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.tags, vec!["nightly", "finance"]);
     }
 
     #[test]
     fn test_config_both() {
         let sql = "{{ config(materialized='view', tags=['daily']) }}\nSELECT 1";
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.materialized.as_deref(), Some("view"));
         assert_eq!(config.tags, vec!["daily"]);
     }
@@ -332,7 +329,7 @@ mod tests {
     #[test]
     fn test_config_whitespace_control() {
         let sql = "{{- config(materialized='ephemeral') -}}\nSELECT 1";
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.materialized.as_deref(), Some("ephemeral"));
     }
 
@@ -345,7 +342,7 @@ mod tests {
             )
         }}
         SELECT 1"#;
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert_eq!(config.materialized.as_deref(), Some("incremental"));
         assert_eq!(config.tags, vec!["nightly", "warehouse"]);
     }
@@ -353,7 +350,7 @@ mod tests {
     #[test]
     fn test_no_config() {
         let sql = "SELECT * FROM {{ ref('orders') }}";
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert!(config.materialized.is_none());
         assert!(config.tags.is_empty());
     }
@@ -364,7 +361,7 @@ mod tests {
             {# {{ config(materialized='table') }} #}
             SELECT 1
         "#;
-        let config = extract_config(sql, &[]);
+        let config = extract_config(sql, "");
         assert!(config.materialized.is_none());
     }
 }

@@ -127,11 +127,13 @@ mod tests {
 name: my_project
 model-paths: ["models", "extra_models"]
 seed-paths: ["data"]
+macro-paths: ["macros", "custom_macros"]
 "#;
         let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(project.model_paths, vec!["models", "extra_models"]);
         assert_eq!(project.seed_paths, vec!["data"]);
         assert_eq!(project.snapshot_paths, vec!["snapshots"]); // default
+        assert_eq!(project.macro_paths, vec!["macros", "custom_macros"]);
     }
 
     #[test]
