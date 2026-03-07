@@ -49,6 +49,13 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
         discovered.yaml_files.extend(yaml);
     }
 
+    // Analyses (treated as models, consistent with manifest mode)
+    for dir in &paths.analysis_paths {
+        let (sql, yaml) = walk_directory(dir);
+        discovered.model_sql_files.extend(sql);
+        discovered.yaml_files.extend(yaml);
+    }
+
     // Macros
     for dir in &paths.macro_paths {
         let (sql, _yaml) = walk_directory(dir);
@@ -191,6 +198,7 @@ mod tests {
             snapshot_paths: vec![snap_dir],
             test_paths: vec![test_dir],
             macro_paths: vec![],
+            analysis_paths: vec![],
         };
 
         let discovered = discover_files(&paths).unwrap();
@@ -202,6 +210,38 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_files_with_analyses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        // Models
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(models_dir.join("model_a.sql"), "SELECT 1").unwrap();
+
+        // Analyses (should be treated as models)
+        let analyses_dir = project_dir.join("analyses");
+        fs::create_dir_all(&analyses_dir).unwrap();
+        fs::write(analyses_dir.join("my_analysis.sql"), "SELECT 1").unwrap();
+        fs::write(analyses_dir.join("schema.yml"), "version: 2").unwrap();
+
+        let paths = ResolvedPaths {
+            model_paths: vec![models_dir],
+            seed_paths: vec![],
+            snapshot_paths: vec![],
+            test_paths: vec![],
+            macro_paths: vec![],
+            analysis_paths: vec![analyses_dir],
+        };
+
+        let discovered = discover_files(&paths).unwrap();
+        // Analysis SQL files are added to model_sql_files
+        assert_eq!(discovered.model_sql_files.len(), 2);
+        // Analysis YAML files are collected
+        assert_eq!(discovered.yaml_files.len(), 1);
+    }
+
+    #[test]
     fn test_discover_files_missing_dirs() {
         let paths = ResolvedPaths {
             model_paths: vec![PathBuf::from("/nonexistent/models")],
@@ -209,6 +249,7 @@ mod tests {
             snapshot_paths: vec![PathBuf::from("/nonexistent/snapshots")],
             test_paths: vec![PathBuf::from("/nonexistent/tests")],
             macro_paths: vec![],
+            analysis_paths: vec![],
         };
 
         let discovered = discover_files(&paths).unwrap();

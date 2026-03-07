@@ -23,6 +23,9 @@ pub struct DbtProject {
 
     #[serde(rename = "macro-paths", default = "default_macro_paths")]
     pub macro_paths: Vec<String>,
+
+    #[serde(rename = "analysis-paths", default = "default_analysis_paths")]
+    pub analysis_paths: Vec<String>,
 }
 
 fn default_model_paths() -> Vec<String> {
@@ -43,6 +46,10 @@ fn default_test_paths() -> Vec<String> {
 
 fn default_macro_paths() -> Vec<String> {
     vec!["macros".to_string()]
+}
+
+fn default_analysis_paths() -> Vec<String> {
+    vec!["analyses".to_string()]
 }
 
 impl DbtProject {
@@ -91,6 +98,11 @@ impl DbtProject {
                 .iter()
                 .map(|p| project_dir.join(p))
                 .collect(),
+            analysis_paths: self
+                .analysis_paths
+                .iter()
+                .map(|p| project_dir.join(p))
+                .collect(),
         }
     }
 }
@@ -102,6 +114,7 @@ pub struct ResolvedPaths {
     pub snapshot_paths: Vec<PathBuf>,
     pub test_paths: Vec<PathBuf>,
     pub macro_paths: Vec<PathBuf>,
+    pub analysis_paths: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -119,6 +132,7 @@ mod tests {
         assert_eq!(project.snapshot_paths, vec!["snapshots"]);
         assert_eq!(project.test_paths, vec!["tests"]);
         assert_eq!(project.macro_paths, vec!["macros"]);
+        assert_eq!(project.analysis_paths, vec!["analyses"]);
     }
 
     #[test]
@@ -134,6 +148,17 @@ macro-paths: ["macros", "custom_macros"]
         assert_eq!(project.seed_paths, vec!["data"]);
         assert_eq!(project.snapshot_paths, vec!["snapshots"]); // default
         assert_eq!(project.macro_paths, vec!["macros", "custom_macros"]);
+        assert_eq!(project.analysis_paths, vec!["analyses"]); // default
+    }
+
+    #[test]
+    fn test_custom_analysis_paths() {
+        let yaml = r#"
+name: my_project
+analysis-paths: ["analyses", "custom_analyses"]
+"#;
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(project.analysis_paths, vec!["analyses", "custom_analyses"]);
     }
 
     #[test]
@@ -173,5 +198,6 @@ macro-paths: ["macros", "custom_macros"]
         assert_eq!(paths.snapshot_paths, vec![PathBuf::from("/proj/snapshots")]);
         assert_eq!(paths.test_paths, vec![PathBuf::from("/proj/tests")]);
         assert_eq!(paths.macro_paths, vec![PathBuf::from("/proj/macros")]);
+        assert_eq!(paths.analysis_paths, vec![PathBuf::from("/proj/analyses")]);
     }
 }
