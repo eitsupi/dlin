@@ -48,6 +48,15 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
         for ep in &report.exposure_paths {
             writeln!(w, "  {}", ep.path.join(" -> ")).unwrap();
         }
+        if report.exposure_paths_truncated {
+            writeln!(
+                w,
+                "  {} Use `dlin graph {} --include-exposures` to see the full lineage.",
+                "(truncated)".dimmed(),
+                report.source_model
+            )
+            .unwrap();
+        }
         writeln!(w).unwrap();
     }
 
@@ -97,6 +106,7 @@ mod tests {
                     "dashboard".to_string(),
                 ],
             }],
+            exposure_paths_truncated: false,
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -170,6 +180,7 @@ mod tests {
             affected_tests: 0,
             affected_exposures: 0,
             exposure_paths: vec![],
+            exposure_paths_truncated: false,
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -202,6 +213,7 @@ mod tests {
             affected_tests: 0,
             affected_exposures: 0,
             exposure_paths: vec![],
+            exposure_paths_truncated: false,
             impacted_nodes: vec![ImpactedNode {
                 unique_id: "model.payments".to_string(),
                 label: "payments".to_string(),

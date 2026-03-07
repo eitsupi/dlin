@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -54,6 +54,8 @@ pub struct ImpactReport {
     pub affected_tests: usize,
     pub affected_exposures: usize,
     pub exposure_paths: Vec<ExposurePath>,
+    /// True if any exposure had more paths than the enumeration cap
+    pub exposure_paths_truncated: bool,
     pub impacted_nodes: Vec<ImpactedNode>,
 }
 
@@ -131,32 +133,46 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         }
     }
 
-    // Find all simple paths to each exposure via DFS
+    // Find all simple paths to exposures via single DFS (capped per exposure)
+    const MAX_PATHS_PER_EXPOSURE: usize = 10;
+    let exposure_set: HashSet<NodeIndex> = exposure_indices.iter().copied().collect();
     let mut exposure_paths: Vec<ExposurePath> = Vec::new();
-    for &exp_idx in &exposure_indices {
-        let mut all_paths: Vec<Vec<NodeIndex>> = Vec::new();
-        let mut stack: Vec<(NodeIndex, Vec<NodeIndex>)> = vec![(source_idx, vec![source_idx])];
-        while let Some((current, path)) = stack.pop() {
-            if current == exp_idx {
-                all_paths.push(path);
+    let mut path_counts: HashMap<NodeIndex, usize> = HashMap::new();
+
+    if !exposure_set.is_empty() {
+        let mut stack: Vec<(NodeIndex, Vec<NodeIndex>, HashSet<NodeIndex>)> = vec![(
+            source_idx,
+            vec![source_idx],
+            HashSet::from([source_idx]),
+        )];
+        while let Some((current, path, path_set)) = stack.pop() {
+            if exposure_set.contains(&current) {
+                let count = path_counts.entry(current).or_insert(0);
+                if *count < MAX_PATHS_PER_EXPOSURE {
+                    *count += 1;
+                    exposure_paths.push(ExposurePath {
+                        exposure: graph[current].label.clone(),
+                        path: path.iter().map(|&idx| graph[idx].label.clone()).collect(),
+                    });
+                }
+                // Don't traverse beyond exposures
                 continue;
             }
             for edge in graph.edges_directed(current, Direction::Outgoing) {
                 let neighbor = edge.target();
-                if !path.contains(&neighbor) {
+                if !path_set.contains(&neighbor) {
                     let mut new_path = path.clone();
                     new_path.push(neighbor);
-                    stack.push((neighbor, new_path));
+                    let mut new_set = path_set.clone();
+                    new_set.insert(neighbor);
+                    stack.push((neighbor, new_path, new_set));
                 }
             }
         }
-        for p in all_paths {
-            exposure_paths.push(ExposurePath {
-                exposure: graph[exp_idx].label.clone(),
-                path: p.iter().map(|&idx| graph[idx].label.clone()).collect(),
-            });
-        }
     }
+    let exposure_paths_truncated = path_counts
+        .values()
+        .any(|&count| count >= MAX_PATHS_PER_EXPOSURE);
     exposure_paths.sort_by(|a, b| a.exposure.cmp(&b.exposure).then(a.path.cmp(&b.path)));
 
     // Sort by severity (descending), then distance
@@ -179,6 +195,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         affected_tests,
         affected_exposures,
         exposure_paths,
+        exposure_paths_truncated,
         impacted_nodes,
     }
 }
