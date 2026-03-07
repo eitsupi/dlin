@@ -3,9 +3,11 @@ use petgraph::stable_graph::NodeIndex;
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::path::PathBuf;
+
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
-use crate::parser::sql::{extract_all, extract_refs_and_sources};
+use crate::parser::sql::{extract_all, extract_refs_and_sources, RefCall, SourceCall};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -206,8 +208,7 @@ fn process_yaml_files(
 
 /// Cached extraction result for a model SQL file (refs and sources).
 /// Avoids re-running minijinja in `process_sql_edges`.
-type ExtractionCache =
-    HashMap<std::path::PathBuf, (Vec<crate::parser::sql::RefCall>, Vec<crate::parser::sql::SourceCall>)>;
+type ExtractionCache = HashMap<PathBuf, (Vec<RefCall>, Vec<SourceCall>)>;
 
 /// Create nodes for model SQL files (with duplicate detection).
 /// Returns a cache of refs/sources extracted per file so that
@@ -239,18 +240,17 @@ fn process_model_files(
         let sql_content = std::fs::read_to_string(sql_path).ok();
 
         // Extract config, refs, and sources in a single minijinja pass
-        let extraction = sql_content
+        let (sql_config, cached_refs_sources) = match sql_content
             .as_ref()
-            .map(|content| extract_all(content, macro_prefix));
-
-        let sql_config = extraction
-            .as_ref()
-            .map(|ext| ext.config.clone())
-            .unwrap_or_default();
+            .map(|content| extract_all(content, macro_prefix))
+        {
+            Some(ext) => (ext.config, Some((ext.refs, ext.sources))),
+            None => (Default::default(), None),
+        };
 
         // Cache refs/sources for process_sql_edges
-        if let Some(ext) = extraction {
-            cache.insert(sql_path.clone(), (ext.refs, ext.sources));
+        if let Some(rs) = cached_refs_sources {
+            cache.insert(sql_path.clone(), rs);
         }
 
         let yaml_meta = model_meta.get(&model_name);
@@ -366,11 +366,13 @@ fn process_sql_edges(
         };
 
         // Use cached extraction for model files; extract fresh for others
+        let owned;
         let (refs, sources) = if let Some(cached) = extraction_cache.get(*sql_path) {
-            (cached.0.clone(), cached.1.clone())
+            (&cached.0, &cached.1)
         } else {
             let content = read_file(sql_path)?;
-            extract_refs_and_sources(&content, macro_prefix)
+            owned = extract_refs_and_sources(&content, macro_prefix);
+            (&owned.0, &owned.1)
         };
 
         for ref_call in refs {
