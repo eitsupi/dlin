@@ -128,7 +128,12 @@ fn add_source_nodes(
     gb: &mut GraphBuilder,
     schema: &crate::parser::yaml_schema::SchemaFile,
     yaml_path: &Path,
+    project_dir: &Path,
 ) {
+    let relative_path = yaml_path
+        .strip_prefix(project_dir)
+        .unwrap_or(yaml_path)
+        .to_path_buf();
     for source_def in &schema.sources {
         for table in &source_def.tables {
             let unique_id = format!("source.{}.{}", source_def.name, table.name);
@@ -137,7 +142,7 @@ fn add_source_nodes(
                 unique_id,
                 label,
                 node_type: NodeType::Source,
-                file_path: Some(yaml_path.to_path_buf()),
+                file_path: Some(relative_path.clone()),
                 description: table
                     .description
                     .clone()
@@ -162,6 +167,7 @@ struct YamlModelMeta {
 fn process_yaml_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
+    project_dir: &Path,
 ) -> Result<(HashMap<String, YamlModelMeta>, Vec<ExposureDefinition>)> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
@@ -173,7 +179,7 @@ fn process_yaml_files(
             Err(_) => continue,
         };
 
-        add_source_nodes(gb, &schema, yaml_path);
+        add_source_nodes(gb, &schema, yaml_path, project_dir);
 
         for model_def in &schema.models {
             let mut meta = YamlModelMeta {
@@ -407,7 +413,7 @@ pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<Lineag
     let mut gb = GraphBuilder::new();
     let macro_prefix = load_macro_prefix(files);
 
-    let (model_meta, exposures) = process_yaml_files(&mut gb, files)?;
+    let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
     process_model_files(&mut gb, files, project_dir, &model_meta, &macro_prefix);
     process_simple_nodes(
         &mut gb,
@@ -946,6 +952,60 @@ models:
             .filter(|&i| graph[i].label == "orders")
             .collect();
         assert_eq!(order_nodes.len(), 2);
+    }
+
+    #[test]
+    fn test_build_graph_file_paths_are_relative() {
+        let (_tmp, project_dir) = setup_temp_project();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/stg_orders.sql"),
+                project_dir.join("models/orders.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files).unwrap();
+
+        for idx in graph.node_indices() {
+            let node = &graph[idx];
+            if let Some(ref fp) = node.file_path {
+                assert!(
+                    fp.is_relative(),
+                    "file_path for node '{}' should be relative but got: {}",
+                    node.label,
+                    fp.display()
+                );
+                assert!(
+                    !fp.starts_with(&project_dir),
+                    "file_path for node '{}' should not start with project_dir: {}",
+                    node.label,
+                    fp.display()
+                );
+            }
+        }
+
+        // Verify source node specifically has relative path
+        let source_node = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Source)
+            .expect("should have a source node");
+        assert_eq!(
+            graph[source_node].file_path.as_deref(),
+            Some(std::path::Path::new("models/schema.yml"))
+        );
+
+        // Verify model node has relative path
+        let model_node = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "stg_orders")
+            .unwrap();
+        assert_eq!(
+            graph[model_node].file_path.as_deref(),
+            Some(std::path::Path::new("models/stg_orders.sql"))
+        );
     }
 
     #[test]
