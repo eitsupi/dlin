@@ -8,5 +8,5 @@ SELECT
     SUM(o.total_amount) as lifetime_value
 FROM {{ ref('stg_customers') }} c
 LEFT JOIN {{ ref('orders') }} o ON c.customer_id = o.customer_id
-LEFT JOIN {{ ref('countries') }} co ON c.country_code = co.code
+LEFT JOIN {{ ref('countries') }} co ON c.country_id = co.id
 GROUP BY 1, 2, 3, 4, 5
