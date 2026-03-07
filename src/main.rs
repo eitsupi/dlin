@@ -143,8 +143,20 @@ fn run_impact_command(
     let dag = build_dag(&project_dir, source, manifest_path)?;
 
     // Find the source model node
-    let source_idx = graph::filter::find_node_by_name(&dag, model)
-        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in the graph", model))?;
+    let source_idx = match graph::filter::find_node_by_name(&dag, model) {
+        graph::filter::NodeLookupResult::Found(idx) => idx,
+        graph::filter::NodeLookupResult::Ambiguous(idx, ids) => {
+            eprintln!(
+                "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+                model,
+                ids.join(", ")
+            );
+            idx
+        }
+        graph::filter::NodeLookupResult::NotFound => {
+            anyhow::bail!("Model '{}' not found in the graph", model);
+        }
+    };
 
     let report = graph::impact::compute_impact(&dag, source_idx);
 

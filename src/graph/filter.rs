@@ -8,20 +8,28 @@ use crate::error::DbtLineageError;
 
 use super::types::*;
 
+/// Result of a node name lookup.
+pub enum NodeLookupResult {
+    /// No matching node found.
+    NotFound,
+    /// Exactly one node matched (exact or suffix).
+    Found(NodeIndex),
+    /// Multiple nodes matched the suffix fallback. The first is used,
+    /// and all matching unique_ids are returned for caller-side warnings.
+    Ambiguous(NodeIndex, Vec<String>),
+}
+
 /// Find a node by name, using a two-pass approach:
 /// 1. Exact match on label or unique_id
 /// 2. Suffix match on unique_id (`.{name}`)
-///
-/// If multiple nodes match the suffix in the fallback pass, the first in
-/// graph iteration order is returned and a warning is emitted to stderr.
-pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
+pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
     // Pass 1: exact label or unique_id
     let exact = graph.node_indices().find(|&idx| {
         let node = &graph[idx];
         node.label == name || node.unique_id == name
     });
-    if exact.is_some() {
-        return exact;
+    if let Some(idx) = exact {
+        return NodeLookupResult::Found(idx);
     }
 
     // Pass 2: suffix match
@@ -31,16 +39,14 @@ pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> Option<NodeIndex> 
         .filter(|&idx| graph[idx].unique_id.ends_with(&suffix))
         .collect();
 
-    if matches.len() > 1 {
-        let ids: Vec<&str> = matches.iter().map(|&idx| graph[idx].unique_id.as_str()).collect();
-        eprintln!(
-            "Warning: '{}' matched multiple nodes: {}. Using the first match.",
-            name,
-            ids.join(", ")
-        );
+    match matches.len() {
+        0 => NodeLookupResult::NotFound,
+        1 => NodeLookupResult::Found(matches[0]),
+        _ => {
+            let ids = matches.iter().map(|&idx| graph[idx].unique_id.clone()).collect();
+            NodeLookupResult::Ambiguous(matches[0], ids)
+        }
     }
-
-    matches.into_iter().next()
 }
 
 /// Configuration for which node types to include
@@ -123,8 +129,20 @@ pub fn filter_graph(
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
 
     if let Some(model_name) = focus_model {
-        let focus_idx = find_node_by_name(graph, model_name)
-            .ok_or_else(|| DbtLineageError::ModelNotFound(model_name.to_string()))?;
+        let focus_idx = match find_node_by_name(graph, model_name) {
+            NodeLookupResult::Found(idx) => idx,
+            NodeLookupResult::Ambiguous(idx, ids) => {
+                eprintln!(
+                    "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+                    model_name,
+                    ids.join(", ")
+                );
+                idx
+            }
+            NodeLookupResult::NotFound => {
+                return Err(DbtLineageError::ModelNotFound(model_name.to_string()).into());
+            }
+        };
 
         keep_nodes.insert(focus_idx);
 
