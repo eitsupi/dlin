@@ -41,6 +41,8 @@ pub struct ImpactedNode {
     pub unique_id: String,
     pub label: String,
     pub node_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
     pub severity: ImpactSeverity,
     pub distance: usize,
 }
@@ -124,6 +126,10 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                     unique_id: node.unique_id.clone(),
                     label: node.label.clone(),
                     node_type: node.node_type.label().to_string(),
+                    file_path: node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
                     severity,
                     distance: next_distance,
                 });

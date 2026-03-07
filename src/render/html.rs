@@ -11,6 +11,8 @@ struct HtmlJsonNode {
     label: String,
     node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     materialization: Option<String>,
@@ -42,6 +44,10 @@ fn build_html_json(graph: &LineageGraph) -> String {
                 unique_id: node.unique_id.clone(),
                 label: node.label.clone(),
                 node_type: node.node_type.label().to_string(),
+                file_path: node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
                 description: node.description.clone(),
                 materialization: node.materialization.clone(),
                 tags: node.tags.clone(),

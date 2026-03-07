@@ -64,12 +64,21 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
         writeln!(w, "{}", "Impacted Nodes:".bold()).unwrap();
         for node in &report.impacted_nodes {
             let sev = node.severity.label().color(severity_color(node.severity));
-            writeln!(
-                w,
-                "  [{:<8}] {} ({}, {} hops)",
-                sev, node.label, node.node_type, node.distance
-            )
-            .unwrap();
+            if let Some(ref path) = node.file_path {
+                writeln!(
+                    w,
+                    "  [{:<8}] {} ({}, {} hops) [{}]",
+                    sev, node.label, node.node_type, node.distance, path
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    w,
+                    "  [{:<8}] {} ({}, {} hops)",
+                    sev, node.label, node.node_type, node.distance
+                )
+                .unwrap();
+            }
         }
     }
 
@@ -112,6 +121,7 @@ mod tests {
                     unique_id: "exposure.dashboard".to_string(),
                     label: "dashboard".to_string(),
                     node_type: "exposure".to_string(),
+                    file_path: None,
                     severity: ImpactSeverity::Critical,
                     distance: 2,
                 },
@@ -119,6 +129,7 @@ mod tests {
                     unique_id: "model.orders".to_string(),
                     label: "orders".to_string(),
                     node_type: "model".to_string(),
+                    file_path: Some("models/marts/orders.sql".to_string()),
                     severity: ImpactSeverity::High,
                     distance: 1,
                 },
@@ -126,6 +137,7 @@ mod tests {
                     unique_id: "test.orders_positive".to_string(),
                     label: "orders_positive".to_string(),
                     node_type: "test".to_string(),
+                    file_path: None,
                     severity: ImpactSeverity::Low,
                     distance: 2,
                 },
@@ -218,6 +230,7 @@ mod tests {
                 unique_id: "model.payments".to_string(),
                 label: "payments".to_string(),
                 node_type: "model".to_string(),
+                file_path: None,
                 severity: ImpactSeverity::Medium,
                 distance: 1,
             }],

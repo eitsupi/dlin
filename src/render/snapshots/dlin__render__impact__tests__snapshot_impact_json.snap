@@ -31,6 +31,7 @@ expression: output
       "unique_id": "model.orders",
       "label": "orders",
       "node_type": "model",
+      "file_path": "models/marts/orders.sql",
       "severity": "high",
       "distance": 1
     },

@@ -17,5 +17,5 @@ Exposure Paths:
 
 Impacted Nodes:
   [critical] dashboard (exposure, 2 hops)
-  [high    ] orders (model, 1 hops)
+  [high    ] orders (model, 1 hops) [models/marts/orders.sql]
   [low     ] orders_positive (test, 2 hops)
