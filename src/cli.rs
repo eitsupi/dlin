@@ -64,6 +64,10 @@ pub struct GraphArgs {
     /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
+
+    /// [Experimental] Include SQL file contents for each node in JSON and plain output
+    #[arg(long)]
+    pub show_sql: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -234,6 +238,19 @@ mod tests {
             Cli::try_parse_from(["dlin", "graph", "--select", "path:models/staging"]).unwrap(),
         );
         assert_eq!(args.select.as_deref(), Some("path:models/staging"));
+    }
+
+    #[test]
+    fn test_graph_show_sql() {
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--show-sql"]).unwrap());
+        assert!(args.show_sql);
+    }
+
+    #[test]
+    fn test_graph_show_sql_default_false() {
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
+        assert!(!args.show_sql);
     }
 
     #[test]

@@ -1,0 +1,22 @@
+---
+source: src/render/json.rs
+expression: output
+---
+{
+  "nodes": [
+    {
+      "unique_id": "model.orders",
+      "label": "orders",
+      "node_type": "model",
+      "file_path": "models/orders.sql",
+      "materialization": "table",
+      "sql_content": "SELECT * FROM {{ ref('stg_orders') }}"
+    },
+    {
+      "unique_id": "source.raw.orders",
+      "label": "raw.orders",
+      "node_type": "source"
+    }
+  ],
+  "edges": []
+}

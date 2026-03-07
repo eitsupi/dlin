@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -26,6 +27,8 @@ struct JsonNode {
     tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     columns: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sql_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -36,11 +39,15 @@ struct JsonEdge {
 }
 
 /// Render the lineage graph as JSON to stdout
-pub fn render_json(graph: &LineageGraph) {
-    render_json_to_writer(graph, &mut std::io::stdout().lock());
+pub fn render_json(graph: &LineageGraph, sql_contents: Option<&HashMap<String, String>>) {
+    render_json_to_writer(graph, sql_contents, &mut std::io::stdout().lock());
 }
 
-fn render_json_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
+fn render_json_to_writer<W: Write>(
+    graph: &LineageGraph,
+    sql_contents: Option<&HashMap<String, String>>,
+    w: &mut W,
+) {
     let nodes: Vec<JsonNode> = graph
         .node_indices()
         .map(|idx| {
@@ -54,6 +61,9 @@ fn render_json_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
                 materialization: node.materialization.clone(),
                 tags: node.tags.clone(),
                 columns: node.columns.clone(),
+                sql_content: sql_contents
+                    .and_then(|m| m.get(&node.unique_id))
+                    .cloned(),
             }
         })
         .collect();
@@ -106,7 +116,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_json_to_writer(graph, &mut buf);
+        render_json_to_writer(graph, None, &mut buf);
         String::from_utf8(buf).unwrap()
     }
 
@@ -249,6 +259,29 @@ mod tests {
             columns: vec!["order_id".into(), "customer_id".into()],
         });
         let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_json_with_sql() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.orders".into(),
+            label: "orders".into(),
+            node_type: NodeType::Model,
+            file_path: Some(PathBuf::from("models/orders.sql")),
+            description: None,
+            materialization: Some("table".into()),
+            tags: vec![],
+            columns: vec![],
+        });
+        graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
+        let sql_contents = HashMap::from([
+            ("model.orders".to_string(), "SELECT * FROM {{ ref('stg_orders') }}".to_string()),
+        ]);
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, Some(&sql_contents), &mut buf);
+        let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
 

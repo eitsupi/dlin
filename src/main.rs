@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -101,7 +102,13 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         anyhow::bail!("TUI feature not enabled. Rebuild with --features tui");
     }
 
-    render_output(&args.output, &filtered);
+    let sql_contents = if args.show_sql {
+        Some(collect_sql_contents(&filtered, &project_dir))
+    } else {
+        None
+    };
+
+    render_output(&args.output, &filtered, sql_contents.as_ref());
 
     Ok(())
 }
@@ -131,16 +138,39 @@ fn build_dag(
 
 /// Dispatch rendering based on output format
 #[cfg(not(tarpaulin_include))]
-fn render_output(format: &cli::OutputFormat, graph: &graph::types::LineageGraph) {
+fn render_output(
+    format: &cli::OutputFormat,
+    graph: &graph::types::LineageGraph,
+    sql_contents: Option<&HashMap<String, String>>,
+) {
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
         cli::OutputFormat::Dot => render::dot::render_dot(graph),
-        cli::OutputFormat::Json => render::json::render_json(graph),
+        cli::OutputFormat::Json => render::json::render_json(graph, sql_contents),
         cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph),
-        cli::OutputFormat::Plain => render::plain::render_plain(graph),
+        cli::OutputFormat::Plain => render::plain::render_plain(graph, sql_contents),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),
     }
+}
+
+/// Collect SQL file contents for all nodes that have a file_path.
+#[cfg(not(tarpaulin_include))]
+fn collect_sql_contents(
+    graph: &graph::types::LineageGraph,
+    project_dir: &Path,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for idx in graph.node_indices() {
+        let node = &graph[idx];
+        if let Some(ref rel_path) = node.file_path {
+            let full_path = project_dir.join(rel_path);
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                map.insert(node.unique_id.clone(), content);
+            }
+        }
+    }
+    map
 }
 
 /// Run the `impact` subcommand

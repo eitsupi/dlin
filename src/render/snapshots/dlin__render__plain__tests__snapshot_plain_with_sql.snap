@@ -1,0 +1,9 @@
+---
+source: src/render/plain.rs
+expression: output
+---
+orders
+--- SQL ---
+SELECT * FROM {{ ref('stg_orders') }}
+----------
+raw.orders

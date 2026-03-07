@@ -151,6 +151,8 @@ Options:
       --include-seeds             Include seed nodes
       --include-snapshots         Include snapshot nodes
       --include-exposures         Include exposure nodes
+      --show-sql                  [Experimental] Include SQL file contents for each
+                                  node in JSON and plain output
   -h, --help                      Print help
 ```
 
