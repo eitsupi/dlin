@@ -62,6 +62,13 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         &selectors,
     )?;
 
+    // Apply output node-type filter
+    let filtered = if let Some(ref type_names) = args.node_types {
+        graph::filter::filter_output_node_types(&filtered, type_names)
+    } else {
+        filtered
+    };
+
     // Render
     #[cfg(feature = "tui")]
     if args.interactive {

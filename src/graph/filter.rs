@@ -187,6 +187,19 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
     new_graph
 }
 
+/// Filter graph to keep only nodes whose type label matches one of the given names.
+/// If `type_names` is empty, the graph is returned unchanged.
+pub fn filter_output_node_types(graph: &LineageGraph, type_names: &[String]) -> LineageGraph {
+    if type_names.is_empty() {
+        return graph.clone();
+    }
+    let keep: HashSet<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| type_names.iter().any(|t| t == graph[idx].node_type.label()))
+        .collect();
+    build_subgraph(graph, &keep)
+}
+
 /// BFS traversal collecting nodes up to max_depth levels away
 fn bfs_collect(
     graph: &LineageGraph,
@@ -740,6 +753,39 @@ mod tests {
         };
         let filtered2 = filter_graph(&g, None, None, None, &filter2, &[]).unwrap();
         assert_eq!(filtered2.node_count(), 2); // model + test
+    }
+
+    // -- Output node-type filter tests -----------------------------------------
+
+    #[test]
+    fn test_filter_output_node_types_empty_returns_all() {
+        let g = make_test_graph();
+        let filtered = filter_output_node_types(&g, &[]);
+        assert_eq!(filtered.node_count(), g.node_count());
+    }
+
+    #[test]
+    fn test_filter_output_node_types_model_only() {
+        let g = make_test_graph();
+        let filtered = filter_output_node_types(&g, &["model".into()]);
+        assert_eq!(filtered.node_count(), 2);
+        for idx in filtered.node_indices() {
+            assert_eq!(filtered[idx].node_type, NodeType::Model);
+        }
+    }
+
+    #[test]
+    fn test_filter_output_node_types_multiple() {
+        let g = make_test_graph();
+        let filtered = filter_output_node_types(&g, &["model".into(), "source".into()]);
+        assert_eq!(filtered.node_count(), 3);
+    }
+
+    #[test]
+    fn test_filter_output_node_types_no_match() {
+        let g = make_test_graph();
+        let filtered = filter_output_node_types(&g, &["test".into()]);
+        assert_eq!(filtered.node_count(), 0);
     }
 
     #[test]

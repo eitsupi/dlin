@@ -29,7 +29,7 @@ pub struct GraphArgs {
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Output format: ascii (default), dot, json, mermaid, svg, html
+    /// Output format: ascii (default), dot, json, mermaid, plain, svg, html
     #[arg(short = 'o', long, default_value = "ascii")]
     pub output: OutputFormat,
 
@@ -52,6 +52,10 @@ pub struct GraphArgs {
     /// Selector expression: tag:X, path:Y, or model name (comma-separated)
     #[arg(short = 's', long)]
     pub select: Option<String>,
+
+    /// Filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure)
+    #[arg(long = "node-type", value_delimiter = ',')]
+    pub node_types: Option<Vec<String>>,
 
     /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
     #[arg(long, default_value = "sql")]
@@ -314,4 +318,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_graph_node_type_single() {
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "--node-type", "model"]).unwrap(),
+        );
+        assert_eq!(args.node_types, Some(vec!["model".to_string()]));
+    }
+
+    #[test]
+    fn test_graph_node_type_multiple() {
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "--node-type", "model,source"]).unwrap(),
+        );
+        assert_eq!(
+            args.node_types,
+            Some(vec!["model".to_string(), "source".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_graph_node_type_default_none() {
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
+        assert!(args.node_types.is_none());
+    }
 }
