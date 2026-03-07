@@ -72,18 +72,10 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
 /// Unlike [`resolve_node_by_name`], this does not return an error for missing
 /// nodes, making it suitable for batch lookups where skipping is preferred.
 pub fn try_resolve_node(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
-    match find_node_by_name(graph, name) {
-        NodeLookupResult::Found(idx) => Some(idx),
-        NodeLookupResult::Ambiguous(idx, ids) => {
-            eprintln!(
-                "Warning: '{}' matched multiple nodes: {}. Using the first match.",
-                name,
-                ids.join(", ")
-            );
-            Some(idx)
-        }
-        NodeLookupResult::NotFound => {
-            eprintln!("Warning: '{}' not found in the graph, skipping.", name);
+    match resolve_node_by_name(graph, name) {
+        Ok(idx) => Some(idx),
+        Err(e) => {
+            eprintln!("Warning: {}, skipping.", e);
             None
         }
     }
@@ -503,6 +495,18 @@ mod tests {
                 .unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
+    }
+
+    #[test]
+    fn test_try_resolve_node_found() {
+        let g = make_test_graph();
+        assert!(try_resolve_node(&g, "orders").is_some());
+    }
+
+    #[test]
+    fn test_try_resolve_node_not_found() {
+        let g = make_test_graph();
+        assert!(try_resolve_node(&g, "nonexistent").is_none());
     }
 
     #[test]

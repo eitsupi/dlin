@@ -85,9 +85,7 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     writeln!(w).unwrap();
 }
 
-/// Render impact reports as JSON to stdout.
-/// A single report is serialized as a plain object for backward compatibility;
-/// multiple reports are serialized as an array.
+/// Render impact reports as a JSON array to stdout.
 pub fn render_impact_json(reports: &[ImpactReport]) {
     render_impact_json_to_writer(reports, &mut std::io::stdout().lock());
 }

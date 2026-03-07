@@ -74,6 +74,7 @@ pub enum Command {
     /// Compute downstream impact analysis for a model
     Impact {
         /// Model names to analyze impact for
+        #[arg(required = true)]
         model: Vec<String>,
 
         /// Path to dbt project directory
@@ -345,6 +346,12 @@ mod tests {
             }
             _ => panic!("Expected Impact subcommand"),
         }
+    }
+
+    #[test]
+    fn test_impact_no_model_fails() {
+        let result = Cli::try_parse_from(["dlin", "impact"]);
+        assert!(result.is_err());
     }
 
     #[test]
