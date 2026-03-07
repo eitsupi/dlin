@@ -146,6 +146,12 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
             HashSet::from([source_idx]),
         )];
         while let Some((current, path, path_set)) = stack.pop() {
+            // Early termination: stop when all exposures have reached the cap
+            if path_counts.len() == exposure_set.len()
+                && path_counts.values().all(|&c| c >= MAX_PATHS_PER_EXPOSURE)
+            {
+                break;
+            }
             if exposure_set.contains(&current) {
                 let count = path_counts.entry(current).or_insert(0);
                 if *count < MAX_PATHS_PER_EXPOSURE {
@@ -155,7 +161,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                         path: path.iter().map(|&idx| graph[idx].label.clone()).collect(),
                     });
                 }
-                // Don't traverse beyond exposures
+                // Exposures are leaf nodes in dbt; don't traverse beyond them
                 continue;
             }
             for edge in graph.edges_directed(current, Direction::Outgoing) {

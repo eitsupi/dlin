@@ -231,4 +231,30 @@ mod tests {
         assert!(output.contains("Impacted Nodes:"));
         assert!(output.contains("payments"));
     }
+
+    #[test]
+    fn test_render_impact_text_truncated_paths() {
+        let report = ImpactReport {
+            source_model: "stg_orders".to_string(),
+            overall_severity: ImpactSeverity::Critical,
+            affected_models: 1,
+            affected_tests: 0,
+            affected_exposures: 1,
+            exposure_paths: vec![ExposurePath {
+                exposure: "dashboard".to_string(),
+                path: vec![
+                    "stg_orders".to_string(),
+                    "orders".to_string(),
+                    "dashboard".to_string(),
+                ],
+            }],
+            exposure_paths_truncated: true,
+            impacted_nodes: vec![],
+        };
+        let mut buf = Vec::new();
+        render_impact_text_to_writer(&report, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("(truncated)"));
+        assert!(output.contains("dlin graph stg_orders --include-exposures"));
+    }
 }
