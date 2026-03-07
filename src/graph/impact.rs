@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -91,8 +91,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     // BFS downstream to find all impacted nodes with distances
     let mut visited: HashSet<NodeIndex> = HashSet::new();
     let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
-    let mut parents: std::collections::HashMap<NodeIndex, NodeIndex> =
-        std::collections::HashMap::new();
+    let mut parents: HashMap<NodeIndex, NodeIndex> = HashMap::new();
     visited.insert(source_idx);
     queue.push_back((source_idx, 0));
 
@@ -383,6 +382,120 @@ mod tests {
         assert_eq!(report.affected_tests, 0);
         assert_eq!(report.affected_exposures, 0);
         assert!(report.impacted_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_exposure_paths_multiple_exposures() {
+        // Diamond graph: src -> A -> exp1, src -> B -> exp2
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "model.src",
+            "src",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let a = g.add_node(make_node(
+            "model.a",
+            "a",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let b = g.add_node(make_node(
+            "model.b",
+            "b",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let exp1 = g.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+            None,
+            None,
+        ));
+        let exp2 = g.add_node(make_node(
+            "exposure.report",
+            "report",
+            NodeType::Exposure,
+            None,
+            None,
+        ));
+
+        g.add_edge(src, a, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(src, b, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(a, exp1, EdgeData { edge_type: EdgeType::Exposure });
+        g.add_edge(b, exp2, EdgeData { edge_type: EdgeType::Exposure });
+
+        let report = compute_impact(&g, src);
+        assert_eq!(report.affected_exposures, 2);
+        assert_eq!(report.exposure_paths.len(), 2);
+
+        // Sorted by exposure name
+        assert_eq!(report.exposure_paths[0].exposure, "dashboard");
+        assert_eq!(report.exposure_paths[0].path, vec!["src", "a", "dashboard"]);
+        assert_eq!(report.exposure_paths[1].exposure, "report");
+        assert_eq!(report.exposure_paths[1].path, vec!["src", "b", "report"]);
+    }
+
+    #[test]
+    fn test_exposure_paths_diamond_convergent() {
+        // Diamond: src -> A -> C -> exp, src -> B -> C -> exp
+        // BFS finds shortest path (through whichever of A/B is visited first)
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "model.src",
+            "src",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let a = g.add_node(make_node(
+            "model.a",
+            "a",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let b = g.add_node(make_node(
+            "model.b",
+            "b",
+            NodeType::Model,
+            Some("view"),
+            None,
+        ));
+        let c = g.add_node(make_node(
+            "model.c",
+            "c",
+            NodeType::Model,
+            Some("table"),
+            None,
+        ));
+        let exp = g.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+            None,
+            None,
+        ));
+
+        g.add_edge(src, a, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(src, b, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(a, c, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(b, c, EdgeData { edge_type: EdgeType::Ref });
+        g.add_edge(c, exp, EdgeData { edge_type: EdgeType::Exposure });
+
+        let report = compute_impact(&g, src);
+        assert_eq!(report.affected_exposures, 1);
+        assert_eq!(report.exposure_paths.len(), 1);
+        assert_eq!(report.exposure_paths[0].exposure, "dashboard");
+        // Path should be length 4: src -> (a or b) -> c -> dashboard
+        assert_eq!(report.exposure_paths[0].path.len(), 4);
+        assert_eq!(report.exposure_paths[0].path[0], "src");
+        assert_eq!(report.exposure_paths[0].path[2], "c");
+        assert_eq!(report.exposure_paths[0].path[3], "dashboard");
     }
 
     #[test]
