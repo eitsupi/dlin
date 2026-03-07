@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -91,7 +91,6 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     // BFS downstream to find all impacted nodes with distances
     let mut visited: HashSet<NodeIndex> = HashSet::new();
     let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
-    let mut parents: HashMap<NodeIndex, NodeIndex> = HashMap::new();
     visited.insert(source_idx);
     queue.push_back((source_idx, 0));
 
@@ -105,7 +104,6 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         for edge in graph.edges_directed(current, Direction::Outgoing) {
             let neighbor = edge.target();
             if visited.insert(neighbor) {
-                parents.insert(neighbor, current);
                 let node = &graph[neighbor];
                 let severity = classify_severity(node);
                 let next_distance = distance + 1;
@@ -133,22 +131,33 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         }
     }
 
-    // Reconstruct paths to exposures
+    // Find all simple paths to each exposure via DFS
     let mut exposure_paths: Vec<ExposurePath> = Vec::new();
     for &exp_idx in &exposure_indices {
-        let mut path = vec![exp_idx];
-        let mut current = exp_idx;
-        while let Some(&parent) = parents.get(&current) {
-            path.push(parent);
-            current = parent;
+        let mut all_paths: Vec<Vec<NodeIndex>> = Vec::new();
+        let mut stack: Vec<(NodeIndex, Vec<NodeIndex>)> = vec![(source_idx, vec![source_idx])];
+        while let Some((current, path)) = stack.pop() {
+            if current == exp_idx {
+                all_paths.push(path);
+                continue;
+            }
+            for edge in graph.edges_directed(current, Direction::Outgoing) {
+                let neighbor = edge.target();
+                if !path.contains(&neighbor) {
+                    let mut new_path = path.clone();
+                    new_path.push(neighbor);
+                    stack.push((neighbor, new_path));
+                }
+            }
         }
-        path.reverse();
-        exposure_paths.push(ExposurePath {
-            exposure: graph[exp_idx].label.clone(),
-            path: path.iter().map(|&idx| graph[idx].label.clone()).collect(),
-        });
+        for p in all_paths {
+            exposure_paths.push(ExposurePath {
+                exposure: graph[exp_idx].label.clone(),
+                path: p.iter().map(|&idx| graph[idx].label.clone()).collect(),
+            });
+        }
     }
-    exposure_paths.sort_by(|a, b| a.exposure.cmp(&b.exposure));
+    exposure_paths.sort_by(|a, b| a.exposure.cmp(&b.exposure).then(a.path.cmp(&b.path)));
 
     // Sort by severity (descending), then distance
     impacted_nodes.sort_by(|a, b| {
@@ -489,13 +498,16 @@ mod tests {
 
         let report = compute_impact(&g, src);
         assert_eq!(report.affected_exposures, 1);
-        assert_eq!(report.exposure_paths.len(), 1);
-        assert_eq!(report.exposure_paths[0].exposure, "dashboard");
-        // Path should be length 4: src -> (a or b) -> c -> dashboard
-        assert_eq!(report.exposure_paths[0].path.len(), 4);
-        assert_eq!(report.exposure_paths[0].path[0], "src");
-        assert_eq!(report.exposure_paths[0].path[2], "c");
-        assert_eq!(report.exposure_paths[0].path[3], "dashboard");
+        // Both paths should be found: src->a->c->dashboard and src->b->c->dashboard
+        assert_eq!(report.exposure_paths.len(), 2);
+        assert_eq!(
+            report.exposure_paths[0].path,
+            vec!["src", "a", "c", "dashboard"]
+        );
+        assert_eq!(
+            report.exposure_paths[1].path,
+            vec!["src", "b", "c", "dashboard"]
+        );
     }
 
     #[test]
