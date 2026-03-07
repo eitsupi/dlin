@@ -54,11 +54,11 @@ pub fn build_macro_prefix(macro_sources: &[String]) -> String {
             continue;
         }
         // Verify the accumulated prefix still parses after adding this macro
-        let mut candidate = prefix.clone();
-        candidate.push_str(source);
-        candidate.push('\n');
-        if env.template_from_str(&candidate).is_ok() {
-            prefix = candidate;
+        let len = prefix.len();
+        prefix.push_str(source);
+        prefix.push('\n');
+        if env.template_from_str(&prefix).is_err() {
+            prefix.truncate(len);
         }
     }
     prefix
@@ -473,6 +473,20 @@ mod tests {
         assert!(prefix.contains("{% macro good() %}"));
         assert!(prefix.contains("{% macro also_good() %}"));
         assert!(!prefix.contains("materialization"));
+    }
+
+    #[test]
+    fn test_build_macro_prefix_skips_combined_conflict() {
+        let sources = vec![
+            // Valid on its own: opens a raw block
+            "{% raw %}some raw content".to_string(),
+            // Valid on its own
+            "{% macro ok() %}SELECT 1{% endmacro %}".to_string(),
+        ];
+        let prefix = build_macro_prefix(&sources);
+        // The first macro leaves an unclosed raw block, so the combination
+        // fails. The second valid macro should still be included.
+        assert!(prefix.contains("{% macro ok() %}"));
     }
 
     #[test]
