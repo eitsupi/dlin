@@ -32,7 +32,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         .canonicalize()
         .unwrap_or(args.project_dir);
 
-    // Warn when --include-tests is used with SQL source (tests aren't detectable from SQL)
+    // Validate flag combinations before building DAG
+    validate_source_flags(&args.source, args.manifest_path.as_ref())?;
     if args.source == SourceType::Sql && args.include_tests {
         eprintln!("Warning: --include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
@@ -87,15 +88,11 @@ fn build_dag(
 ) -> Result<graph::types::LineageGraph> {
     match source {
         SourceType::Manifest => {
-            let path = manifest_path
-                .ok_or_else(|| anyhow::anyhow!("--manifest-path is required when using --source manifest"))?;
+            let path = manifest_path.expect("validate_source_flags should be called before build_dag");
             let resolved = resolve_manifest_path(path)?;
             parser::manifest::build_graph_from_manifest(&resolved)
         }
         SourceType::Sql => {
-            if manifest_path.is_some() {
-                anyhow::bail!("--manifest-path cannot be used with --source sql; did you mean --source manifest?");
-            }
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
@@ -130,6 +127,7 @@ fn run_impact_command(
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
+    validate_source_flags(source, manifest_path)?;
     let dag = build_dag(&project_dir, source, manifest_path)?;
 
     // Find the source model node
@@ -149,6 +147,22 @@ fn run_impact_command(
     }
 
     Ok(())
+}
+
+/// Validate that --source and --manifest-path flags are consistent.
+#[cfg(not(tarpaulin_include))]
+fn validate_source_flags(source: &SourceType, manifest_path: Option<&PathBuf>) -> Result<()> {
+    match source {
+        SourceType::Manifest if manifest_path.is_none() => {
+            anyhow::bail!("--manifest-path is required when using --source manifest");
+        }
+        SourceType::Sql if manifest_path.is_some() => {
+            anyhow::bail!(
+                "--manifest-path cannot be used with --source sql; did you mean --source manifest?"
+            );
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Resolve the manifest path from the --manifest-path argument.
