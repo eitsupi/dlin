@@ -79,6 +79,9 @@ pub enum Command {
     /// Visualize dbt model lineage graph
     Graph(GraphArgs),
 
+    /// List all nodes in the dbt project
+    List(ListArgs),
+
     /// Compute downstream impact analysis for a model
     Impact {
         /// Model names to analyze impact for
@@ -112,6 +115,53 @@ pub enum Command {
 
 }
 
+#[derive(Debug, clap::Args)]
+pub struct ListArgs {
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Output format: plain (default) or json
+    #[arg(short = 'o', long, default_value = "plain")]
+    pub output: ListOutputFormat,
+
+    /// Include test nodes
+    #[arg(long)]
+    pub include_tests: bool,
+
+    /// Include seed nodes
+    #[arg(long)]
+    pub include_seeds: bool,
+
+    /// Include snapshot nodes
+    #[arg(long)]
+    pub include_snapshots: bool,
+
+    /// Include exposure nodes
+    #[arg(long)]
+    pub include_exposures: bool,
+
+    /// Selector expression: tag:X, path:Y, or model name (comma-separated)
+    #[arg(short = 's', long)]
+    pub select: Option<String>,
+
+    /// Filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure)
+    #[arg(long = "node-type", value_delimiter = ',')]
+    pub node_types: Option<Vec<String>>,
+
+    /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+    #[arg(long, default_value = "sql")]
+    pub source: SourceType,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// Suppress warning messages
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum OutputFormat {
     Ascii,
@@ -134,6 +184,12 @@ pub enum SourceType {
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum ImpactOutputFormat {
     Text,
+    Json,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum ListOutputFormat {
+    Plain,
     Json,
 }
 
@@ -448,5 +504,67 @@ mod tests {
     fn test_graph_node_type_default_none() {
         let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
         assert!(args.node_types.is_none());
+    }
+
+    // -- List subcommand tests ------------------------------------------------
+
+    fn unwrap_list(cli: Cli) -> ListArgs {
+        match cli.command {
+            Command::List(args) => args,
+            _ => panic!("Expected List subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_list_default_args() {
+        let args = unwrap_list(Cli::try_parse_from(["dlin", "list"]).unwrap());
+        assert!(matches!(args.output, ListOutputFormat::Plain));
+        assert!(!args.include_tests);
+        assert!(!args.include_seeds);
+        assert!(!args.include_snapshots);
+        assert!(!args.include_exposures);
+        assert!(args.select.is_none());
+        assert!(args.node_types.is_none());
+        assert_eq!(args.source, SourceType::Sql);
+        assert!(args.manifest_path.is_none());
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_list_json_output() {
+        let args = unwrap_list(
+            Cli::try_parse_from(["dlin", "list", "-o", "json"]).unwrap(),
+        );
+        assert!(matches!(args.output, ListOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_list_with_filters() {
+        let args = unwrap_list(
+            Cli::try_parse_from([
+                "dlin",
+                "list",
+                "--include-tests",
+                "--node-type",
+                "model,source",
+                "-s",
+                "tag:nightly",
+                "-q",
+            ])
+            .unwrap(),
+        );
+        assert!(args.include_tests);
+        assert_eq!(
+            args.node_types,
+            Some(vec!["model".to_string(), "source".to_string()])
+        );
+        assert_eq!(args.select.as_deref(), Some("tag:nightly"));
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_list_invalid_output_format() {
+        let result = Cli::try_parse_from(["dlin", "list", "-o", "dot"]);
+        assert!(result.is_err());
     }
 }

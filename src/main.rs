@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, Cli, Command, GraphArgs, SourceType};
+use dlin::cli::{self, Cli, Command, GraphArgs, ListArgs, SourceType};
 use dlin::graph;
 use dlin::input;
 use dlin::parser;
@@ -18,6 +18,10 @@ fn main() -> Result<()> {
         Command::Graph(args) => {
             dlin::set_quiet(args.quiet);
             run_graph_command(args)
+        }
+        Command::List(args) => {
+            dlin::set_quiet(args.quiet);
+            run_list_command(args)
         }
         Command::Impact {
             model,
@@ -115,6 +119,58 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     };
 
     render_output(&args.output, &filtered, sql_contents.as_ref());
+
+    Ok(())
+}
+
+/// Run the `list` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_list_command(args: ListArgs) -> Result<()> {
+    let project_dir = args
+        .project_dir
+        .canonicalize()
+        .unwrap_or(args.project_dir);
+
+    validate_source_flags(&args.source, args.manifest_path.as_ref())?;
+    if args.source == SourceType::Sql && args.include_tests {
+        dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
+    }
+
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
+
+    // Parse selectors
+    let selectors = args
+        .select
+        .as_deref()
+        .map(graph::filter::parse_selectors)
+        .unwrap_or_default();
+
+    // Filter graph
+    let filtered = graph::filter::filter_graph(
+        &dag,
+        &[],
+        None,
+        None,
+        &graph::filter::NodeTypeFilter {
+            include_tests: args.include_tests,
+            include_seeds: args.include_seeds,
+            include_snapshots: args.include_snapshots,
+            include_exposures: args.include_exposures,
+        },
+        &selectors,
+    )?;
+
+    // Apply output node-type filter
+    let filtered = if let Some(ref type_names) = args.node_types {
+        for t in &graph::filter::validate_node_type_names(type_names) {
+            dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+        }
+        graph::filter::filter_output_node_types(&filtered, type_names)
+    } else {
+        filtered
+    };
+
+    render::list::render_list(&filtered, &args.output);
 
     Ok(())
 }

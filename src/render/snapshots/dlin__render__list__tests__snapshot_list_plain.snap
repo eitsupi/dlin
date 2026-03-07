@@ -1,0 +1,9 @@
+---
+source: src/render/list.rs
+expression: output
+---
+exposure	dashboard
+model	orders
+model	stg_orders
+source	raw.orders
+test	orders_positive

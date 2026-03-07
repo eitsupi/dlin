@@ -1,0 +1,31 @@
+---
+source: src/render/list.rs
+expression: output
+---
+[
+  {
+    "unique_id": "exposure.dashboard",
+    "label": "dashboard",
+    "node_type": "exposure"
+  },
+  {
+    "unique_id": "model.orders",
+    "label": "orders",
+    "node_type": "model"
+  },
+  {
+    "unique_id": "model.stg_orders",
+    "label": "stg_orders",
+    "node_type": "model"
+  },
+  {
+    "unique_id": "source.raw.orders",
+    "label": "raw.orders",
+    "node_type": "source"
+  },
+  {
+    "unique_id": "test.orders_positive",
+    "label": "orders_positive",
+    "node_type": "test"
+  }
+]

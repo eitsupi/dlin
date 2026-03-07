@@ -4,6 +4,7 @@ pub mod html;
 pub mod impact;
 pub mod json;
 pub mod layout;
+pub mod list;
 pub mod mermaid;
 pub mod plain;
 pub mod svg;
