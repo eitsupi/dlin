@@ -143,17 +143,7 @@ fn run_impact_command(
     let dag = build_dag(&project_dir, source, manifest_path)?;
 
     // Find the source model node
-    let source_idx = dag
-        .node_indices()
-        .find(|&idx| {
-            let node = &dag[idx];
-            node.label == model || node.unique_id == model
-        })
-        .or_else(|| {
-            let suffix = format!(".{}", model);
-            dag.node_indices()
-                .find(|&idx| dag[idx].unique_id.ends_with(&suffix))
-        })
+    let source_idx = graph::filter::find_node_by_name(&dag, model)
         .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in the graph", model))?;
 
     let report = graph::impact::compute_impact(&dag, source_idx);

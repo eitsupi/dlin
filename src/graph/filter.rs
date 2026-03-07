@@ -8,6 +8,41 @@ use crate::error::DbtLineageError;
 
 use super::types::*;
 
+/// Find a node by name, using a two-pass approach:
+/// 1. Exact match on label or unique_id
+/// 2. Suffix match on unique_id (`.{name}`)
+///
+/// If multiple nodes match the suffix in the fallback pass, the first in
+/// graph iteration order is returned and a warning is emitted to stderr.
+pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
+    // Pass 1: exact label or unique_id
+    let exact = graph.node_indices().find(|&idx| {
+        let node = &graph[idx];
+        node.label == name || node.unique_id == name
+    });
+    if exact.is_some() {
+        return exact;
+    }
+
+    // Pass 2: suffix match
+    let suffix = format!(".{}", name);
+    let matches: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| graph[idx].unique_id.ends_with(&suffix))
+        .collect();
+
+    if matches.len() > 1 {
+        let ids: Vec<&str> = matches.iter().map(|&idx| graph[idx].unique_id.as_str()).collect();
+        eprintln!(
+            "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+            name,
+            ids.join(", ")
+        );
+    }
+
+    matches.into_iter().next()
+}
+
 /// Configuration for which node types to include
 pub struct NodeTypeFilter {
     pub include_tests: bool,
@@ -88,19 +123,7 @@ pub fn filter_graph(
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
 
     if let Some(model_name) = focus_model {
-        // Find the focus node: prefer exact label/unique_id match, fall back to suffix
-        let focus_idx = graph
-            .node_indices()
-            .find(|&idx| {
-                let node = &graph[idx];
-                node.label == model_name || node.unique_id == model_name
-            })
-            .or_else(|| {
-                let suffix = format!(".{}", model_name);
-                graph
-                    .node_indices()
-                    .find(|&idx| graph[idx].unique_id.ends_with(&suffix))
-            })
+        let focus_idx = find_node_by_name(graph, model_name)
             .ok_or_else(|| DbtLineageError::ModelNotFound(model_name.to_string()))?;
 
         keep_nodes.insert(focus_idx);
