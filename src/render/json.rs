@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
@@ -38,15 +38,19 @@ struct JsonEdge {
     edge_type: String,
 }
 
-/// Render the lineage graph as JSON to stdout
+/// Render the lineage graph as JSON to stdout.
+/// Pretty-prints when stdout is a terminal, compact otherwise.
 pub fn render_json(graph: &LineageGraph, sql_contents: Option<&HashMap<String, String>>) {
-    render_json_to_writer(graph, sql_contents, &mut std::io::stdout().lock());
+    let mut stdout = std::io::stdout().lock();
+    let pretty = stdout.is_terminal();
+    render_json_to_writer(graph, sql_contents, &mut stdout, pretty);
 }
 
 fn render_json_to_writer<W: Write>(
     graph: &LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
     w: &mut W,
+    pretty: bool,
 ) {
     let nodes: Vec<JsonNode> = graph
         .node_indices()
@@ -82,7 +86,11 @@ fn render_json_to_writer<W: Write>(
         .collect();
 
     let json_graph = JsonGraph { nodes, edges };
-    serde_json::to_writer_pretty(&mut *w, &json_graph).unwrap();
+    if pretty {
+        serde_json::to_writer_pretty(&mut *w, &json_graph).unwrap();
+    } else {
+        serde_json::to_writer(&mut *w, &json_graph).unwrap();
+    }
     writeln!(w).unwrap();
 }
 
@@ -116,7 +124,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_json_to_writer(graph, None, &mut buf);
+        render_json_to_writer(graph, None, &mut buf, true);
         String::from_utf8(buf).unwrap()
     }
 
@@ -280,7 +288,7 @@ mod tests {
             ("model.orders".to_string(), "SELECT * FROM {{ ref('stg_orders') }}".to_string()),
         ]);
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, Some(&sql_contents), &mut buf);
+        render_json_to_writer(&graph, Some(&sql_contents), &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }

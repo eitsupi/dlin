@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use colored::Colorize;
 
@@ -93,12 +93,19 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
 }
 
 /// Render impact reports as a JSON array to stdout.
+/// Pretty-prints when stdout is a terminal, compact otherwise.
 pub fn render_impact_json(reports: &[ImpactReport]) {
-    render_impact_json_to_writer(reports, &mut std::io::stdout().lock());
+    let mut stdout = std::io::stdout().lock();
+    let pretty = stdout.is_terminal();
+    render_impact_json_to_writer(reports, &mut stdout, pretty);
 }
 
-pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W) {
-    serde_json::to_writer_pretty(&mut *w, reports).unwrap();
+pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W, pretty: bool) {
+    if pretty {
+        serde_json::to_writer_pretty(&mut *w, reports).unwrap();
+    } else {
+        serde_json::to_writer(&mut *w, reports).unwrap();
+    }
     writeln!(w).unwrap();
 }
 
@@ -175,7 +182,7 @@ mod tests {
     fn test_render_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf);
+        render_impact_json_to_writer(&[report], &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -273,7 +280,7 @@ mod tests {
     fn test_snapshot_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf);
+        render_impact_json_to_writer(&[report], &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -292,7 +299,7 @@ mod tests {
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report1, report2], &mut buf);
+        render_impact_json_to_writer(&[report1, report2], &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -305,7 +312,7 @@ mod tests {
     #[test]
     fn test_render_impact_json_empty() {
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[], &mut buf);
+        render_impact_json_to_writer(&[], &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -374,7 +381,7 @@ mod tests {
     fn test_snapshot_impact_json_with_sql() {
         let report = make_report_with_sql();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf);
+        render_impact_json_to_writer(&[report], &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
