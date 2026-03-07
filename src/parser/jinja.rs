@@ -49,10 +49,16 @@ pub fn build_macro_prefix(macro_sources: &[String]) -> String {
     let env = Environment::new();
     let mut prefix = String::new();
     for source in macro_sources {
-        // Only include macros that minijinja can parse
-        if env.template_from_str(source).is_ok() {
-            prefix.push_str(source);
-            prefix.push('\n');
+        // Only include macros that minijinja can parse individually
+        if env.template_from_str(source).is_err() {
+            continue;
+        }
+        // Verify the accumulated prefix still parses after adding this macro
+        let mut candidate = prefix.clone();
+        candidate.push_str(source);
+        candidate.push('\n');
+        if env.template_from_str(&candidate).is_ok() {
+            prefix = candidate;
         }
     }
     prefix
@@ -464,8 +470,8 @@ mod tests {
         ];
         let prefix = build_macro_prefix(&sources);
         // Bad macro is skipped, good macros are included
-        assert!(prefix.contains("good"));
-        assert!(prefix.contains("also_good"));
+        assert!(prefix.contains("{% macro good() %}"));
+        assert!(prefix.contains("{% macro also_good() %}"));
         assert!(!prefix.contains("materialization"));
     }
 
