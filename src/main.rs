@@ -165,8 +165,11 @@ fn collect_sql_contents(
         let node = &graph[idx];
         if let Some(ref rel_path) = node.file_path {
             let full_path = project_dir.join(rel_path);
-            if let Ok(content) = std::fs::read_to_string(&full_path) {
-                map.insert(node.unique_id.clone(), content);
+            match std::fs::read_to_string(&full_path) {
+                Ok(content) => { map.insert(node.unique_id.clone(), content); }
+                Err(e) => {
+                    eprintln!("Warning: could not read {}: {}", full_path.display(), e);
+                }
             }
         }
     }
