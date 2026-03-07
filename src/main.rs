@@ -166,7 +166,9 @@ fn collect_sql_contents(
         if let Some(ref rel_path) = node.file_path {
             let full_path = project_dir.join(rel_path);
             match std::fs::read_to_string(&full_path) {
-                Ok(content) => { map.insert(node.unique_id.clone(), content); }
+                Ok(content) => {
+                    map.insert(node.unique_id.clone(), content);
+                }
                 Err(e) => {
                     eprintln!("Warning: could not read {}: {}", full_path.display(), e);
                 }
@@ -202,8 +204,13 @@ fn run_impact_command(
         .collect();
 
     if show_sql {
+        let sql_map = collect_sql_contents(&dag, &project_dir);
         for report in &mut reports {
-            graph::impact::populate_sql_content(report, &project_dir);
+            for node in &mut report.impacted_nodes {
+                if let Some(sql) = sql_map.get(&node.unique_id) {
+                    node.sql_content = Some(sql.clone());
+                }
+            }
         }
     }
 

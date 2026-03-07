@@ -215,22 +215,6 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     }
 }
 
-/// Populate `sql_content` for impacted nodes that have a `file_path`.
-/// The `project_dir` is prepended to relative file paths.
-pub fn populate_sql_content(report: &mut ImpactReport, project_dir: &std::path::Path) {
-    for node in &mut report.impacted_nodes {
-        if let Some(ref rel_path) = node.file_path {
-            let full_path = project_dir.join(rel_path);
-            match std::fs::read_to_string(&full_path) {
-                Ok(content) => node.sql_content = Some(content),
-                Err(e) => {
-                    eprintln!("Warning: could not read {}: {}", full_path.display(), e);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
