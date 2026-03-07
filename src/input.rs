@@ -195,7 +195,7 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
         }
     };
 
-    let schema = match yaml_schema::parse_schema_file(&content) {
+    let schema = match yaml_schema::parse_schema_file(&content, Some(abs_path)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(

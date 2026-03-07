@@ -174,7 +174,7 @@ fn process_yaml_files(
 
     for yaml_path in &files.yaml_files {
         let content = read_file(yaml_path)?;
-        let schema = match parse_schema_file(&content) {
+        let schema = match parse_schema_file(&content, Some(yaml_path.as_path())) {
             Ok(s) => s,
             Err(_) => continue,
         };

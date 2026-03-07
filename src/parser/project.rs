@@ -65,7 +65,35 @@ impl DbtProject {
                 source: e,
             })?;
 
-        let project: DbtProject = serde_saphyr::from_str(&content)
+        let value: serde_json::Value = match serde_saphyr::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("duplicate mapping key") {
+                    // Extract just the key name from "duplicate mapping key: <name>, set ..."
+                    let key_info = err_msg
+                        .split("duplicate mapping key: ")
+                        .nth(1)
+                        .and_then(|s| s.split(',').next())
+                        .unwrap_or("unknown");
+                    eprintln!(
+                        "Warning: duplicate YAML key '{}' in {} (using last value)",
+                        key_info,
+                        project_file.display(),
+                    );
+                    let options = serde_saphyr::options::Options {
+                        duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins,
+                        ..Default::default()
+                    };
+                    serde_saphyr::from_str_with_options(&content, options)
+                        .context(format!("Failed to parse {}", project_file.display()))?
+                } else {
+                    return Err(e)
+                        .context(format!("Failed to parse {}", project_file.display()));
+                }
+            }
+        };
+        let project: DbtProject = serde_json::from_value(value)
             .context(format!("Failed to parse {}", project_file.display()))?;
 
         Ok(project)
@@ -169,6 +197,21 @@ analysis-paths: ["analyses", "custom_analyses"]
         let project = DbtProject::load(tmp.path()).unwrap();
         assert_eq!(project.name, "test_project");
         assert_eq!(project.model_paths, vec!["models"]);
+    }
+
+    #[test]
+    fn test_load_duplicate_keys() {
+        // Test that duplicate YAML keys are accepted (last wins, matching PyYAML behavior).
+        // dbt users may have duplicate keys in dbt_project.yml (e.g. vars sections).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: my_project\nversion: '1.0.0'\nname: my_project_dup\n",
+        )
+        .unwrap();
+
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(project.name, "my_project_dup"); // last wins
     }
 
     #[test]
