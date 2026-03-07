@@ -358,6 +358,54 @@ mod cli {
     }
 
     #[test]
+    fn test_source_manifest_without_path() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--source",
+                "manifest",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--manifest-path is required"),
+            "Should require --manifest-path: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_source_sql_with_manifest_path_errors() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--source",
+                "sql",
+                "--manifest-path",
+                "/some/path",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--manifest-path cannot be used with --source sql"),
+            "Should reject --manifest-path with --source sql: {}",
+            stderr
+        );
+    }
+
+    #[test]
     fn test_include_tests() {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())

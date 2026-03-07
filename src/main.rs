@@ -32,12 +32,12 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         .canonicalize()
         .unwrap_or(args.project_dir);
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
-
     // Warn when --include-tests is used with SQL source (tests aren't detectable from SQL)
     if args.source == SourceType::Sql && args.include_tests {
         eprintln!("Warning: --include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
+
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
 
     // Parse selectors
     let selectors = args
@@ -93,6 +93,9 @@ fn build_dag(
             parser::manifest::build_graph_from_manifest(&resolved)
         }
         SourceType::Sql => {
+            if manifest_path.is_some() {
+                anyhow::bail!("--manifest-path cannot be used with --source sql; did you mean --source manifest?");
+            }
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
