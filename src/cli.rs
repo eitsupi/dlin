@@ -92,6 +92,10 @@ pub enum Command {
         /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
         #[arg(long)]
         manifest_path: Option<PathBuf>,
+
+        /// [Experimental] Include SQL file contents for each impacted node in the output
+        #[arg(long)]
+        show_sql: bool,
     },
 
 }
@@ -343,6 +347,28 @@ mod tests {
             } => {
                 assert_eq!(model, &["orders", "stg_orders"]);
                 assert_eq!(project_dir, &PathBuf::from("/path/to/project"));
+            }
+            _ => panic!("Expected Impact subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_impact_show_sql() {
+        let cli = Cli::try_parse_from(["dlin", "impact", "orders", "--show-sql"]).unwrap();
+        match cli.command {
+            Command::Impact { show_sql, .. } => {
+                assert!(show_sql);
+            }
+            _ => panic!("Expected Impact subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_impact_show_sql_default_false() {
+        let cli = Cli::try_parse_from(["dlin", "impact", "orders"]).unwrap();
+        match cli.command {
+            Command::Impact { show_sql, .. } => {
+                assert!(!show_sql);
             }
             _ => panic!("Expected Impact subcommand"),
         }

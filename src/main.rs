@@ -21,7 +21,8 @@ fn main() -> Result<()> {
             output,
             source,
             manifest_path,
-        } => run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref()),
+            show_sql,
+        } => run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql),
 
     }
 }
@@ -150,6 +151,7 @@ fn run_impact_command(
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
     manifest_path: Option<&PathBuf>,
+    show_sql: bool,
 ) -> Result<()> {
     let project_dir = project_dir
         .canonicalize()
@@ -158,13 +160,19 @@ fn run_impact_command(
     validate_source_flags(source, manifest_path)?;
     let dag = build_dag(&project_dir, source, manifest_path)?;
 
-    let reports: Vec<_> = models
+    let mut reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(&dag, model)?;
             Some(graph::impact::compute_impact(&dag, source_idx))
         })
         .collect();
+
+    if show_sql {
+        for report in &mut reports {
+            graph::impact::populate_sql_content(report, &project_dir);
+        }
+    }
 
     match output {
         cli::ImpactOutputFormat::Text => {

@@ -45,6 +45,8 @@ pub struct ImpactedNode {
     pub file_path: Option<String>,
     pub severity: ImpactSeverity,
     pub distance: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_content: Option<String>,
 }
 
 /// Full impact analysis report
@@ -132,6 +134,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                         .map(|p| p.to_string_lossy().into_owned()),
                     severity,
                     distance: next_distance,
+                    sql_content: None,
                 });
 
                 queue.push_back((neighbor, next_distance));
@@ -209,6 +212,19 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
         exposure_paths,
         exposure_paths_truncated,
         impacted_nodes,
+    }
+}
+
+/// Populate `sql_content` for impacted nodes that have a `file_path`.
+/// The `project_dir` is prepended to relative file paths.
+pub fn populate_sql_content(report: &mut ImpactReport, project_dir: &std::path::Path) {
+    for node in &mut report.impacted_nodes {
+        if let Some(ref rel_path) = node.file_path {
+            let full_path = project_dir.join(rel_path);
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                node.sql_content = Some(content);
+            }
+        }
     }
 }
 

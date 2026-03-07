@@ -79,6 +79,13 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
                 )
                 .unwrap();
             }
+            if let Some(ref sql) = node.sql_content {
+                writeln!(w, "    {}", "--- SQL ---".dimmed()).unwrap();
+                for line in sql.lines() {
+                    writeln!(w, "    {}", line).unwrap();
+                }
+                writeln!(w, "    {}", "----------".dimmed()).unwrap();
+            }
         }
     }
 
@@ -124,6 +131,7 @@ mod tests {
                     file_path: None,
                     severity: ImpactSeverity::Critical,
                     distance: 2,
+                    sql_content: None,
                 },
                 ImpactedNode {
                     unique_id: "model.orders".to_string(),
@@ -132,6 +140,7 @@ mod tests {
                     file_path: Some("models/marts/orders.sql".to_string()),
                     severity: ImpactSeverity::High,
                     distance: 1,
+                    sql_content: None,
                 },
                 ImpactedNode {
                     unique_id: "test.orders_positive".to_string(),
@@ -140,6 +149,7 @@ mod tests {
                     file_path: None,
                     severity: ImpactSeverity::Low,
                     distance: 2,
+                    sql_content: None,
                 },
             ],
         }
@@ -236,6 +246,7 @@ mod tests {
                 file_path: None,
                 severity: ImpactSeverity::Medium,
                 distance: 1,
+                sql_content: None,
             }],
         };
         let mut buf = Vec::new();
@@ -299,6 +310,73 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 0);
+    }
+
+    fn make_report_with_sql() -> ImpactReport {
+        ImpactReport {
+            source_model: "stg_orders".to_string(),
+            overall_severity: ImpactSeverity::Critical,
+            affected_models: 1,
+            affected_tests: 1,
+            affected_exposures: 1,
+            exposure_paths: vec![ExposurePath {
+                exposure: "dashboard".to_string(),
+                path: vec![
+                    "stg_orders".to_string(),
+                    "orders".to_string(),
+                    "dashboard".to_string(),
+                ],
+            }],
+            exposure_paths_truncated: false,
+            impacted_nodes: vec![
+                ImpactedNode {
+                    unique_id: "exposure.dashboard".to_string(),
+                    label: "dashboard".to_string(),
+                    node_type: "exposure".to_string(),
+                    file_path: None,
+                    severity: ImpactSeverity::Critical,
+                    distance: 2,
+                    sql_content: None,
+                },
+                ImpactedNode {
+                    unique_id: "model.orders".to_string(),
+                    label: "orders".to_string(),
+                    node_type: "model".to_string(),
+                    file_path: Some("models/marts/orders.sql".to_string()),
+                    severity: ImpactSeverity::High,
+                    distance: 1,
+                    sql_content: Some("SELECT\n    o.id,\n    o.status,\n    s.total\nFROM {{ ref('stg_orders') }} o\nJOIN {{ ref('stg_payments') }} s ON o.id = s.order_id".to_string()),
+                },
+                ImpactedNode {
+                    unique_id: "test.orders_positive".to_string(),
+                    label: "orders_positive".to_string(),
+                    node_type: "test".to_string(),
+                    file_path: None,
+                    severity: ImpactSeverity::Low,
+                    distance: 2,
+                    sql_content: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_snapshot_impact_text_with_sql() {
+        colored::control::set_override(false);
+        let report = make_report_with_sql();
+        let mut buf = Vec::new();
+        render_impact_text_to_writer(&report, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_impact_json_with_sql() {
+        let report = make_report_with_sql();
+        let mut buf = Vec::new();
+        render_impact_json_to_writer(&[report], &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
     }
 
     #[test]

@@ -105,6 +105,7 @@ Compute downstream impact for one or more models with severity scoring:
 ```sh
 dlin impact orders -p path/to/project            # text report
 dlin impact orders stg_orders -o json             # JSON for CI (multiple models)
+dlin impact orders --show-sql -o json             # include SQL content in output
 dlin impact orders --source manifest --manifest-path target/manifest.json
 ```
 
@@ -168,6 +169,8 @@ Options:
       --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
       --manifest-path <PATH>      Path to manifest.json file or directory containing
                                   target/manifest.json (required when --source manifest)
+      --show-sql                  [Experimental] Include SQL file contents for each
+                                  impacted node
   -h, --help                      Print help
 ```
 
