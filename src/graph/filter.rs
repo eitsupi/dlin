@@ -9,7 +9,7 @@ use crate::error::DbtLineageError;
 use super::types::*;
 
 /// Result of a node name lookup.
-pub enum NodeLookupResult {
+enum NodeLookupResult {
     /// No matching node found.
     NotFound,
     /// Exactly one node matched (exact or suffix).
@@ -22,7 +22,7 @@ pub enum NodeLookupResult {
 /// Find a node by name, using a two-pass approach:
 /// 1. Exact match on label or unique_id
 /// 2. Suffix match on unique_id (`.{name}`)
-pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
+fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
     // Pass 1: exact label or unique_id
     let exact = graph.node_indices().find(|&idx| {
         let node = &graph[idx];
@@ -45,6 +45,25 @@ pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
         _ => {
             let ids = matches.iter().map(|&idx| graph[idx].unique_id.clone()).collect();
             NodeLookupResult::Ambiguous(matches[0], ids)
+        }
+    }
+}
+
+/// Resolve a node by name, returning the node index or an error.
+/// Warns to stderr when the suffix fallback matches multiple nodes.
+pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeIndex> {
+    match find_node_by_name(graph, name) {
+        NodeLookupResult::Found(idx) => Ok(idx),
+        NodeLookupResult::Ambiguous(idx, ids) => {
+            eprintln!(
+                "Warning: '{}' matched multiple nodes: {}. Using the first match.",
+                name,
+                ids.join(", ")
+            );
+            Ok(idx)
+        }
+        NodeLookupResult::NotFound => {
+            Err(DbtLineageError::ModelNotFound(name.to_string()).into())
         }
     }
 }
@@ -129,20 +148,7 @@ pub fn filter_graph(
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
 
     if let Some(model_name) = focus_model {
-        let focus_idx = match find_node_by_name(graph, model_name) {
-            NodeLookupResult::Found(idx) => idx,
-            NodeLookupResult::Ambiguous(idx, ids) => {
-                eprintln!(
-                    "Warning: '{}' matched multiple nodes: {}. Using the first match.",
-                    model_name,
-                    ids.join(", ")
-                );
-                idx
-            }
-            NodeLookupResult::NotFound => {
-                return Err(DbtLineageError::ModelNotFound(model_name.to_string()).into());
-            }
-        };
+        let focus_idx = resolve_node_by_name(graph, model_name)?;
 
         keep_nodes.insert(focus_idx);
 
