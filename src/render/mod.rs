@@ -1,5 +1,4 @@
 pub mod ascii;
-pub mod diff;
 pub mod dot;
 pub mod html;
 pub mod impact;

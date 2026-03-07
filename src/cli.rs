@@ -81,24 +81,6 @@ pub enum Command {
         manifest: Option<PathBuf>,
     },
 
-    /// Compare lineage between git refs
-    Diff {
-        /// Base git ref to compare from (e.g., main, HEAD~1)
-        #[arg(long)]
-        base: String,
-
-        /// Head git ref to compare to (defaults to working tree)
-        #[arg(long)]
-        head: Option<String>,
-
-        /// Path to dbt project directory
-        #[arg(short = 'p', long = "project-dir", default_value = ".")]
-        project_dir: PathBuf,
-
-        /// Output format: text (default) or json
-        #[arg(short = 'o', long, default_value = "text")]
-        output: DiffOutputFormat,
-    },
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -117,11 +99,6 @@ pub enum ImpactOutputFormat {
     Json,
 }
 
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum DiffOutputFormat {
-    Text,
-    Json,
-}
 
 #[cfg(test)]
 mod tests {
@@ -280,33 +257,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_diff_subcommand() {
-        let cli = Cli::try_parse_from(["dlin", "diff", "--base", "main"]).unwrap();
-        match cli.command {
-            Command::Diff {
-                ref base, ref head, ..
-            } => {
-                assert_eq!(base, "main");
-                assert!(head.is_none());
-            }
-            _ => panic!("Expected Diff subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_diff_subcommand_with_head() {
-        let cli =
-            Cli::try_parse_from(["dlin", "diff", "--base", "main", "--head", "feature"])
-                .unwrap();
-        match cli.command {
-            Command::Diff {
-                ref base, ref head, ..
-            } => {
-                assert_eq!(base, "main");
-                assert_eq!(head.as_deref(), Some("feature"));
-            }
-            _ => panic!("Expected Diff subcommand"),
-        }
-    }
 }
