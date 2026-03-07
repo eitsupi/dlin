@@ -1,0 +1,25 @@
+---
+source: src/render/json.rs
+expression: output
+---
+{
+  "nodes": [
+    {
+      "unique_id": "model.orders",
+      "label": "orders",
+      "node_type": "model",
+      "file_path": "models/orders.sql",
+      "description": "Orders mart model",
+      "materialization": "table",
+      "tags": [
+        "daily",
+        "core"
+      ],
+      "columns": [
+        "order_id",
+        "customer_id"
+      ]
+    }
+  ],
+  "edges": []
+}

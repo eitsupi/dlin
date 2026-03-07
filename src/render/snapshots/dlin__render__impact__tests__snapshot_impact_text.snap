@@ -1,0 +1,21 @@
+---
+source: src/render/impact.rs
+expression: output
+---
+
+Impact Analysis: stg_orders
+==================================================
+Overall Severity: CRITICAL
+
+Summary:
+  Affected models:    1
+  Affected tests:     1
+  Affected exposures: 1
+
+Exposure Paths:
+  stg_orders -> orders -> dashboard
+
+Impacted Nodes:
+  [critical] dashboard (exposure, 2 hops)
+  [high    ] orders (model, 1 hops)
+  [low     ] orders_positive (test, 2 hops)

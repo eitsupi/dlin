@@ -1,0 +1,19 @@
+---
+source: src/render/dot.rs
+expression: output
+---
+digraph dbt_lineage {
+  rankdir=LR;
+  node [shape=box, style=filled, fontname="Helvetica"];
+
+  "source.raw.orders" [label="src:raw.orders", fillcolor="#27AE60", fontcolor="white"];
+  "model.stg_orders" [label="stg_orders", fillcolor="#4A90D9", fontcolor="white"];
+  "model.orders" [label="orders", fillcolor="#4A90D9", fontcolor="white"];
+  "test.orders_positive" [label="test:orders_positive", fillcolor="#1ABC9C", fontcolor="white"];
+  "exposure.dashboard" [label="exp:dashboard", fillcolor="#E74C3C", fontcolor="white"];
+
+  "source.raw.orders" -> "model.stg_orders" [label="source", style=dashed];
+  "model.stg_orders" -> "model.orders" [label="ref"];
+  "model.orders" -> "test.orders_positive" [label="test", style=dotted];
+  "model.orders" -> "exposure.dashboard" [label="exposure", style=bold];
+}

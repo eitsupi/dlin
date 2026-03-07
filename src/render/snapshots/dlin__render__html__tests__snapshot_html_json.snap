@@ -1,0 +1,5 @@
+---
+source: src/render/html.rs
+expression: json
+---
+{"nodes":[{"unique_id":"source.raw.orders","label":"raw.orders","node_type":"source"},{"unique_id":"model.stg_orders","label":"stg_orders","node_type":"model"},{"unique_id":"model.orders","label":"orders","node_type":"model"},{"unique_id":"test.orders_positive","label":"orders_positive","node_type":"test"},{"unique_id":"exposure.dashboard","label":"dashboard","node_type":"exposure"}],"edges":[{"source":"source.raw.orders","target":"model.stg_orders","edge_type":"source"},{"source":"model.stg_orders","target":"model.orders","edge_type":"ref"},{"source":"model.orders","target":"test.orders_positive","edge_type":"test"},{"source":"model.orders","target":"exposure.dashboard","edge_type":"exposure"}]}

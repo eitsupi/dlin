@@ -1,0 +1,45 @@
+---
+source: src/render/impact.rs
+expression: output
+---
+{
+  "source_model": "stg_orders",
+  "overall_severity": "critical",
+  "affected_models": 1,
+  "affected_tests": 1,
+  "affected_exposures": 1,
+  "exposure_paths": [
+    {
+      "exposure": "dashboard",
+      "path": [
+        "stg_orders",
+        "orders",
+        "dashboard"
+      ]
+    }
+  ],
+  "exposure_paths_truncated": false,
+  "impacted_nodes": [
+    {
+      "unique_id": "exposure.dashboard",
+      "label": "dashboard",
+      "node_type": "exposure",
+      "severity": "critical",
+      "distance": 2
+    },
+    {
+      "unique_id": "model.orders",
+      "label": "orders",
+      "node_type": "model",
+      "severity": "high",
+      "distance": 1
+    },
+    {
+      "unique_id": "test.orders_positive",
+      "label": "orders_positive",
+      "node_type": "test",
+      "severity": "low",
+      "distance": 2
+    }
+  ]
+}

@@ -229,6 +229,41 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_lineage() {
+        let mut graph = LineageGraph::new();
+        let src = graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
+        let stg = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
+        let mart = graph.add_node(make_node("model.orders", "orders", NodeType::Model));
+        let t = graph.add_node(make_node("test.orders_positive", "orders_positive", NodeType::Test));
+        let exp = graph.add_node(make_node("exposure.dashboard", "dashboard", NodeType::Exposure));
+
+        graph.add_edge(src, stg, EdgeData { edge_type: EdgeType::Source });
+        graph.add_edge(stg, mart, EdgeData { edge_type: EdgeType::Ref });
+        graph.add_edge(mart, t, EdgeData { edge_type: EdgeType::Test });
+        graph.add_edge(mart, exp, EdgeData { edge_type: EdgeType::Exposure });
+
+        let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_node_metadata() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.orders".into(),
+            label: "orders".into(),
+            node_type: NodeType::Model,
+            file_path: Some(PathBuf::from("models/orders.sql")),
+            description: Some("Orders mart model".into()),
+            materialization: Some("table".into()),
+            tags: vec!["daily".into(), "core".into()],
+            columns: vec!["order_id".into(), "customer_id".into()],
+        });
+        let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
     fn test_node_with_materialization_tags_columns() {
         let mut graph = LineageGraph::new();
         graph.add_node(NodeData {

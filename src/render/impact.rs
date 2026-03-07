@@ -233,6 +233,25 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_impact_text() {
+        colored::control::set_override(false);
+        let report = make_report();
+        let mut buf = Vec::new();
+        render_impact_text_to_writer(&report, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_impact_json() {
+        let report = make_report();
+        let mut buf = Vec::new();
+        render_impact_json_to_writer(&report, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
     fn test_render_impact_text_truncated_paths() {
         let report = ImpactReport {
             source_model: "stg_orders".to_string(),
