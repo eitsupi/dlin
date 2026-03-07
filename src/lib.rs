@@ -13,7 +13,7 @@ static QUIET: AtomicBool = AtomicBool::new(false);
 
 /// Enable quiet mode (suppress warnings on stderr).
 pub fn set_quiet(quiet: bool) {
-    QUIET.store(quiet, Ordering::Relaxed);
+    QUIET.store(quiet, Ordering::Release);
 }
 
 /// Print a warning message to stderr unless quiet mode is enabled.
@@ -28,5 +28,26 @@ macro_rules! warn {
 
 /// Returns true if quiet mode is enabled.
 pub fn is_quiet() -> bool {
-    QUIET.load(Ordering::Relaxed)
+    QUIET.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quiet_flag() {
+        // Default is not quiet
+        set_quiet(false);
+        assert!(!is_quiet());
+
+        set_quiet(true);
+        assert!(is_quiet());
+
+        // warn! should not panic in quiet mode
+        warn!("this should be suppressed");
+
+        set_quiet(false);
+        assert!(!is_quiet());
+    }
 }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -65,36 +65,8 @@ impl DbtProject {
                 source: e,
             })?;
 
-        let value: serde_json::Value = match serde_saphyr::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                let err_msg = e.to_string();
-                if err_msg.contains("duplicate mapping key") {
-                    // Extract just the key name from "duplicate mapping key: <name>, set ..."
-                    let key_info = err_msg
-                        .split("duplicate mapping key: ")
-                        .nth(1)
-                        .and_then(|s| s.split(',').next())
-                        .unwrap_or("unknown");
-                    crate::warn!(
-                        "duplicate YAML key '{}' in {} (using last value)",
-                        key_info,
-                        project_file.display(),
-                    );
-                    let options = serde_saphyr::options::Options {
-                        duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins,
-                        ..Default::default()
-                    };
-                    serde_saphyr::from_str_with_options(&content, options)
-                        .context(format!("Failed to parse {}", project_file.display()))?
-                } else {
-                    return Err(e)
-                        .context(format!("Failed to parse {}", project_file.display()));
-                }
-            }
-        };
-        let project: DbtProject = serde_json::from_value(value)
-            .context(format!("Failed to parse {}", project_file.display()))?;
+        let project: DbtProject = super::yaml_from_str(&content, &project_file.display().to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", project_file.display(), e))?;
 
         Ok(project)
     }

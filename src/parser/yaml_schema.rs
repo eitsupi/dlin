@@ -96,37 +96,10 @@ pub fn parse_schema_file(
     content: &str,
     path: Option<&std::path::Path>,
 ) -> Result<SchemaFile, Box<dyn std::error::Error>> {
-    let value: serde_json::Value = match serde_saphyr::from_str(content) {
-        Ok(v) => v,
-        Err(e) => {
-            let err_msg = e.to_string();
-            if err_msg.contains("duplicate mapping key") {
-                let location = path
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<input>".to_string());
-                let key_info = err_msg
-                    .split("duplicate mapping key: ")
-                    .nth(1)
-                    .and_then(|s| s.split(',').next())
-                    .unwrap_or("unknown");
-                crate::warn!(
-                    "duplicate YAML key '{}' in {} (using last value)",
-                    key_info, location,
-                );
-                let options = serde_saphyr::options::Options {
-                    duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins,
-                    ..Default::default()
-                };
-                serde_saphyr::from_str_with_options(content, options)?
-            } else {
-                return Err(e.into());
-            }
-        }
-    };
-    if value.is_null() {
-        return Ok(SchemaFile::default());
-    }
-    Ok(serde_json::from_value(value)?)
+    let location = path
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<input>".to_string());
+    Ok(super::yaml_from_str(content, &location)?)
 }
 
 #[cfg(test)]
@@ -264,16 +237,23 @@ exposures:
     }
 
     #[test]
-    fn test_parse_duplicate_keys() {
+    fn test_parse_duplicate_mapping_keys() {
+        // Duplicate mapping keys (same key at same level) should be tolerated
+        // with last-value-wins, matching PyYAML behavior.
         let yaml = r#"
 sources:
   - name: raw
     tables:
       - name: orders
-      - name: orders
+sources:
+  - name: other
+    tables:
+      - name: users
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
-        assert_eq!(schema.sources[0].tables.len(), 2);
+        // Last value wins: "other" source replaces "raw"
+        assert_eq!(schema.sources.len(), 1);
+        assert_eq!(schema.sources[0].name, "other");
     }
 
     #[test]
