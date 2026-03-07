@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, Cli, Command, GraphArgs};
+use dlin::cli::{self, Cli, Command, GraphArgs, SourceType};
 use dlin::graph;
 use dlin::parser;
 use dlin::render;
@@ -18,8 +18,9 @@ fn main() -> Result<()> {
             model,
             project_dir,
             output,
-            manifest,
-        } => run_impact_command(&model, &project_dir, &output, manifest.as_ref()),
+            source,
+            manifest_path,
+        } => run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref()),
     }
 }
 
@@ -31,7 +32,12 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         .canonicalize()
         .unwrap_or(args.project_dir);
 
-    let dag = build_dag(&project_dir, args.manifest.as_ref())?;
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
+
+    // Warn when --include-tests is used with SQL source (tests aren't detectable from SQL)
+    if args.source == SourceType::Sql && args.include_tests {
+        eprintln!("Warning: --include-tests has no effect with --source sql; tests are only available with --source manifest");
+    }
 
     // Parse selectors
     let selectors = args
@@ -74,15 +80,24 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
 /// Build the lineage DAG from either a manifest file or by parsing SQL files
 #[cfg(not(tarpaulin_include))]
-fn build_dag(project_dir: &Path, manifest: Option<&PathBuf>) -> Result<graph::types::LineageGraph> {
-    if let Some(manifest_arg) = manifest {
-        let manifest_path = resolve_manifest_path(manifest_arg)?;
-        parser::manifest::build_graph_from_manifest(&manifest_path)
-    } else {
-        let project = parser::project::DbtProject::load(project_dir)?;
-        let paths = project.resolve_paths(project_dir);
-        let files = parser::discovery::discover_files(&paths)?;
-        graph::builder::build_graph(project_dir, &files)
+fn build_dag(
+    project_dir: &Path,
+    source: &SourceType,
+    manifest_path: Option<&PathBuf>,
+) -> Result<graph::types::LineageGraph> {
+    match source {
+        SourceType::Manifest => {
+            let path = manifest_path
+                .ok_or_else(|| anyhow::anyhow!("--manifest-path is required when using --source manifest"))?;
+            let resolved = resolve_manifest_path(path)?;
+            parser::manifest::build_graph_from_manifest(&resolved)
+        }
+        SourceType::Sql => {
+            let project = parser::project::DbtProject::load(project_dir)?;
+            let paths = project.resolve_paths(project_dir);
+            let files = parser::discovery::discover_files(&paths)?;
+            graph::builder::build_graph(project_dir, &files)
+        }
     }
 }
 
@@ -105,21 +120,14 @@ fn run_impact_command(
     model: &str,
     project_dir: &Path,
     output: &cli::ImpactOutputFormat,
-    manifest: Option<&PathBuf>,
+    source: &SourceType,
+    manifest_path: Option<&PathBuf>,
 ) -> Result<()> {
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    let dag = if let Some(manifest_arg) = manifest {
-        let manifest_path = resolve_manifest_path(manifest_arg)?;
-        parser::manifest::build_graph_from_manifest(&manifest_path)?
-    } else {
-        let project = parser::project::DbtProject::load(&project_dir)?;
-        let paths = project.resolve_paths(&project_dir);
-        let files = parser::discovery::discover_files(&paths)?;
-        graph::builder::build_graph(&project_dir, &files)?
-    };
+    let dag = build_dag(&project_dir, source, manifest_path)?;
 
     // Find the source model node
     let source_idx = dag
@@ -140,7 +148,7 @@ fn run_impact_command(
     Ok(())
 }
 
-/// Resolve the manifest path from the --manifest argument.
+/// Resolve the manifest path from the --manifest-path argument.
 /// If the path is a directory, look for `target/manifest.json` inside it.
 /// If it's a file, use it directly.
 #[cfg(not(tarpaulin_include))]

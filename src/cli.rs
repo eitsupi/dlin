@@ -53,9 +53,13 @@ pub struct GraphArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Use manifest.json instead of parsing SQL (path to manifest file or directory containing target/manifest.json)
+    /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+    #[arg(long, default_value = "sql")]
+    pub source: SourceType,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
     #[arg(long)]
-    pub manifest: Option<PathBuf>,
+    pub manifest_path: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -76,9 +80,13 @@ pub enum Command {
         #[arg(short = 'o', long, default_value = "text")]
         output: ImpactOutputFormat,
 
-        /// Use manifest.json instead of parsing SQL
+        /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+        #[arg(long, default_value = "sql")]
+        source: SourceType,
+
+        /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
         #[arg(long)]
-        manifest: Option<PathBuf>,
+        manifest_path: Option<PathBuf>,
     },
 
 }
@@ -91,6 +99,14 @@ pub enum OutputFormat {
     Mermaid,
     Svg,
     Html,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum SourceType {
+    /// Parse SQL files directly (default)
+    Sql,
+    /// Use dbt manifest.json
+    Manifest,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -139,7 +155,8 @@ mod tests {
         assert!(!args.include_snapshots);
         assert!(!args.include_exposures);
         assert!(args.select.is_none());
-        assert!(args.manifest.is_none());
+        assert_eq!(args.source, SourceType::Sql);
+        assert!(args.manifest_path.is_none());
         assert!(matches!(args.output, OutputFormat::Ascii));
     }
 
@@ -200,20 +217,50 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_manifest_flag() {
-        let args = unwrap_graph(
-            Cli::try_parse_from(["dlin", "graph", "--manifest", "/path/to/manifest.json"])
-                .unwrap(),
-        );
-        assert_eq!(args.manifest, Some(PathBuf::from("/path/to/manifest.json")));
+    fn test_graph_source_default_is_sql() {
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
+        assert_eq!(args.source, SourceType::Sql);
+        assert!(args.manifest_path.is_none());
     }
 
     #[test]
-    fn test_graph_manifest_flag_directory() {
+    fn test_graph_source_manifest_with_path() {
         let args = unwrap_graph(
-            Cli::try_parse_from(["dlin", "graph", "--manifest", "/path/to/project"]).unwrap(),
+            Cli::try_parse_from([
+                "dlin",
+                "graph",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                "/path/to/manifest.json",
+            ])
+            .unwrap(),
         );
-        assert_eq!(args.manifest, Some(PathBuf::from("/path/to/project")));
+        assert_eq!(args.source, SourceType::Manifest);
+        assert_eq!(
+            args.manifest_path,
+            Some(PathBuf::from("/path/to/manifest.json"))
+        );
+    }
+
+    #[test]
+    fn test_graph_source_manifest_directory() {
+        let args = unwrap_graph(
+            Cli::try_parse_from([
+                "dlin",
+                "graph",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                "/path/to/project",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(args.source, SourceType::Manifest);
+        assert_eq!(
+            args.manifest_path,
+            Some(PathBuf::from("/path/to/project"))
+        );
     }
 
     #[test]
