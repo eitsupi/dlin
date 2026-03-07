@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "dlin", about = "A fast CLI tool for dbt model lineage analysis")]
+#[command(name = "dlin", about = "A fast CLI tool for dbt model lineage analysis", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -110,6 +110,14 @@ mod tests {
         // With no subcommand, clap should error (which triggers help display)
         let result = Cli::try_parse_from(["dlin"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_version_flag() {
+        let result = Cli::try_parse_from(["dlin", "--version"]);
+        // clap exits with an error (DisplayVersion) when --version is passed
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
     fn unwrap_graph(cli: Cli) -> GraphArgs {
