@@ -96,6 +96,12 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
 /// Common file extensions that are NOT dbt source/model names.
 /// Used to distinguish root-level files (e.g. "README.md") from dbt source
 /// references (e.g. "raw.orders") when there is no path separator.
+///
+/// Note: this allowlist is inherently incomplete.  In the rare case that a
+/// dbt source table name collides with a listed extension (e.g. a table
+/// literally named "py" referenced as "raw.py"), the input will be silently
+/// ignored.  Use an explicit model name without the source prefix, or pass
+/// the schema YAML path instead.
 fn is_common_file_extension(ext: &str) -> bool {
     matches!(
         ext,

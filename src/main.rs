@@ -47,7 +47,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     let mut raw_inputs = args.model;
     raw_inputs.extend(stdin_lines);
     let models = if input::has_path_like_input(&raw_inputs) {
-        let cwd = std::env::current_dir()?;
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
