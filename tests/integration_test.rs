@@ -326,6 +326,38 @@ mod cli {
     }
 
     #[test]
+    fn test_macro_ref_tracking() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--output",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success());
+
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let edges = json["edges"].as_array().unwrap();
+
+        // order_summary uses macro order_totals() which contains ref('stg_payments')
+        let has_macro_edge = edges.iter().any(|e| {
+            e["source"].as_str() == Some("model.stg_payments")
+                && e["target"].as_str() == Some("model.order_summary")
+        });
+        assert!(
+            has_macro_edge,
+            "Should have edge from 'stg_payments' to 'order_summary' via macro, edges: {:?}",
+            edges
+        );
+    }
+
+    #[test]
     fn test_include_tests() {
         let fixture = super::fixture_dir();
         let output = Command::new(binary_path())

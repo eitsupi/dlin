@@ -12,6 +12,7 @@ pub struct DiscoveredFiles {
     pub snapshot_sql_files: Vec<PathBuf>,
     pub test_sql_files: Vec<PathBuf>,
     pub yaml_files: Vec<PathBuf>,
+    pub macro_sql_files: Vec<PathBuf>,
 }
 
 /// Walk all configured paths and collect SQL/YAML files
@@ -46,6 +47,12 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
         let (sql, yaml) = walk_directory(dir);
         discovered.test_sql_files.extend(sql);
         discovered.yaml_files.extend(yaml);
+    }
+
+    // Macros
+    for dir in &paths.macro_paths {
+        let (sql, _yaml) = walk_directory(dir);
+        discovered.macro_sql_files.extend(sql);
     }
 
     Ok(discovered)
@@ -183,6 +190,7 @@ mod tests {
             seed_paths: vec![seeds_dir],
             snapshot_paths: vec![snap_dir],
             test_paths: vec![test_dir],
+            macro_paths: vec![],
         };
 
         let discovered = discover_files(&paths).unwrap();
@@ -200,6 +208,7 @@ mod tests {
             seed_paths: vec![PathBuf::from("/nonexistent/seeds")],
             snapshot_paths: vec![PathBuf::from("/nonexistent/snapshots")],
             test_paths: vec![PathBuf::from("/nonexistent/tests")],
+            macro_paths: vec![],
         };
 
         let discovered = discover_files(&paths).unwrap();

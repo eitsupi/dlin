@@ -17,16 +17,36 @@ pub struct JinjaExtraction {
 /// Renders twice (with `is_incremental()` returning both false and true) and
 /// merges results to capture refs/sources from all conditional branches.
 /// Returns `None` if the template fails to render (caller should fall back to regex).
-pub fn extract_via_jinja(sql: &str) -> Option<JinjaExtraction> {
+///
+/// `macro_sources` contains the raw contents of macro SQL files. These are
+/// prepended to the template so that custom macros containing ref()/source()
+/// calls are expanded and tracked.
+pub fn extract_via_jinja(sql: &str, macro_sources: &[String]) -> Option<JinjaExtraction> {
+    let template = build_template(sql, macro_sources);
+
     // Render with is_incremental=false first (full-load path)
-    let mut result = render_with_incremental(sql, false)?;
+    let mut result = render_with_incremental(&template, false)?;
 
     // Render again with is_incremental=true to capture incremental-only refs
-    if let Some(incr) = render_with_incremental(sql, true) {
+    if let Some(incr) = render_with_incremental(&template, true) {
         merge_extraction(&mut result, incr);
     }
 
     Some(result)
+}
+
+/// Build a combined template by prepending macro definitions to the SQL content.
+fn build_template(sql: &str, macro_sources: &[String]) -> String {
+    if macro_sources.is_empty() {
+        return sql.to_string();
+    }
+    let mut combined = String::new();
+    for source in macro_sources {
+        combined.push_str(source);
+        combined.push('\n');
+    }
+    combined.push_str(sql);
+    combined
 }
 
 /// Merge `other` into `base`, adding only deduplicated refs and sources
@@ -219,7 +239,7 @@ mod tests {
     #[test]
     fn test_simple_ref() {
         let sql = "SELECT * FROM {{ ref('stg_orders') }}";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
         assert!(ext.refs[0].package.is_none());
@@ -228,7 +248,7 @@ mod tests {
     #[test]
     fn test_two_arg_ref() {
         let sql = "SELECT * FROM {{ ref('other_pkg', 'stg_orders') }}";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("other_pkg"));
         assert_eq!(ext.refs[0].name, "stg_orders");
@@ -237,7 +257,7 @@ mod tests {
     #[test]
     fn test_source() {
         let sql = "SELECT * FROM {{ source('raw', 'orders') }}";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.sources.len(), 1);
         assert_eq!(ext.sources[0].source_name, "raw");
         assert_eq!(ext.sources[0].table_name, "orders");
@@ -246,7 +266,7 @@ mod tests {
     #[test]
     fn test_config() {
         let sql = "{{ config(materialized='incremental', tags=['nightly', 'finance']) }}\nSELECT 1";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly", "finance"]);
     }
@@ -261,7 +281,7 @@ mod tests {
             FROM {{ ref('stg_orders') }} o
             JOIN {{ source('raw', 'customers') }} c ON o.customer_id = c.id
         "#;
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.sources.len(), 1);
         assert_eq!(ext.config.materialized.as_deref(), Some("table"));
@@ -273,7 +293,7 @@ mod tests {
             {% set orders = ref('stg_orders') %}
             SELECT * FROM {{ orders }}
         "#;
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
     }
@@ -288,7 +308,7 @@ mod tests {
             SELECT * FROM {{ ref('stg_full_orders') }}
             {% endif %}
         "#;
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         // Both branches are rendered: unique refs from each branch
         assert_eq!(ext.refs.len(), 2);
         assert!(ext.refs.iter().any(|r| r.name == "stg_full_orders"));
@@ -301,7 +321,7 @@ mod tests {
             {# This is a comment with {{ ref('should_be_ignored') }} #}
             SELECT * FROM {{ ref('actual_model') }}
         "#;
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "actual_model");
     }
@@ -309,7 +329,7 @@ mod tests {
     #[test]
     fn test_whitespace_control() {
         let sql = "SELECT * FROM {{- ref('stg_orders') -}}";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
     }
@@ -317,7 +337,7 @@ mod tests {
     #[test]
     fn test_var_with_default() {
         let sql = "SELECT * FROM {{ ref('model_' ~ var('suffix', 'default')) }}";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_default");
     }
@@ -330,7 +350,7 @@ mod tests {
                 {% if not loop.last %}UNION ALL{% endif %}
             {% endfor %}
         "#;
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.sources.len(), 2);
         assert_eq!(ext.sources[0].source_name, "raw");
         assert_eq!(ext.sources[0].table_name, "orders");
@@ -341,7 +361,7 @@ mod tests {
     #[test]
     fn test_config_with_extra_kwargs() {
         let sql = "{{ config(materialized='incremental', schema='analytics', unique_key='id', tags=['nightly']) }}\nSELECT 1";
-        let ext = extract_via_jinja(sql).unwrap();
+        let ext = extract_via_jinja(sql, &[]).unwrap();
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly"]);
     }
@@ -350,7 +370,85 @@ mod tests {
     fn test_returns_none_on_unsupported_template() {
         // Unknown block tags should cause failure
         let sql = "{% materialization table, default %} SELECT 1 {% endmaterialization %}";
-        let result = extract_via_jinja(sql);
+        let result = extract_via_jinja(sql, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_macro_ref_extraction() {
+        let macro_src = r#"
+            {% macro my_cte() %}
+                SELECT * FROM {{ ref('base_model') }}
+            {% endmacro %}
+        "#;
+        let sql = "SELECT * FROM ({{ my_cte() }})";
+        let ext = extract_via_jinja(sql, &[macro_src.to_string()]).unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "base_model");
+    }
+
+    #[test]
+    fn test_macro_source_extraction() {
+        let macro_src = r#"
+            {% macro raw_data(table) %}
+                SELECT * FROM {{ source('raw', table) }}
+            {% endmacro %}
+        "#;
+        let sql = "SELECT * FROM ({{ raw_data('orders') }})";
+        let ext = extract_via_jinja(sql, &[macro_src.to_string()]).unwrap();
+        assert_eq!(ext.sources.len(), 1);
+        assert_eq!(ext.sources[0].source_name, "raw");
+        assert_eq!(ext.sources[0].table_name, "orders");
+    }
+
+    #[test]
+    fn test_macro_with_multiple_refs() {
+        let macro_src = r#"
+            {% macro join_tables(period) %}
+                SELECT * FROM {{ ref('deals') }}
+                LEFT JOIN {{ ref('providers') }} ON 1=1
+                LEFT JOIN {{ source('raw', 'prices') }} ON 1=1
+            {% endmacro %}
+        "#;
+        let sql = "{{ join_tables('day') }}";
+        let ext = extract_via_jinja(sql, &[macro_src.to_string()]).unwrap();
+        assert_eq!(ext.refs.len(), 2);
+        assert!(ext.refs.iter().any(|r| r.name == "deals"));
+        assert!(ext.refs.iter().any(|r| r.name == "providers"));
+        assert_eq!(ext.sources.len(), 1);
+        assert_eq!(ext.sources[0].table_name, "prices");
+    }
+
+    #[test]
+    fn test_multiple_macro_files() {
+        let macro1 = r#"
+            {% macro get_orders() %}
+                SELECT * FROM {{ ref('stg_orders') }}
+            {% endmacro %}
+        "#;
+        let macro2 = r#"
+            {% macro get_customers() %}
+                SELECT * FROM {{ ref('stg_customers') }}
+            {% endmacro %}
+        "#;
+        let sql = "{{ get_orders() }} UNION ALL {{ get_customers() }}";
+        let ext = extract_via_jinja(
+            sql,
+            &[macro1.to_string(), macro2.to_string()],
+        )
+        .unwrap();
+        assert_eq!(ext.refs.len(), 2);
+        assert!(ext.refs.iter().any(|r| r.name == "stg_orders"));
+        assert!(ext.refs.iter().any(|r| r.name == "stg_customers"));
+    }
+
+    #[test]
+    fn test_invalid_macro_falls_back_gracefully() {
+        // A macro with unsupported syntax should cause extract_via_jinja to return None
+        let bad_macro = "{% materialization custom %} stuff {% endmaterialization %}";
+        let sql = "SELECT * FROM {{ ref('orders') }}";
+        let result = extract_via_jinja(sql, &[bad_macro.to_string()]);
+        // Returns None because the combined template fails to parse
         assert!(result.is_none());
     }
 }

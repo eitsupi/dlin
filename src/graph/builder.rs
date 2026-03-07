@@ -8,6 +8,16 @@ use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::sql::{extract_config, extract_refs_and_sources};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
+/// Read all macro SQL files and return their contents as strings.
+/// Files that fail to read are silently skipped.
+fn load_macro_sources(files: &DiscoveredFiles) -> Vec<String> {
+    files
+        .macro_sql_files
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect()
+}
+
 use super::types::*;
 
 /// Shared state threaded through the build_graph helper functions
@@ -187,6 +197,7 @@ fn process_model_files(
     files: &DiscoveredFiles,
     project_dir: &Path,
     model_meta: &HashMap<String, YamlModelMeta>,
+    macro_sources: &[String],
 ) {
     let mut model_name_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
 
@@ -209,7 +220,7 @@ fn process_model_files(
         // Extract config from SQL
         let sql_config = sql_content
             .as_ref()
-            .map(|content| extract_config(content))
+            .map(|content| extract_config(content, macro_sources))
             .unwrap_or_default();
 
         let yaml_meta = model_meta.get(&model_name);
@@ -282,6 +293,7 @@ fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
+    macro_sources: &[String],
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -319,7 +331,7 @@ fn process_sql_edges(
             None => continue,
         };
 
-        let (refs, sources) = extract_refs_and_sources(&content);
+        let (refs, sources) = extract_refs_and_sources(&content, macro_sources);
 
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
@@ -386,9 +398,10 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 /// Build the lineage graph from discovered files
 pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
+    let macro_sources = load_macro_sources(files);
 
     let (model_meta, exposures) = process_yaml_files(&mut gb, files)?;
-    process_model_files(&mut gb, files, project_dir, &model_meta);
+    process_model_files(&mut gb, files, project_dir, &model_meta, &macro_sources);
     process_simple_nodes(
         &mut gb,
         &files.seed_files,
@@ -403,7 +416,7 @@ pub fn build_graph(project_dir: &Path, files: &DiscoveredFiles) -> Result<Lineag
         "snapshot",
         NodeType::Snapshot,
     );
-    process_sql_edges(&mut gb, files, project_dir)?;
+    process_sql_edges(&mut gb, files, project_dir, &macro_sources)?;
     process_exposures(&mut gb, &exposures);
 
     Ok(gb.graph)
@@ -926,5 +939,65 @@ models:
             .filter(|&i| graph[i].label == "orders")
             .collect();
         assert_eq!(order_nodes.len(), 2);
+    }
+
+    #[test]
+    fn test_build_graph_with_macros() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+
+        let models_dir = project_dir.join("models");
+        let macros_dir = project_dir.join("macros");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::create_dir_all(&macros_dir).unwrap();
+
+        // Macro that references a model
+        fs::write(
+            macros_dir.join("my_macro.sql"),
+            r#"
+{% macro my_cte() %}
+    SELECT * FROM {{ ref('base_table') }}
+{% endmacro %}
+"#,
+        )
+        .unwrap();
+
+        // Model that uses the macro
+        fs::write(
+            models_dir.join("base_table.sql"),
+            "SELECT 1 as id",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("derived.sql"),
+            "SELECT * FROM ({{ my_cte() }})",
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/base_table.sql"),
+                project_dir.join("models/derived.sql"),
+            ],
+            macro_sql_files: vec![project_dir.join("macros/my_macro.sql")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files).unwrap();
+        // base_table + derived = 2 nodes
+        assert_eq!(graph.node_count(), 2);
+        // ref edge: base_table → derived
+        assert_eq!(graph.edge_count(), 1);
+
+        // Verify the edge direction
+        let base = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "base_table")
+            .unwrap();
+        let derived = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "derived")
+            .unwrap();
+        assert!(graph.contains_edge(base, derived));
     }
 }

@@ -20,6 +20,9 @@ pub struct DbtProject {
 
     #[serde(rename = "test-paths", default = "default_test_paths")]
     pub test_paths: Vec<String>,
+
+    #[serde(rename = "macro-paths", default = "default_macro_paths")]
+    pub macro_paths: Vec<String>,
 }
 
 fn default_model_paths() -> Vec<String> {
@@ -36,6 +39,10 @@ fn default_snapshot_paths() -> Vec<String> {
 
 fn default_test_paths() -> Vec<String> {
     vec!["tests".to_string()]
+}
+
+fn default_macro_paths() -> Vec<String> {
+    vec!["macros".to_string()]
 }
 
 impl DbtProject {
@@ -79,6 +86,11 @@ impl DbtProject {
                 .iter()
                 .map(|p| project_dir.join(p))
                 .collect(),
+            macro_paths: self
+                .macro_paths
+                .iter()
+                .map(|p| project_dir.join(p))
+                .collect(),
         }
     }
 }
@@ -89,6 +101,7 @@ pub struct ResolvedPaths {
     pub seed_paths: Vec<PathBuf>,
     pub snapshot_paths: Vec<PathBuf>,
     pub test_paths: Vec<PathBuf>,
+    pub macro_paths: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -105,6 +118,7 @@ mod tests {
         assert_eq!(project.seed_paths, vec!["seeds"]);
         assert_eq!(project.snapshot_paths, vec!["snapshots"]);
         assert_eq!(project.test_paths, vec!["tests"]);
+        assert_eq!(project.macro_paths, vec!["macros"]);
     }
 
     #[test]
@@ -156,5 +170,6 @@ seed-paths: ["data"]
         assert_eq!(paths.seed_paths, vec![PathBuf::from("/proj/seeds")]);
         assert_eq!(paths.snapshot_paths, vec![PathBuf::from("/proj/snapshots")]);
         assert_eq!(paths.test_paths, vec![PathBuf::from("/proj/tests")]);
+        assert_eq!(paths.macro_paths, vec![PathBuf::from("/proj/macros")]);
     }
 }
