@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -66,7 +66,7 @@ impl DbtProject {
             })?;
 
         let project: DbtProject = super::yaml_from_str(&content, &project_file.display().to_string())
-            .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", project_file.display(), e))?;
+            .context(format!("Failed to parse {}", project_file.display()))?;
 
         Ok(project)
     }

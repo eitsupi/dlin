@@ -95,11 +95,11 @@ pub struct ExposureOwner {
 pub fn parse_schema_file(
     content: &str,
     path: Option<&std::path::Path>,
-) -> Result<SchemaFile, Box<dyn std::error::Error>> {
+) -> anyhow::Result<SchemaFile> {
     let location = path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<input>".to_string());
-    Ok(super::yaml_from_str(content, &location)?)
+    super::yaml_from_str(content, &location)
 }
 
 #[cfg(test)]

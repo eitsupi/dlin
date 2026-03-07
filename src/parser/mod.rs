@@ -8,6 +8,7 @@ pub mod sql;
 #[allow(dead_code)]
 pub mod yaml_schema;
 
+use anyhow::Result;
 use serde::de::DeserializeOwned;
 
 /// Parse YAML content tolerating duplicate mapping keys (last value wins).
@@ -19,7 +20,7 @@ use serde::de::DeserializeOwned;
 pub fn yaml_from_str<T: DeserializeOwned>(
     content: &str,
     location: &str,
-) -> Result<T, Box<dyn std::error::Error>> {
+) -> Result<T> {
     let value: serde_json::Value = match serde_saphyr::from_str(content) {
         Ok(v) => v,
         Err(e) => {
