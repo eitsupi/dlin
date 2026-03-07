@@ -97,6 +97,7 @@ pub enum OutputFormat {
     Dot,
     Json,
     Mermaid,
+    Plain,
     Svg,
     Html,
 }
@@ -270,6 +271,7 @@ mod tests {
             ("dot", "Dot"),
             ("json", "Json"),
             ("mermaid", "Mermaid"),
+            ("plain", "Plain"),
             ("svg", "Svg"),
             ("html", "Html"),
         ] {

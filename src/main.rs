@@ -110,6 +110,7 @@ fn render_output(format: &cli::OutputFormat, graph: &graph::types::LineageGraph)
         cli::OutputFormat::Dot => render::dot::render_dot(graph),
         cli::OutputFormat::Json => render::json::render_json(graph),
         cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph),
+        cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),
     }

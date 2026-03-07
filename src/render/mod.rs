@@ -5,6 +5,7 @@ pub mod impact;
 pub mod json;
 pub mod layout;
 pub mod mermaid;
+pub mod plain;
 pub mod svg;
 
 #[cfg(test)]
