@@ -1,383 +1,219 @@
 # dlin
 
-A fast Rust CLI tool for analyzing [dbt](https://www.getdbt.com/) model lineage. Parses SQL files directly to extract `ref()` and `source()` dependencies, builds a DAG, and renders it as ASCII art, Graphviz DOT, SVG, interactive HTML, or a terminal UI.
+A fast CLI tool for [dbt](https://www.getdbt.com/) model lineage analysis, written in Rust.
 
-Supports both direct SQL parsing (no dbt compilation or Python runtime needed) and `manifest.json` for full-fidelity graphs.
+Parses SQL files directly — no `dbt compile`, no Python runtime needed. Builds a dependency graph from `ref()` and `source()` calls, then outputs it as JSON, ASCII art, DOT, Mermaid, SVG, HTML, or an interactive terminal UI.
 
-## Features
+## Highlights
 
-- **Direct SQL parsing** — extracts `ref()` and `source()` calls via regex, no `dbt compile` needed
-- **Manifest support** — optionally read `manifest.json` for column metadata, materializations, and full graph fidelity
-- **Interactive TUI** — navigate, search, and explore lineage in a terminal UI (ratatui) with Unicode box-drawing nodes, orthogonal edge routing, and full mouse support
-- **Impact analysis** — `dlin impact <model>` computes downstream impact with severity scoring (Critical/High/Medium/Low)
-- **Node listing** — `dlin list` enumerates nodes with `--json-fields` for field selection (useful for CI pipelines)
-- **7 output formats** — ASCII, Graphviz DOT, JSON, Mermaid, Plain, self-contained SVG, and interactive HTML (pan/zoom/search)
-- **JSON field selection** — `--json-fields unique_id,label` to emit only specified fields, or `--json-full` for all fields
-- **Stdin/pipe support** — accepts model names or file paths from stdin (e.g., `git diff --name-only | dlin graph`)
-- **Run dbt from TUI** — execute `dbt run` / `dbt test` on selected models with scope control (`+upstream`, `downstream+`, `+all+`) via keyboard menu or right-click context menu
-- **Run status tracking** — color-coded nodes show success (green), error (red), outdated (yellow), or never-run (default)
-- **Path highlighting** — trace upstream/downstream paths with impact analysis in the TUI
-- **Selector expressions** — filter by tag, path, or model name (`-s tag:finance,path:marts`)
-- **Node type filtering** — filter output by node type (`--node-type model,source`)
-- **Node type support** — models, sources, seeds, snapshots, tests, exposures
+- **Fast** — parallel SQL extraction with [rayon](https://github.com/rayon-rs/rayon); disk cache for instant subsequent runs
+- **Zero Python dependency** — works from a single binary; no virtualenv, no dbt installation required
+- **Machine-readable output** — deterministic JSON with `--json-fields` for field selection, designed for CI and AI agent pipelines
+- **Two data sources** — parse SQL directly (default) or read `manifest.json` for full-fidelity graphs
+- **Composable** — stdin/stdout piping across subcommands (`impact` → `list` → `jq`)
 
 ## Installation
 
-### From crates.io
-
 ```sh
-cargo install dlin
+cargo install --git https://github.com/eitsupi/dlin.git
 ```
 
-### From source
+## Quick start
 
 ```sh
-git clone https://github.com/eitsupi/dlin.git
-cd dlin
-cargo install --path .
+$ dlin graph -p path/to/dbt/project
+ [ src:raw.payments ]     [ stg_payments ]        [ orders ]        [ customers ]
+  [ src:raw.orders ]       [ stg_orders ]      [ order_summary ]
+[ src:raw.customers ]    [ stg_customers ]
+
+Edges:
+  stg_orders ──ref──> order_summary
+  stg_payments ──ref──> order_summary
+  stg_customers ──ref──> customers
+  orders ──ref──> customers
+  stg_orders ──ref──> orders
+  stg_payments ──ref──> orders
+  src:raw.orders ──src──> stg_orders
+  src:raw.payments ──src──> stg_payments
+  src:raw.customers ──src──> stg_customers
 ```
 
-The binary is installed to `~/.cargo/bin/dlin`.
+## Usage examples
 
-## Usage
-
-### Static output
+### Graph — visualize lineage
 
 ```sh
-# Full lineage of current directory's dbt project
-dlin graph
-
-# Focus on a specific model
-dlin graph stg_orders
-
-# Focus on multiple models
-dlin graph stg_orders orders
-
-# Point at a different project directory
-dlin graph -p path/to/dbt/project
-
-# Show 2 levels upstream, 1 downstream
-dlin graph stg_orders -u 2 -d 1
-
-# Include seeds, tests, snapshots, exposures
-dlin graph --include-seeds --include-tests --include-snapshots --include-exposures
-
-# Selector expressions
-dlin graph -s tag:finance,path:marts
-
-# Filter output by node type
-dlin graph --node-type model,source
-
-# Use manifest.json instead of parsing SQL
-dlin graph --source manifest --manifest-path target/manifest.json
-
-# Output formats
-dlin graph -o dot > lineage.dot        # Graphviz DOT
-dlin graph -o json                      # JSON graph
-dlin graph -o mermaid                   # Mermaid diagram
-dlin graph -o plain                     # Plain text (one node per line)
-dlin graph -o svg > lineage.svg         # Self-contained SVG
-dlin graph -o html > lineage.html       # Interactive HTML (pan/zoom/search)
+dlin graph                                # full lineage (ASCII)
+dlin graph orders -u 1 -d 1              # 1 hop upstream/downstream
+dlin graph -o json                        # JSON for programmatic use
+dlin graph -o dot | dot -Tsvg > out.svg   # Graphviz rendering
+dlin graph -o json --json-fields unique_id,label  # select specific fields
+dlin graph -i                             # interactive TUI
 ```
 
-### Pipe / stdin support
+### List — enumerate nodes
 
 ```sh
-# Pipe file paths from git diff
-git diff --name-only main | dlin graph
-
-# Pipe model names
-echo -e "stg_orders\norders" | dlin graph
+$ dlin list
+model   customers
+model   order_summary
+model   orders
+model   stg_customers
+model   stg_orders
+model   stg_payments
+source  raw.customers
+source  raw.orders
+source  raw.payments
 ```
 
-When stdin contains file paths (detected by path separators or file extensions), they are automatically resolved to dbt model names.
-
-### Node listing
+Filter to specific models and output as JSON:
 
 ```sh
-# List all models and sources
-dlin list
-
-# List specific models
-dlin list orders stg_orders
-
-# List as JSON
-dlin list -o json
-
-# List only source nodes
-dlin list --node-type source
-
-# JSON with specific fields
-dlin list orders -o json --json-fields unique_id,sql_content
-
-# JSON with all fields
-dlin list -o json --json-full
+$ dlin list orders -o json --json-fields unique_id,file_path
+[{"file_path":"models/marts/orders.sql","unique_id":"model.orders"}]
 ```
 
-### Pipelines
-
-Combine subcommands for CI/automation workflows:
+### Impact — downstream impact analysis
 
 ```sh
-# Get impacted model names, then fetch their SQL content
+$ dlin impact orders
+Impact Analysis: orders
+==================================================
+Overall Severity: CRITICAL
+
+Summary:
+  Affected models:    1
+  Affected tests:     1
+  Affected exposures: 1
+
+Impacted Nodes:
+  [critical] weekly_report (exposure, 1 hops)
+  [high    ] customers (model, 1 hops) [models/marts/customers.sql]
+  [low     ] assert_orders_positive_amount (test, 1 hops)
+```
+
+### Pipelines — compose subcommands
+
+```sh
+# Get impacted model names, then fetch their SQL
 dlin impact orders -o json \
   | jq -r '.[].impacted_nodes[].unique_id' \
   | dlin list -o json --json-fields unique_id,sql_content
+
+# Lineage of changed files
+git diff --name-only main | dlin graph -o json
 
 # List changed models with metadata
 git diff --name-only main | dlin list -o json --json-fields unique_id,label,description
 ```
 
-### Interactive TUI
+Stdin accepts model names or file paths. File paths (detected by extension or path separators) are automatically resolved to model names using `dbt_project.yml`.
+
+## Performance
+
+dlin is designed for fast feedback loops:
+
+- **Parallel extraction** — SQL files are parsed concurrently using rayon
+- **Disk cache** — extraction results are cached to `.dlin/extraction_cache.json` (auto-created, gitignored); invalidated per-file by mtime and size
+- **In-memory dedup** — minijinja template rendering is performed once per file and reused across phases
+- **No runtime dependency** — single static binary, no Python interpreter startup
+
+Use `--no-cache` to force a fresh parse. Use `--cache-dir` to customize the cache location.
+
+## Data sources
+
+### SQL parsing (default)
+
+Extracts `ref()` and `source()` calls from SQL via regex + [minijinja](https://github.com/mitsuhiko/minijinja) template evaluation. Handles Jinja blocks, macros, and config expressions. No Python or dbt installation required.
+
+### Manifest (`--source manifest`)
+
+Reads a pre-compiled `manifest.json` for full accuracy including column metadata, materializations, and complex Jinja logic that cannot be statically analyzed.
+
+```sh
+dlin graph --source manifest --manifest-path target/manifest.json
+dlin graph --source manifest --manifest-path path/to/project  # auto-finds target/manifest.json
+```
+
+## JSON output
+
+### Field selection
+
+Control which fields appear in JSON node output:
+
+```sh
+dlin graph -o json --json-fields unique_id,label        # only these fields
+dlin graph -o json --json-full                           # all available fields
+dlin list -o json --json-fields unique_id,sql_content    # works on list too
+```
+
+Available fields: `unique_id`, `label`, `node_type`, `file_path`, `description`, `materialization`, `tags`, `columns`, `sql_content`
+
+Default (when neither flag is given): `unique_id`, `label`, `node_type`, `file_path`
+
+### Output format
+
+- TTY → pretty-printed JSON
+- Pipe/redirect → compact single-line JSON (for `jq`, scripts, etc.)
+
+## Filtering
+
+```sh
+dlin graph -s tag:finance,path:marts      # selector expressions (union)
+dlin graph --node-type model,source       # post-filter by node type
+dlin graph --include-tests --include-seeds  # include optional node types
+dlin list --node-type source              # list only sources
+```
+
+Selectors support `tag:<name>`, `path:<prefix>`, and bare model names (comma-separated, OR logic).
+
+## Interactive TUI
 
 ```sh
 dlin graph -i
-dlin graph -i -p path/to/dbt/project
-dlin graph -i stg_orders -u 3 -d 3
 ```
 
-### Impact analysis
+Features: vim-style navigation, mouse support, search (`/`), path highlighting (`p`), run dbt commands (`x`), node list sidebar (`n`).
 
-Compute downstream impact for one or more models with severity scoring:
+<details>
+<summary>TUI keybindings</summary>
+
+| Key | Action |
+|-----|--------|
+| `h` `j` `k` `l` / arrows | Navigate nodes |
+| `H` `J` `K` `L` | Pan viewport |
+| `+` / `-` | Zoom |
+| `/` | Search |
+| `p` | Toggle path highlighting |
+| `n` | Toggle node list |
+| `x` | Run menu (dbt run/test) |
+| `o` | View last run output |
+| `q` | Quit |
+
+Mouse: click to select, drag to pan, scroll to zoom, right-click for context menu.
+
+</details>
+
+The TUI reads `target/run_results.json` when available and color-codes nodes by run status (green = success, red = error, yellow = outdated).
+
+To build without TUI dependencies:
 
 ```sh
-dlin impact orders -p path/to/project            # text report
-dlin impact orders stg_orders -o json             # JSON for CI (multiple models)
-dlin impact orders --source manifest --manifest-path target/manifest.json
+cargo install dlin --no-default-features
 ```
-
-Severity levels:
-- **Critical** — impacts exposures (dashboards, reports)
-- **High** — impacts table/incremental materializations or mart models
-- **Medium** — impacts staging or intermediate models
-- **Low** — impacts tests only
-
-## CLI Reference
-
-```
-Usage: dlin <COMMAND>
-
-Commands:
-  graph   Visualize dbt model lineage graph
-  list    List nodes in the dbt project (lightweight, no edges)
-  impact  Compute downstream impact analysis for a model
-```
-
-### `dlin graph`
-
-```
-Usage: dlin graph [OPTIONS] [MODEL]...
-
-Arguments:
-  [MODEL]...  Model names to focus on (shows full lineage if omitted)
-
-Options:
-  -p, --project-dir <PATH>       Path to dbt project directory [default: .]
-  -u, --upstream <N>              Upstream levels to show (default: all)
-  -d, --downstream <N>            Downstream levels to show (default: all)
-  -i, --interactive               Launch interactive TUI mode
-  -o, --output <FORMAT>           Output format [default: ascii]
-                                  [values: ascii, dot, json, mermaid, plain, svg, html]
-  -s, --select <SELECTOR>         Selector expression: tag:X, path:Y, or model name
-                                  (comma-separated)
-      --node-type <TYPES>         Filter output by node type (comma-separated:
-                                  model, source, seed, snapshot, test, exposure)
-      --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
-      --manifest-path <PATH>      Path to manifest.json file or directory containing
-                                  target/manifest.json (required when --source manifest)
-      --include-tests             Include test nodes
-      --include-seeds             Include seed nodes
-      --include-snapshots         Include snapshot nodes
-      --include-exposures         Include exposure nodes
-      --json-fields <FIELDS>      Select which fields to include in JSON output
-                                  (comma-separated). Default: unique_id, label,
-                                  node_type, file_path
-      --json-full                 Include all available fields in JSON output
-  -h, --help                      Print help
-```
-
-### `dlin list`
-
-```
-Usage: dlin list [OPTIONS] [MODEL]...
-
-Arguments:
-  [MODEL]...  Model names to list (lists all nodes if omitted)
-
-Options:
-  -p, --project-dir <PATH>       Path to dbt project directory [default: .]
-  -o, --output <FORMAT>           Output format [default: plain]
-                                  [values: plain, json]
-  -s, --select <SELECTOR>         Selector expression: tag:X, path:Y, or model name
-                                  (comma-separated)
-      --node-type <TYPES>         Filter output by node type (comma-separated:
-                                  model, source, seed, snapshot, test, exposure)
-      --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
-      --manifest-path <PATH>      Path to manifest.json file or directory containing
-                                  target/manifest.json (required when --source manifest)
-      --include-tests             Include test nodes
-      --include-seeds             Include seed nodes
-      --include-snapshots         Include snapshot nodes
-      --include-exposures         Include exposure nodes
-      --json-fields <FIELDS>      Select which fields to include in JSON output
-                                  (comma-separated). Default: unique_id, label,
-                                  node_type, file_path
-      --json-full                 Include all available fields in JSON output
-  -h, --help                      Print help
-```
-
-### `dlin impact`
-
-```
-Usage: dlin impact [OPTIONS] <MODEL>...
-
-Arguments:
-  <MODEL>...  Model names to analyze impact for
-
-Options:
-  -p, --project-dir <PATH>       Path to dbt project directory [default: .]
-  -o, --output <FORMAT>           Output format: text (default) or json
-                                  [default: text] [values: text, json]
-      --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
-      --manifest-path <PATH>      Path to manifest.json file or directory containing
-                                  target/manifest.json (required when --source manifest)
-  -h, --help                      Print help
-```
-
-## TUI Keybindings
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `h` `j` `k` `l` / arrow keys | Navigate between nodes (left/down/up/right) |
-| `H` `J` `K` `L` | Pan the viewport |
-| `+` / `-` | Zoom in / out (adjusts spacing) |
-| `Tab` / `Shift+Tab` | Cycle through nodes sequentially |
-| `r` | Reset view (center + zoom) |
-
-### Mouse
-
-| Action | Target | Effect |
-|--------|--------|--------|
-| Left click | Node on graph | Select node (no viewport jump) |
-| Left click | Empty graph area | Begin drag to pan |
-| Drag | Graph area | Pan the viewport |
-| Scroll up / down | Graph area | Zoom in / out |
-| Left click | Node list entry | Select node and center viewport |
-| Left click | Group header | Collapse / expand group |
-| Right click | Node on graph | Open context menu (run options) |
-
-### Search
-
-| Key | Action |
-|-----|--------|
-| `/` | Open search |
-| `Tab` | Next search result |
-| `Esc` / `Enter` | Close search |
-
-### Analysis
-
-| Key | Action |
-|-----|--------|
-| `p` | Toggle path highlighting (upstream/downstream trace with impact analysis) |
-
-### Node list panel
-
-| Key | Action |
-|-----|--------|
-| `n` | Toggle node list sidebar |
-| `c` | Collapse/expand directory group |
-
-### Running dbt
-
-| Key | Action |
-|-----|--------|
-| `x` | Open run menu for selected node |
-| Right click | Open context menu on a node (same run options) |
-| `o` | View last run output |
-
-Run menu / context menu options:
-
-| Key | Command |
-|-----|---------|
-| `r` | `dbt run` (this model) |
-| `u` | `dbt run` +upstream |
-| `d` | `dbt run` downstream+ |
-| `a` | `dbt run` +all+ |
-| `t` | `dbt test` |
-
-### General
-
-| Key | Action |
-|-----|--------|
-| `q` | Quit |
-| `Ctrl+C` | Quit (any mode) |
-
-## Node colors in TUI
-
-**By run status** (when `target/run_results.json` exists):
-
-| Color | Meaning |
-|-------|---------|
-| Green | Last run succeeded |
-| Red | Last run failed |
-| Yellow | Outdated (source file modified after last run) |
-| DarkGray | Skipped |
-
-**By node type** (when never run):
-
-| Color | Type |
-|-------|------|
-| Blue | Model |
-| Green | Source |
-| Yellow | Seed |
-| Magenta | Snapshot |
-| Cyan | Test |
-| Red | Exposure |
-| DarkGray | Phantom (unresolved ref) |
-
-## How it works
-
-1. **Parse** `dbt_project.yml` to find model/seed/snapshot/analysis paths (or read `manifest.json`)
-2. **Walk** those directories, collecting `.sql` and `.yml` files
-3. **Extract** `ref('model')` and `source('schema', 'table')` from SQL via regex
-4. **Parse** YAML schema files for sources, model descriptions, and exposures
-5. **Build** a directed acyclic graph (petgraph) where edges flow from dependency to dependent
-6. **Filter** by focus model, depth, selectors, and node type
-7. **Layout** using a Sugiyama-style layered algorithm (longest-path layering + barycenter ordering)
-8. **Render** as ASCII, DOT, JSON, Mermaid, Plain, SVG, HTML, or interactive TUI
 
 ## Limitations of SQL parse mode
 
-When using `--source sql` (the default), dlin extracts dependencies via regex without executing Jinja or Python. This means some patterns cannot be fully resolved:
+- **`var()` dynamic references** — `ref(var('name'))` cannot be resolved (variable values are runtime-only)
+- **Runtime context** — `target.type`, `env_var()`, etc. are not evaluated
+- **Conditional Jinja** — branches are evaluated with default values; non-default paths may be missed
+- **Column extraction** — falls back to regex on final SELECT when YAML schema is absent; cannot resolve `SELECT *` or CTE columns
 
-- **`var()` dynamic references** — `{{ ref(var('model_name')) }}` or `source(var('schema'), var('table'))` cannot be traced because variable values are only known at dbt runtime
-- **Runtime context** — expressions like `target.type`, `target.name`, or `env_var()` are not evaluated, so conditional branches depending on them may produce incomplete results
-- **Conditional Jinja blocks** — `{% if var('flag') %}...{% endif %}` blocks are evaluated with default values via minijinja; refs inside branches that require non-default values may be missed
-- **Column extraction** — column lists are determined from YAML schema definitions (`models:` → `columns:`) when available. If no YAML columns are defined, dlin falls back to best-effort regex extraction from the final SELECT clause. This fallback cannot resolve `SELECT *`, computed columns from CTEs, or Jinja-generated column lists. For accurate column metadata, define columns in your YAML schema files or use `--source manifest`
-
-For full-fidelity graphs, use `--source manifest --manifest-path target/manifest.json` with a pre-compiled manifest.
-
-## uv / virtualenv support
-
-When running dbt from the TUI, the tool auto-detects whether to use `uv run dbt` or plain `dbt`:
-
-- If `uv.lock` or `pyproject.toml` exists in the dbt project directory, uses `uv run dbt`
-- Otherwise, if `dbt` is on PATH, uses it directly
-- If `dbt` is not on PATH but `uv` is, falls back to `uv run dbt`
-
-## Building without TUI
-
-The TUI is enabled by default. To build a minimal binary with only static output:
-
-```sh
-cargo build --release --no-default-features
-```
+For full accuracy, use `--source manifest`.
 
 ## Credits
 
-This project is a hard fork of [dbt-lineage-viewer](https://github.com/sipemu/dbt-lineage-viewer) by Simon Müller, originally released under the MIT license.
+This project is a hard fork of [dbt-lineage-viewer](https://github.com/sipemu/dbt-lineage-viewer) by Simon Muller, originally released under the MIT license.
 
 ## License
 
