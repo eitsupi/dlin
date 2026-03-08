@@ -30,13 +30,36 @@ fn to_absolute(path_str: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-/// Read lines from stdin if it is not a terminal.
-/// Returns an empty Vec if stdin is a terminal (interactive mode).
+/// Read lines from stdin if data is being piped or redirected from a file.
+/// Returns an empty Vec if stdin is a terminal (interactive mode) or if
+/// stdin is not a pipe/regular file (e.g. /dev/null in CI or AI agent
+/// environments).
 pub fn read_stdin_lines() -> Vec<String> {
     let stdin = io::stdin();
     if stdin.is_terminal() {
         return Vec::new();
     }
+
+    // In non-TTY environments (CI, AI agents), stdin may be connected to
+    // /dev/null or other non-pipe sources that shouldn't be read.
+    // Only proceed if stdin is actually a pipe (FIFO) or regular file.
+    // TODO: Add Windows support using GetFileType() Win32 API to check for
+    // FILE_TYPE_PIPE / FILE_TYPE_DISK. Currently Windows falls back to the
+    // is_terminal() check only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        match std::fs::metadata("/dev/stdin") {
+            Ok(meta) => {
+                let ft = meta.file_type();
+                if !ft.is_fifo() && !ft.is_file() {
+                    return Vec::new();
+                }
+            }
+            Err(_) => return Vec::new(),
+        }
+    }
+
     stdin
         .lock()
         .lines()
