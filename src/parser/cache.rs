@@ -40,6 +40,16 @@ pub struct ExtractionCache {
 }
 
 impl ExtractionCache {
+    /// Create a no-op cache that never reads from or writes to disk.
+    pub fn disabled() -> Self {
+        Self {
+            macro_prefix_hash: 0,
+            entries: HashMap::new(),
+            cache_path: PathBuf::new(),
+            dirty: false,
+        }
+    }
+
     /// Load the cache from disk, or create an empty one.
     /// If the macro prefix hash doesn't match, all entries are discarded.
     ///
@@ -99,7 +109,7 @@ impl ExtractionCache {
 
     /// Save the cache to disk if it has been modified.
     pub fn save(&self) {
-        if !self.dirty {
+        if !self.dirty || self.cache_path.as_os_str().is_empty() {
             return;
         }
         let cf = CacheFile {

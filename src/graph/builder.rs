@@ -500,14 +500,20 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin/`.
+/// If `no_cache` is true, the extraction cache is completely disabled.
 pub fn build_graph(
     project_dir: &Path,
     files: &DiscoveredFiles,
     cache_dir: Option<&Path>,
+    no_cache: bool,
 ) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
     let macro_prefix = load_macro_prefix(files);
-    let mut disk_cache = cache::ExtractionCache::load(project_dir, &macro_prefix, cache_dir);
+    let mut disk_cache = if no_cache {
+        cache::ExtractionCache::disabled()
+    } else {
+        cache::ExtractionCache::load(project_dir, &macro_prefix, cache_dir)
+    };
 
     let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
@@ -719,7 +725,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
 
         // Should have source + 2 models = 3 nodes
         assert_eq!(graph.node_count(), 3);
@@ -748,7 +754,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         assert_eq!(graph.node_count(), 1);
         let node = &graph[graph.node_indices().next().unwrap()];
         assert_eq!(node.node_type, NodeType::Seed);
@@ -768,7 +774,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         assert_eq!(graph.node_count(), 1);
         let node = &graph[graph.node_indices().next().unwrap()];
         assert_eq!(node.node_type, NodeType::Snapshot);
@@ -798,7 +804,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // model + test = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // ref edge: stg_orders → assert_positive
@@ -834,7 +840,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // model + exposure = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // exposure edge: orders → weekly_report
@@ -864,7 +870,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // seed + model = 2 nodes (no phantom)
         assert_eq!(graph.node_count(), 2);
         // ref edge: countries → stg_countries
@@ -895,7 +901,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // model + phantom = 2 nodes
         assert_eq!(graph.node_count(), 2);
         let phantom = graph
@@ -922,7 +928,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // model + phantom source = 2 nodes
         assert_eq!(graph.node_count(), 2);
         let phantom = graph
@@ -942,7 +948,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         let stg = graph
             .node_indices()
             .find(|&i| graph[i].label == "stg_orders")
@@ -965,7 +971,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         let edge_types: Vec<EdgeType> = graph
             .edge_references()
             .map(|e| e.weight().edge_type)
@@ -978,7 +984,7 @@ exposures:
     fn test_build_graph_empty_files() {
         let tmp = tempfile::tempdir().unwrap();
         let files = DiscoveredFiles::default();
-        let graph = build_graph(tmp.path(), &files, None).unwrap();
+        let graph = build_graph(tmp.path(), &files, None, true).unwrap();
         assert_eq!(graph.node_count(), 0);
         assert_eq!(graph.edge_count(), 0);
     }
@@ -1018,7 +1024,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         let stg = graph
             .node_indices()
             .find(|&i| graph[i].label == "stg_orders")
@@ -1050,7 +1056,7 @@ models:
         };
 
         // Should not panic, just warn on stderr about the duplicate
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // Both SQL files produce nodes (duplicate warning is informational)
         let order_nodes: Vec<_> = graph
             .node_indices()
@@ -1072,7 +1078,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
 
         for idx in graph.node_indices() {
             let node = &graph[idx];
@@ -1155,7 +1161,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true).unwrap();
         // base_table + derived = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // ref edge: base_table → derived

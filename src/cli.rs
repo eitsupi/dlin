@@ -39,6 +39,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
+    /// Disable extraction cache (always re-parse all files)
+    #[arg(long, global = true, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
