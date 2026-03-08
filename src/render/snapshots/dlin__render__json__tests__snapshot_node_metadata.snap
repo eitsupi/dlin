@@ -5,20 +5,20 @@ expression: output
 {
   "nodes": [
     {
-      "unique_id": "model.orders",
-      "label": "orders",
-      "node_type": "model",
-      "file_path": "models/orders.sql",
+      "columns": [
+        "order_id",
+        "customer_id"
+      ],
       "description": "Orders mart model",
+      "file_path": "models/orders.sql",
+      "label": "orders",
       "materialization": "table",
+      "node_type": "model",
       "tags": [
         "daily",
         "core"
       ],
-      "columns": [
-        "order_id",
-        "customer_id"
-      ]
+      "unique_id": "model.orders"
     }
   ],
   "edges": []

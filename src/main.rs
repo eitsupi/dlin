@@ -32,11 +32,10 @@ fn main() -> Result<()> {
             output,
             source,
             manifest_path,
-            show_sql,
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql, cache_dir.as_deref(), no_cache)
+            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache)
         }
     }
 }
@@ -103,6 +102,19 @@ fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) 
         filtered
     };
 
+    // Resolve JSON fields
+    let json_fields = render::json::resolve_graph_fields(
+        args.json_fields.as_deref(),
+        args.json_full,
+    ).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // Warn if --json-fields/--json-full used with non-JSON output
+    if !matches!(args.output, cli::OutputFormat::Json)
+        && (args.json_fields.is_some() || args.json_full)
+    {
+        dlin::warn!("--json-fields/--json-full have no effect with -o {}", format!("{:?}", args.output).to_lowercase());
+    }
+
     // Render
     #[cfg(feature = "tui")]
     if args.interactive {
@@ -115,13 +127,14 @@ fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) 
         anyhow::bail!("TUI feature not enabled. Rebuild with --features tui");
     }
 
-    let sql_contents = if args.show_sql {
+    // Collect SQL contents only when sql_content field is requested
+    let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents(&filtered, &project_dir))
     } else {
         None
     };
 
-    render_output(&args.output, &filtered, sql_contents.as_ref());
+    render_output(&args.output, &filtered, sql_contents.as_ref(), &json_fields);
 
     Ok(())
 }
@@ -173,7 +186,19 @@ fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) ->
         filtered
     };
 
-    render::list::render_list(&filtered, &args.output);
+    // Resolve JSON fields for list
+    let json_fields = render::list::resolve_list_fields(
+        args.json_fields.as_deref(),
+        args.json_full,
+    ).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if !matches!(args.output, cli::ListOutputFormat::Json)
+        && (args.json_fields.is_some() || args.json_full)
+    {
+        dlin::warn!("--json-fields/--json-full have no effect with -o plain");
+    }
+
+    render::list::render_list(&filtered, &args.output, &json_fields);
 
     Ok(())
 }
@@ -209,13 +234,14 @@ fn render_output(
     format: &cli::OutputFormat,
     graph: &graph::types::LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
+    json_fields: &std::collections::HashSet<String>,
 ) {
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
         cli::OutputFormat::Dot => render::dot::render_dot(graph),
-        cli::OutputFormat::Json => render::json::render_json(graph, sql_contents),
+        cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
         cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph),
-        cli::OutputFormat::Plain => render::plain::render_plain(graph, sql_contents),
+        cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),
     }
@@ -253,7 +279,6 @@ fn run_impact_command(
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
     manifest_path: Option<&PathBuf>,
-    show_sql: bool,
     cache_dir: Option<&Path>,
     no_cache: bool,
 ) -> Result<()> {
@@ -264,7 +289,7 @@ fn run_impact_command(
     validate_source_flags(source, manifest_path)?;
     let dag = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache)?;
 
-    let mut reports: Vec<_> = models
+    let reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(&dag, model)?;
@@ -277,17 +302,6 @@ fn run_impact_command(
             "no models found matching: {}",
             models.join(", ")
         );
-    }
-
-    if show_sql {
-        let sql_map = collect_sql_contents(&dag, &project_dir);
-        for report in &mut reports {
-            for node in &mut report.impacted_nodes {
-                if let Some(sql) = sql_map.get(&node.unique_id) {
-                    node.sql_content = Some(sql.clone());
-                }
-            }
-        }
     }
 
     match output {

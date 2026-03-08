@@ -28,7 +28,7 @@ Examples:
   dlin graph                              # Full lineage (ASCII art)
   dlin graph -o json                      # Full lineage as JSON
   dlin graph orders -u 2 -d 1             # orders with 2 upstream, 1 downstream
-  dlin graph -o json -q                   # JSON output, suppress warnings
+  dlin graph -o json --json-full           # JSON with all fields
   dlin list -o json                       # List all node names as JSON
   dlin impact orders -o json              # Downstream impact analysis
   git diff --name-only main | dlin graph  # Lineage of changed files",
@@ -109,6 +109,12 @@ Examples:
   # Use manifest.json instead of SQL parsing
   dlin graph --source manifest --manifest-path target/manifest.json
 
+  # JSON with specific fields
+  dlin graph -o json --json-fields unique_id,label,description
+
+  # JSON with all fields
+  dlin graph -o json --json-full
+
   # Graphviz rendering
   dlin graph -o dot | dot -Tsvg > lineage.svg
 
@@ -171,9 +177,13 @@ pub struct GraphArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// [Experimental] Include SQL file contents for each node in JSON and plain output
-    #[arg(long)]
-    pub show_sql: bool,
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
+    #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
+    pub json_fields: Option<Vec<String>>,
+
+    /// Shorthand for specifying all available fields in --json-fields. Cannot be combined with --json-fields
+    #[arg(long, conflicts_with = "json_fields")]
+    pub json_full: bool,
 
     /// Suppress warning messages
     #[arg(short = 'q', long)]
@@ -216,9 +226,6 @@ Examples:
   # Multiple models at once
   dlin impact orders stg_orders -o json
 
-  # Include SQL content in output
-  dlin impact orders --show-sql -o json
-
   # Use manifest instead of SQL parsing
   dlin impact orders --source manifest --manifest-path target/manifest.json"
     )]
@@ -242,10 +249,6 @@ Examples:
         /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
         #[arg(long)]
         manifest_path: Option<PathBuf>,
-
-        /// [Experimental] Include SQL file contents for each impacted node in the output
-        #[arg(long)]
-        show_sql: bool,
 
         /// Suppress warning messages
         #[arg(short = 'q', long)]
@@ -325,6 +328,14 @@ pub struct ListArgs {
     /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
+
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
+    #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
+    pub json_fields: Option<Vec<String>>,
+
+    /// Shorthand for specifying all available fields in --json-fields. Cannot be combined with --json-fields
+    #[arg(long, conflicts_with = "json_fields")]
+    pub json_full: bool,
 
     /// Suppress warning messages
     #[arg(short = 'q', long)]
@@ -494,16 +505,39 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_show_sql() {
-        let args =
-            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--show-sql"]).unwrap());
-        assert!(args.show_sql);
+    fn test_graph_json_fields() {
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "--json-fields", "unique_id,label"]).unwrap(),
+        );
+        assert_eq!(
+            args.json_fields,
+            Some(vec!["unique_id".to_string(), "label".to_string()])
+        );
+        assert!(!args.json_full);
     }
 
     #[test]
-    fn test_graph_show_sql_default_false() {
+    fn test_graph_json_full() {
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "--json-full"]).unwrap(),
+        );
+        assert!(args.json_full);
+        assert!(args.json_fields.is_none());
+    }
+
+    #[test]
+    fn test_graph_json_fields_and_full_conflict() {
+        let result = Cli::try_parse_from([
+            "dlin", "graph", "--json-fields", "unique_id", "--json-full",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_graph_json_fields_default_none() {
         let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
-        assert!(!args.show_sql);
+        assert!(args.json_fields.is_none());
+        assert!(!args.json_full);
     }
 
     #[test]
@@ -623,25 +657,10 @@ mod tests {
     }
 
     #[test]
-    fn test_impact_show_sql() {
-        let cli = Cli::try_parse_from(["dlin", "impact", "orders", "--show-sql"]).unwrap();
-        match cli.command {
-            Command::Impact { show_sql, .. } => {
-                assert!(show_sql);
-            }
-            _ => panic!("Expected Impact subcommand"),
-        }
-    }
-
-    #[test]
-    fn test_impact_show_sql_default_false() {
-        let cli = Cli::try_parse_from(["dlin", "impact", "orders"]).unwrap();
-        match cli.command {
-            Command::Impact { show_sql, .. } => {
-                assert!(!show_sql);
-            }
-            _ => panic!("Expected Impact subcommand"),
-        }
+    fn test_impact_show_sql_removed() {
+        // --show-sql was removed; verify it's no longer accepted
+        let result = Cli::try_parse_from(["dlin", "impact", "orders", "--show-sql"]);
+        assert!(result.is_err());
     }
 
     #[test]

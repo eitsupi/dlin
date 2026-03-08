@@ -5,17 +5,17 @@ expression: output
 {
   "nodes": [
     {
-      "unique_id": "model.orders",
-      "label": "orders",
-      "node_type": "model",
       "file_path": "models/orders.sql",
+      "label": "orders",
       "materialization": "table",
-      "sql_content": "SELECT * FROM {{ ref('stg_orders') }}"
+      "node_type": "model",
+      "sql_content": "SELECT * FROM {{ ref('stg_orders') }}",
+      "unique_id": "model.orders"
     },
     {
-      "unique_id": "source.raw.orders",
       "label": "raw.orders",
-      "node_type": "source"
+      "node_type": "source",
+      "unique_id": "source.raw.orders"
     }
   ],
   "edges": []

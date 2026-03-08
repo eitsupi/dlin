@@ -5,29 +5,29 @@ expression: output
 {
   "nodes": [
     {
-      "unique_id": "exposure.dashboard",
       "label": "dashboard",
-      "node_type": "exposure"
+      "node_type": "exposure",
+      "unique_id": "exposure.dashboard"
     },
     {
-      "unique_id": "model.orders",
       "label": "orders",
-      "node_type": "model"
+      "node_type": "model",
+      "unique_id": "model.orders"
     },
     {
-      "unique_id": "model.stg_orders",
       "label": "stg_orders",
-      "node_type": "model"
+      "node_type": "model",
+      "unique_id": "model.stg_orders"
     },
     {
-      "unique_id": "source.raw.orders",
       "label": "raw.orders",
-      "node_type": "source"
+      "node_type": "source",
+      "unique_id": "source.raw.orders"
     },
     {
-      "unique_id": "test.orders_positive",
       "label": "orders_positive",
-      "node_type": "test"
+      "node_type": "test",
+      "unique_id": "test.orders_positive"
     }
   ],
   "edges": [

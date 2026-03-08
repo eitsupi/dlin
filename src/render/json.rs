@@ -1,19 +1,70 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::graph::types::*;
 
+/// All available node fields for graph JSON output.
+pub const GRAPH_NODE_FIELDS: &[&str] = &[
+    "unique_id",
+    "label",
+    "node_type",
+    "file_path",
+    "description",
+    "materialization",
+    "tags",
+    "columns",
+    "sql_content",
+];
+
+/// Default node fields when neither --json-fields nor --json-full is specified.
+pub const GRAPH_DEFAULT_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path"];
+
+/// Resolve which fields to emit, and validate field names.
+/// Returns `Err` with a message listing available fields if any name is unknown.
+pub fn resolve_graph_fields(
+    json_fields: Option<&[String]>,
+    json_full: bool,
+) -> Result<HashSet<String>, String> {
+    if json_full {
+        return Ok(GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect());
+    }
+    match json_fields {
+        Some(fields) => {
+            let known: HashSet<&str> = GRAPH_NODE_FIELDS.iter().copied().collect();
+            let mut unknown: Vec<&str> = Vec::new();
+            for f in fields {
+                if !known.contains(f.as_str()) {
+                    unknown.push(f);
+                }
+            }
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "unknown JSON field(s): {}. Available fields: {}",
+                    unknown.join(", "),
+                    GRAPH_NODE_FIELDS.join(", "),
+                ));
+            }
+            Ok(fields.iter().cloned().collect())
+        }
+        None => Ok(GRAPH_DEFAULT_FIELDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()),
+    }
+}
+
 #[derive(Serialize)]
 struct JsonGraph {
-    nodes: Vec<JsonNode>,
+    nodes: Vec<Value>,
     edges: Vec<JsonEdge>,
 }
 
 #[derive(Serialize)]
-struct JsonNode {
+struct JsonNodeFull {
     unique_id: String,
     label: String,
     node_type: String,
@@ -40,23 +91,31 @@ struct JsonEdge {
 
 /// Render the lineage graph as JSON to stdout.
 /// Pretty-prints when stdout is a terminal, compact otherwise.
-pub fn render_json(graph: &LineageGraph, sql_contents: Option<&HashMap<String, String>>) {
+pub fn render_json(
+    graph: &LineageGraph,
+    sql_contents: Option<&HashMap<String, String>>,
+    fields: &HashSet<String>,
+) {
     let mut stdout = std::io::stdout().lock();
     let pretty = stdout.is_terminal();
-    render_json_to_writer(graph, sql_contents, &mut stdout, pretty);
+    render_json_to_writer(graph, sql_contents, fields, &mut stdout, pretty);
 }
 
 fn render_json_to_writer<W: Write>(
     graph: &LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
+    fields: &HashSet<String>,
     w: &mut W,
     pretty: bool,
 ) {
-    let mut nodes: Vec<JsonNode> = graph
+    let all_fields: HashSet<String> = GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect();
+    let use_all = *fields == all_fields;
+
+    let mut nodes: Vec<(String, Value)> = graph
         .node_indices()
         .map(|idx| {
             let node = &graph[idx];
-            JsonNode {
+            let full = JsonNodeFull {
                 unique_id: node.unique_id.clone(),
                 label: node.label.clone(),
                 node_type: node.node_type.label().to_string(),
@@ -68,10 +127,18 @@ fn render_json_to_writer<W: Write>(
                 sql_content: sql_contents
                     .and_then(|m| m.get(&node.unique_id))
                     .cloned(),
-            }
+            };
+            let sort_key = node.unique_id.clone();
+            let value = if use_all {
+                serde_json::to_value(&full).unwrap()
+            } else {
+                filter_fields(serde_json::to_value(&full).unwrap(), fields)
+            };
+            (sort_key, value)
         })
         .collect();
-    nodes.sort_unstable_by(|a, b| a.unique_id.cmp(&b.unique_id));
+    nodes.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let nodes: Vec<Value> = nodes.into_iter().map(|(_, v)| v).collect();
 
     let mut edges: Vec<JsonEdge> = graph
         .edge_references()
@@ -99,6 +166,20 @@ fn render_json_to_writer<W: Write>(
         serde_json::to_writer(&mut *w, &json_graph).unwrap();
     }
     writeln!(w).unwrap();
+}
+
+/// Keep only the specified fields from a JSON object.
+pub fn filter_fields(value: Value, fields: &HashSet<String>) -> Value {
+    match value {
+        Value::Object(map) => {
+            let filtered: serde_json::Map<String, Value> = map
+                .into_iter()
+                .filter(|(k, _)| fields.contains(k))
+                .collect();
+            Value::Object(filtered)
+        }
+        other => other,
+    }
 }
 
 fn edge_type_label(edge_type: EdgeType) -> String {
@@ -129,9 +210,13 @@ mod tests {
         }
     }
 
+    fn all_fields() -> HashSet<String> {
+        GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()
+    }
+
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_json_to_writer(graph, None, &mut buf, true);
+        render_json_to_writer(graph, None, &all_fields(), &mut buf, true);
         String::from_utf8(buf).unwrap()
     }
 
@@ -338,7 +423,7 @@ mod tests {
             ("model.orders".to_string(), "SELECT * FROM {{ ref('stg_orders') }}".to_string()),
         ]);
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, Some(&sql_contents), &mut buf, true);
+        render_json_to_writer(&graph, Some(&sql_contents), &all_fields(), &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -350,7 +435,7 @@ mod tests {
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
         graph.add_edge(a, b, EdgeData { edge_type: EdgeType::Ref });
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &mut buf, false);
+        render_json_to_writer(&graph, None, &all_fields(), &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 1, "compact JSON should be a single line");
@@ -378,5 +463,105 @@ mod tests {
         assert_eq!(node["tags"][1], "core");
         assert_eq!(node["columns"][0], "order_id");
         assert_eq!(node["columns"][1], "customer_id");
+    }
+
+    // -- Field filtering tests ------------------------------------------------
+
+    #[test]
+    fn test_default_fields_only() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.orders".into(),
+            label: "orders".into(),
+            node_type: NodeType::Model,
+            file_path: Some(PathBuf::from("models/orders.sql")),
+            description: Some("desc".into()),
+            materialization: Some("table".into()),
+            tags: vec!["daily".into()],
+            columns: vec!["id".into()],
+        });
+        let fields = resolve_graph_fields(None, false).unwrap();
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &fields, &mut buf, false);
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let node = &parsed["nodes"][0];
+        // Default fields present
+        assert_eq!(node["unique_id"], "model.orders");
+        assert_eq!(node["label"], "orders");
+        assert_eq!(node["node_type"], "model");
+        assert_eq!(node["file_path"], "models/orders.sql");
+        // Non-default fields absent
+        assert!(node.get("description").is_none());
+        assert!(node.get("materialization").is_none());
+        assert!(node.get("tags").is_none());
+        assert!(node.get("columns").is_none());
+    }
+
+    #[test]
+    fn test_custom_fields() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.orders".into(),
+            label: "orders".into(),
+            node_type: NodeType::Model,
+            file_path: Some(PathBuf::from("models/orders.sql")),
+            description: Some("desc".into()),
+            materialization: Some("table".into()),
+            tags: vec![],
+            columns: vec![],
+        });
+        let fields = resolve_graph_fields(
+            Some(&["unique_id".into(), "description".into()]),
+            false,
+        ).unwrap();
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &fields, &mut buf, false);
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let node = &parsed["nodes"][0];
+        assert_eq!(node["unique_id"], "model.orders");
+        assert_eq!(node["description"], "desc");
+        // Other fields absent
+        assert!(node.get("label").is_none());
+        assert!(node.get("node_type").is_none());
+        assert!(node.get("file_path").is_none());
+    }
+
+    #[test]
+    fn test_json_full_includes_all() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.orders".into(),
+            label: "orders".into(),
+            node_type: NodeType::Model,
+            file_path: Some(PathBuf::from("models/orders.sql")),
+            description: Some("desc".into()),
+            materialization: Some("table".into()),
+            tags: vec!["daily".into()],
+            columns: vec!["id".into()],
+        });
+        let fields = resolve_graph_fields(None, true).unwrap();
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &fields, &mut buf, false);
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let node = &parsed["nodes"][0];
+        assert_eq!(node["description"], "desc");
+        assert_eq!(node["materialization"], "table");
+        assert_eq!(node["tags"][0], "daily");
+        assert_eq!(node["columns"][0], "id");
+    }
+
+    #[test]
+    fn test_unknown_field_error() {
+        let result = resolve_graph_fields(
+            Some(&["unique_id".into(), "nonexistent".into()]),
+            false,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("Available fields"));
     }
 }
