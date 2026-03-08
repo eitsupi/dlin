@@ -77,7 +77,7 @@ impl NodeData {
 }
 
 /// Edge types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(dead_code)]
 pub enum EdgeType {
     /// ref() dependency

@@ -4,7 +4,6 @@ expression: output
 ---
 flowchart LR
     exposure_dashboard>"dashboard"]
-
     model_orders["orders"]
     model_stg_orders["stg_orders"]
     source_raw_orders(["raw.orders"])

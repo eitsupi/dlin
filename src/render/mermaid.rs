@@ -30,7 +30,7 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
             NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}",  id, label),
             NodeType::Test => format!("{}{{\"{}\"}}", id, label),
-            NodeType::Exposure => format!("{}>\"{}\"]\n", id, label),
+            NodeType::Exposure => format!("{}>\"{}\"]", id, label),
             NodeType::Phantom => format!("{}(\"{}\")", id, label),
         };
         writeln!(w, "    {}", shape).unwrap();
@@ -44,7 +44,7 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
         let target = &graph[edge.target()];
         (mermaid_id(&source.unique_id), mermaid_id(&target.unique_id), edge.weight().edge_type.clone())
     }).collect();
-    edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(format!("{:?}", a.2).cmp(&format!("{:?}", b.2))));
+    edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     // Render edges
     for (src_id, tgt_id, edge_type) in &edges {
