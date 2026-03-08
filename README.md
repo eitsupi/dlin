@@ -80,12 +80,12 @@ flowchart LR
 ### Graph — visualize lineage
 
 ```sh
-dlin graph                                # full lineage (ASCII)
-dlin graph orders -u 1 -d 1              # 1 hop upstream/downstream
-dlin graph -o json                        # JSON for programmatic use
-dlin graph -o dot | dot -Tsvg > out.svg   # Graphviz rendering
+dlin graph                                        # full lineage (ASCII)
+dlin graph orders -u 1 -d 1                       # 1 hop upstream/downstream
+dlin graph -o json                                # JSON for programmatic use
+dlin graph -o dot | dot -Tsvg > out.svg           # Graphviz rendering
 dlin graph -o json --json-fields unique_id,label  # select specific fields
-dlin graph -i                             # interactive TUI
+dlin graph -i                                     # interactive TUI
 ```
 
 ### List — enumerate nodes
@@ -133,15 +133,16 @@ Impacted Nodes:
 
 ```sh
 # Get impacted model names, then fetch their SQL
-dlin impact orders -o json \
-  | jq -r '.[].impacted_nodes[].unique_id' \
-  | dlin list -o json --json-fields unique_id,sql_content
+dlin impact orders -o json |
+  jq -r '.[].impacted_nodes[].unique_id' |
+  dlin list -o json --json-fields unique_id,sql_content
 
 # Lineage of changed files
 git diff --name-only main | dlin graph -o json
 
 # List changed models with metadata
-git diff --name-only main | dlin list -o json --json-fields unique_id,label,description
+git diff --name-only main |
+  dlin list -o json --json-fields unique_id,label,description
 ```
 
 Stdin accepts model names or file paths. File paths (detected by extension or path separators) are automatically resolved to model names using `dbt_project.yml`.
@@ -179,9 +180,9 @@ dlin graph --source manifest --manifest-path path/to/project  # auto-finds targe
 Control which fields appear in JSON node output:
 
 ```sh
-dlin graph -o json --json-fields unique_id,label        # only these fields
-dlin graph -o json --json-full                           # all available fields
-dlin list -o json --json-fields unique_id,sql_content    # works on list too
+dlin graph -o json --json-fields unique_id,label       # only these fields
+dlin graph -o json --json-full                         # all available fields
+dlin list -o json --json-fields unique_id,sql_content  # works on list too
 ```
 
 Available fields: `unique_id`, `label`, `node_type`, `file_path`, `description`, `materialization`, `tags`, `columns`, `sql_content`
@@ -196,10 +197,10 @@ Default (when neither flag is given): `unique_id`, `label`, `node_type`, `file_p
 ## Filtering
 
 ```sh
-dlin graph -s tag:finance,path:marts      # selector expressions (union)
-dlin graph --node-type model,source       # post-filter by node type
+dlin graph -s tag:finance,path:marts        # selector expressions (union)
+dlin graph --node-type model,source         # post-filter by node type
 dlin graph --include-tests --include-seeds  # include optional node types
-dlin list --node-type source              # list only sources
+dlin list --node-type source                # list only sources
 ```
 
 Selectors support `tag:<name>`, `path:<prefix>`, and bare model names (comma-separated, OR logic).
