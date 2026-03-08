@@ -52,13 +52,13 @@ pub fn read_stdin_lines() -> Vec<String> {
     {
         use std::os::unix::fs::FileTypeExt;
         use std::os::unix::io::{AsRawFd, FromRawFd};
-        // Safety: we wrap fd 0 in a File temporarily to call metadata(),
-        // then forget it so stdin is not closed.
+        // Safety: we wrap fd 0 in a File to call metadata(). ManuallyDrop
+        // ensures stdin is never closed, even if metadata() were to panic.
         let ft = {
-            let f = unsafe { std::fs::File::from_raw_fd(stdin.as_raw_fd()) };
-            let meta = f.metadata();
-            std::mem::forget(f);
-            match meta {
+            let f = std::mem::ManuallyDrop::new(unsafe {
+                std::fs::File::from_raw_fd(stdin.as_raw_fd())
+            });
+            match f.metadata() {
                 Ok(m) => m.file_type(),
                 Err(_) => return Vec::new(),
             }
