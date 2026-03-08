@@ -36,7 +36,7 @@ Examples:
     version
 )]
 pub struct Cli {
-    /// Directory for caching extraction results (default: <project-dir>/.dlin)
+    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
     #[arg(long, global = true, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 

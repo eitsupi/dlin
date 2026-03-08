@@ -114,7 +114,7 @@ Stdin accepts model names or file paths. File paths (detected by extension or pa
 dlin is designed for fast feedback loops:
 
 - **Parallel extraction** — SQL files are parsed concurrently using rayon
-- **Disk cache** — extraction results are cached to `.dlin/extraction_cache.json` (auto-created, gitignored); invalidated per-file by mtime and size
+- **Disk cache** — extraction results are cached to `.dlin_cache/extraction_cache.json` (auto-created, gitignored); invalidated per-file by mtime and size
 - **In-memory dedup** — minijinja template rendering is performed once per file and reused across phases
 - **No runtime dependency** — single static binary, no Python interpreter startup
 

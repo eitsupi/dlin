@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::jinja::JinjaExtraction;
 
 /// Cache file name used when cache is stored under the project directory
-const CACHE_DIR: &str = ".dlin";
+const CACHE_DIR: &str = ".dlin_cache";
 const CACHE_FILENAME: &str = "extraction_cache.json";
 
 /// A single cached extraction entry
@@ -55,7 +55,7 @@ impl ExtractionCache {
     /// If the macro prefix hash doesn't match, all entries are discarded.
     ///
     /// When `cache_dir` is `None`, the cache is stored under
-    /// `<project_dir>/.dlin/extraction_cache.json`. When `cache_dir` is
+    /// `<project_dir>/.dlin_cache/extraction_cache.json`. When `cache_dir` is
     /// provided, the cache file is placed directly inside it.
     pub fn load(project_dir: &Path, macro_prefix: &str, cache_dir: Option<&Path>) -> Self {
         let cache_path = match cache_dir {
@@ -286,7 +286,7 @@ mod tests {
         cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
-        let gitignore = project_dir.join(".dlin/.gitignore");
+        let gitignore = project_dir.join(".dlin_cache/.gitignore");
         assert!(gitignore.exists());
         let content = fs::read_to_string(&gitignore).unwrap();
         assert!(content.contains("*"));
@@ -300,7 +300,7 @@ mod tests {
         fs::write(&sql_file, "SELECT 1").unwrap();
 
         // Pre-create .gitignore with custom content
-        let dlin_dir = project_dir.join(".dlin");
+        let dlin_dir = project_dir.join(".dlin_cache");
         fs::create_dir_all(&dlin_dir).unwrap();
         fs::write(dlin_dir.join(".gitignore"), "custom\n").unwrap();
 
@@ -324,7 +324,7 @@ mod tests {
         cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
-        // Cache file should be directly in cache_dir, not nested under .dlin/
+        // Cache file should be directly in cache_dir, not nested under .dlin_cache/
         assert!(cache_dir.join(CACHE_FILENAME).exists());
         assert!(!cache_dir.join(CACHE_DIR).exists());
     }

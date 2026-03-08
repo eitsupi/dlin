@@ -499,7 +499,7 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
-/// otherwise the cache is stored under `<project_dir>/.dlin/`.
+/// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
 /// If `no_cache` is true, the extraction cache is completely disabled.
 pub fn build_graph(
     project_dir: &Path,
