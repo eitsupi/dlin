@@ -73,7 +73,7 @@ fn classify_select_item(item: &str) -> Option<String> {
 fn find_last_top_level_select(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let len = bytes.len();
-    let mut depth: i32 = 0;
+    let mut depth: u32 = 0;
     let mut last_select_end: Option<usize> = None;
     let mut i = 0;
 
@@ -81,9 +81,7 @@ fn find_last_top_level_select(s: &str) -> Option<usize> {
         match bytes[i] {
             b'(' => depth += 1,
             b')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
             }
             b's' | b'S' if depth == 0 => {
                 if check_keyword_at(bytes, i, len, b"SELECT") {
@@ -160,16 +158,14 @@ fn check_from_at(_s: &str, bytes: &[u8], i: usize, len: usize) -> bool {
 fn find_top_level_from(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let len = bytes.len();
-    let mut depth: i32 = 0;
+    let mut depth: u32 = 0;
     let mut i = 0;
 
     while i < len {
         match bytes[i] {
             b'(' => depth += 1,
             b')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
             }
             b'f' | b'F' if depth == 0 => {
                 if check_from_at(s, bytes, i, len) {

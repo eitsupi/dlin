@@ -184,7 +184,11 @@ fn add_source_nodes(
             description: non_empty_string(&source.description),
             materialization: None,
             tags: vec![],
-            columns: source.columns.keys().cloned().collect(),
+            columns: {
+                let mut cols: Vec<String> = source.columns.keys().cloned().collect();
+                cols.sort();
+                cols
+            },
         });
         node_map.insert(orig_id.clone(), idx);
         // Also index by simplified id for edge resolution
@@ -209,7 +213,11 @@ fn add_regular_nodes(
             description: non_empty_string(&node.description),
             materialization: node.config.materialized.clone(),
             tags: node.config.tags.clone(),
-            columns: node.columns.keys().cloned().collect(),
+            columns: {
+                let mut cols: Vec<String> = node.columns.keys().cloned().collect();
+                cols.sort();
+                cols
+            },
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
