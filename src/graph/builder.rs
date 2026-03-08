@@ -1,5 +1,6 @@
 use anyhow::Result;
 use petgraph::stable_graph::NodeIndex;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
+use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{extract_all, extract_refs_and_sources, RefCall, SourceCall};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
@@ -210,6 +212,14 @@ fn process_yaml_files(
 /// Avoids re-running minijinja in `process_sql_edges`.
 type ExtractionCache = HashMap<PathBuf, (Vec<RefCall>, Vec<SourceCall>)>;
 
+/// Result of parallel extraction for a single model SQL file
+struct ModelExtraction {
+    sql_path: PathBuf,
+    model_name: String,
+    extraction: Option<JinjaExtraction>,
+    columns: Vec<String>,
+}
+
 /// Create nodes for model SQL files (with duplicate detection).
 /// Returns a cache of refs/sources extracted per file so that
 /// `process_sql_edges` can reuse them instead of re-rendering.
@@ -220,42 +230,58 @@ fn process_model_files(
     model_meta: &HashMap<String, YamlModelMeta>,
     macro_prefix: &str,
 ) -> ExtractionCache {
+    // Parallel phase: read files and run minijinja extraction concurrently
+    let extractions: Vec<ModelExtraction> = files
+        .model_sql_files
+        .par_iter()
+        .map(|sql_path| {
+            let model_name = file_stem_str(sql_path);
+            let sql_content = std::fs::read_to_string(sql_path).ok();
+
+            let extraction = sql_content
+                .as_ref()
+                .map(|content| extract_all(content, macro_prefix));
+
+            let columns = sql_content
+                .as_ref()
+                .map(|content| extract_select_columns(content))
+                .unwrap_or_default();
+
+            ModelExtraction {
+                sql_path: sql_path.clone(),
+                model_name,
+                extraction,
+                columns,
+            }
+        })
+        .collect();
+
+    // Sequential phase: insert nodes into the graph
     let mut model_name_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
     let mut cache: ExtractionCache = HashMap::new();
 
-    for sql_path in &files.model_sql_files {
-        let model_name = file_stem_str(sql_path);
-
-        if let Some(existing_path) = model_name_paths.get(&model_name) {
+    for me in extractions {
+        if let Some(existing_path) = model_name_paths.get(&me.model_name) {
             crate::warn!(
                 "duplicate model name '{}' in {} and {}",
-                model_name,
+                me.model_name,
                 existing_path.display(),
-                sql_path.display()
+                me.sql_path.display()
             );
         }
-        model_name_paths.insert(model_name.clone(), sql_path.clone());
+        model_name_paths.insert(me.model_name.clone(), me.sql_path.clone());
 
-        // Read SQL content once for extraction and column extraction
-        let sql_content = std::fs::read_to_string(sql_path).ok();
-
-        // Extract config, refs, and sources in a single minijinja pass
-        let (sql_config, cached_refs_sources) = match sql_content
-            .as_ref()
-            .map(|content| extract_all(content, macro_prefix))
-        {
+        let (sql_config, cached_refs_sources) = match me.extraction {
             Some(ext) => (ext.config, Some((ext.refs, ext.sources))),
             None => (Default::default(), None),
         };
 
-        // Cache refs/sources for process_sql_edges
         if let Some(rs) = cached_refs_sources {
-            cache.insert(sql_path.clone(), rs);
+            cache.insert(me.sql_path.clone(), rs);
         }
 
-        let yaml_meta = model_meta.get(&model_name);
+        let yaml_meta = model_meta.get(&me.model_name);
 
-        // SQL config takes precedence over YAML config; merge tags
         let materialization = sql_config
             .materialized
             .or_else(|| yaml_meta.and_then(|m| m.materialization.clone()));
@@ -267,27 +293,22 @@ fn process_model_files(
         tags.sort();
         tags.dedup();
 
-        let unique_id = format!("model.{}", model_name);
-        let relative_path = sql_path
+        let unique_id = format!("model.{}", me.model_name);
+        let relative_path = me
+            .sql_path
             .strip_prefix(project_dir)
-            .unwrap_or(sql_path)
+            .unwrap_or(&me.sql_path)
             .to_path_buf();
-
-        // Extract columns from SELECT clause
-        let columns = sql_content
-            .as_ref()
-            .map(|content| extract_select_columns(content))
-            .unwrap_or_default();
 
         gb.add_node(NodeData {
             unique_id,
-            label: model_name.clone(),
+            label: me.model_name,
             node_type: NodeType::Model,
             file_path: Some(relative_path),
             description: yaml_meta.and_then(|m| m.description.clone()),
             materialization,
             tags,
-            columns,
+            columns: me.columns,
         });
     }
 
