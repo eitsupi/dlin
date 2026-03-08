@@ -6,7 +6,7 @@ use minijinja::{Environment, ErrorKind, Value};
 use super::sql::{RefCall, SourceCall, SqlConfig};
 
 /// All extracted information from rendering a dbt Jinja SQL template
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct JinjaExtraction {
     pub refs: Vec<RefCall>,
     pub sources: Vec<SourceCall>,

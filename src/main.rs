@@ -14,14 +14,16 @@ use dlin::render;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let cache_dir = cli.cache_dir;
+
     match cli.command {
         Command::Graph(args) => {
             dlin::set_quiet(args.quiet);
-            run_graph_command(args)
+            run_graph_command(args, cache_dir.as_deref())
         }
         Command::List(args) => {
             dlin::set_quiet(args.quiet);
-            run_list_command(args)
+            run_list_command(args, cache_dir.as_deref())
         }
         Command::Impact {
             model,
@@ -33,14 +35,14 @@ fn main() -> Result<()> {
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql)
+            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), show_sql, cache_dir.as_deref())
         }
     }
 }
 
 /// Run the `graph` subcommand
 #[cfg(not(tarpaulin_include))]
-fn run_graph_command(args: GraphArgs) -> Result<()> {
+fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>) -> Result<()> {
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -52,7 +54,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -125,7 +127,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
 /// Run the `list` subcommand
 #[cfg(not(tarpaulin_include))]
-fn run_list_command(args: ListArgs) -> Result<()> {
+fn run_list_command(args: ListArgs, cache_dir: Option<&Path>) -> Result<()> {
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -136,7 +138,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref())?;
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir)?;
 
     // Parse selectors
     let selectors = args
@@ -181,6 +183,7 @@ fn build_dag(
     project_dir: &Path,
     source: &SourceType,
     manifest_path: Option<&PathBuf>,
+    cache_dir: Option<&Path>,
 ) -> Result<graph::types::LineageGraph> {
     match source {
         SourceType::Manifest => {
@@ -193,7 +196,7 @@ fn build_dag(
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            graph::builder::build_graph(project_dir, &files)
+            graph::builder::build_graph(project_dir, &files, cache_dir)
         }
     }
 }
@@ -249,13 +252,14 @@ fn run_impact_command(
     source: &SourceType,
     manifest_path: Option<&PathBuf>,
     show_sql: bool,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let dag = build_dag(&project_dir, source, manifest_path)?;
+    let dag = build_dag(&project_dir, source, manifest_path, cache_dir)?;
 
     let mut reports: Vec<_> = models
         .iter()

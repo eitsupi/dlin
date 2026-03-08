@@ -4,6 +4,10 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "dlin", about = "A fast CLI tool for dbt model lineage analysis", version)]
 pub struct Cli {
+    /// Directory for caching extraction results (default: <project-dir>/.dlin)
+    #[arg(long, global = true, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
