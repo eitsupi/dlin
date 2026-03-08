@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use super::jinja::JinjaExtraction;
 
-/// Cache file name stored under `.dlin/` in the project directory
-const CACHE_FILE: &str = ".dlin/extraction_cache.json";
+/// Cache file name used when cache is stored under the project directory
+const CACHE_DIR: &str = ".dlin";
+const CACHE_FILENAME: &str = "extraction_cache.json";
 
 /// A single cached extraction entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheEntry {
     /// File modification time (seconds since UNIX epoch)
     mtime_secs: u64,
+    /// File size in bytes (secondary check for same-second modifications)
+    file_size: u64,
     /// Extraction result
     extraction: JinjaExtraction,
 }
@@ -39,8 +42,15 @@ pub struct ExtractionCache {
 impl ExtractionCache {
     /// Load the cache from disk, or create an empty one.
     /// If the macro prefix hash doesn't match, all entries are discarded.
-    pub fn load(project_dir: &Path, macro_prefix: &str) -> Self {
-        let cache_path = project_dir.join(CACHE_FILE);
+    ///
+    /// When `cache_dir` is `None`, the cache is stored under
+    /// `<project_dir>/.dlin/extraction_cache.json`. When `cache_dir` is
+    /// provided, the cache file is placed directly inside it.
+    pub fn load(project_dir: &Path, macro_prefix: &str, cache_dir: Option<&Path>) -> Self {
+        let cache_path = match cache_dir {
+            Some(dir) => dir.join(CACHE_FILENAME),
+            None => project_dir.join(CACHE_DIR).join(CACHE_FILENAME),
+        };
         let hash = hash_str(macro_prefix);
 
         let entries = std::fs::read_to_string(&cache_path)
@@ -63,8 +73,8 @@ impl ExtractionCache {
     pub fn get(&self, path: &Path, project_dir: &Path) -> Option<&JinjaExtraction> {
         let key = relative_key(path, project_dir);
         let entry = self.entries.get(&key)?;
-        let mtime = file_mtime_secs(path)?;
-        if entry.mtime_secs == mtime {
+        let stat = file_stat(path)?;
+        if entry.mtime_secs == stat.mtime_secs && entry.file_size == stat.file_size {
             Some(&entry.extraction)
         } else {
             None
@@ -72,14 +82,15 @@ impl ExtractionCache {
     }
 
     /// Insert an extraction result into the cache.
-    pub fn insert(&mut self, path: &Path, project_dir: &Path, extraction: JinjaExtraction) {
+    pub fn insert(&mut self, path: &Path, project_dir: &Path, extraction: &JinjaExtraction) {
         let key = relative_key(path, project_dir);
-        if let Some(mtime) = file_mtime_secs(path) {
+        if let Some(stat) = file_stat(path) {
             self.entries.insert(
                 key,
                 CacheEntry {
-                    mtime_secs: mtime,
-                    extraction,
+                    mtime_secs: stat.mtime_secs,
+                    file_size: stat.file_size,
+                    extraction: extraction.clone(),
                 },
             );
             self.dirty = true;
@@ -96,18 +107,30 @@ impl ExtractionCache {
             entries: self.entries.clone(),
         };
         if let Some(parent) = self.cache_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if std::fs::create_dir_all(parent).is_err() {
+                crate::warn!("could not create cache directory: {}", parent.display());
+                return;
+            }
             // Auto-create .gitignore to prevent accidental commits
             let gitignore = parent.join(".gitignore");
             if !gitignore.exists() {
-                let _ = std::fs::write(
+                if let Err(e) = std::fs::write(
                     &gitignore,
                     "# Automatically created by dlin\n*\n",
-                );
+                ) {
+                    crate::warn!("could not create {}: {}", gitignore.display(), e);
+                }
             }
         }
-        if let Ok(json) = serde_json::to_string(&cf) {
-            let _ = std::fs::write(&self.cache_path, json);
+        match serde_json::to_string(&cf) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&self.cache_path, json) {
+                    crate::warn!("could not write cache file {}: {}", self.cache_path.display(), e);
+                }
+            }
+            Err(e) => {
+                crate::warn!("could not serialize cache: {}", e);
+            }
         }
     }
 }
@@ -122,15 +145,25 @@ fn hash_str(s: &str) -> u64 {
     hash
 }
 
-/// Get file modification time as seconds since UNIX epoch
-fn file_mtime_secs(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .ok()?
+/// File metadata relevant for cache invalidation
+struct FileStat {
+    mtime_secs: u64,
+    file_size: u64,
+}
+
+/// Get file modification time and size from a single stat call
+fn file_stat(path: &Path) -> Option<FileStat> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_secs = meta
         .modified()
         .ok()?
         .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
+        .ok()?
+        .as_secs();
+    Some(FileStat {
+        mtime_secs,
+        file_size: meta.len(),
+    })
 }
 
 /// Convert an absolute path to a relative key string for cache storage
@@ -155,7 +188,7 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix");
+        let mut cache = ExtractionCache::load(project_dir, "prefix", None);
         assert!(cache.get(&sql_file, project_dir).is_none());
 
         let extraction = JinjaExtraction {
@@ -166,11 +199,11 @@ mod tests {
             sources: vec![],
             config: SqlConfig::default(),
         };
-        cache.insert(&sql_file, project_dir, extraction);
+        cache.insert(&sql_file, project_dir, &extraction);
         cache.save();
 
         // Reload from disk
-        let cache2 = ExtractionCache::load(project_dir, "prefix");
+        let cache2 = ExtractionCache::load(project_dir, "prefix", None);
         let hit = cache2.get(&sql_file, project_dir).unwrap();
         assert_eq!(hit.refs.len(), 1);
         assert_eq!(hit.refs[0].name, "orders");
@@ -183,16 +216,12 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix_v1");
-        cache.insert(
-            &sql_file,
-            project_dir,
-            JinjaExtraction::default(),
-        );
+        let mut cache = ExtractionCache::load(project_dir, "prefix_v1", None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
         // Different macro prefix → cache miss
-        let cache2 = ExtractionCache::load(project_dir, "prefix_v2");
+        let cache2 = ExtractionCache::load(project_dir, "prefix_v2", None);
         assert!(cache2.get(&sql_file, project_dir).is_none());
     }
 
@@ -203,20 +232,35 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix");
-        cache.insert(
-            &sql_file,
-            project_dir,
-            JinjaExtraction::default(),
-        );
+        let mut cache = ExtractionCache::load(project_dir, "prefix", None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
-        // Modify file (need to change mtime)
+        // Modify file (change both mtime and size)
         std::thread::sleep(std::time::Duration::from_secs(1));
-        fs::write(&sql_file, "SELECT 2").unwrap();
+        fs::write(&sql_file, "SELECT 1, 2, 3").unwrap();
 
-        let cache2 = ExtractionCache::load(project_dir, "prefix");
+        let cache2 = ExtractionCache::load(project_dir, "prefix", None);
         assert!(cache2.get(&sql_file, project_dir).is_none());
+    }
+
+    #[test]
+    fn test_cache_invalidated_by_size_change() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path();
+        let sql_file = project_dir.join("model.sql");
+        fs::write(&sql_file, "SELECT 1").unwrap();
+
+        let mut cache = ExtractionCache::load(project_dir, "prefix", None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
+
+        // Tamper with the entry to have the correct mtime but wrong size
+        let key = relative_key(&sql_file, project_dir);
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.file_size += 1;
+        }
+
+        assert!(cache.get(&sql_file, project_dir).is_none());
     }
 
     #[test]
@@ -226,8 +270,8 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix");
-        cache.insert(&sql_file, project_dir, JinjaExtraction::default());
+        let mut cache = ExtractionCache::load(project_dir, "prefix", None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
         let gitignore = project_dir.join(".dlin/.gitignore");
@@ -248,11 +292,28 @@ mod tests {
         fs::create_dir_all(&dlin_dir).unwrap();
         fs::write(dlin_dir.join(".gitignore"), "custom\n").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix");
-        cache.insert(&sql_file, project_dir, JinjaExtraction::default());
+        let mut cache = ExtractionCache::load(project_dir, "prefix", None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
         let content = fs::read_to_string(dlin_dir.join(".gitignore")).unwrap();
         assert_eq!(content, "custom\n");
+    }
+
+    #[test]
+    fn test_custom_cache_dir() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path();
+        let cache_dir = tmp.path().join("my_cache");
+        let sql_file = project_dir.join("model.sql");
+        fs::write(&sql_file, "SELECT 1").unwrap();
+
+        let mut cache = ExtractionCache::load(project_dir, "prefix", Some(&cache_dir));
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
+        cache.save();
+
+        // Cache file should be directly in cache_dir, not nested under .dlin/
+        assert!(cache_dir.join(CACHE_FILENAME).exists());
+        assert!(!cache_dir.join(CACHE_DIR).exists());
     }
 }

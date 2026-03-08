@@ -235,7 +235,8 @@ fn process_model_files(
     disk_cache: &mut cache::ExtractionCache,
 ) -> ExtractionCache {
     // Parallel phase: read files and run minijinja extraction concurrently.
-    // Uses disk cache to skip minijinja rendering for unchanged files.
+    // Uses disk cache (immutable borrow) to skip rendering for unchanged files.
+    let cache_ref = &*disk_cache;
     let extractions: Vec<ModelExtraction> = files
         .model_sql_files
         .par_iter()
@@ -243,7 +244,7 @@ fn process_model_files(
             let model_name = file_stem_str(sql_path);
 
             // Check disk cache first
-            if let Some(cached) = disk_cache.get(sql_path, project_dir) {
+            if let Some(cached) = cache_ref.get(sql_path, project_dir) {
                 let sql_content = std::fs::read_to_string(sql_path).ok();
                 let columns = sql_content
                     .as_ref()
@@ -299,7 +300,7 @@ fn process_model_files(
             Some(ext) => {
                 // Save newly extracted results to disk cache
                 if !from_cache {
-                    disk_cache.insert(&me.sql_path, project_dir, ext.clone());
+                    disk_cache.insert(&me.sql_path, project_dir, &ext);
                 }
                 (ext.config, Some((ext.refs, ext.sources)))
             }
@@ -498,8 +499,7 @@ pub fn build_graph(
 ) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
     let macro_prefix = load_macro_prefix(files);
-    let cache_base = cache_dir.unwrap_or(project_dir);
-    let mut disk_cache = cache::ExtractionCache::load(cache_base, &macro_prefix);
+    let mut disk_cache = cache::ExtractionCache::load(project_dir, &macro_prefix, cache_dir);
 
     let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
