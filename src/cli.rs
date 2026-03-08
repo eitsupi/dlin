@@ -2,7 +2,38 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "dlin", about = "A fast CLI tool for dbt model lineage analysis", version)]
+#[command(
+    name = "dlin",
+    about = "A fast CLI tool for dbt model lineage analysis",
+    long_about = "\
+A fast CLI tool for dbt model lineage analysis.
+
+Parses SQL files directly to extract ref() and source() dependencies (no dbt compile needed), \
+or reads manifest.json for full-fidelity graphs. Outputs as ASCII, DOT, JSON, Mermaid, SVG, \
+HTML, or an interactive TUI.
+
+Data sources:
+  sql (default)   Parse SQL files via regex + minijinja. No Python or dbt required.
+  manifest        Read a pre-compiled manifest.json for full accuracy.
+
+Stdin support:
+  Accepts model names or file paths from stdin. File paths (detected by extension \
+or path separators) are resolved to model names automatically.
+
+Exit codes:
+  0   Success
+  1   Error (project not found, all specified models not found, etc.)",
+    after_long_help = "\
+Examples:
+  dlin graph                              # Full lineage (ASCII art)
+  dlin graph -o json                      # Full lineage as JSON
+  dlin graph orders -u 2 -d 1             # orders with 2 upstream, 1 downstream
+  dlin graph -o json -q                   # JSON output, suppress warnings
+  dlin list -o json                       # List all node names as JSON
+  dlin impact orders -o json              # Downstream impact analysis
+  git diff --name-only main | dlin graph  # Lineage of changed files",
+    version
+)]
 pub struct Cli {
     /// Directory for caching extraction results (default: <project-dir>/.dlin)
     #[arg(long, global = true, env = "DLIN_CACHE_DIR")]
@@ -13,6 +44,73 @@ pub struct Cli {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    long_about = "\
+Visualize dbt model lineage graph.
+
+Shows the dependency graph of dbt models, sources, seeds, snapshots, tests, and exposures. \
+By default shows all models and sources. Use positional arguments to focus on specific models.
+
+Output formats:
+  ascii (default)  Text-based DAG for terminal display
+  json             Machine-readable {\"nodes\":[...], \"edges\":[...]} structure
+  dot              Graphviz DOT format (pipe to `dot -Tsvg > out.svg`)
+  mermaid          Mermaid diagram syntax
+  plain            One node name per line (useful for scripting)
+  svg              Self-contained SVG file
+  html             Interactive HTML with pan/zoom/search
+
+Depth control (-u/-d):
+  Without -u/-d, all reachable nodes are included.
+  -u 0 -d 0 shows only the focus model itself.
+  BFS traversal follows edges regardless of node type.
+
+Node type filter (--node-type):
+  Applied as a post-filter AFTER depth traversal. Only matching node types \
+appear in the output. Edges between excluded nodes are removed.
+  To see connections across types, include all relevant types:
+    --node-type source,model    # sources + models + edges between them
+
+Stdin/pipe support:
+  Accepts model names or file paths on stdin (one per line). \
+File paths are resolved to model names using dbt project configuration.",
+    after_long_help = "\
+Examples:
+  # Full lineage of the project
+  dlin graph
+  dlin graph -o json
+
+  # Focus on a model with depth control
+  dlin graph orders -u 2 -d 1
+  dlin graph stg_orders -d 0            # just the node, no downstream
+
+  # Multiple models
+  dlin graph stg_orders orders customers
+
+  # Find upstream sources of a model
+  dlin graph orders -u 3 --node-type source,model -o json
+
+  # Find downstream models of a source
+  dlin graph raw.orders -d 2 --node-type source,model -o json
+
+  # List only source nodes (no edges)
+  dlin graph --node-type source -o json
+
+  # Filter by tag or path
+  dlin graph -s tag:finance,path:marts -o json
+
+  # From git diff (pipe changed files)
+  git diff --name-only main | dlin graph -o json
+
+  # Use manifest.json instead of SQL parsing
+  dlin graph --source manifest --manifest-path target/manifest.json
+
+  # Graphviz rendering
+  dlin graph -o dot | dot -Tsvg > lineage.svg
+
+  # Interactive TUI
+  dlin graph -i"
+)]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
     pub model: Vec<String>,
@@ -37,19 +135,19 @@ pub struct GraphArgs {
     #[arg(short = 'o', long, default_value = "ascii")]
     pub output: OutputFormat,
 
-    /// Include test nodes
+    /// Include test nodes (excluded by default)
     #[arg(long)]
     pub include_tests: bool,
 
-    /// Include seed nodes
+    /// Include seed nodes (excluded by default)
     #[arg(long)]
     pub include_seeds: bool,
 
-    /// Include snapshot nodes
+    /// Include snapshot nodes (excluded by default)
     #[arg(long)]
     pub include_snapshots: bool,
 
-    /// Include exposure nodes
+    /// Include exposure nodes (excluded by default)
     #[arg(long)]
     pub include_exposures: bool,
 
@@ -57,7 +155,7 @@ pub struct GraphArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure)
+    /// Post-filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure). Edges between excluded types are removed; use multiple types to preserve edges
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
@@ -83,10 +181,43 @@ pub enum Command {
     /// Visualize dbt model lineage graph
     Graph(GraphArgs),
 
-    /// List all nodes in the dbt project
+    /// List all nodes in the dbt project (lightweight, no edges)
     List(ListArgs),
 
-    /// Compute downstream impact analysis for a model
+    /// Compute downstream impact analysis for a model (with severity scoring)
+    #[command(
+        long_about = "\
+Compute downstream impact analysis for one or more models.
+
+Finds all downstream dependents and assigns severity levels:
+  Critical  impacts exposures (dashboards, reports)
+  High      impacts table/incremental materializations or mart models
+  Medium    impacts staging or intermediate models
+  Low       impacts tests only
+
+Text output: human-readable report with severity and distance.
+JSON output: structured array of impact reports for CI/programmatic use.
+
+Exit codes:
+  0   Success (impact computed, even if no downstream dependents)
+  1   Error (all specified models not found)",
+        after_long_help = "\
+Examples:
+  # Text report for a single model
+  dlin impact orders
+
+  # JSON output for CI integration
+  dlin impact orders -o json
+
+  # Multiple models at once
+  dlin impact orders stg_orders -o json
+
+  # Include SQL content in output
+  dlin impact orders --show-sql -o json
+
+  # Use manifest instead of SQL parsing
+  dlin impact orders --source manifest --manifest-path target/manifest.json"
+    )]
     Impact {
         /// Model names to analyze impact for
         #[arg(required = true)]
@@ -120,6 +251,36 @@ pub enum Command {
 }
 
 #[derive(Debug, clap::Args)]
+#[command(
+    long_about = "\
+List all nodes in the dbt project (no edges, no depth traversal).
+
+A lightweight alternative to `graph` for enumerating nodes. \
+Outputs one node per line (plain) or a JSON array (json). \
+Useful for getting a quick inventory of models, sources, etc.
+
+Plain output: one node name per line, sorted alphabetically.
+JSON output: array of objects with unique_id, label, node_type, and metadata.",
+    after_long_help = "\
+Examples:
+  # List all models and sources
+  dlin list
+
+  # List as JSON for programmatic use
+  dlin list -o json
+
+  # List only source nodes
+  dlin list --node-type source
+
+  # List models tagged 'finance'
+  dlin list -s tag:finance
+
+  # List all node types including seeds and tests
+  dlin list --include-seeds --include-tests
+
+  # Count models (combine with standard tools)
+  dlin list --node-type model | wc -l"
+)]
 pub struct ListArgs {
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -129,19 +290,19 @@ pub struct ListArgs {
     #[arg(short = 'o', long, default_value = "plain")]
     pub output: ListOutputFormat,
 
-    /// Include test nodes
+    /// Include test nodes (excluded by default)
     #[arg(long)]
     pub include_tests: bool,
 
-    /// Include seed nodes
+    /// Include seed nodes (excluded by default)
     #[arg(long)]
     pub include_seeds: bool,
 
-    /// Include snapshot nodes
+    /// Include snapshot nodes (excluded by default)
     #[arg(long)]
     pub include_snapshots: bool,
 
-    /// Include exposure nodes
+    /// Include exposure nodes (excluded by default)
     #[arg(long)]
     pub include_exposures: bool,
 
