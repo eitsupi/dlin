@@ -186,6 +186,12 @@ pub fn filter_graph(
                 &mut keep_nodes,
             );
         }
+
+        // All specified models were not found
+        if keep_nodes.is_empty() {
+            let names = focus_models.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            return Err(DbtLineageError::ModelNotFound(names).into());
+        }
     } else {
         // No focus models -- keep all nodes
         keep_nodes.extend(graph.node_indices());
@@ -445,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_model_not_found_skips_with_warning() {
+    fn test_filter_model_not_found_returns_error() {
         let g = make_test_graph();
         let filter = NodeTypeFilter {
             include_tests: false,
@@ -453,10 +459,11 @@ mod tests {
             include_snapshots: false,
             include_exposures: true,
         };
-        // Not-found models are skipped, resulting in an empty graph
-        let filtered =
-            filter_graph(&g, &["nonexistent".into()], None, None, &filter, &[]).unwrap();
-        assert_eq!(filtered.node_count(), 0);
+        // All specified models not found → error
+        let result =
+            filter_graph(&g, &["nonexistent".into()], None, None, &filter, &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("model not found"));
     }
 
     #[test]
@@ -571,16 +578,18 @@ mod tests {
     #[test]
     fn test_filter_multiple_focus_all_invalid() {
         let g = make_test_graph();
-        let filtered = filter_graph(
+        let result = filter_graph(
             &g,
             &["no_such_a".into(), "no_such_b".into()],
             None,
             None,
             &default_type_filter(),
             &[],
-        )
-        .unwrap();
-        assert_eq!(filtered.node_count(), 0);
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no_such_a"));
+        assert!(msg.contains("no_such_b"));
     }
 
     #[test]

@@ -269,6 +269,13 @@ fn run_impact_command(
         })
         .collect();
 
+    if reports.is_empty() {
+        anyhow::bail!(
+            "no models found matching: {}",
+            models.join(", ")
+        );
+    }
+
     if show_sql {
         let sql_map = collect_sql_contents(&dag, &project_dir);
         for report in &mut reports {

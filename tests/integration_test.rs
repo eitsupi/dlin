@@ -267,11 +267,14 @@ mod cli {
             .output()
             .expect("Failed to run binary");
 
-        assert!(output.status.success());
+        assert!(
+            !output.status.success(),
+            "Expected non-zero exit code for nonexistent model"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("not found") || stderr.contains("nonexistent_model"),
-            "Expected warning on stderr, got: {}",
+            "Expected error on stderr, got: {}",
             stderr
         );
     }
