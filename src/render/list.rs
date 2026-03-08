@@ -1,62 +1,35 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::ListOutputFormat;
 use crate::graph::types::*;
-
-/// All available node fields for list JSON output.
-pub const LIST_NODE_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path"];
+use super::json::build_node_value;
 
 /// Resolve which fields to emit for list JSON, and validate field names.
+/// Uses the same field set as graph JSON output.
 pub fn resolve_list_fields(
     json_fields: Option<&[String]>,
     json_full: bool,
 ) -> Result<HashSet<String>, String> {
-    if json_full {
-        return Ok(LIST_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect());
-    }
-    match json_fields {
-        Some(fields) => {
-            let known: HashSet<&str> = LIST_NODE_FIELDS.iter().copied().collect();
-            let mut unknown: Vec<&str> = Vec::new();
-            for f in fields {
-                if !known.contains(f.as_str()) {
-                    unknown.push(f);
-                }
-            }
-            if !unknown.is_empty() {
-                return Err(format!(
-                    "unknown JSON field(s): {}. Available fields: {}",
-                    unknown.join(", "),
-                    LIST_NODE_FIELDS.join(", "),
-                ));
-            }
-            Ok(fields.iter().cloned().collect())
-        }
-        None => Ok(LIST_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()),
-    }
-}
-
-#[derive(Serialize)]
-struct ListNode {
-    unique_id: String,
-    label: String,
-    node_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    file_path: Option<String>,
+    // Delegate to the same logic as graph, sharing the field set
+    super::json::resolve_graph_fields(json_fields, json_full)
 }
 
 /// Render node list to stdout.
-pub fn render_list(graph: &LineageGraph, format: &ListOutputFormat, fields: &HashSet<String>) {
+pub fn render_list(
+    graph: &LineageGraph,
+    format: &ListOutputFormat,
+    fields: &HashSet<String>,
+    sql_contents: Option<&HashMap<String, String>>,
+) {
     let mut stdout = std::io::stdout().lock();
     match format {
         ListOutputFormat::Plain => render_list_plain(graph, &mut stdout),
         ListOutputFormat::Json => {
             let pretty = stdout.is_terminal();
-            render_list_json(graph, fields, &mut stdout, pretty);
+            render_list_json(graph, fields, sql_contents, &mut stdout, pretty);
         }
     }
 }
@@ -79,29 +52,17 @@ pub fn render_list_plain<W: Write>(graph: &LineageGraph, w: &mut W) {
 pub fn render_list_json<W: Write>(
     graph: &LineageGraph,
     fields: &HashSet<String>,
+    sql_contents: Option<&HashMap<String, String>>,
     w: &mut W,
     pretty: bool,
 ) {
-    let all_fields: HashSet<String> = LIST_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect();
-    let use_all = *fields == all_fields;
-
     let mut nodes: Vec<(String, String, Value)> = graph
         .node_indices()
         .map(|idx| {
             let node = &graph[idx];
-            let full = ListNode {
-                unique_id: node.unique_id.clone(),
-                label: node.label.clone(),
-                node_type: node.node_type.label().to_string(),
-                file_path: node.file_path.as_ref().map(|p| p.to_string_lossy().into()),
-            };
-            let sort_key_type = full.node_type.clone();
-            let sort_key_label = full.label.clone();
-            let value = if use_all {
-                serde_json::to_value(&full).unwrap()
-            } else {
-                super::json::filter_fields(serde_json::to_value(&full).unwrap(), fields)
-            };
+            let sort_key_type = node.node_type.label().to_string();
+            let sort_key_label = node.label.clone();
+            let value = build_node_value(node, fields, sql_contents);
             (sort_key_type, sort_key_label, value)
         })
         .collect();
@@ -121,7 +82,7 @@ mod tests {
     use super::*;
 
     fn all_fields() -> HashSet<String> {
-        LIST_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()
+        super::super::json::GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()
     }
 
     fn make_node(unique_id: &str, label: &str, node_type: NodeType) -> NodeData {
@@ -178,7 +139,7 @@ mod tests {
     fn test_json_sorted_output() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
@@ -196,7 +157,7 @@ mod tests {
     fn test_json_compact_single_line() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 1, "compact JSON should be a single line");
@@ -206,7 +167,7 @@ mod tests {
     fn test_json_pretty_multi_line() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, true);
+        render_list_json(&graph, &all_fields(), None, &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert!(lines.len() > 1, "pretty JSON should be multi-line");
@@ -216,7 +177,7 @@ mod tests {
     fn test_json_empty_graph() {
         let graph = LineageGraph::new();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert!(parsed.is_empty());
@@ -227,7 +188,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("model.orders", "orders", NodeType::Model));
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed[0]["unique_id"], "model.orders");
@@ -247,7 +208,7 @@ mod tests {
             columns: vec![],
         });
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed[0]["file_path"], "models/orders.sql");
@@ -258,7 +219,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false);
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert!(parsed[0].get("file_path").is_none());
@@ -277,7 +238,7 @@ mod tests {
     fn test_snapshot_list_json() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), &mut buf, true);
+        render_list_json(&graph, &all_fields(), None, &mut buf, true);
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }

@@ -112,7 +112,7 @@ fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) 
     if !matches!(args.output, cli::OutputFormat::Json)
         && (args.json_fields.is_some() || args.json_full)
     {
-        dlin::warn!("--json-fields/--json-full have no effect with -o {}", format!("{:?}", args.output).to_lowercase());
+        dlin::warn!("--json-fields/--json-full have no effect with -o {}", args.output.label());
     }
 
     // Render
@@ -198,7 +198,14 @@ fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) ->
         dlin::warn!("--json-fields/--json-full have no effect with -o plain");
     }
 
-    render::list::render_list(&filtered, &args.output, &json_fields);
+    // Collect SQL contents only when sql_content field is requested
+    let sql_contents = if json_fields.contains("sql_content") {
+        Some(collect_sql_contents(&filtered, &project_dir))
+    } else {
+        None
+    };
+
+    render::list::render_list(&filtered, &args.output, &json_fields, sql_contents.as_ref());
 
     Ok(())
 }

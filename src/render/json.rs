@@ -64,29 +64,72 @@ struct JsonGraph {
 }
 
 #[derive(Serialize)]
-struct JsonNodeFull {
-    unique_id: String,
-    label: String,
-    node_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    file_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    materialization: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tags: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    columns: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sql_content: Option<String>,
-}
-
-#[derive(Serialize)]
 struct JsonEdge {
     source: String,
     target: String,
     edge_type: String,
+}
+
+/// Build a JSON object containing only the requested fields for a node.
+pub fn build_node_value(
+    node: &NodeData,
+    fields: &HashSet<String>,
+    sql_contents: Option<&HashMap<String, String>>,
+) -> Value {
+    let mut map = serde_json::Map::new();
+    if fields.contains("unique_id") {
+        map.insert("unique_id".into(), Value::String(node.unique_id.clone()));
+    }
+    if fields.contains("label") {
+        map.insert("label".into(), Value::String(node.label.clone()));
+    }
+    if fields.contains("node_type") {
+        map.insert(
+            "node_type".into(),
+            Value::String(node.node_type.label().to_string()),
+        );
+    }
+    if fields.contains("file_path") {
+        if let Some(ref p) = node.file_path {
+            map.insert(
+                "file_path".into(),
+                Value::String(p.to_string_lossy().into()),
+            );
+        }
+    }
+    if fields.contains("description") {
+        if let Some(ref d) = node.description {
+            map.insert("description".into(), Value::String(d.clone()));
+        }
+    }
+    if fields.contains("materialization") {
+        if let Some(ref m) = node.materialization {
+            map.insert("materialization".into(), Value::String(m.clone()));
+        }
+    }
+    if fields.contains("tags") && !node.tags.is_empty() {
+        map.insert(
+            "tags".into(),
+            Value::Array(node.tags.iter().map(|t| Value::String(t.clone())).collect()),
+        );
+    }
+    if fields.contains("columns") && !node.columns.is_empty() {
+        map.insert(
+            "columns".into(),
+            Value::Array(
+                node.columns
+                    .iter()
+                    .map(|c| Value::String(c.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if fields.contains("sql_content") {
+        if let Some(sql) = sql_contents.and_then(|m| m.get(&node.unique_id)) {
+            map.insert("sql_content".into(), Value::String(sql.clone()));
+        }
+    }
+    Value::Object(map)
 }
 
 /// Render the lineage graph as JSON to stdout.
@@ -108,32 +151,12 @@ fn render_json_to_writer<W: Write>(
     w: &mut W,
     pretty: bool,
 ) {
-    let all_fields: HashSet<String> = GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect();
-    let use_all = *fields == all_fields;
-
     let mut nodes: Vec<(String, Value)> = graph
         .node_indices()
         .map(|idx| {
             let node = &graph[idx];
-            let full = JsonNodeFull {
-                unique_id: node.unique_id.clone(),
-                label: node.label.clone(),
-                node_type: node.node_type.label().to_string(),
-                file_path: node.file_path.as_ref().map(|p| p.to_string_lossy().into()),
-                description: node.description.clone(),
-                materialization: node.materialization.clone(),
-                tags: node.tags.clone(),
-                columns: node.columns.clone(),
-                sql_content: sql_contents
-                    .and_then(|m| m.get(&node.unique_id))
-                    .cloned(),
-            };
             let sort_key = node.unique_id.clone();
-            let value = if use_all {
-                serde_json::to_value(&full).unwrap()
-            } else {
-                filter_fields(serde_json::to_value(&full).unwrap(), fields)
-            };
+            let value = build_node_value(node, fields, sql_contents);
             (sort_key, value)
         })
         .collect();
@@ -166,20 +189,6 @@ fn render_json_to_writer<W: Write>(
         serde_json::to_writer(&mut *w, &json_graph).unwrap();
     }
     writeln!(w).unwrap();
-}
-
-/// Keep only the specified fields from a JSON object.
-pub fn filter_fields(value: Value, fields: &HashSet<String>) -> Value {
-    match value {
-        Value::Object(map) => {
-            let filtered: serde_json::Map<String, Value> = map
-                .into_iter()
-                .filter(|(k, _)| fields.contains(k))
-                .collect();
-            Value::Object(filtered)
-        }
-        other => other,
-    }
 }
 
 fn edge_type_label(edge_type: EdgeType) -> String {

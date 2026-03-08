@@ -329,7 +329,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
     #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
     pub json_fields: Option<Vec<String>>,
 
@@ -351,6 +351,21 @@ pub enum OutputFormat {
     Plain,
     Svg,
     Html,
+}
+
+impl OutputFormat {
+    /// Return the lowercase label for this output format.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Ascii => "ascii",
+            Self::Dot => "dot",
+            Self::Json => "json",
+            Self::Mermaid => "mermaid",
+            Self::Plain => "plain",
+            Self::Svg => "svg",
+            Self::Html => "html",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
