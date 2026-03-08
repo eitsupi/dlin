@@ -52,7 +52,7 @@ fn render_json_to_writer<W: Write>(
     w: &mut W,
     pretty: bool,
 ) {
-    let nodes: Vec<JsonNode> = graph
+    let mut nodes: Vec<JsonNode> = graph
         .node_indices()
         .map(|idx| {
             let node = &graph[idx];
@@ -71,8 +71,9 @@ fn render_json_to_writer<W: Write>(
             }
         })
         .collect();
+    nodes.sort_unstable_by(|a, b| a.unique_id.cmp(&b.unique_id));
 
-    let edges: Vec<JsonEdge> = graph
+    let mut edges: Vec<JsonEdge> = graph
         .edge_references()
         .map(|edge| {
             let source = &graph[edge.source()];
@@ -84,6 +85,12 @@ fn render_json_to_writer<W: Write>(
             }
         })
         .collect();
+    edges.sort_unstable_by(|a, b| {
+        a.source
+            .cmp(&b.source)
+            .then(a.target.cmp(&b.target))
+            .then(a.edge_type.cmp(&b.edge_type))
+    });
 
     let json_graph = JsonGraph { nodes, edges };
     if pretty {
@@ -224,9 +231,52 @@ mod tests {
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let nodes = parsed["nodes"].as_array().unwrap();
-        for (i, (_, _, expected_type)) in types.iter().enumerate() {
-            assert_eq!(nodes[i]["node_type"], *expected_type);
-        }
+        // Nodes are sorted by unique_id; verify all expected types are present
+        let mut actual: Vec<(&str, &str)> = nodes
+            .iter()
+            .map(|n| (n["unique_id"].as_str().unwrap(), n["node_type"].as_str().unwrap()))
+            .collect();
+        actual.sort();
+        let mut expected: Vec<(&str, &str)> = types.iter().map(|(id, _, t)| (*id, *t)).collect();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_deterministic_node_order() {
+        let mut graph = LineageGraph::new();
+        // Add nodes in reverse alphabetical order
+        graph.add_node(make_node("model.z_last", "z_last", NodeType::Model));
+        graph.add_node(make_node("model.a_first", "a_first", NodeType::Model));
+        graph.add_node(make_node("model.m_middle", "m_middle", NodeType::Model));
+        let output = render_to_string(&graph);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let nodes = parsed["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["unique_id"], "model.a_first");
+        assert_eq!(nodes[1]["unique_id"], "model.m_middle");
+        assert_eq!(nodes[2]["unique_id"], "model.z_last");
+    }
+
+    #[test]
+    fn test_deterministic_edge_order() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
+        // Add edges in reverse order
+        graph.add_edge(c, a, EdgeData { edge_type: EdgeType::Ref });
+        graph.add_edge(a, b, EdgeData { edge_type: EdgeType::Ref });
+        graph.add_edge(a, c, EdgeData { edge_type: EdgeType::Ref });
+        let output = render_to_string(&graph);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let edges = parsed["edges"].as_array().unwrap();
+        // Sorted by (source, target)
+        assert_eq!(edges[0]["source"], "model.a");
+        assert_eq!(edges[0]["target"], "model.b");
+        assert_eq!(edges[1]["source"], "model.a");
+        assert_eq!(edges[1]["target"], "model.c");
+        assert_eq!(edges[2]["source"], "model.c");
+        assert_eq!(edges[2]["target"], "model.a");
     }
 
     #[test]
