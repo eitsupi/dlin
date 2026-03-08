@@ -38,6 +38,43 @@ Edges:
   src:raw.customers ──src──> stg_customers
 ```
 
+Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML. For example, `dlin graph -o mermaid` produces:
+
+```mermaid
+flowchart LR
+    model_customers["customers"]
+    model_order_summary["order_summary"]
+    model_orders["orders"]
+    model_stg_customers["stg_customers"]
+    model_stg_orders["stg_orders"]
+    model_stg_payments["stg_payments"]
+    source_raw_customers(["raw.customers"])
+    source_raw_orders(["raw.orders"])
+    source_raw_payments(["raw.payments"])
+
+    model_orders -->|ref| model_customers
+    model_stg_customers -->|ref| model_customers
+    model_stg_orders -->|ref| model_order_summary
+    model_stg_orders -->|ref| model_orders
+    model_stg_payments -->|ref| model_order_summary
+    model_stg_payments -->|ref| model_orders
+    source_raw_customers -.->|source| model_stg_customers
+    source_raw_orders -.->|source| model_stg_orders
+    source_raw_payments -.->|source| model_stg_payments
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    class model_customers model
+    class model_order_summary model
+    class model_orders model
+    class model_stg_customers model
+    class model_stg_orders model
+    class model_stg_payments model
+    class source_raw_customers source
+    class source_raw_orders source
+    class source_raw_payments source
+```
+
 ## Usage examples
 
 ### Graph — visualize lineage

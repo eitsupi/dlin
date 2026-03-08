@@ -16,32 +16,39 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
         return;
     }
 
+    // Collect and sort nodes by unique_id
+    let mut nodes: Vec<_> = graph.node_indices().map(|idx| &graph[idx]).collect();
+    nodes.sort_by_key(|n| &n.unique_id);
+
     // Render nodes with type-specific shapes
-    for idx in graph.node_indices() {
-        let node = &graph[idx];
+    for node in &nodes {
         let id = mermaid_id(&node.unique_id);
         let label = &node.label;
         let shape = match node.node_type {
-            NodeType::Model => format!("{}[\"{}\"]\n", id, label),
-            NodeType::Source => format!("{}([\"{}\"]) \n", id, label),
-            NodeType::Seed => format!("{}[/\"{}\"\\]\n", id, label),
-            NodeType::Snapshot => format!("{}{{{{\"{}\"}}}} \n", id, label),
-            NodeType::Test => format!("{}{{\"{}\"}} \n", id, label),
+            NodeType::Model => format!("{}[\"{}\"]", id, label),
+            NodeType::Source => format!("{}([\"{}\"])", id, label),
+            NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
+            NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}",  id, label),
+            NodeType::Test => format!("{}{{\"{}\"}}", id, label),
             NodeType::Exposure => format!("{}>\"{}\"]\n", id, label),
-            NodeType::Phantom => format!("{}(\"{}\")\n", id, label),
+            NodeType::Phantom => format!("{}(\"{}\")", id, label),
         };
-        write!(w, "    {}", shape).unwrap();
+        writeln!(w, "    {}", shape).unwrap();
     }
 
     writeln!(w).unwrap();
 
-    // Render edges
-    for edge in graph.edge_references() {
+    // Collect and sort edges by (source_id, target_id, edge_type)
+    let mut edges: Vec<_> = graph.edge_references().map(|edge| {
         let source = &graph[edge.source()];
         let target = &graph[edge.target()];
-        let src_id = mermaid_id(&source.unique_id);
-        let tgt_id = mermaid_id(&target.unique_id);
-        let arrow = match edge.weight().edge_type {
+        (mermaid_id(&source.unique_id), mermaid_id(&target.unique_id), edge.weight().edge_type.clone())
+    }).collect();
+    edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(format!("{:?}", a.2).cmp(&format!("{:?}", b.2))));
+
+    // Render edges
+    for (src_id, tgt_id, edge_type) in &edges {
+        let arrow = match edge_type {
             EdgeType::Ref => format!("    {} -->|ref| {}", src_id, tgt_id),
             EdgeType::Source => format!("    {} -.->|source| {}", src_id, tgt_id),
             EdgeType::Test => format!("    {} -.->|test| {}", src_id, tgt_id),
@@ -52,30 +59,30 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
 
     writeln!(w).unwrap();
 
-    // Style classes for node types
-    writeln!(w, "    classDef model fill:#4A90D9,stroke:#333,color:#fff").unwrap();
-    writeln!(w, "    classDef source fill:#27AE60,stroke:#333,color:#fff").unwrap();
-    writeln!(w, "    classDef seed fill:#F39C12,stroke:#333,color:#fff").unwrap();
-    writeln!(
-        w,
-        "    classDef snapshot fill:#8E44AD,stroke:#333,color:#fff"
-    )
-    .unwrap();
-    writeln!(w, "    classDef test fill:#1ABC9C,stroke:#333,color:#fff").unwrap();
-    writeln!(
-        w,
-        "    classDef exposure fill:#E74C3C,stroke:#333,color:#fff"
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "    classDef phantom fill:#BDC3C7,stroke:#333,color:#000"
-    )
-    .unwrap();
+    // Collect used node types
+    let mut used_types: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for node in &nodes {
+        used_types.insert(node.node_type.label());
+    }
 
-    // Apply classes
-    for idx in graph.node_indices() {
-        let node = &graph[idx];
+    // Style classes — only for types present in the graph
+    let class_defs = [
+        ("model", "fill:#4A90D9,stroke:#333,color:#fff"),
+        ("source", "fill:#27AE60,stroke:#333,color:#fff"),
+        ("seed", "fill:#F39C12,stroke:#333,color:#fff"),
+        ("snapshot", "fill:#8E44AD,stroke:#333,color:#fff"),
+        ("test", "fill:#1ABC9C,stroke:#333,color:#fff"),
+        ("exposure", "fill:#E74C3C,stroke:#333,color:#fff"),
+        ("phantom", "fill:#BDC3C7,stroke:#333,color:#000"),
+    ];
+    for (name, style) in &class_defs {
+        if used_types.contains(name) {
+            writeln!(w, "    classDef {} {}", name, style).unwrap();
+        }
+    }
+
+    // Apply classes (sorted by unique_id via nodes)
+    for node in &nodes {
         let id = mermaid_id(&node.unique_id);
         let class = node.node_type.label();
         writeln!(w, "    class {} {}", id, class).unwrap();
@@ -219,17 +226,29 @@ mod tests {
     }
 
     #[test]
-    fn test_style_classes() {
+    fn test_style_classes_only_used_types() {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("model.a", "a", NodeType::Model));
         let output = render_to_string(&graph);
+        // Only model classDef should be present
+        assert!(output.contains("classDef model fill:#4A90D9"));
+        assert!(!output.contains("classDef source"));
+        assert!(!output.contains("classDef seed"));
+        assert!(!output.contains("classDef snapshot"));
+        assert!(!output.contains("classDef test"));
+        assert!(!output.contains("classDef exposure"));
+        assert!(!output.contains("classDef phantom"));
+    }
+
+    #[test]
+    fn test_style_classes_multiple_types() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        graph.add_node(make_node("source.raw.b", "raw.b", NodeType::Source));
+        let output = render_to_string(&graph);
         assert!(output.contains("classDef model fill:#4A90D9"));
         assert!(output.contains("classDef source fill:#27AE60"));
-        assert!(output.contains("classDef seed fill:#F39C12"));
-        assert!(output.contains("classDef snapshot fill:#8E44AD"));
-        assert!(output.contains("classDef test fill:#1ABC9C"));
-        assert!(output.contains("classDef exposure fill:#E74C3C"));
-        assert!(output.contains("classDef phantom fill:#BDC3C7"));
+        assert!(!output.contains("classDef seed"));
     }
 
     #[test]
