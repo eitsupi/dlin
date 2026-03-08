@@ -168,14 +168,14 @@ fn render_with_incremental(sql: &str, is_incremental: bool) -> Option<JinjaExtra
     // this → dummy relation object
     env.add_global("this", Value::from("__dbt_this__"));
 
-    // var() → returns default or empty string
+    // var() → returns default or truthy sentinel (so {% if var('x') %} blocks are entered)
     env.add_function(
         "var",
         |args: &[Value]| -> Result<Value, minijinja::Error> {
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
-                Ok(Value::from(""))
+                Ok(Value::from("__dbt_var_unknown__"))
             }
         },
     );
