@@ -725,7 +725,8 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        // Use no_cache: false to exercise the cache-enabled path end-to-end
+        let graph = build_graph(&project_dir, &files, None, false).unwrap();
 
         // Should have source + 2 models = 3 nodes
         assert_eq!(graph.node_count(), 3);

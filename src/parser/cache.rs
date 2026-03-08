@@ -35,7 +35,8 @@ struct CacheFile {
 pub struct ExtractionCache {
     macro_prefix_hash: u64,
     entries: HashMap<String, CacheEntry>,
-    cache_path: PathBuf,
+    /// `None` when the cache is disabled (no-op mode).
+    cache_path: Option<PathBuf>,
     dirty: bool,
 }
 
@@ -45,7 +46,7 @@ impl ExtractionCache {
         Self {
             macro_prefix_hash: 0,
             entries: HashMap::new(),
-            cache_path: PathBuf::new(),
+            cache_path: None,
             dirty: false,
         }
     }
@@ -73,7 +74,7 @@ impl ExtractionCache {
         Self {
             macro_prefix_hash: hash,
             entries,
-            cache_path,
+            cache_path: Some(cache_path),
             dirty: false,
         }
     }
@@ -109,14 +110,15 @@ impl ExtractionCache {
 
     /// Save the cache to disk if it has been modified.
     pub fn save(&self) {
-        if !self.dirty || self.cache_path.as_os_str().is_empty() {
-            return;
-        }
+        let cache_path = match (&self.cache_path, self.dirty) {
+            (Some(p), true) => p,
+            _ => return,
+        };
         let cf = CacheFile {
             macro_prefix_hash: self.macro_prefix_hash,
             entries: self.entries.clone(),
         };
-        if let Some(parent) = self.cache_path.parent() {
+        if let Some(parent) = cache_path.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 crate::warn!("could not create cache directory: {}", parent.display());
                 return;
@@ -134,8 +136,8 @@ impl ExtractionCache {
         }
         match serde_json::to_string(&cf) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&self.cache_path, json) {
-                    crate::warn!("could not write cache file {}: {}", self.cache_path.display(), e);
+                if let Err(e) = std::fs::write(cache_path, json) {
+                    crate::warn!("could not write cache file {}: {}", cache_path.display(), e);
                 }
             }
             Err(e) => {
