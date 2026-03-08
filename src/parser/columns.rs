@@ -8,10 +8,6 @@ static JINJA_TAG: LazyLock<Regex> =
 /// Regex to strip Jinja comments {# ... #}
 static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
 
-/// Match the beginning of a SELECT clause (possibly with DISTINCT).
-static SELECT_START: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)\bSELECT\b\s+(?:DISTINCT\s+)?").unwrap());
-
 /// Extract column names from the outermost SELECT clause of a SQL string.
 ///
 /// This is a best-effort regex-based extraction, not a full SQL parser.
@@ -29,14 +25,16 @@ pub fn extract_select_columns(sql: &str) -> Vec<String> {
     let cleaned = JINJA_COMMENT.replace_all(sql, "");
     let cleaned = JINJA_TAG.replace_all(&cleaned, "__jinja__");
 
-    // Find the first SELECT keyword
-    let m = match SELECT_START.find(&cleaned) {
-        Some(m) => m,
+    // Find the last top-level SELECT keyword (not inside parentheses).
+    // This handles CTEs correctly: `WITH cte AS (SELECT ... ) SELECT ...`
+    // where the CTE's SELECT is inside parentheses.
+    let select_end = match find_last_top_level_select(&cleaned) {
+        Some(end) => end,
         None => return vec![],
     };
 
     // Find the first top-level FROM after the SELECT (not inside parentheses)
-    let after_select = &cleaned[m.end()..];
+    let after_select = &cleaned[select_end..];
     let select_body = match find_top_level_from(after_select) {
         Some(pos) => &after_select[..pos],
         None => return vec![],
@@ -68,6 +66,70 @@ fn classify_select_item(item: &str) -> Option<String> {
     } else {
         Some(col)
     }
+}
+
+/// Find the byte offset just after the last top-level SELECT keyword (not inside parentheses).
+/// Also skips DISTINCT if present. Returns the position where the column list begins.
+fn find_last_top_level_select(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut depth: i32 = 0;
+    let mut last_select_end: Option<usize> = None;
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b's' | b'S' if depth == 0 => {
+                if check_keyword_at(bytes, i, len, b"SELECT") {
+                    let end = i + 6;
+                    // Skip optional DISTINCT
+                    let after = skip_whitespace(bytes, end, len);
+                    if check_keyword_at(bytes, after, len, b"DISTINCT") {
+                        let after_distinct = skip_whitespace(bytes, after + 8, len);
+                        last_select_end = Some(after_distinct);
+                    } else {
+                        last_select_end = Some(after);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    last_select_end
+}
+
+/// Check if the bytes at position `i` match the given keyword (case-insensitive)
+/// with word boundaries on both sides.
+fn check_keyword_at(bytes: &[u8], i: usize, len: usize, keyword: &[u8]) -> bool {
+    let klen = keyword.len();
+    if i + klen > len {
+        return false;
+    }
+    for j in 0..klen {
+        if !bytes[i + j].eq_ignore_ascii_case(&keyword[j]) {
+            return false;
+        }
+    }
+    let before_ok = i == 0 || is_word_boundary(bytes[i - 1]);
+    let after_ok = i + klen >= len || is_word_boundary(bytes[i + klen]);
+    before_ok && after_ok
+}
+
+/// Skip whitespace characters and return the next non-whitespace position.
+fn skip_whitespace(bytes: &[u8], start: usize, len: usize) -> usize {
+    let mut i = start;
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 /// Check if a byte is a word boundary character (not alphanumeric and not underscore)
@@ -338,17 +400,28 @@ mod tests {
             )
             SELECT outer_col1, outer_col2 FROM cte
         "#;
-        // The first SELECT...FROM is inside the CTE.
-        // For a basic regex approach, we get the first SELECT...FROM found.
-        // This returns the CTE's columns. For most dbt models, the outermost
-        // query is the final SELECT, but with CTEs the regex finds the first one.
-        // This is a known limitation of the regex approach.
         let cols = extract_select_columns(sql);
-        // The CTE's SELECT is wrapped in parens, so the regex actually
-        // matches the outer SELECT because the inner one is inside parens
-        // following "AS (" and the FROM at the end of "FROM raw_table" is
-        // consumed. Let's verify what we actually get.
-        assert!(!cols.is_empty());
+        assert_eq!(cols, vec!["outer_col1", "outer_col2"]);
+    }
+
+    #[test]
+    fn test_multiple_ctes_gets_final_select() {
+        let sql = r#"
+            WITH cte1 AS (
+                SELECT * FROM raw_table
+            ),
+            cte2 AS (
+                SELECT a, b FROM cte1
+            )
+            SELECT
+                onramp_name,
+                count(distinct client_id) as total_known_clients,
+                sum(total_deals) as total_deals
+            FROM cte2
+            GROUP BY 1
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["onramp_name", "total_known_clients", "total_deals"]);
     }
 
     #[test]

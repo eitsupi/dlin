@@ -287,6 +287,7 @@ When using `--source sql` (the default), dlin extracts dependencies via regex wi
 - **`var()` dynamic references** — `{{ ref(var('model_name')) }}` or `source(var('schema'), var('table'))` cannot be traced because variable values are only known at dbt runtime
 - **Runtime context** — expressions like `target.type`, `target.name`, or `env_var()` are not evaluated, so conditional branches depending on them may produce incomplete results
 - **Conditional Jinja blocks** — `{% if var('flag') %}...{% endif %}` blocks are evaluated with default values via minijinja; refs inside branches that require non-default values may be missed
+- **Column extraction** — column lists are determined from YAML schema definitions (`models:` → `columns:`) when available. If no YAML columns are defined, dlin falls back to best-effort regex extraction from the final SELECT clause. This fallback cannot resolve `SELECT *`, computed columns from CTEs, or Jinja-generated column lists. For accurate column metadata, define columns in your YAML schema files or use `--source manifest`
 
 For full-fidelity graphs, use `--source manifest --manifest-path target/manifest.json` with a pre-compiled manifest.
 

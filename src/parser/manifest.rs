@@ -33,6 +33,9 @@ pub struct ManifestNode {
     pub config: ManifestConfig,
     pub description: Option<String>,
     pub path: Option<String>,
+    /// Column definitions keyed by column name
+    #[serde(default)]
+    pub columns: HashMap<String, ManifestColumn>,
 }
 
 /// A source entry in the manifest
@@ -45,6 +48,15 @@ pub struct ManifestSource {
     pub resource_type: String,
     pub description: Option<String>,
     pub path: Option<String>,
+    /// Column definitions keyed by column name
+    #[serde(default)]
+    pub columns: HashMap<String, ManifestColumn>,
+}
+
+/// A column entry in the manifest
+#[derive(Debug, Deserialize)]
+pub struct ManifestColumn {
+    pub name: String,
 }
 
 /// An exposure entry in the manifest
@@ -172,7 +184,7 @@ fn add_source_nodes(
             description: non_empty_string(&source.description),
             materialization: None,
             tags: vec![],
-            columns: vec![],
+            columns: source.columns.keys().cloned().collect(),
         });
         node_map.insert(orig_id.clone(), idx);
         // Also index by simplified id for edge resolution
@@ -197,7 +209,7 @@ fn add_regular_nodes(
             description: non_empty_string(&node.description),
             materialization: node.config.materialized.clone(),
             tags: node.config.tags.clone(),
-            columns: vec![],
+            columns: node.columns.keys().cloned().collect(),
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -380,6 +392,7 @@ mod tests {
                     },
                     description: Some("Staged orders".to_string()),
                     path: Some("models/staging/stg_orders.sql".to_string()),
+                    columns: HashMap::new(),
                 },
             )]),
             sources: HashMap::from([(
@@ -391,6 +404,7 @@ mod tests {
                     resource_type: "source".to_string(),
                     description: Some("Raw orders table".to_string()),
                     path: Some("models/staging/schema.yml".to_string()),
+                    columns: HashMap::new(),
                 },
             )]),
             exposures: HashMap::new(),
@@ -434,6 +448,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    columns: HashMap::new(),
                 },
             )]),
             sources: HashMap::new(),
@@ -479,6 +494,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("seeds/countries.csv".to_string()),
+                        columns: HashMap::new(),
                     },
                 ),
                 (
@@ -494,6 +510,7 @@ mod tests {
                         },
                         description: None,
                         path: Some("snapshots/snap_orders.sql".to_string()),
+                        columns: HashMap::new(),
                     },
                 ),
             ]),
@@ -531,6 +548,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
                 (
@@ -545,6 +563,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("tests/assert_positive.sql".to_string()),
+                        columns: HashMap::new(),
                     },
                 ),
             ]),
@@ -592,6 +611,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    columns: HashMap::new(),
                 },
             )]),
             sources: HashMap::new(),
@@ -619,6 +639,7 @@ mod tests {
                     },
                     description: None,
                     path: None,
+                    columns: HashMap::new(),
                 },
             )]),
             sources: HashMap::new(),
@@ -699,6 +720,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    columns: HashMap::new(),
                 },
             )]),
             sources: HashMap::new(),
@@ -730,6 +752,7 @@ mod tests {
                         },
                         description: None,
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
                 (
@@ -744,6 +767,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
                 (
@@ -764,6 +788,7 @@ mod tests {
                         },
                         description: Some("Order fact table".to_string()),
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
             ]),
@@ -777,6 +802,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
                 (
@@ -788,6 +814,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: None,
+                        columns: HashMap::new(),
                     },
                 ),
             ]),

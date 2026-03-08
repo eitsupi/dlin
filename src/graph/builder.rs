@@ -166,6 +166,7 @@ struct YamlModelMeta {
     description: Option<String>,
     materialization: Option<String>,
     tags: Vec<String>,
+    columns: Vec<String>,
 }
 
 /// Parse YAML schema files: create source nodes, collect model metadata and exposures
@@ -189,6 +190,7 @@ fn process_yaml_files(
         for model_def in &schema.models {
             let mut meta = YamlModelMeta {
                 description: model_def.description.clone(),
+                columns: model_def.columns.iter().map(|c| c.name.clone()).collect(),
                 ..Default::default()
             };
             // Merge tags from model-level and config-level
@@ -331,6 +333,12 @@ fn process_model_files(
             .unwrap_or(&me.sql_path)
             .to_path_buf();
 
+        // Prefer YAML-defined columns; fall back to SQL extraction (best-effort)
+        let columns = match yaml_meta {
+            Some(m) if !m.columns.is_empty() => m.columns.clone(),
+            _ => me.columns,
+        };
+
         gb.add_node(NodeData {
             unique_id,
             label: me.model_name,
@@ -339,7 +347,7 @@ fn process_model_files(
             description: yaml_meta.and_then(|m| m.description.clone()),
             materialization,
             tags,
-            columns: me.columns,
+            columns,
         });
     }
 
