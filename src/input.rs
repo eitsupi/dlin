@@ -43,20 +43,28 @@ pub fn read_stdin_lines() -> Vec<String> {
     // In non-TTY environments (CI, AI agents), stdin may be connected to
     // /dev/null or other non-pipe sources that shouldn't be read.
     // Only proceed if stdin is actually a pipe (FIFO) or regular file.
+    // We query metadata via the raw file descriptor (fd 0) rather than
+    // /dev/stdin so this works in minimal containers that lack /dev/stdin.
     // TODO: Add Windows support using GetFileType() Win32 API to check for
     // FILE_TYPE_PIPE / FILE_TYPE_DISK. Currently Windows falls back to the
     // is_terminal() check only.
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
-        match std::fs::metadata("/dev/stdin") {
-            Ok(meta) => {
-                let ft = meta.file_type();
-                if !ft.is_fifo() && !ft.is_file() {
-                    return Vec::new();
-                }
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        // Safety: we wrap fd 0 in a File temporarily to call metadata(),
+        // then forget it so stdin is not closed.
+        let ft = {
+            let f = unsafe { std::fs::File::from_raw_fd(stdin.as_raw_fd()) };
+            let meta = f.metadata();
+            std::mem::forget(f);
+            match meta {
+                Ok(m) => m.file_type(),
+                Err(_) => return Vec::new(),
             }
-            Err(_) => return Vec::new(),
+        };
+        if !ft.is_fifo() && !ft.is_file() {
+            return Vec::new();
         }
     }
 
@@ -756,5 +764,30 @@ models:
             }
             other => panic!("Expected SqlFile, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    // --- stdin file-type detection tests ---
+
+    /// Verify that the fd-based metadata approach correctly identifies
+    /// /dev/null as neither a FIFO nor a regular file (so it would be skipped).
+    #[cfg(unix)]
+    #[test]
+    fn test_dev_null_is_not_fifo_or_file() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let f = std::fs::File::open("/dev/null").unwrap();
+        let ft = f.metadata().unwrap().file_type();
+        // /dev/null is a character device — not a pipe, not a regular file
+        assert!(!ft.is_fifo());
+        assert!(!ft.is_file());
+    }
+
+    /// Verify that a regular file is correctly detected as a file (readable stdin source).
+    #[cfg(unix)]
+    #[test]
+    fn test_regular_file_is_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let ft = tmp.as_file().metadata().unwrap().file_type();
+        assert!(ft.is_file());
     }
 }
