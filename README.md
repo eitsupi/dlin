@@ -10,7 +10,9 @@ Supports both direct SQL parsing (no dbt compilation or Python runtime needed) a
 - **Manifest support** — optionally read `manifest.json` for column metadata, materializations, and full graph fidelity
 - **Interactive TUI** — navigate, search, and explore lineage in a terminal UI (ratatui) with Unicode box-drawing nodes, orthogonal edge routing, and full mouse support
 - **Impact analysis** — `dlin impact <model>` computes downstream impact with severity scoring (Critical/High/Medium/Low)
+- **Node listing** — `dlin list` enumerates nodes with `--json-fields` for field selection (useful for CI pipelines)
 - **7 output formats** — ASCII, Graphviz DOT, JSON, Mermaid, Plain, self-contained SVG, and interactive HTML (pan/zoom/search)
+- **JSON field selection** — `--json-fields unique_id,label` to emit only specified fields, or `--json-full` for all fields
 - **Stdin/pipe support** — accepts model names or file paths from stdin (e.g., `git diff --name-only | dlin graph`)
 - **Run dbt from TUI** — execute `dbt run` / `dbt test` on selected models with scope control (`+upstream`, `downstream+`, `+all+`) via keyboard menu or right-click context menu
 - **Run status tracking** — color-coded nodes show success (green), error (red), outdated (yellow), or never-run (default)
@@ -90,6 +92,42 @@ echo -e "stg_orders\norders" | dlin graph
 
 When stdin contains file paths (detected by path separators or file extensions), they are automatically resolved to dbt model names.
 
+### Node listing
+
+```sh
+# List all models and sources
+dlin list
+
+# List specific models
+dlin list orders stg_orders
+
+# List as JSON
+dlin list -o json
+
+# List only source nodes
+dlin list --node-type source
+
+# JSON with specific fields
+dlin list orders -o json --json-fields unique_id,sql_content
+
+# JSON with all fields
+dlin list -o json --json-full
+```
+
+### Pipelines
+
+Combine subcommands for CI/automation workflows:
+
+```sh
+# Get impacted model names, then fetch their SQL content
+dlin impact orders -o json \
+  | jq -r '.[].impacted_nodes[].unique_id' \
+  | dlin list -o json --json-fields unique_id,sql_content
+
+# List changed models with metadata
+git diff --name-only main | dlin list -o json --json-fields unique_id,label,description
+```
+
 ### Interactive TUI
 
 ```sh
@@ -105,7 +143,6 @@ Compute downstream impact for one or more models with severity scoring:
 ```sh
 dlin impact orders -p path/to/project            # text report
 dlin impact orders stg_orders -o json             # JSON for CI (multiple models)
-dlin impact orders --show-sql -o json             # include SQL content in output
 dlin impact orders --source manifest --manifest-path target/manifest.json
 ```
 
@@ -122,6 +159,7 @@ Usage: dlin <COMMAND>
 
 Commands:
   graph   Visualize dbt model lineage graph
+  list    List nodes in the dbt project (lightweight, no edges)
   impact  Compute downstream impact analysis for a model
 ```
 
@@ -151,8 +189,40 @@ Options:
       --include-seeds             Include seed nodes
       --include-snapshots         Include snapshot nodes
       --include-exposures         Include exposure nodes
-      --show-sql                  [Experimental] Include SQL file contents for each
-                                  node in JSON and plain output
+      --json-fields <FIELDS>      Select which fields to include in JSON output
+                                  (comma-separated). Default: unique_id, label,
+                                  node_type, file_path
+      --json-full                 Include all available fields in JSON output
+  -h, --help                      Print help
+```
+
+### `dlin list`
+
+```
+Usage: dlin list [OPTIONS] [MODEL]...
+
+Arguments:
+  [MODEL]...  Model names to list (lists all nodes if omitted)
+
+Options:
+  -p, --project-dir <PATH>       Path to dbt project directory [default: .]
+  -o, --output <FORMAT>           Output format [default: plain]
+                                  [values: plain, json]
+  -s, --select <SELECTOR>         Selector expression: tag:X, path:Y, or model name
+                                  (comma-separated)
+      --node-type <TYPES>         Filter output by node type (comma-separated:
+                                  model, source, seed, snapshot, test, exposure)
+      --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
+      --manifest-path <PATH>      Path to manifest.json file or directory containing
+                                  target/manifest.json (required when --source manifest)
+      --include-tests             Include test nodes
+      --include-seeds             Include seed nodes
+      --include-snapshots         Include snapshot nodes
+      --include-exposures         Include exposure nodes
+      --json-fields <FIELDS>      Select which fields to include in JSON output
+                                  (comma-separated). Default: unique_id, label,
+                                  node_type, file_path
+      --json-full                 Include all available fields in JSON output
   -h, --help                      Print help
 ```
 
@@ -171,8 +241,6 @@ Options:
       --source <SOURCE>           Data source: sql (default) or manifest [default: sql]
       --manifest-path <PATH>      Path to manifest.json file or directory containing
                                   target/manifest.json (required when --source manifest)
-      --show-sql                  [Experimental] Include SQL file contents for each
-                                  impacted node
   -h, --help                      Print help
 ```
 

@@ -154,6 +154,20 @@ fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) ->
 
     let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir, no_cache)?;
 
+    // Merge CLI positional args and stdin, then resolve file paths to node names
+    let stdin_lines = input::read_stdin_lines();
+    let mut raw_inputs = args.model;
+    raw_inputs.extend(stdin_lines);
+    let models = if input::has_path_like_input(&raw_inputs) {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
+        let project = parser::project::DbtProject::load(&project_dir)?;
+        let resolved_paths = project.resolve_paths(&project_dir);
+        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+    } else {
+        raw_inputs
+    };
+
     // Parse selectors
     let selectors = args
         .select
@@ -161,12 +175,17 @@ fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) ->
         .map(graph::filter::parse_selectors)
         .unwrap_or_default();
 
-    // Filter graph
+    // Filter graph — when models are specified, use depth 0 (no traversal)
+    let (upstream, downstream) = if models.is_empty() {
+        (None, None)
+    } else {
+        (Some(0), Some(0))
+    };
     let filtered = graph::filter::filter_graph(
         &dag,
-        &[],
-        None,
-        None,
+        &models,
+        upstream,
+        downstream,
         &graph::filter::NodeTypeFilter {
             include_tests: args.include_tests,
             include_seeds: args.include_seeds,

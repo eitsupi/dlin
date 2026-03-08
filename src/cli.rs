@@ -30,6 +30,7 @@ Examples:
   dlin graph orders -u 2 -d 1             # orders with 2 upstream, 1 downstream
   dlin graph -o json --json-full           # JSON with all fields
   dlin list -o json                       # List all node names as JSON
+  dlin list orders stg_orders -o json     # List specific models as JSON
   dlin impact orders -o json              # Downstream impact analysis
   git diff --name-only main | dlin graph  # Lineage of changed files",
     version
@@ -195,7 +196,7 @@ pub enum Command {
     /// Visualize dbt model lineage graph
     Graph(GraphArgs),
 
-    /// List all nodes in the dbt project (lightweight, no edges)
+    /// List nodes in the dbt project (lightweight, no edges)
     List(ListArgs),
 
     /// Compute downstream impact analysis for a model (with severity scoring)
@@ -260,18 +261,28 @@ Examples:
 #[derive(Debug, clap::Args)]
 #[command(
     long_about = "\
-List all nodes in the dbt project (no edges, no depth traversal).
+List nodes in the dbt project (no edges, no depth traversal).
 
 A lightweight alternative to `graph` for enumerating nodes. \
 Outputs one node per line (plain) or a JSON array (json). \
 Useful for getting a quick inventory of models, sources, etc.
 
+When model names are given as positional arguments or via stdin, only those nodes \
+are listed. Without arguments, all nodes are listed.
+
 Plain output: one node name per line, sorted alphabetically.
-JSON output: array of objects with unique_id, label, node_type, and metadata.",
+JSON output: array of objects with unique_id, label, node_type, and metadata.
+
+Stdin/pipe support:
+  Accepts model names or file paths on stdin (one per line). \
+File paths are resolved to model names using dbt project configuration.",
     after_long_help = "\
 Examples:
   # List all models and sources
   dlin list
+
+  # List specific models
+  dlin list orders stg_orders
 
   # List as JSON for programmatic use
   dlin list -o json
@@ -286,9 +297,18 @@ Examples:
   dlin list --include-seeds --include-tests
 
   # Count models (combine with standard tools)
-  dlin list --node-type model | wc -l"
+  dlin list --node-type model | wc -l
+
+  # Pipeline: get impacted models, then fetch their SQL
+  dlin impact orders -o json | jq -r '.[].impacted_nodes[].unique_id' | dlin list -o json --json-fields unique_id,sql_content
+
+  # List models from changed files
+  git diff --name-only main | dlin list -o json --json-fields unique_id,label"
 )]
 pub struct ListArgs {
+    /// Model names to list (lists all nodes if omitted)
+    pub model: Vec<String>,
+
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
@@ -721,6 +741,7 @@ mod tests {
     #[test]
     fn test_list_default_args() {
         let args = unwrap_list(Cli::try_parse_from(["dlin", "list"]).unwrap());
+        assert!(args.model.is_empty());
         assert!(matches!(args.output, ListOutputFormat::Plain));
         assert!(!args.include_tests);
         assert!(!args.include_seeds);
@@ -731,6 +752,27 @@ mod tests {
         assert_eq!(args.source, SourceType::Sql);
         assert!(args.manifest_path.is_none());
         assert!(!args.quiet);
+    }
+
+    #[test]
+    fn test_list_with_models() {
+        let args = unwrap_list(
+            Cli::try_parse_from(["dlin", "list", "orders", "stg_orders"]).unwrap(),
+        );
+        assert_eq!(args.model, vec!["orders", "stg_orders"]);
+    }
+
+    #[test]
+    fn test_list_with_models_and_flags() {
+        let args = unwrap_list(
+            Cli::try_parse_from(["dlin", "list", "orders", "-o", "json", "--json-fields", "unique_id,sql_content"]).unwrap(),
+        );
+        assert_eq!(args.model, vec!["orders"]);
+        assert!(matches!(args.output, ListOutputFormat::Json));
+        assert_eq!(
+            args.json_fields,
+            Some(vec!["unique_id".to_string(), "sql_content".to_string()])
+        );
     }
 
     #[test]
