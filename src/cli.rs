@@ -14,7 +14,15 @@ HTML, or an interactive TUI.
 
 Data sources:
   sql (default)   Parse SQL files via regex + minijinja. No Python or dbt required.
-  manifest        Read a pre-compiled manifest.json for full accuracy.
+                  Detects ref() and source() calls in SQL, plus exposures from YAML.
+                  YAML-defined generic tests (not_null, unique, etc.) are NOT detected
+                  — use manifest mode for full test coverage.
+  manifest        Read a pre-compiled manifest.json for full accuracy. Requires
+                  `dbt compile` (or `dbt run`/`dbt build`) to have been run first.
+                  Use `dlin check-manifest` to verify freshness before querying.
+
+  Use sql mode for quick, local exploration without dbt setup. Switch to manifest
+  mode when you need complete test/exposure coverage or exact materialization info.
 
 Stdin support:
   Accepts model names or file paths from stdin. File paths (detected by extension \
@@ -155,7 +163,7 @@ pub struct GraphArgs {
     #[arg(short = 'o', long, default_value = "ascii")]
     pub output: OutputFormat,
 
-    /// Include test nodes (excluded by default)
+    /// Include test nodes (excluded by default). In sql mode, only inline tests defined in SQL files are detected; YAML-defined generic tests (not_null, unique, etc.) require manifest mode
     #[arg(long)]
     pub include_tests: bool,
 
@@ -183,7 +191,7 @@ pub struct GraphArgs {
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
-    /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
@@ -264,7 +272,7 @@ Examples:
         #[arg(short = 'o', long, default_value = "text")]
         output: ImpactOutputFormat,
 
-        /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+        /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
         #[arg(long, default_value = "sql")]
         source: SourceType,
 
@@ -406,7 +414,7 @@ pub struct ListArgs {
     #[arg(short = 'o', long, default_value = "plain")]
     pub output: ListOutputFormat,
 
-    /// Include test nodes (excluded by default)
+    /// Include test nodes (excluded by default). In sql mode, only inline tests defined in SQL files are detected; YAML-defined generic tests (not_null, unique, etc.) require manifest mode
     #[arg(long)]
     pub include_tests: bool,
 
@@ -434,7 +442,7 @@ pub struct ListArgs {
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
-    /// Data source: sql (parse SQL files, default) or manifest (use manifest.json)
+    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
@@ -483,9 +491,9 @@ impl OutputFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum SourceType {
-    /// Parse SQL files directly (default)
+    /// Parse SQL files directly — no dbt/Python required, but YAML-defined tests and exposures are not detected
     Sql,
-    /// Use dbt manifest.json
+    /// Use dbt manifest.json — full accuracy, requires prior `dbt compile`
     Manifest,
 }
 
