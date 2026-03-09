@@ -90,22 +90,31 @@ pub fn build_node_value(
         );
     }
     if fields.contains("file_path") {
-        if let Some(ref p) = node.file_path {
-            map.insert(
-                "file_path".into(),
-                Value::String(p.to_string_lossy().into()),
-            );
-        }
+        map.insert(
+            "file_path".into(),
+            match node.file_path {
+                Some(ref p) => Value::String(p.to_string_lossy().into()),
+                None => Value::Null,
+            },
+        );
     }
     if fields.contains("description") {
-        if let Some(ref d) = node.description {
-            map.insert("description".into(), Value::String(d.clone()));
-        }
+        map.insert(
+            "description".into(),
+            match node.description {
+                Some(ref d) => Value::String(d.clone()),
+                None => Value::Null,
+            },
+        );
     }
     if fields.contains("materialization") {
-        if let Some(ref m) = node.materialization {
-            map.insert("materialization".into(), Value::String(m.clone()));
-        }
+        map.insert(
+            "materialization".into(),
+            match node.materialization {
+                Some(ref m) => Value::String(m.clone()),
+                None => Value::Null,
+            },
+        );
     }
     if fields.contains("tags") {
         map.insert(
@@ -113,7 +122,7 @@ pub fn build_node_value(
             Value::Array(node.tags.iter().map(|t| Value::String(t.clone())).collect()),
         );
     }
-    if fields.contains("columns") && !node.columns.is_empty() {
+    if fields.contains("columns") {
         map.insert(
             "columns".into(),
             Value::Array(
@@ -125,9 +134,13 @@ pub fn build_node_value(
         );
     }
     if fields.contains("sql_content") {
-        if let Some(sql) = sql_contents.and_then(|m| m.get(&node.unique_id)) {
-            map.insert("sql_content".into(), Value::String(sql.clone()));
-        }
+        map.insert(
+            "sql_content".into(),
+            match sql_contents.and_then(|m| m.get(&node.unique_id)) {
+                Some(sql) => Value::String(sql.clone()),
+                None => Value::Null,
+            },
+        );
     }
     Value::Object(map)
 }
@@ -250,8 +263,8 @@ mod tests {
         assert_eq!(nodes[0]["unique_id"], "model.orders");
         assert_eq!(nodes[0]["label"], "orders");
         assert_eq!(nodes[0]["node_type"], "model");
-        assert!(nodes[0].get("file_path").is_none());
-        assert!(nodes[0].get("description").is_none());
+        assert!(nodes[0]["file_path"].is_null());
+        assert!(nodes[0]["description"].is_null());
     }
 
     #[test]
@@ -501,7 +514,7 @@ mod tests {
         assert_eq!(node["label"], "orders");
         assert_eq!(node["node_type"], "model");
         assert_eq!(node["file_path"], "models/orders.sql");
-        // Non-default fields absent
+        // Non-default fields absent (not in default set)
         assert!(node.get("description").is_none());
         assert!(node.get("materialization").is_none());
         assert!(node.get("tags").is_none());

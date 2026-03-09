@@ -5,32 +5,57 @@ expression: output
 {
   "nodes": [
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "dashboard",
+      "materialization": null,
       "node_type": "exposure",
+      "sql_content": null,
       "tags": [],
       "unique_id": "exposure.dashboard"
     },
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "orders",
+      "materialization": null,
       "node_type": "model",
+      "sql_content": null,
       "tags": [],
       "unique_id": "model.orders"
     },
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "stg_orders",
+      "materialization": null,
       "node_type": "model",
+      "sql_content": null,
       "tags": [],
       "unique_id": "model.stg_orders"
     },
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "raw.orders",
+      "materialization": null,
       "node_type": "source",
+      "sql_content": null,
       "tags": [],
       "unique_id": "source.raw.orders"
     },
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "orders_positive",
+      "materialization": null,
       "node_type": "test",
+      "sql_content": null,
       "tags": [],
       "unique_id": "test.orders_positive"
     }

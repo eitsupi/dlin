@@ -14,6 +14,7 @@ expression: output
       "label": "orders",
       "materialization": "table",
       "node_type": "model",
+      "sql_content": null,
       "tags": [
         "daily",
         "core"

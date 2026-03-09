@@ -5,6 +5,8 @@ expression: output
 {
   "nodes": [
     {
+      "columns": [],
+      "description": null,
       "file_path": "models/orders.sql",
       "label": "orders",
       "materialization": "table",
@@ -14,8 +16,13 @@ expression: output
       "unique_id": "model.orders"
     },
     {
+      "columns": [],
+      "description": null,
+      "file_path": null,
       "label": "raw.orders",
+      "materialization": null,
       "node_type": "source",
+      "sql_content": null,
       "tags": [],
       "unique_id": "source.raw.orders"
     }

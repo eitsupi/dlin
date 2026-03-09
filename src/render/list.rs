@@ -218,14 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn test_json_omits_null_file_path() {
+    fn test_json_null_file_path() {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
         let mut buf = Vec::new();
         render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
-        assert!(parsed[0].get("file_path").is_none());
+        assert!(parsed[0]["file_path"].is_null());
     }
 
     #[test]
