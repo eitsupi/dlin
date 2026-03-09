@@ -33,6 +33,7 @@ thiserror = "2"
 indexmap = "2"
 minijinja = "2"
 rayon = "1"
+globset = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -92,11 +92,12 @@ pub struct NodeTypeFilter {
 /// A parsed selector expression
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {
-    /// Match nodes whose tags contain the given value
+    /// Match nodes whose tags contain the given value (glob supported)
     Tag(String),
-    /// Match nodes whose file_path starts with the given path prefix
+    /// Match nodes whose file_path starts with the given prefix,
+    /// or matches a glob pattern when the value contains `*`, `?`, or `[`.
     Path(String),
-    /// Match nodes whose label equals the given model name
+    /// Match nodes whose label equals the given model name (glob supported)
     ModelName(String),
 }
 
@@ -123,16 +124,43 @@ pub fn parse_selectors(input: &str) -> Vec<Selector> {
         .collect()
 }
 
+/// Return `true` if the pattern contains glob metacharacters.
+fn is_glob_pattern(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+/// Match a value against a pattern using glob when metacharacters are present,
+/// otherwise fall back to exact equality.
+fn glob_or_exact(pattern: &str, value: &str) -> bool {
+    if is_glob_pattern(pattern) {
+        globset::GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .ok()
+            .map(|g| g.compile_matcher().is_match(value))
+            .unwrap_or(false)
+    } else {
+        value == pattern
+    }
+}
+
 /// Check if a single node matches any of the given selectors (union / OR logic).
 fn node_matches_any_selector(node: &NodeData, selectors: &[Selector]) -> bool {
     selectors.iter().any(|sel| match sel {
-        Selector::Tag(tag) => node.tags.contains(tag),
-        Selector::Path(prefix) => node
+        Selector::Tag(pattern) => node.tags.iter().any(|t| glob_or_exact(pattern, t)),
+        Selector::Path(pattern) => node
             .file_path
             .as_ref()
-            .map(|fp| fp.to_string_lossy().starts_with(prefix.as_str()))
+            .map(|fp| {
+                let path_str = fp.to_string_lossy();
+                if is_glob_pattern(pattern) {
+                    glob_or_exact(pattern, &path_str)
+                } else {
+                    path_str.starts_with(pattern.as_str())
+                }
+            })
             .unwrap_or(false),
-        Selector::ModelName(name) => node.label == *name,
+        Selector::ModelName(pattern) => glob_or_exact(pattern, &node.label),
     })
 }
 
@@ -777,6 +805,37 @@ mod tests {
     }
 
     #[test]
+    fn test_selector_by_path_glob() {
+        let g = make_tagged_graph();
+        // **&#x2F;staging/** should match the same nodes as prefix "models/staging"
+        let selectors = parse_selectors("path:**/staging/**");
+        let filtered =
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+        assert_eq!(filtered.node_count(), 2);
+        let labels: Vec<String> = filtered
+            .node_indices()
+            .map(|i| filtered[i].label.clone())
+            .collect();
+        assert!(labels.contains(&"raw.orders".to_string()));
+        assert!(labels.contains(&"stg_orders".to_string()));
+    }
+
+    #[test]
+    fn test_selector_by_path_glob_extension() {
+        let g = make_tagged_graph();
+        // Match only .sql files under staging
+        let selectors = parse_selectors("path:models/staging/*.sql");
+        let filtered =
+            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+        assert_eq!(filtered.node_count(), 1);
+        let labels: Vec<String> = filtered
+            .node_indices()
+            .map(|i| filtered[i].label.clone())
+            .collect();
+        assert!(labels.contains(&"stg_orders".to_string()));
+    }
+
+    #[test]
     fn test_selector_by_model_name() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
@@ -883,6 +942,46 @@ mod tests {
     }
 
     #[test]
+    fn test_node_matches_any_selector_tag_glob() {
+        let node = make_node(
+            "model.x",
+            "x",
+            NodeType::Model,
+            None,
+            vec!["nightly".into(), "finance_v2".into()],
+        );
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Tag("night*".into())]
+        ));
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Tag("finance_v?".into())]
+        ));
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::Tag("daily*".into())]
+        ));
+    }
+
+    #[test]
+    fn test_node_matches_any_selector_model_name_glob() {
+        let node = make_node("model.stg_orders", "stg_orders", NodeType::Model, None, vec![]);
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::ModelName("stg_*".into())]
+        ));
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::ModelName("*orders".into())]
+        ));
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::ModelName("fct_*".into())]
+        ));
+    }
+
+    #[test]
     fn test_node_matches_any_selector_path() {
         let node = make_node(
             "model.x",
@@ -902,6 +1001,86 @@ mod tests {
         assert!(!node_matches_any_selector(
             &node,
             &[Selector::Path("tests".into())]
+        ));
+    }
+
+    #[test]
+    fn test_node_matches_any_selector_path_glob_doublestar() {
+        let node = make_node(
+            "model.x",
+            "x",
+            NodeType::Model,
+            Some(PathBuf::from("models/staging/stg_orders.sql")),
+            vec![],
+        );
+        // ** matches intermediate directories
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Path("**/staging/**".into())]
+        ));
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Path("models/**/stg_orders.sql".into())]
+        ));
+        // No match
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::Path("**/marts/**".into())]
+        ));
+    }
+
+    #[test]
+    fn test_node_matches_any_selector_path_glob_star() {
+        let node = make_node(
+            "model.x",
+            "x",
+            NodeType::Model,
+            Some(PathBuf::from("models/staging/stg_orders.sql")),
+            vec![],
+        );
+        // * matches within a single path component
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Path("models/staging/*.sql".into())]
+        ));
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::Path("models/*.sql".into())]
+        ));
+    }
+
+    #[test]
+    fn test_node_matches_any_selector_path_glob_question() {
+        let node = make_node(
+            "model.x",
+            "x",
+            NodeType::Model,
+            Some(PathBuf::from("models/staging/stg_orders.sql")),
+            vec![],
+        );
+        assert!(node_matches_any_selector(
+            &node,
+            &[Selector::Path("models/staging/stg_order?.sql".into())]
+        ));
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::Path("models/staging/stg_order??.sql".into())]
+        ));
+    }
+
+    #[test]
+    fn test_node_matches_any_selector_path_glob_invalid_pattern() {
+        let node = make_node(
+            "model.x",
+            "x",
+            NodeType::Model,
+            Some(PathBuf::from("models/x.sql")),
+            vec![],
+        );
+        // Invalid glob pattern should not match (not panic)
+        assert!(!node_matches_any_selector(
+            &node,
+            &[Selector::Path("[invalid".into())]
         ));
     }
 

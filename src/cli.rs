@@ -94,8 +94,16 @@ Examples:
   # List only source nodes (no edges)
   dlin graph --node-type source -o json
 
-  # Filter by tag or path
-  dlin graph -s tag:finance,path:marts -o json
+  # Filter by path prefix or glob
+  dlin graph -s path:models/marts -o json
+  dlin graph -s 'path:**/staging/**' -o json
+
+  # Filter by tag and path (OR logic)
+  dlin graph -s 'tag:finance,path:**/staging/**' -o json
+
+  # Glob in model name or tag
+  dlin graph -s 'stg_*' -o json
+  dlin graph -s 'tag:night*' -o json
 
   # From git diff (pipe changed files)
   git diff --name-only main | dlin graph -o json
@@ -163,7 +171,11 @@ pub struct GraphArgs {
     #[arg(long)]
     pub include_exposures: bool,
 
-    /// Selector expression: tag:X, path:Y, or model name (comma-separated)
+    /// Selector expression (comma-separated, OR logic).
+    /// All selectors support glob patterns (*, **, ?, []):
+    ///   tag:<pattern>     match nodes by tag
+    ///   path:<pattern>    match by file path (prefix or glob)
+    ///   <pattern>         match by model label
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
@@ -410,7 +422,11 @@ pub struct ListArgs {
     #[arg(long)]
     pub include_exposures: bool,
 
-    /// Selector expression: tag:X, path:Y, or model name (comma-separated)
+    /// Selector expression (comma-separated, OR logic).
+    /// All selectors support glob patterns (*, **, ?, []):
+    ///   tag:<pattern>     match nodes by tag
+    ///   path:<pattern>    match by file path (prefix or glob)
+    ///   <pattern>         match by model label
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
