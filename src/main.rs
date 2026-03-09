@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, Cli, Command, GraphArgs, ListArgs, SourceType};
+use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, GraphArgs, ListArgs, SourceType};
 use dlin::graph;
 use dlin::input;
 use dlin::parser;
@@ -29,17 +29,18 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let cache_dir = cli.cache_dir;
-    let no_cache = cli.no_cache;
-
     match cli.command {
         Command::Graph(args) => {
             dlin::set_quiet(args.quiet);
-            run_graph_command(args, cache_dir.as_deref(), no_cache)
+            run_graph_command(args)
         }
         Command::List(args) => {
             dlin::set_quiet(args.quiet);
-            run_list_command(args, cache_dir.as_deref(), no_cache)
+            run_list_command(args)
+        }
+        Command::CheckManifest(args) => {
+            dlin::set_quiet(args.quiet);
+            run_check_manifest_command(args)
         }
         Command::Impact {
             model,
@@ -47,6 +48,8 @@ fn main() -> Result<()> {
             output,
             source,
             manifest_path,
+            cache_dir,
+            no_cache,
             quiet,
         } => {
             dlin::set_quiet(quiet);
@@ -57,7 +60,9 @@ fn main() -> Result<()> {
 
 /// Run the `graph` subcommand
 #[cfg(not(tarpaulin_include))]
-fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) -> Result<()> {
+fn run_graph_command(args: GraphArgs) -> Result<()> {
+    let cache_dir = args.cache_dir;
+    let no_cache = args.no_cache;
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -69,7 +74,7 @@ fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) 
         dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir, no_cache)?;
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -156,7 +161,9 @@ fn run_graph_command(args: GraphArgs, cache_dir: Option<&Path>, no_cache: bool) 
 
 /// Run the `list` subcommand
 #[cfg(not(tarpaulin_include))]
-fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) -> Result<()> {
+fn run_list_command(args: ListArgs) -> Result<()> {
+    let cache_dir = args.cache_dir;
+    let no_cache = args.no_cache;
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -167,7 +174,7 @@ fn run_list_command(args: ListArgs, cache_dir: Option<&Path>, no_cache: bool) ->
         dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
     }
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir, no_cache)?;
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -255,9 +262,7 @@ fn build_dag(
 ) -> Result<graph::types::LineageGraph> {
     match source {
         SourceType::Manifest => {
-            let path = manifest_path
-                .ok_or_else(|| anyhow::anyhow!("manifest_path is required for SourceType::Manifest (call validate_source_flags first)"))?;
-            let resolved = resolve_manifest_path(path)?;
+            let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
             parser::manifest::build_graph_from_manifest(&resolved)
         }
         SourceType::Sql => {
@@ -360,16 +365,35 @@ fn run_impact_command(
 /// Validate that --source and --manifest-path flags are consistent.
 #[cfg(not(tarpaulin_include))]
 fn validate_source_flags(source: &SourceType, manifest_path: Option<&PathBuf>) -> Result<()> {
-    match source {
-        SourceType::Manifest if manifest_path.is_none() => {
-            anyhow::bail!("--manifest-path is required when using --source manifest");
-        }
-        SourceType::Sql if manifest_path.is_some() => {
+    if let SourceType::Sql = source {
+        if manifest_path.is_some() {
             anyhow::bail!(
                 "--manifest-path cannot be used with --source sql; did you mean --source manifest?"
             );
         }
-        _ => Ok(()),
+    }
+    Ok(())
+}
+
+/// Resolve manifest_path, falling back to `<project_dir>/target/manifest.json` when not specified.
+#[cfg(not(tarpaulin_include))]
+fn resolve_manifest_path_or_default(
+    manifest_path: Option<&PathBuf>,
+    project_dir: &Path,
+) -> Result<PathBuf> {
+    match manifest_path {
+        Some(p) => resolve_manifest_path(p),
+        None => {
+            let default = project_dir.join("target").join("manifest.json");
+            if default.exists() {
+                Ok(default)
+            } else {
+                anyhow::bail!(
+                    "No manifest.json found at {}. Use --manifest-path or run `dbt compile` first.",
+                    default.display()
+                );
+            }
+        }
     }
 }
 
@@ -393,4 +417,88 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     } else {
         anyhow::bail!("Manifest path does not exist: {}", manifest_arg.display());
     }
+}
+
+/// Run the `check-manifest` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
+    let project_dir = args
+        .project_dir
+        .canonicalize()
+        .unwrap_or(args.project_dir);
+
+    let manifest_path = resolve_manifest_path_or_default(
+        args.manifest_path.as_ref(),
+        &project_dir,
+    )?;
+
+    let manifest_mtime = std::fs::metadata(&manifest_path)
+        .and_then(|m| m.modified())
+        .map_err(|e| anyhow::anyhow!("cannot read manifest.json at {}: {}", manifest_path.display(), e))?;
+
+    // Discover project files
+    let project = parser::project::DbtProject::load(&project_dir)?;
+    let paths = project.resolve_paths(&project_dir);
+    let files = parser::discovery::discover_files(&paths)?;
+
+    // Collect all SQL/YAML files and compare mtimes
+    let mut stale_files: Vec<PathBuf> = Vec::new();
+    let all_files = files.model_sql_files.iter()
+        .chain(files.macro_sql_files.iter())
+        .chain(files.seed_files.iter())
+        .chain(files.snapshot_sql_files.iter())
+        .chain(files.test_sql_files.iter())
+        .chain(files.yaml_files.iter());
+
+    for file in all_files {
+        if let Ok(meta) = std::fs::metadata(file) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > manifest_mtime {
+                    let rel = file.strip_prefix(&project_dir).unwrap_or(file);
+                    stale_files.push(rel.to_path_buf());
+                }
+            }
+        }
+    }
+
+    stale_files.sort();
+    let is_stale = !stale_files.is_empty();
+
+    match args.output {
+        CheckManifestOutputFormat::Text => {
+            if !args.quiet {
+                if is_stale {
+                    println!(
+                        "manifest.json is stale ({} file{} newer):",
+                        stale_files.len(),
+                        if stale_files.len() == 1 { "" } else { "s" }
+                    );
+                    for f in &stale_files {
+                        println!("  {}", f.display());
+                    }
+                } else {
+                    println!("manifest.json is up-to-date");
+                }
+            }
+        }
+        CheckManifestOutputFormat::Json => {
+            let result = serde_json::json!({
+                "manifest_path": manifest_path.to_string_lossy(),
+                "is_stale": is_stale,
+                "stale_file_count": stale_files.len(),
+                "stale_files": stale_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            });
+            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                serde_json::to_writer_pretty(std::io::stdout(), &result).unwrap();
+            } else {
+                serde_json::to_writer(std::io::stdout(), &result).unwrap();
+            }
+            println!();
+        }
+    }
+
+    if is_stale {
+        std::process::exit(1);
+    }
+    Ok(())
 }

@@ -148,6 +148,28 @@ Impacted Nodes:
   [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
 
+### Check-manifest — manifest.json helper
+
+dlin works standalone without dbt, but `--source manifest` mode provides higher accuracy by reading a pre-compiled `manifest.json`. Since `dbt compile` can be slow (seconds to tens of seconds depending on project size and warehouse connection), you want to avoid running it unnecessarily. The `check-manifest` command detects when `dbt compile` needs to be re-run by comparing file timestamps of all project SQL and YAML files against `manifest.json`.
+
+```sh
+$ dlin check-manifest
+manifest.json is stale (3 files newer):
+  models/staging/stg_orders.sql
+  models/marts/orders.sql
+  macros/order_totals.sql
+
+# Conditionally recompile
+$ dlin check-manifest || dbt compile
+
+# JSON output for CI pipelines
+$ dlin check-manifest -o json
+{"is_stale":true,"manifest_path":"target/manifest.json","stale_file_count":3,"stale_files":["macros/order_totals.sql","models/marts/orders.sql","models/staging/stg_orders.sql"]}
+
+# Quiet mode (exit code only)
+$ dlin check-manifest -q && echo "up-to-date" || echo "stale"
+```
+
 ### Pipelines — compose subcommands
 
 ```sh

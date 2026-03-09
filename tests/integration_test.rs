@@ -378,12 +378,11 @@ mod cli {
             .output()
             .expect("Failed to run binary");
 
-        assert!(!output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Should default to <project-dir>/target/manifest.json
         assert!(
-            stderr.contains("--manifest-path is required"),
-            "Should require --manifest-path: {}",
-            stderr
+            output.status.success(),
+            "Should default to <project-dir>/target/manifest.json: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -620,5 +619,77 @@ mod cli {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success());
         assert!(stdout.contains("assert_orders_positive_amount"));
+    }
+
+    #[test]
+    fn test_check_manifest_text_output() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        // Fixture SQL files are newer than the manifest, so it should be stale (exit 1)
+        assert!(
+            !output.status.success(),
+            "Should exit 1 when manifest is stale"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("stale"),
+            "Should report stale: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_check_manifest_json_output() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert_eq!(parsed["is_stale"], true);
+        assert!(parsed["stale_files"].as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn test_check_manifest_quiet_output() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "-q",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(!output.status.success());
+        // Quiet mode should produce no output
+        assert!(
+            output.stderr.is_empty(),
+            "Quiet mode should produce no stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "Quiet mode should produce no stdout"
+        );
     }
 }

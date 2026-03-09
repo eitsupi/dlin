@@ -32,18 +32,11 @@ Examples:
   dlin list -o json                       # List all node names as JSON
   dlin list orders stg_orders -o json     # List specific models as JSON
   dlin impact orders -o json              # Downstream impact analysis
+  dlin check-manifest || dbt compile      # Recompile if manifest is stale
   git diff --name-only main | dlin graph  # Lineage of changed files",
     version
 )]
 pub struct Cli {
-    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
-    #[arg(long, global = true, env = "DLIN_CACHE_DIR")]
-    pub cache_dir: Option<PathBuf>,
-
-    /// Disable extraction cache (always re-parse all files)
-    #[arg(long, global = true, env = "DLIN_NO_CACHE")]
-    pub no_cache: bool,
-
     #[command(subcommand)]
     pub command: Command,
 }
@@ -130,6 +123,14 @@ pub struct GraphArgs {
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
 
+    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+    #[arg(long, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable extraction cache (always re-parse all files)
+    #[arg(long, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
     /// Upstream levels to show (default: all)
     #[arg(short = 'u', long)]
     pub upstream: Option<usize>,
@@ -174,7 +175,7 @@ pub struct GraphArgs {
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
@@ -239,6 +240,14 @@ Examples:
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
         project_dir: PathBuf,
 
+        /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+        #[arg(long, env = "DLIN_CACHE_DIR")]
+        cache_dir: Option<PathBuf>,
+
+        /// Disable extraction cache (always re-parse all files)
+        #[arg(long, env = "DLIN_NO_CACHE")]
+        no_cache: bool,
+
         /// Output format: text (default) or json
         #[arg(short = 'o', long, default_value = "text")]
         output: ImpactOutputFormat,
@@ -247,7 +256,7 @@ Examples:
         #[arg(long, default_value = "sql")]
         source: SourceType,
 
-        /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
+        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
         #[arg(long)]
         manifest_path: Option<PathBuf>,
 
@@ -256,6 +265,66 @@ Examples:
         quiet: bool,
     },
 
+    /// Check if manifest.json is up-to-date with project files
+    #[command(
+        name = "check-manifest",
+        long_about = "\
+Helper for working with manifest.json — checks whether it needs to be regenerated.
+
+Since `dbt compile` can be slow (seconds to tens of seconds depending on project \
+size and warehouse connection), this command lets you skip unnecessary recompilation \
+by detecting whether any project files have changed since the manifest was last built.
+
+Compares the modification time of manifest.json against all project SQL and YAML \
+files (models, macros, tests, snapshots, seeds, and analyses). If any file is \
+newer than the manifest, exits with code 1 and lists the stale files.
+
+This command does not use dlin's extraction cache; it only compares file timestamps.
+
+Exit codes:
+  0   Manifest is up-to-date (all project files are older)
+  1   Manifest is stale (some files are newer) or manifest not found",
+        after_long_help = "\
+Examples:
+  # Check and conditionally recompile
+  dlin check-manifest || dbt compile
+
+  # Quiet mode (exit code only)
+  dlin check-manifest -q
+
+  # JSON output for programmatic use
+  dlin check-manifest -o json
+
+  # Check with explicit manifest path
+  dlin check-manifest --manifest-path path/to/manifest.json"
+    )]
+    CheckManifest(CheckManifestArgs),
+
+}
+
+#[derive(Debug, clap::Args)]
+pub struct CheckManifestArgs {
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// Output format: text (default) or json
+    #[arg(short = 'o', long, default_value = "text")]
+    pub output: CheckManifestOutputFormat,
+
+    /// Suppress warning messages (exit code only)
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum CheckManifestOutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, clap::Args)]
@@ -313,6 +382,14 @@ pub struct ListArgs {
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
 
+    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+    #[arg(long, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable extraction cache (always re-parse all files)
+    #[arg(long, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
     /// Output format: plain (default) or json
     #[arg(short = 'o', long, default_value = "plain")]
     pub output: ListOutputFormat,
@@ -345,7 +422,7 @@ pub struct ListArgs {
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (required when --source manifest)
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
