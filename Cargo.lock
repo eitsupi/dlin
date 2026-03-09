@@ -411,6 +411,7 @@ dependencies = [
  "indexmap",
  "insta",
  "jugar-probar",
+ "libc",
  "minijinja",
  "petgraph",
  "ratatui",

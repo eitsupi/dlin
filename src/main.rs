@@ -10,8 +10,23 @@ use dlin::input;
 use dlin::parser;
 use dlin::render;
 
+/// Reset SIGPIPE to default behavior so broken pipes terminate the process
+/// silently instead of causing panics. Rust's runtime sets SIG_IGN on SIGPIPE,
+/// which turns pipe closures into EPIPE errors that panic via `.unwrap()`.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // Safety: signal() is a standard POSIX function. Restoring SIG_DFL for
+    // SIGPIPE is safe and matches the expected behavior of CLI tools.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 #[cfg(not(tarpaulin_include))]
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    reset_sigpipe();
+
     let cli = Cli::parse();
 
     let cache_dir = cli.cache_dir;
