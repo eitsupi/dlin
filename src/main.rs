@@ -505,9 +505,8 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 serde_json::to_writer(&mut out, &result)
             };
             if let Err(e) = res {
-                let io_err = std::io::Error::new(std::io::ErrorKind::Other, e);
-                if io_err.kind() != std::io::ErrorKind::BrokenPipe {
-                    return Err(io_err.into());
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
                 }
             } else if let Err(e) = writeln!(out) {
                 if e.kind() != std::io::ErrorKind::BrokenPipe {
