@@ -104,13 +104,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     )?;
 
     // Apply node-type filter (default: model,source; --node-type-all for all types)
-    let type_names: Vec<String> = if args.node_type_all {
-        graph::filter::KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-    } else {
-        args.node_types.unwrap_or_else(|| {
-            graph::filter::DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-        })
-    };
+    let type_names = graph::filter::resolve_node_types(args.node_types, args.node_type_all);
     for t in &graph::filter::validate_node_type_names(&type_names) {
         dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
     }
@@ -203,13 +197,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     )?;
 
     // Apply node-type filter (default: model,source; --node-type-all for all types)
-    let type_names: Vec<String> = if args.node_type_all {
-        graph::filter::KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-    } else {
-        args.node_types.unwrap_or_else(|| {
-            graph::filter::DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-        })
-    };
+    let type_names = graph::filter::resolve_node_types(args.node_types, args.node_type_all);
     for t in &graph::filter::validate_node_type_names(&type_names) {
         dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
     }

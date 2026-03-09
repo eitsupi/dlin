@@ -305,6 +305,20 @@ pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapsh
 /// Default node types shown when `--node-type` is not specified.
 pub const DEFAULT_NODE_TYPE_LABELS: &[&str] = &["model", "source"];
 
+/// Resolve the effective node type names from CLI arguments.
+///
+/// - If `all` is true, returns all known node types.
+/// - Otherwise uses `explicit` if provided, falling back to [`DEFAULT_NODE_TYPE_LABELS`].
+pub fn resolve_node_types(explicit: Option<Vec<String>>, all: bool) -> Vec<String> {
+    if all {
+        KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
+    } else {
+        explicit.unwrap_or_else(|| {
+            DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
+        })
+    }
+}
+
 /// Return unrecognized node type names from the given list.
 pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
     type_names
@@ -448,10 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_no_focus() {
+    fn test_filter_no_focus_returns_all_nodes() {
         let g = make_test_graph();
         let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        // With no focus and no selectors, all nodes pass through unfiltered
         assert_eq!(filtered.node_count(), 4);
+        let types: std::collections::HashSet<&str> = filtered.node_indices().map(|i| filtered[i].node_type.label()).collect();
+        assert!(types.contains("source"), "source node should be present");
+        assert!(types.contains("model"), "model nodes should be present");
+        assert!(types.contains("exposure"), "exposure node should be present");
     }
 
     #[test]
