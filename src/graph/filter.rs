@@ -81,14 +81,6 @@ pub fn try_resolve_node(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
     }
 }
 
-/// Configuration for which node types to include
-pub struct NodeTypeFilter {
-    pub include_tests: bool,
-    pub include_seeds: bool,
-    pub include_snapshots: bool,
-    pub include_exposures: bool,
-}
-
 /// A compiled pattern matcher: either a pre-compiled glob or a plain string.
 ///
 /// This is an implementation detail of [`Selector`]; use [`parse_selectors`] to construct.
@@ -210,13 +202,14 @@ pub fn apply_selectors(graph: &LineageGraph, selectors: &[Selector]) -> HashSet<
         .collect()
 }
 
-/// Filter the graph based on focus models, distance, selectors, and node types
+/// Filter the graph based on focus models, distance, and selectors.
+///
+/// Node type filtering is handled separately by [`filter_output_node_types`].
 pub fn filter_graph(
     graph: &LineageGraph,
     focus_models: &[String],
     upstream: Option<usize>,
     downstream: Option<usize>,
-    type_filter: &NodeTypeFilter,
     selectors: &[Selector],
 ) -> Result<LineageGraph> {
     // Check for cycles
@@ -278,30 +271,7 @@ pub fn filter_graph(
         }
     }
 
-    let keep_nodes = apply_type_filter(graph, keep_nodes, type_filter);
-
     Ok(build_subgraph(graph, &keep_nodes))
-}
-
-/// Filter a set of node indices by node type
-fn apply_type_filter(
-    graph: &LineageGraph,
-    nodes: HashSet<NodeIndex>,
-    type_filter: &NodeTypeFilter,
-) -> HashSet<NodeIndex> {
-    nodes
-        .into_iter()
-        .filter(|&idx| {
-            let node = &graph[idx];
-            match node.node_type {
-                NodeType::Test => type_filter.include_tests,
-                NodeType::Seed => type_filter.include_seeds,
-                NodeType::Snapshot => type_filter.include_snapshots,
-                NodeType::Exposure => type_filter.include_exposures,
-                NodeType::Model | NodeType::Source | NodeType::Phantom => true,
-            }
-        })
-        .collect()
 }
 
 /// Build a new graph containing only the specified nodes and their interconnecting edges
@@ -331,6 +301,9 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
 
 /// Known node type labels for validation.
 pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
+
+/// Default node types shown when `--node-type` is not specified.
+pub const DEFAULT_NODE_TYPE_LABELS: &[&str] = &["model", "source"];
 
 /// Return unrecognized node type names from the given list.
 pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
@@ -477,57 +450,34 @@ mod tests {
     #[test]
     fn test_filter_no_focus() {
         let g = make_test_graph();
-        let filter = NodeTypeFilter {
-            include_tests: false,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: true,
-        };
-        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
     #[test]
     fn test_filter_focus_upstream_1() {
         let g = make_test_graph();
-        let filter = NodeTypeFilter {
-            include_tests: false,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: true,
-        };
         // Focus on "orders" with 1 upstream, 0 downstream
-        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &filter, &[]).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &[]).unwrap();
         // Should have: orders + stg_orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
 
     #[test]
-    fn test_filter_excludes_exposures() {
+    fn test_filter_excludes_exposures_via_output_filter() {
         let g = make_test_graph();
-        let filter = NodeTypeFilter {
-            include_tests: false,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: false,
-        };
-        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
-        // Exposure should be excluded
+        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        // Apply output filter to exclude exposures
+        let filtered = filter_output_node_types(&filtered, &["model".into(), "source".into()]);
         assert_eq!(filtered.node_count(), 3);
     }
 
     #[test]
     fn test_filter_model_not_found_returns_error() {
         let g = make_test_graph();
-        let filter = NodeTypeFilter {
-            include_tests: false,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: true,
-        };
         // All specified models not found → error
         let result =
-            filter_graph(&g, &["nonexistent".into()], None, None, &filter, &[]);
+            filter_graph(&g, &["nonexistent".into()], None, None, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("model not found"));
     }
@@ -537,7 +487,7 @@ mod tests {
         let g = make_test_graph();
         // Focus on source node using its label "raw.orders"
         let filtered =
-            filter_graph(&g, &["raw.orders".into()], None, Some(1), &default_type_filter(), &[])
+            filter_graph(&g, &["raw.orders".into()], None, Some(1), &[])
                 .unwrap();
         // raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
@@ -552,7 +502,6 @@ mod tests {
             &["source.raw.orders".into()],
             None,
             Some(1),
-            &default_type_filter(),
             &[],
         )
         .unwrap();
@@ -564,7 +513,7 @@ mod tests {
     fn test_filter_focus_exposure_by_label() {
         let g = make_test_graph();
         let filtered =
-            filter_graph(&g, &["dashboard".into()], Some(1), None, &default_type_filter(), &[])
+            filter_graph(&g, &["dashboard".into()], Some(1), None, &[])
                 .unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
@@ -591,7 +540,6 @@ mod tests {
             &["raw.orders".into(), "dashboard".into()],
             Some(0),
             Some(0),
-            &default_type_filter(),
             &[],
         )
         .unwrap();
@@ -615,7 +563,6 @@ mod tests {
             &["raw.orders".into(), "dashboard".into()],
             Some(1),
             Some(1),
-            &default_type_filter(),
             &[],
         )
         .unwrap();
@@ -632,7 +579,6 @@ mod tests {
             &["orders".into(), "nonexistent".into()],
             Some(0),
             Some(0),
-            &default_type_filter(),
             &[],
         )
         .unwrap();
@@ -649,7 +595,6 @@ mod tests {
             &["no_such_a".into(), "no_such_b".into()],
             None,
             None,
-            &default_type_filter(),
             &[],
         );
         assert!(result.is_err());
@@ -668,7 +613,6 @@ mod tests {
             &["stg_orders".into(), "orders".into()],
             Some(1),
             Some(1),
-            &default_type_filter(),
             &[],
         )
         .unwrap();
@@ -799,21 +743,12 @@ mod tests {
         g
     }
 
-    fn default_type_filter() -> NodeTypeFilter {
-        NodeTypeFilter {
-            include_tests: true,
-            include_seeds: true,
-            include_snapshots: true,
-            include_exposures: true,
-        }
-    }
-
     #[test]
     fn test_selector_by_tag() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nightly");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -827,7 +762,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("path:models/staging");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         // Should match: raw.orders (schema.yml in models/staging) and stg_orders
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
@@ -844,7 +779,7 @@ mod tests {
         // **&#x2F;staging/** should match the same nodes as prefix "models/staging"
         let selectors = parse_selectors("path:**/staging/**");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -860,7 +795,7 @@ mod tests {
         // Match only .sql files under staging
         let selectors = parse_selectors("path:models/staging/*.sql");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -874,7 +809,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -889,7 +824,7 @@ mod tests {
         // tag:nightly matches stg_orders, model name "orders" matches orders
         let selectors = parse_selectors("tag:nightly,orders");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -904,7 +839,7 @@ mod tests {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nonexistent");
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &selectors).unwrap();
+            filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -922,7 +857,6 @@ mod tests {
             &["orders".into()],
             None,
             None,
-            &default_type_filter(),
             &selectors,
         )
         .unwrap();
@@ -939,7 +873,7 @@ mod tests {
         let g = make_tagged_graph();
         let no_selectors: Vec<Selector> = vec![];
         let filtered =
-            filter_graph(&g, &[], None, None, &default_type_filter(), &no_selectors).unwrap();
+            filter_graph(&g, &[], None, None, &no_selectors).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -1126,14 +1060,11 @@ mod tests {
             },
         );
 
-        // Exclude all optional types
-        let filter = NodeTypeFilter {
-            include_tests: false,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: false,
-        };
-        let filtered = filter_graph(&g, &[], None, None, &filter, &[]).unwrap();
+        // Default filter (model,source only) — excludes test, seed, snapshot
+        let filtered = filter_output_node_types(
+            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
         assert_eq!(filtered.node_count(), 1); // Only the model remains
         let labels: Vec<String> = filtered
             .node_indices()
@@ -1141,14 +1072,11 @@ mod tests {
             .collect();
         assert!(labels.contains(&"orders".to_string()));
 
-        // Include tests only
-        let filter2 = NodeTypeFilter {
-            include_tests: true,
-            include_seeds: false,
-            include_snapshots: false,
-            include_exposures: false,
-        };
-        let filtered2 = filter_graph(&g, &[], None, None, &filter2, &[]).unwrap();
+        // Include model + test
+        let filtered2 = filter_output_node_types(
+            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &["model".into(), "test".into()],
+        );
         assert_eq!(filtered2.node_count(), 2); // model + test
     }
 
@@ -1260,7 +1188,7 @@ mod tests {
             },
         );
 
-        let result = filter_graph(&g, &[], None, None, &default_type_filter(), &[]);
+        let result = filter_graph(&g, &[], None, None, &[]);
         assert!(result.is_err());
     }
 }

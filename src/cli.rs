@@ -163,22 +163,6 @@ pub struct GraphArgs {
     #[arg(short = 'o', long, default_value = "ascii")]
     pub output: OutputFormat,
 
-    /// Include test nodes (excluded by default). In sql mode, only inline tests defined in SQL files are detected; YAML-defined generic tests (not_null, unique, etc.) require manifest mode
-    #[arg(long)]
-    pub include_tests: bool,
-
-    /// Include seed nodes (excluded by default)
-    #[arg(long)]
-    pub include_seeds: bool,
-
-    /// Include snapshot nodes (excluded by default)
-    #[arg(long)]
-    pub include_snapshots: bool,
-
-    /// Include exposure nodes (excluded by default)
-    #[arg(long)]
-    pub include_exposures: bool,
-
     /// Selector expression (comma-separated, OR logic).
     /// All selectors support glob patterns (*, **, ?, []):
     ///   tag:<pattern>     match nodes by tag
@@ -187,9 +171,16 @@ pub struct GraphArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Post-filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure). Edges between excluded types are removed; use multiple types to preserve edges
-    #[arg(long = "node-type", value_delimiter = ',')]
+    /// Filter output by node type (comma-separated). Default: model,source.
+    /// Available types: model, source, seed, snapshot, test, exposure.
+    /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
+    /// use manifest mode for full test coverage
+    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
     pub node_types: Option<Vec<String>>,
+
+    /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
+    #[arg(long, conflicts_with = "node_types")]
+    pub node_type_all: bool,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
@@ -382,8 +373,8 @@ Examples:
   # List models tagged 'finance'
   dlin list -s tag:finance
 
-  # List all node types including seeds and tests
-  dlin list --include-seeds --include-tests
+  # List all node types
+  dlin list --node-type-all
 
   # Count models (combine with standard tools)
   dlin list --node-type model | wc -l
@@ -414,22 +405,6 @@ pub struct ListArgs {
     #[arg(short = 'o', long, default_value = "plain")]
     pub output: ListOutputFormat,
 
-    /// Include test nodes (excluded by default). In sql mode, only inline tests defined in SQL files are detected; YAML-defined generic tests (not_null, unique, etc.) require manifest mode
-    #[arg(long)]
-    pub include_tests: bool,
-
-    /// Include seed nodes (excluded by default)
-    #[arg(long)]
-    pub include_seeds: bool,
-
-    /// Include snapshot nodes (excluded by default)
-    #[arg(long)]
-    pub include_snapshots: bool,
-
-    /// Include exposure nodes (excluded by default)
-    #[arg(long)]
-    pub include_exposures: bool,
-
     /// Selector expression (comma-separated, OR logic).
     /// All selectors support glob patterns (*, **, ?, []):
     ///   tag:<pattern>     match nodes by tag
@@ -438,9 +413,16 @@ pub struct ListArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated: model,source,seed,snapshot,test,exposure)
-    #[arg(long = "node-type", value_delimiter = ',')]
+    /// Filter output by node type (comma-separated). Default: model,source.
+    /// Available types: model, source, seed, snapshot, test, exposure.
+    /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
+    /// use manifest mode for full test coverage
+    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
     pub node_types: Option<Vec<String>>,
+
+    /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
+    #[arg(long, conflicts_with = "node_types")]
+    pub node_type_all: bool,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
@@ -544,11 +526,8 @@ mod tests {
         assert!(!args.interactive);
         assert!(args.upstream.is_none());
         assert!(args.downstream.is_none());
-        assert!(!args.include_tests);
-        assert!(!args.include_seeds);
-        assert!(!args.include_snapshots);
-        assert!(!args.include_exposures);
         assert!(args.select.is_none());
+        assert!(args.node_types.is_none());
         assert_eq!(args.source, SourceType::Sql);
         assert!(args.manifest_path.is_none());
         assert!(matches!(args.output, OutputFormat::Ascii));
@@ -590,10 +569,8 @@ mod tests {
                 "-i",
                 "-o",
                 "dot",
-                "--include-tests",
-                "--include-seeds",
-                "--include-snapshots",
-                "--include-exposures",
+                "--node-type",
+                "model,source,test,seed,snapshot,exposure",
                 "--select",
                 "tag:nightly,path:models/staging",
             ])
@@ -605,10 +582,17 @@ mod tests {
         assert_eq!(args.downstream, Some(3));
         assert!(args.interactive);
         assert!(matches!(args.output, OutputFormat::Dot));
-        assert!(args.include_tests);
-        assert!(args.include_seeds);
-        assert!(args.include_snapshots);
-        assert!(args.include_exposures);
+        assert_eq!(
+            args.node_types,
+            Some(vec![
+                "model".to_string(),
+                "source".to_string(),
+                "test".to_string(),
+                "seed".to_string(),
+                "snapshot".to_string(),
+                "exposure".to_string(),
+            ])
+        );
         assert_eq!(
             args.select.as_deref(),
             Some("tag:nightly,path:models/staging")
@@ -844,10 +828,6 @@ mod tests {
         let args = unwrap_list(Cli::try_parse_from(["dlin", "list"]).unwrap());
         assert!(args.model.is_empty());
         assert!(matches!(args.output, ListOutputFormat::Plain));
-        assert!(!args.include_tests);
-        assert!(!args.include_seeds);
-        assert!(!args.include_snapshots);
-        assert!(!args.include_exposures);
         assert!(args.select.is_none());
         assert!(args.node_types.is_none());
         assert_eq!(args.source, SourceType::Sql);
@@ -890,19 +870,17 @@ mod tests {
             Cli::try_parse_from([
                 "dlin",
                 "list",
-                "--include-tests",
                 "--node-type",
-                "model,source",
+                "model,source,test",
                 "-s",
                 "tag:nightly",
                 "-q",
             ])
             .unwrap(),
         );
-        assert!(args.include_tests);
         assert_eq!(
             args.node_types,
-            Some(vec!["model".to_string(), "source".to_string()])
+            Some(vec!["model".to_string(), "source".to_string(), "test".to_string()])
         );
         assert_eq!(args.select.as_deref(), Some("tag:nightly"));
         assert!(args.quiet);

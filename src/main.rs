@@ -70,9 +70,6 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
-    if args.source == SourceType::Sql && args.include_tests {
-        dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
-    }
 
     let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
@@ -103,24 +100,21 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         &models,
         args.upstream,
         args.downstream,
-        &graph::filter::NodeTypeFilter {
-            include_tests: args.include_tests,
-            include_seeds: args.include_seeds,
-            include_snapshots: args.include_snapshots,
-            include_exposures: args.include_exposures,
-        },
         &selectors,
     )?;
 
-    // Apply output node-type filter
-    let filtered = if let Some(ref type_names) = args.node_types {
-        for t in &graph::filter::validate_node_type_names(type_names) {
-            dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
-        }
-        graph::filter::filter_output_node_types(&filtered, type_names)
+    // Apply node-type filter (default: model,source; --node-type-all for all types)
+    let type_names: Vec<String> = if args.node_type_all {
+        graph::filter::KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
     } else {
-        filtered
+        args.node_types.unwrap_or_else(|| {
+            graph::filter::DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
+        })
     };
+    for t in &graph::filter::validate_node_type_names(&type_names) {
+        dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+    }
+    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
 
     // Resolve JSON fields
     let json_fields = render::json::resolve_graph_fields(
@@ -170,9 +164,6 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         .unwrap_or(args.project_dir);
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
-    if args.source == SourceType::Sql && args.include_tests {
-        dlin::warn!("--include-tests has no effect with --source sql; tests are only available with --source manifest");
-    }
 
     let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
@@ -208,24 +199,21 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         &models,
         upstream,
         downstream,
-        &graph::filter::NodeTypeFilter {
-            include_tests: args.include_tests,
-            include_seeds: args.include_seeds,
-            include_snapshots: args.include_snapshots,
-            include_exposures: args.include_exposures,
-        },
         &selectors,
     )?;
 
-    // Apply output node-type filter
-    let filtered = if let Some(ref type_names) = args.node_types {
-        for t in &graph::filter::validate_node_type_names(type_names) {
-            dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
-        }
-        graph::filter::filter_output_node_types(&filtered, type_names)
+    // Apply node-type filter (default: model,source; --node-type-all for all types)
+    let type_names: Vec<String> = if args.node_type_all {
+        graph::filter::KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
     } else {
-        filtered
+        args.node_types.unwrap_or_else(|| {
+            graph::filter::DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
+        })
     };
+    for t in &graph::filter::validate_node_type_names(&type_names) {
+        dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+    }
+    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
 
     // Resolve JSON fields for list
     let json_fields = render::list::resolve_list_fields(

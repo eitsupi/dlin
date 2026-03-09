@@ -216,7 +216,8 @@ mod cli {
                 fixture.to_str().unwrap(),
                 "--output",
                 "dot",
-                "--include-exposures",
+                "--node-type",
+                "model,source,exposure",
             ])
             .output()
             .expect("Failed to run binary");
@@ -287,7 +288,8 @@ mod cli {
                 "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--include-seeds",
+                "--node-type",
+                "model,source,seed",
                 "--output",
                 "dot",
             ])
@@ -307,7 +309,8 @@ mod cli {
                 "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--include-seeds",
+                "--node-type",
+                "model,source,seed",
                 "--output",
                 "json",
             ])
@@ -609,7 +612,8 @@ mod cli {
                 "graph",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--include-tests",
+                "--node-type",
+                "model,source,test",
                 "--output",
                 "dot",
             ])
