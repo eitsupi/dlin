@@ -107,7 +107,7 @@ pub fn build_node_value(
             map.insert("materialization".into(), Value::String(m.clone()));
         }
     }
-    if fields.contains("tags") && !node.tags.is_empty() {
+    if fields.contains("tags") {
         map.insert(
             "tags".into(),
             Value::Array(node.tags.iter().map(|t| Value::String(t.clone())).collect()),

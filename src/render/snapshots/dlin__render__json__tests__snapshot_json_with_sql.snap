@@ -10,11 +10,13 @@ expression: output
       "materialization": "table",
       "node_type": "model",
       "sql_content": "SELECT * FROM {{ ref('stg_orders') }}",
+      "tags": [],
       "unique_id": "model.orders"
     },
     {
       "label": "raw.orders",
       "node_type": "source",
+      "tags": [],
       "unique_id": "source.raw.orders"
     }
   ],

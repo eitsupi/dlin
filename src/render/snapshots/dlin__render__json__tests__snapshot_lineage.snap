@@ -7,26 +7,31 @@ expression: output
     {
       "label": "dashboard",
       "node_type": "exposure",
+      "tags": [],
       "unique_id": "exposure.dashboard"
     },
     {
       "label": "orders",
       "node_type": "model",
+      "tags": [],
       "unique_id": "model.orders"
     },
     {
       "label": "stg_orders",
       "node_type": "model",
+      "tags": [],
       "unique_id": "model.stg_orders"
     },
     {
       "label": "raw.orders",
       "node_type": "source",
+      "tags": [],
       "unique_id": "source.raw.orders"
     },
     {
       "label": "orders_positive",
       "node_type": "test",
+      "tags": [],
       "unique_id": "test.orders_positive"
     }
   ],
