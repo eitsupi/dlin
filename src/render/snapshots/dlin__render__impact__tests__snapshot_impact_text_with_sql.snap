@@ -16,8 +16,8 @@ Exposure Paths:
   stg_orders -> orders -> dashboard
 
 Impacted Nodes:
-  [critical] dashboard (exposure, 2 hops)
-  [high    ] orders (model, 1 hops) [models/marts/orders.sql]
+  [critical] dashboard (exposure, 2 distance)
+  [high    ] orders (model, 1 distance) [models/marts/orders.sql]
     --- SQL ---
     SELECT
         o.id,
@@ -26,4 +26,4 @@ Impacted Nodes:
     FROM {{ ref('stg_orders') }} o
     JOIN {{ ref('stg_payments') }} s ON o.id = s.order_id
     ----------
-  [low     ] orders_positive (test, 2 hops)
+  [low     ] orders_positive (test, 2 distance)

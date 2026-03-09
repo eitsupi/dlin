@@ -143,9 +143,9 @@ Summary:
   Affected exposures: 1
 
 Impacted Nodes:
-  [critical] weekly_report (exposure, 1 hops)
-  [high    ] customers (model, 1 hops) [models/marts/customers.sql]
-  [low     ] assert_orders_positive_amount (test, 1 hops)
+  [critical] weekly_report (exposure, 1 distance)
+  [high    ] customers (model, 1 distance) [models/marts/customers.sql]
+  [low     ] assert_orders_positive_amount (test, 1 distance)
 ```
 
 ### Pipelines — compose subcommands

@@ -44,6 +44,7 @@ pub struct ImpactedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
     pub severity: ImpactSeverity,
+    /// Number of edges from the source model (also known as "degree" in dbt terminology)
     pub distance: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sql_content: Option<String>,

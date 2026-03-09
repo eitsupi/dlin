@@ -210,7 +210,7 @@ Finds all downstream dependents and assigns severity levels:
   Medium    impacts staging or intermediate models
   Low       impacts tests only
 
-Text output: human-readable report with severity and distance.
+Text output: human-readable report with severity and distance (degree).
 JSON output: structured array of impact reports for CI/programmatic use.
 
 Exit codes:
