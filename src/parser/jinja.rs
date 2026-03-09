@@ -197,9 +197,10 @@ fn render_with_incremental(
         "var",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
             if let Some(key) = args.first() {
-                let key_str = key.to_string();
-                if let Some(val) = vars_map.get(&key_str) {
-                    return Ok(val.clone());
+                if let Some(key_str) = key.as_str() {
+                    if let Some(val) = vars_map.get(key_str) {
+                        return Ok(val.clone());
+                    }
                 }
             }
             // Fall back to default argument (2nd arg) or truthy sentinel
