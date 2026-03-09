@@ -101,6 +101,7 @@ fn resource_type_to_node_type(resource_type: &str) -> NodeType {
 /// Simplify a dbt manifest unique_id (e.g. "model.my_project.stg_orders") to
 /// the short form used in this tool's graph (e.g. "model.stg_orders").
 /// For sources: "source.my_project.raw.orders" -> "source.raw.orders"
+/// For tests:   "test.my_project.test_name.hash" -> "test.test_name"
 fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
     let parts: Vec<&str> = unique_id.split('.').collect();
     match resource_type {
@@ -108,6 +109,14 @@ fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
             // source.project.source_name.table_name -> source.source_name.table_name
             if parts.len() >= 4 {
                 format!("{}.{}.{}", parts[0], parts[2], parts[3])
+            } else {
+                unique_id.to_string()
+            }
+        }
+        "test" => {
+            // test.project.test_name[.hash] -> test.test_name (skip trailing hash)
+            if parts.len() >= 3 {
+                format!("{}.{}", parts[0], parts[2])
             } else {
                 unique_id.to_string()
             }
@@ -354,6 +363,23 @@ mod tests {
         assert_eq!(
             simplify_unique_id("source.raw.orders", "source"),
             "source.raw.orders"
+        );
+    }
+
+    #[test]
+    fn test_simplify_unique_id_test() {
+        // test.project.test_name.hash -> test.test_name
+        assert_eq!(
+            simplify_unique_id("test.jaffle_shop.not_null_orders_order_id.cf6c17daed", "test"),
+            "test.not_null_orders_order_id"
+        );
+    }
+
+    #[test]
+    fn test_simplify_unique_id_test_short() {
+        assert_eq!(
+            simplify_unique_id("test.not_null_orders_order_id", "test"),
+            "test.not_null_orders_order_id"
         );
     }
 
