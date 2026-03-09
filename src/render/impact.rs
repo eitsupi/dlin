@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 
 use colored::Colorize;
 
@@ -6,7 +6,7 @@ use crate::graph::impact::{ImpactReport, ImpactSeverity};
 
 /// Render impact report as colored text to stdout
 pub fn render_impact_text(report: &ImpactReport) {
-    render_impact_text_to_writer(report, &mut std::io::stdout().lock());
+    super::handle_stdout_result(render_impact_text_to_writer(report, &mut std::io::stdout().lock()));
 }
 
 fn severity_color(severity: ImpactSeverity) -> colored::Color {
@@ -18,15 +18,14 @@ fn severity_color(severity: ImpactSeverity) -> colored::Color {
     }
 }
 
-pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) {
-    writeln!(w).unwrap();
+pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) -> io::Result<()> {
+    writeln!(w)?;
     writeln!(
         w,
         "{}",
         format!("Impact Analysis: {}", report.source_model).bold()
-    )
-    .unwrap();
-    writeln!(w, "{}", "=".repeat(50)).unwrap();
+    )?;
+    writeln!(w, "{}", "=".repeat(50))?;
 
     let severity_str = report
         .overall_severity
@@ -34,19 +33,19 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
         .to_uppercase()
         .color(severity_color(report.overall_severity))
         .bold();
-    writeln!(w, "Overall Severity: {}", severity_str).unwrap();
-    writeln!(w).unwrap();
+    writeln!(w, "Overall Severity: {}", severity_str)?;
+    writeln!(w)?;
 
-    writeln!(w, "{}", "Summary:".bold()).unwrap();
-    writeln!(w, "  Affected models:    {}", report.affected_models).unwrap();
-    writeln!(w, "  Affected tests:     {}", report.affected_tests).unwrap();
-    writeln!(w, "  Affected exposures: {}", report.affected_exposures).unwrap();
-    writeln!(w).unwrap();
+    writeln!(w, "{}", "Summary:".bold())?;
+    writeln!(w, "  Affected models:    {}", report.affected_models)?;
+    writeln!(w, "  Affected tests:     {}", report.affected_tests)?;
+    writeln!(w, "  Affected exposures: {}", report.affected_exposures)?;
+    writeln!(w)?;
 
     if !report.exposure_paths.is_empty() {
-        writeln!(w, "{}", "Exposure Paths:".bold()).unwrap();
+        writeln!(w, "{}", "Exposure Paths:".bold())?;
         for ep in &report.exposure_paths {
-            writeln!(w, "  {}", ep.path.join(" -> ")).unwrap();
+            writeln!(w, "  {}", ep.path.join(" -> "))?;
         }
         if report.exposure_paths_truncated {
             writeln!(
@@ -54,14 +53,13 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
                 "  {} Use `dlin graph {} --include-exposures` to see the full lineage.",
                 "(truncated)".dimmed(),
                 report.source_model
-            )
-            .unwrap();
+            )?;
         }
-        writeln!(w).unwrap();
+        writeln!(w)?;
     }
 
     if !report.impacted_nodes.is_empty() {
-        writeln!(w, "{}", "Impacted Nodes:".bold()).unwrap();
+        writeln!(w, "{}", "Impacted Nodes:".bold())?;
         for node in &report.impacted_nodes {
             let sev = node.severity.label().color(severity_color(node.severity));
             if let Some(ref path) = node.file_path {
@@ -69,27 +67,26 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
                     w,
                     "  [{:<8}] {} ({}, distance: {}) [{}]",
                     sev, node.label, node.node_type, node.distance, path
-                )
-                .unwrap();
+                )?;
             } else {
                 writeln!(
                     w,
                     "  [{:<8}] {} ({}, distance: {})",
                     sev, node.label, node.node_type, node.distance
-                )
-                .unwrap();
+                )?;
             }
             if let Some(ref sql) = node.sql_content {
-                writeln!(w, "    {}", "--- SQL ---".dimmed()).unwrap();
+                writeln!(w, "    {}", "--- SQL ---".dimmed())?;
                 for line in sql.lines() {
-                    writeln!(w, "    {}", line).unwrap();
+                    writeln!(w, "    {}", line)?;
                 }
-                writeln!(w, "    {}", "----------".dimmed()).unwrap();
+                writeln!(w, "    {}", "----------".dimmed())?;
             }
         }
     }
 
-    writeln!(w).unwrap();
+    writeln!(w)?;
+    Ok(())
 }
 
 /// Render impact reports as a JSON array to stdout.
@@ -97,16 +94,17 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
 pub fn render_impact_json(reports: &[ImpactReport]) {
     let mut stdout = std::io::stdout().lock();
     let pretty = stdout.is_terminal();
-    render_impact_json_to_writer(reports, &mut stdout, pretty);
+    super::handle_stdout_result(render_impact_json_to_writer(reports, &mut stdout, pretty));
 }
 
-pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W, pretty: bool) {
+pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W, pretty: bool) -> io::Result<()> {
     if pretty {
-        serde_json::to_writer_pretty(&mut *w, reports).unwrap();
+        serde_json::to_writer_pretty(&mut *w, reports).map_err(super::serde_io_error)?;
     } else {
-        serde_json::to_writer(&mut *w, reports).unwrap();
+        serde_json::to_writer(&mut *w, reports).map_err(super::serde_io_error)?;
     }
-    writeln!(w).unwrap();
+    writeln!(w)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -166,7 +164,7 @@ mod tests {
     fn test_render_impact_text() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(output.contains("Impact Analysis: stg_orders"));
@@ -182,7 +180,7 @@ mod tests {
     fn test_render_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf, true);
+        render_impact_json_to_writer(&[report], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -216,7 +214,7 @@ mod tests {
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Impact Analysis: isolated"));
         assert!(output.contains("Affected models:    0"));
@@ -257,7 +255,7 @@ mod tests {
             }],
         };
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Impact Analysis: stg_payments"));
         assert!(output.contains("MEDIUM"));
@@ -271,7 +269,7 @@ mod tests {
         colored::control::set_override(false);
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -280,7 +278,7 @@ mod tests {
     fn test_snapshot_impact_json() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf, true);
+        render_impact_json_to_writer(&[report], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -299,7 +297,7 @@ mod tests {
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report1, report2], &mut buf, true);
+        render_impact_json_to_writer(&[report1, report2], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -313,7 +311,7 @@ mod tests {
     fn test_compact_impact_json_single_line() {
         let report = make_report();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf, false);
+        render_impact_json_to_writer(&[report], &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 1, "compact JSON should be a single line");
@@ -323,7 +321,7 @@ mod tests {
     #[test]
     fn test_render_impact_json_empty() {
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[], &mut buf, true);
+        render_impact_json_to_writer(&[], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -383,7 +381,7 @@ mod tests {
         colored::control::set_override(false);
         let report = make_report_with_sql();
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -392,7 +390,7 @@ mod tests {
     fn test_snapshot_impact_json_with_sql() {
         let report = make_report_with_sql();
         let mut buf = Vec::new();
-        render_impact_json_to_writer(&[report], &mut buf, true);
+        render_impact_json_to_writer(&[report], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -417,7 +415,7 @@ mod tests {
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
-        render_impact_text_to_writer(&report, &mut buf);
+        render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("(truncated)"));
         assert!(output.contains("dlin graph stg_orders --include-exposures"));

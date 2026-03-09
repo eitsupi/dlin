@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
@@ -6,14 +6,14 @@ use crate::graph::types::*;
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
 pub fn render_mermaid(graph: &LineageGraph) {
-    render_mermaid_to_writer(graph, &mut std::io::stdout().lock());
+    super::handle_stdout_result(render_mermaid_to_writer(graph, &mut std::io::stdout().lock()));
 }
 
-fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
-    writeln!(w, "flowchart LR").unwrap();
+fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
+    writeln!(w, "flowchart LR")?;
 
     if graph.node_count() == 0 {
-        return;
+        return Ok(());
     }
 
     // Collect and sort nodes by unique_id
@@ -33,10 +33,10 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             NodeType::Exposure => format!("{}>\"{}\"]", id, label),
             NodeType::Phantom => format!("{}(\"{}\")", id, label),
         };
-        writeln!(w, "    {}", shape).unwrap();
+        writeln!(w, "    {}", shape)?;
     }
 
-    writeln!(w).unwrap();
+    writeln!(w)?;
 
     // Collect and sort edges by (source_id, target_id, edge_type)
     let mut edges: Vec<_> = graph.edge_references().map(|edge| {
@@ -54,10 +54,10 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             EdgeType::Test => format!("    {} -.->|test| {}", src_id, tgt_id),
             EdgeType::Exposure => format!("    {} ==>|exposure| {}", src_id, tgt_id),
         };
-        writeln!(w, "{}", arrow).unwrap();
+        writeln!(w, "{}", arrow)?;
     }
 
-    writeln!(w).unwrap();
+    writeln!(w)?;
 
     // Collect used node types
     let mut used_types: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -77,7 +77,7 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
     ];
     for (name, style) in &class_defs {
         if used_types.contains(name) {
-            writeln!(w, "    classDef {} {}", name, style).unwrap();
+            writeln!(w, "    classDef {} {}", name, style)?;
         }
     }
 
@@ -85,8 +85,9 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
     for node in &nodes {
         let id = mermaid_id(&node.unique_id);
         let class = node.node_type.label();
-        writeln!(w, "    class {} {}", id, class).unwrap();
+        writeln!(w, "    class {} {}", id, class)?;
     }
+    Ok(())
 }
 
 /// Convert a unique_id to a valid Mermaid node ID (replace dots with underscores)
@@ -113,7 +114,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf);
+        render_mermaid_to_writer(graph, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 

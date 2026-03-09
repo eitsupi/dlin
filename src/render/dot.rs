@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
@@ -6,18 +6,17 @@ use crate::graph::types::*;
 
 /// Render the lineage graph as Graphviz DOT format to stdout
 pub fn render_dot(graph: &LineageGraph) {
-    render_dot_to_writer(graph, &mut std::io::stdout().lock());
+    super::handle_stdout_result(render_dot_to_writer(graph, &mut std::io::stdout().lock()));
 }
 
-fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
-    writeln!(w, "digraph dbt_lineage {{").unwrap();
-    writeln!(w, "  rankdir=LR;").unwrap();
+fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
+    writeln!(w, "digraph dbt_lineage {{")?;
+    writeln!(w, "  rankdir=LR;")?;
     writeln!(
         w,
         "  node [shape=box, style=filled, fontname=\"Helvetica\"];"
-    )
-    .unwrap();
-    writeln!(w).unwrap();
+    )?;
+    writeln!(w)?;
 
     // Render nodes
     for idx in graph.node_indices() {
@@ -28,11 +27,10 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             w,
             "  \"{}\" [label=\"{}\", fillcolor=\"{}\", fontcolor=\"{}\"];",
             node.unique_id, label, color, fontcolor
-        )
-        .unwrap();
+        )?;
     }
 
-    writeln!(w).unwrap();
+    writeln!(w)?;
 
     // Render edges
     for edge in graph.edge_references() {
@@ -50,11 +48,11 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             source.unique_id,
             target.unique_id,
             edge.weight().edge_type_label(),
-        )
-        .unwrap();
+        )?;
     }
 
-    writeln!(w, "}}").unwrap();
+    writeln!(w, "}}")?;
+    Ok(())
 }
 
 impl EdgeData {
@@ -99,7 +97,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_dot_to_writer(graph, &mut buf);
+        render_dot_to_writer(graph, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 

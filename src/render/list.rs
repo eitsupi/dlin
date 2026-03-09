@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 
 use serde_json::Value;
 
@@ -25,16 +25,17 @@ pub fn render_list(
     sql_contents: Option<&HashMap<String, String>>,
 ) {
     let mut stdout = std::io::stdout().lock();
-    match format {
+    let result = match format {
         ListOutputFormat::Plain => render_list_plain(graph, &mut stdout),
         ListOutputFormat::Json => {
             let pretty = stdout.is_terminal();
-            render_list_json(graph, fields, sql_contents, &mut stdout, pretty);
+            render_list_json(graph, fields, sql_contents, &mut stdout, pretty)
         }
-    }
+    };
+    super::handle_stdout_result(result);
 }
 
-pub fn render_list_plain<W: Write>(graph: &LineageGraph, w: &mut W) {
+pub fn render_list_plain<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
     let mut entries: Vec<(&str, &str)> = graph
         .node_indices()
         .map(|idx| {
@@ -45,8 +46,9 @@ pub fn render_list_plain<W: Write>(graph: &LineageGraph, w: &mut W) {
     entries.sort_unstable();
 
     for (node_type, label) in entries {
-        writeln!(w, "{}\t{}", node_type, label).unwrap();
+        writeln!(w, "{}\t{}", node_type, label)?;
     }
+    Ok(())
 }
 
 pub fn render_list_json<W: Write>(
@@ -55,7 +57,7 @@ pub fn render_list_json<W: Write>(
     sql_contents: Option<&HashMap<String, String>>,
     w: &mut W,
     pretty: bool,
-) {
+) -> io::Result<()> {
     let mut nodes: Vec<(String, String, Value)> = graph
         .node_indices()
         .map(|idx| {
@@ -70,11 +72,12 @@ pub fn render_list_json<W: Write>(
     let nodes: Vec<Value> = nodes.into_iter().map(|(_, _, v)| v).collect();
 
     if pretty {
-        serde_json::to_writer_pretty(&mut *w, &nodes).unwrap();
+        serde_json::to_writer_pretty(&mut *w, &nodes).map_err(super::serde_io_error)?;
     } else {
-        serde_json::to_writer(&mut *w, &nodes).unwrap();
+        serde_json::to_writer(&mut *w, &nodes).map_err(super::serde_io_error)?;
     }
-    writeln!(w).unwrap();
+    writeln!(w)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -118,7 +121,7 @@ mod tests {
     fn test_plain_sorted_output() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_plain(&graph, &mut buf);
+        render_list_plain(&graph, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert_eq!(
             output,
@@ -130,7 +133,7 @@ mod tests {
     fn test_plain_empty_graph() {
         let graph = LineageGraph::new();
         let mut buf = Vec::new();
-        render_list_plain(&graph, &mut buf);
+        render_list_plain(&graph, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.is_empty());
     }
@@ -139,7 +142,7 @@ mod tests {
     fn test_json_sorted_output() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
@@ -157,7 +160,7 @@ mod tests {
     fn test_json_compact_single_line() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 1, "compact JSON should be a single line");
@@ -167,7 +170,7 @@ mod tests {
     fn test_json_pretty_multi_line() {
         let graph = make_test_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, true);
+        render_list_json(&graph, &all_fields(), None, &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert!(lines.len() > 1, "pretty JSON should be multi-line");
@@ -177,7 +180,7 @@ mod tests {
     fn test_json_empty_graph() {
         let graph = LineageGraph::new();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert!(parsed.is_empty());
@@ -188,7 +191,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("model.orders", "orders", NodeType::Model));
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed[0]["unique_id"], "model.orders");
@@ -208,7 +211,7 @@ mod tests {
             columns: vec![],
         });
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed[0]["file_path"], "models/orders.sql");
@@ -219,7 +222,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, false);
+        render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert!(parsed[0].get("file_path").is_none());
@@ -229,7 +232,7 @@ mod tests {
     fn test_snapshot_list_plain() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_list_plain(&graph, &mut buf);
+        render_list_plain(&graph, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -238,7 +241,7 @@ mod tests {
     fn test_snapshot_list_json() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_list_json(&graph, &all_fields(), None, &mut buf, true);
+        render_list_json(&graph, &all_fields(), None, &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }

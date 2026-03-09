@@ -1,3 +1,5 @@
+use std::io;
+
 pub mod ascii;
 pub mod dot;
 pub mod html;
@@ -8,6 +10,25 @@ pub mod list;
 pub mod mermaid;
 pub mod plain;
 pub mod svg;
+
+/// Handle an I/O result from writing to stdout.
+/// Silently ignores `BrokenPipe` errors (e.g. `cmd | head`).
+pub(crate) fn handle_stdout_result(result: io::Result<()>) {
+    if let Err(e) = result {
+        if e.kind() != io::ErrorKind::BrokenPipe {
+            eprintln!("error writing output: {}", e);
+        }
+    }
+}
+
+/// Convert a `serde_json::Error` into an `io::Error`, preserving the
+/// underlying I/O error kind (e.g. `BrokenPipe`) when present.
+pub(crate) fn serde_io_error(e: serde_json::Error) -> io::Error {
+    match e.io_error_kind() {
+        Some(kind) => io::Error::new(kind, e),
+        None => io::Error::new(io::ErrorKind::Other, e),
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod test_helpers {

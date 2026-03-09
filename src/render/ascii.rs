@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{self, Write};
 
 use colored::Colorize;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -35,7 +35,7 @@ fn warn_if_too_wide(graph: &LineageGraph) {
 #[cfg(not(tarpaulin_include))]
 pub fn render_ascii(graph: &LineageGraph) {
     warn_if_too_wide(graph);
-    render_ascii_to_writer(graph, &mut std::io::stdout().lock());
+    super::handle_stdout_result(render_ascii_to_writer(graph, &mut std::io::stdout().lock()));
 }
 
 /// Compute column x-offsets from column widths and spacing
@@ -108,15 +108,15 @@ fn format_edge_arrow(edge_type: EdgeType) -> &'static str {
     }
 }
 
-fn render_ascii_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
+fn render_ascii_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
     if graph.node_count() == 0 {
-        writeln!(w, "(empty graph — no nodes to display)").unwrap();
-        return;
+        writeln!(w, "(empty graph — no nodes to display)")?;
+        return Ok(());
     }
 
     let layout = sugiyama_layout(graph);
     if layout.num_layers == 0 {
-        return;
+        return Ok(());
     }
 
     let col_widths = calculate_column_widths(graph, &layout);
@@ -124,11 +124,11 @@ fn render_ascii_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
 
     for row in 0..layout.max_layer_width {
         let line = render_row(graph, &layout, row, &col_widths, &col_offsets);
-        writeln!(w, "{}", line.trim_end()).unwrap();
+        writeln!(w, "{}", line.trim_end())?;
     }
 
-    writeln!(w).unwrap();
-    writeln!(w, "{}", "Edges:".bold()).unwrap();
+    writeln!(w)?;
+    writeln!(w, "{}", "Edges:".bold())?;
     for edge in graph.edge_references() {
         let source = &graph[edge.source()];
         let target = &graph[edge.target()];
@@ -138,12 +138,12 @@ fn render_ascii_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
             colorize_node(&source.display_name(), source.node_type),
             format_edge_arrow(edge.weight().edge_type),
             colorize_node(&target.display_name(), target.node_type),
-        )
-        .unwrap();
+        )?;
     }
 
-    writeln!(w).unwrap();
-    print_legend_to_writer(w);
+    writeln!(w)?;
+    print_legend_to_writer(w)?;
+    Ok(())
 }
 
 /// Calculate the width needed for each column (layer)
@@ -178,8 +178,8 @@ fn colorize_node(text: &str, node_type: NodeType) -> String {
     }
 }
 
-fn print_legend_to_writer<W: Write>(w: &mut W) {
-    writeln!(w, "{}", "Legend:".bold()).unwrap();
+fn print_legend_to_writer<W: Write>(w: &mut W) -> io::Result<()> {
+    writeln!(w, "{}", "Legend:".bold())?;
     writeln!(
         w,
         "  {} {} {} {} {} {} {}",
@@ -190,8 +190,8 @@ fn print_legend_to_writer<W: Write>(w: &mut W) {
         "test".cyan(),
         "exposure".red(),
         "phantom".dimmed(),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -252,7 +252,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_ascii_to_writer(graph, &mut buf);
+        render_ascii_to_writer(graph, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn test_legend() {
         let mut buf = Vec::new();
-        print_legend_to_writer(&mut buf);
+        print_legend_to_writer(&mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Legend:"));
     }

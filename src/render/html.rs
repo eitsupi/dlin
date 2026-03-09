@@ -81,10 +81,10 @@ fn build_html_json(graph: &LineageGraph) -> String {
 
 /// Render HTML to stdout
 pub fn render_html(graph: &LineageGraph) {
-    render_html_to_writer(graph, &mut std::io::stdout().lock());
+    super::handle_stdout_result(render_html_to_writer(graph, &mut std::io::stdout().lock()));
 }
 
-pub fn render_html_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) {
+pub fn render_html_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> std::io::Result<()> {
     let svg_content = crate::render::svg::render_svg_to_string(graph);
     let json_data = build_html_json(graph);
 
@@ -231,8 +231,8 @@ body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMa
 </html>"#,
         svg_content = svg_content,
         json_data = json_data
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -254,7 +254,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_html_to_writer(graph, &mut buf);
+        render_html_to_writer(graph, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
