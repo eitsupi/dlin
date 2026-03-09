@@ -85,7 +85,6 @@ fn render_file_list<W: Write>(w: &mut W, label: &str, files: &[String], max: usi
         return Ok(());
     }
     let show = files.len().min(max);
-    //           "Manifest:    " is 13 chars; align sub-labels to same column
     writeln!(w, "  {}:", label)?;
     for f in &files[..show] {
         writeln!(w, "  - {}", f)?;

@@ -441,6 +441,20 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
     Ok(())
 }
 
+/// Collect file paths referenced in manifest that no longer exist on disk.
+fn find_deleted_manifest_files(
+    manifest: &parser::manifest::Manifest,
+    project_dir: &Path,
+) -> Vec<String> {
+    let mut deleted: Vec<String> = manifest
+        .collect_file_paths()
+        .into_iter()
+        .filter(|p| !project_dir.join(p).exists())
+        .collect();
+    deleted.sort();
+    deleted
+}
+
 /// Check manifest.json freshness, returning None if manifest is irrelevant.
 #[cfg(not(tarpaulin_include))]
 fn check_manifest_freshness(
@@ -495,16 +509,11 @@ fn check_manifest_freshness(
 
     // Check for deleted files: paths referenced in manifest but missing on disk
     let deleted_files = match parser::manifest::load_manifest(&resolved) {
-        Ok(manifest) => {
-            let mut deleted: Vec<String> = manifest
-                .collect_file_paths()
-                .into_iter()
-                .filter(|p| !project_dir.join(p).exists())
-                .collect();
-            deleted.sort();
-            deleted
+        Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
+        Err(e) => {
+            dlin::warn!("cannot parse manifest.json for deleted-file check: {}", e);
+            return None;
         }
-        Err(_) => vec![],
     };
 
     let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
@@ -572,13 +581,10 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
 
     // Check for deleted files: paths referenced in manifest but missing on disk
     let manifest = parser::manifest::load_manifest(&manifest_path)?;
-    let mut deleted_files: Vec<PathBuf> = manifest
-        .collect_file_paths()
+    let deleted_files: Vec<PathBuf> = find_deleted_manifest_files(&manifest, &project_dir)
         .into_iter()
-        .filter(|p| !project_dir.join(p).exists())
         .map(PathBuf::from)
         .collect();
-    deleted_files.sort();
 
     let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
 
