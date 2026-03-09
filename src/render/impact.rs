@@ -67,14 +67,14 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
             if let Some(ref path) = node.file_path {
                 writeln!(
                     w,
-                    "  [{:<8}] {} ({}, {} distance) [{}]",
+                    "  [{:<8}] {} ({}, distance: {}) [{}]",
                     sev, node.label, node.node_type, node.distance, path
                 )
                 .unwrap();
             } else {
                 writeln!(
                     w,
-                    "  [{:<8}] {} ({}, {} distance)",
+                    "  [{:<8}] {} ({}, distance: {})",
                     sev, node.label, node.node_type, node.distance
                 )
                 .unwrap();
