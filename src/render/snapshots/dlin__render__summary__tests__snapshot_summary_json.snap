@@ -16,5 +16,6 @@ expression: output
     "total": 12
   },
   "edge_count": 10,
-  "vars_count": 2
+  "vars_count": 2,
+  "manifest_status": null
 }

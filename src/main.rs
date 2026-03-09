@@ -434,7 +434,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
     };
 
     match args.output {
-        SummaryOutputFormat::Text => render::summary::render_summary(&report, true),
+        SummaryOutputFormat::Text => render::summary::render_summary_text_stdout(&report),
         SummaryOutputFormat::Json => render::summary::render_summary_json_stdout(&report),
     }
 

@@ -13,7 +13,6 @@ pub struct SummaryReport {
     pub node_counts: NodeCounts,
     pub edge_count: usize,
     pub vars_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_status: Option<ManifestStatus>,
 }
 
@@ -62,15 +61,10 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
     NodeCounts { model, source, seed, snapshot, test, exposure, phantom, total }
 }
 
-/// Render summary to stdout.
-pub fn render_summary(report: &SummaryReport, pretty: bool) {
+/// Render summary as human-readable text to stdout.
+pub fn render_summary_text_stdout(report: &SummaryReport) {
     let mut stdout = io::stdout().lock();
-    let result = if pretty {
-        render_summary_text(report, &mut stdout)
-    } else {
-        render_summary_json(report, &mut stdout, false)
-    };
-    super::handle_stdout_result(result);
+    super::handle_stdout_result(render_summary_text(report, &mut stdout));
 }
 
 /// Render summary as JSON to stdout.
@@ -257,8 +251,7 @@ mod tests {
         assert_eq!(parsed["node_counts"]["total"], 12);
         assert_eq!(parsed["edge_count"], 10);
         assert_eq!(parsed["vars_count"], 2);
-        // manifest_status omitted when None
-        assert!(parsed.get("manifest_status").is_none());
+        assert!(parsed["manifest_status"].is_null());
     }
 
     #[test]
