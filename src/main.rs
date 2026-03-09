@@ -264,7 +264,7 @@ fn build_dag(
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            graph::builder::build_graph(project_dir, &files, cache_dir, no_cache)
+            graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, &project.vars)
         }
     }
 }

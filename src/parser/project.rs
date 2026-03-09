@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::DbtLineageError;
@@ -26,6 +27,9 @@ pub struct DbtProject {
 
     #[serde(rename = "analysis-paths", default = "default_analysis_paths")]
     pub analysis_paths: Vec<String>,
+
+    #[serde(default)]
+    pub vars: HashMap<String, serde_json::Value>,
 }
 
 fn default_model_paths() -> Vec<String> {

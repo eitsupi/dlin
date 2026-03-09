@@ -67,7 +67,16 @@ fn strip_jinja_comments(sql: &str) -> String {
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
 pub fn extract_all(sql: &str, macro_prefix: &str) -> super::jinja::JinjaExtraction {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
+    extract_all_with_vars(sql, macro_prefix, &std::collections::HashMap::new())
+}
+
+/// Like [`extract_all`] but resolves `var()` calls using project-level variables.
+pub fn extract_all_with_vars(
+    sql: &str,
+    macro_prefix: &str,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> super::jinja::JinjaExtraction {
+    if let Some(ext) = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars) {
         return ext;
     }
     super::jinja::JinjaExtraction {
@@ -83,7 +92,16 @@ pub fn extract_all(sql: &str, macro_prefix: &str) -> super::jinja::JinjaExtracti
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
 pub fn extract_refs_and_sources(sql: &str, macro_prefix: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
+    extract_refs_and_sources_with_vars(sql, macro_prefix, &std::collections::HashMap::new())
+}
+
+/// Like [`extract_refs_and_sources`] but resolves `var()` calls using project-level variables.
+pub fn extract_refs_and_sources_with_vars(
+    sql: &str,
+    macro_prefix: &str,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> (Vec<RefCall>, Vec<SourceCall>) {
+    if let Some(ext) = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars) {
         return (ext.refs, ext.sources);
     }
     (extract_refs_regex(sql), extract_sources_regex(sql))

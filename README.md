@@ -22,17 +22,23 @@ cargo install --git https://github.com/eitsupi/dlin.git
 
 ```sh
 $ dlin graph -p path/to/dbt/project
- [ src:raw.payments ]     [ stg_payments ]        [ orders ]        [ customers ]
-  [ src:raw.orders ]       [ stg_orders ]      [ order_summary ]
-[ src:raw.customers ]    [ stg_customers ]
+ [ src:raw.orders ]      [ stg_retail_orders ]        [ orders ]         [ customers ]
+[ src:raw.payments ]        [ stg_orders ]        [ combined_orders ]
+[ src:raw.customers ]    [ stg_online_orders ]     [ order_summary ]
+                           [ stg_payments ]
+                           [ stg_customers ]
 
 Edges:
   stg_orders ──ref──> order_summary
   stg_payments ──ref──> order_summary
   stg_customers ──ref──> customers
   orders ──ref──> customers
+  stg_online_orders ──ref──> combined_orders
+  stg_retail_orders ──ref──> combined_orders
   stg_orders ──ref──> orders
   stg_payments ──ref──> orders
+  src:raw.orders ──src──> stg_retail_orders
+  src:raw.orders ──src──> stg_online_orders
   src:raw.orders ──src──> stg_orders
   src:raw.payments ──src──> stg_payments
   src:raw.customers ──src──> stg_customers
@@ -42,34 +48,44 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML. 
 
 ```mermaid
 flowchart LR
+    model_combined_orders["combined_orders"]
     model_customers["customers"]
     model_order_summary["order_summary"]
     model_orders["orders"]
     model_stg_customers["stg_customers"]
+    model_stg_online_orders["stg_online_orders"]
     model_stg_orders["stg_orders"]
     model_stg_payments["stg_payments"]
+    model_stg_retail_orders["stg_retail_orders"]
     source_raw_customers(["raw.customers"])
     source_raw_orders(["raw.orders"])
     source_raw_payments(["raw.payments"])
 
     model_orders -->|ref| model_customers
     model_stg_customers -->|ref| model_customers
+    model_stg_online_orders -->|ref| model_combined_orders
     model_stg_orders -->|ref| model_order_summary
     model_stg_orders -->|ref| model_orders
     model_stg_payments -->|ref| model_order_summary
     model_stg_payments -->|ref| model_orders
+    model_stg_retail_orders -->|ref| model_combined_orders
     source_raw_customers -.->|source| model_stg_customers
+    source_raw_orders -.->|source| model_stg_online_orders
     source_raw_orders -.->|source| model_stg_orders
+    source_raw_orders -.->|source| model_stg_retail_orders
     source_raw_payments -.->|source| model_stg_payments
 
     classDef model fill:#4A90D9,stroke:#333,color:#fff
     classDef source fill:#27AE60,stroke:#333,color:#fff
+    class model_combined_orders model
     class model_customers model
     class model_order_summary model
     class model_orders model
     class model_stg_customers model
+    class model_stg_online_orders model
     class model_stg_orders model
     class model_stg_payments model
+    class model_stg_retail_orders model
     class source_raw_customers source
     class source_raw_orders source
     class source_raw_payments source
@@ -92,12 +108,15 @@ dlin graph -i                                     # interactive TUI
 
 ```sh
 $ dlin list
+model   combined_orders
 model   customers
 model   order_summary
 model   orders
 model   stg_customers
+model   stg_online_orders
 model   stg_orders
 model   stg_payments
+model   stg_retail_orders
 source  raw.customers
 source  raw.orders
 source  raw.payments
@@ -242,7 +261,7 @@ cargo install dlin --no-default-features
 
 ## Limitations of SQL parse mode
 
-- **`var()` dynamic references** — `ref(var('name'))` cannot be resolved (variable values are runtime-only)
+- **`var()` with CLI overrides** — `var()` resolves values from `dbt_project.yml` `vars`, but `--vars` CLI overrides are not supported
 - **Runtime context** — `target.type`, `env_var()`, etc. are not evaluated
 - **Conditional Jinja** — branches are evaluated with default values; non-default paths may be missed
 - **Column extraction** — falls back to regex on final SELECT when YAML schema is absent; cannot resolve `SELECT *` or CTE columns

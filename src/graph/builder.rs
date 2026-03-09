@@ -10,7 +10,9 @@ use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
-use crate::parser::sql::{extract_all, extract_refs_and_sources, RefCall, SourceCall};
+use crate::parser::sql::{
+    extract_all_with_vars, extract_refs_and_sources_with_vars, RefCall, SourceCall,
+};
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -235,6 +237,7 @@ fn process_model_files(
     model_meta: &HashMap<String, YamlModelMeta>,
     macro_prefix: &str,
     disk_cache: &mut cache::ExtractionCache,
+    vars: &HashMap<String, serde_json::Value>,
 ) -> ExtractionCache {
     // Parallel phase: read files and run minijinja extraction concurrently.
     // Uses disk cache (immutable borrow) to skip rendering for unchanged files.
@@ -265,7 +268,7 @@ fn process_model_files(
 
             let extraction = sql_content
                 .as_ref()
-                .map(|content| extract_all(content, macro_prefix));
+                .map(|content| extract_all_with_vars(content, macro_prefix, vars));
 
             let columns = sql_content
                 .as_ref()
@@ -389,6 +392,7 @@ fn process_sql_edges(
     project_dir: &Path,
     macro_prefix: &str,
     extraction_cache: &ExtractionCache,
+    vars: &HashMap<String, serde_json::Value>,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -431,7 +435,7 @@ fn process_sql_edges(
             (&cached.0, &cached.1)
         } else {
             let content = read_file(sql_path)?;
-            owned = extract_refs_and_sources(&content, macro_prefix);
+            owned = extract_refs_and_sources_with_vars(&content, macro_prefix, vars);
             (&owned.0, &owned.1)
         };
 
@@ -506,6 +510,7 @@ pub fn build_graph(
     files: &DiscoveredFiles,
     cache_dir: Option<&Path>,
     no_cache: bool,
+    vars: &HashMap<String, serde_json::Value>,
 ) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
     let macro_prefix = load_macro_prefix(files);
@@ -523,6 +528,7 @@ pub fn build_graph(
         &model_meta,
         &macro_prefix,
         &mut disk_cache,
+        vars,
     );
     process_simple_nodes(
         &mut gb,
@@ -538,7 +544,7 @@ pub fn build_graph(
         "snapshot",
         NodeType::Snapshot,
     );
-    process_sql_edges(&mut gb, files, project_dir, &macro_prefix, &extraction_cache)?;
+    process_sql_edges(&mut gb, files, project_dir, &macro_prefix, &extraction_cache, vars)?;
     process_exposures(&mut gb, &exposures);
 
     disk_cache.save();
@@ -726,7 +732,7 @@ models:
         };
 
         // Use no_cache: false to exercise the cache-enabled path end-to-end
-        let graph = build_graph(&project_dir, &files, None, false).unwrap();
+        let graph = build_graph(&project_dir, &files, None, false, &HashMap::new()).unwrap();
 
         // Should have source + 2 models = 3 nodes
         assert_eq!(graph.node_count(), 3);
@@ -755,7 +761,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         assert_eq!(graph.node_count(), 1);
         let node = &graph[graph.node_indices().next().unwrap()];
         assert_eq!(node.node_type, NodeType::Seed);
@@ -775,7 +781,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         assert_eq!(graph.node_count(), 1);
         let node = &graph[graph.node_indices().next().unwrap()];
         assert_eq!(node.node_type, NodeType::Snapshot);
@@ -805,7 +811,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // model + test = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // ref edge: stg_orders → assert_positive
@@ -841,7 +847,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // model + exposure = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // exposure edge: orders → weekly_report
@@ -871,7 +877,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // seed + model = 2 nodes (no phantom)
         assert_eq!(graph.node_count(), 2);
         // ref edge: countries → stg_countries
@@ -902,7 +908,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // model + phantom = 2 nodes
         assert_eq!(graph.node_count(), 2);
         let phantom = graph
@@ -929,7 +935,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // model + phantom source = 2 nodes
         assert_eq!(graph.node_count(), 2);
         let phantom = graph
@@ -949,7 +955,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         let stg = graph
             .node_indices()
             .find(|&i| graph[i].label == "stg_orders")
@@ -972,7 +978,7 @@ exposures:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         let edge_types: Vec<EdgeType> = graph
             .edge_references()
             .map(|e| e.weight().edge_type)
@@ -985,7 +991,7 @@ exposures:
     fn test_build_graph_empty_files() {
         let tmp = tempfile::tempdir().unwrap();
         let files = DiscoveredFiles::default();
-        let graph = build_graph(tmp.path(), &files, None, true).unwrap();
+        let graph = build_graph(tmp.path(), &files, None, true, &HashMap::new()).unwrap();
         assert_eq!(graph.node_count(), 0);
         assert_eq!(graph.edge_count(), 0);
     }
@@ -1025,7 +1031,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         let stg = graph
             .node_indices()
             .find(|&i| graph[i].label == "stg_orders")
@@ -1057,7 +1063,7 @@ models:
         };
 
         // Should not panic, just warn on stderr about the duplicate
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // Both SQL files produce nodes (duplicate warning is informational)
         let order_nodes: Vec<_> = graph
             .node_indices()
@@ -1079,7 +1085,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
 
         for idx in graph.node_indices() {
             let node = &graph[idx];
@@ -1162,7 +1168,7 @@ models:
             ..Default::default()
         };
 
-        let graph = build_graph(&project_dir, &files, None, true).unwrap();
+        let graph = build_graph(&project_dir, &files, None, true, &HashMap::new()).unwrap();
         // base_table + derived = 2 nodes
         assert_eq!(graph.node_count(), 2);
         // ref edge: base_table → derived
@@ -1178,5 +1184,76 @@ models:
             .find(|&i| graph[i].label == "derived")
             .unwrap();
         assert!(graph.contains_edge(base, derived));
+    }
+
+    #[test]
+    fn test_var_list_expansion_resolves_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // dbt_project.yml with vars
+        fs::write(
+            project_dir.join("dbt_project.yml"),
+            "name: var_test\n",
+        )
+        .unwrap();
+
+        // Model that uses var() to iterate over categories and ref dynamically
+        fs::write(
+            models_dir.join("combined.sql"),
+            r#"
+            {%- set categories = var("product_categories") -%}
+            {%- for cat in categories -%}
+                SELECT * FROM {{ ref('stg_' ~ cat ~ '_summary') }}
+                {% if not loop.last %}UNION ALL{% endif %}
+            {%- endfor -%}
+            "#,
+        )
+        .unwrap();
+
+        // Stub models that the refs point to
+        fs::write(models_dir.join("stg_electronics_summary.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("stg_clothing_summary.sql"), "SELECT 1").unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/combined.sql"),
+                project_dir.join("models/stg_electronics_summary.sql"),
+                project_dir.join("models/stg_clothing_summary.sql"),
+            ],
+            ..Default::default()
+        };
+
+        // Provide project-level vars
+        let mut vars = HashMap::new();
+        vars.insert(
+            "product_categories".to_string(),
+            serde_json::json!(["electronics", "clothing"]),
+        );
+
+        let graph = build_graph(&project_dir, &files, None, true, &vars).unwrap();
+
+        // 3 model nodes: combined + stg_electronics_summary + stg_clothing_summary
+        assert_eq!(graph.node_count(), 3);
+
+        // 2 edges: stg_electronics_summary → combined, stg_clothing_summary → combined
+        assert_eq!(graph.edge_count(), 2);
+
+        let combined = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "combined")
+            .unwrap();
+        let electronics = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "stg_electronics_summary")
+            .unwrap();
+        let clothing = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "stg_clothing_summary")
+            .unwrap();
+        assert!(graph.contains_edge(electronics, combined));
+        assert!(graph.contains_edge(clothing, combined));
     }
 }

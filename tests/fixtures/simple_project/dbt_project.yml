@@ -6,3 +6,7 @@ model-paths: ["models"]
 seed-paths: ["seeds"]
 snapshot-paths: ["snapshots"]
 test-paths: ["tests"]
+
+vars:
+  payment_methods: ["credit_card", "bank_transfer"]
+  order_sources: ["online", "retail"]

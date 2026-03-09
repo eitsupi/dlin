@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use minijinja::value::Kwargs;
@@ -22,6 +23,16 @@ pub struct JinjaExtraction {
 /// It is prepended to the template so that custom macros containing
 /// ref()/source() calls are expanded and tracked.
 pub fn extract_via_jinja(sql: &str, macro_prefix: &str) -> Option<JinjaExtraction> {
+    extract_via_jinja_with_vars(sql, macro_prefix, &HashMap::new())
+}
+
+/// Like [`extract_via_jinja`] but resolves `var()` calls using the given
+/// project-level variables (parsed from `dbt_project.yml`).
+pub fn extract_via_jinja_with_vars(
+    sql: &str,
+    macro_prefix: &str,
+    vars: &HashMap<String, serde_json::Value>,
+) -> Option<JinjaExtraction> {
     let template = if macro_prefix.is_empty() {
         sql.to_string()
     } else {
@@ -29,10 +40,10 @@ pub fn extract_via_jinja(sql: &str, macro_prefix: &str) -> Option<JinjaExtractio
     };
 
     // Render with is_incremental=false first (full-load path)
-    let mut result = render_with_incremental(&template, false)?;
+    let mut result = render_with_incremental(&template, false, vars)?;
 
     // Render again with is_incremental=true to capture incremental-only refs
-    if let Some(incr) = render_with_incremental(&template, true) {
+    if let Some(incr) = render_with_incremental(&template, true, vars) {
         merge_extraction(&mut result, incr);
     }
 
@@ -79,8 +90,17 @@ fn merge_extraction(base: &mut JinjaExtraction, other: JinjaExtraction) {
     // config from first render takes precedence
 }
 
+/// Convert a `serde_json::Value` to a `minijinja::Value`.
+fn json_to_minijinja(v: &serde_json::Value) -> Value {
+    Value::from_serialize(v)
+}
+
 /// Render a dbt SQL template once with the given `is_incremental` value.
-fn render_with_incremental(sql: &str, is_incremental: bool) -> Option<JinjaExtraction> {
+fn render_with_incremental(
+    sql: &str,
+    is_incremental: bool,
+    vars: &HashMap<String, serde_json::Value>,
+) -> Option<JinjaExtraction> {
     let extraction = Arc::new(Mutex::new(JinjaExtraction::default()));
 
     let mut env = Environment::new();
@@ -168,10 +188,21 @@ fn render_with_incremental(sql: &str, is_incremental: bool) -> Option<JinjaExtra
     // this → dummy relation object
     env.add_global("this", Value::from("__dbt_this__"));
 
-    // var() → returns default or truthy sentinel (so {% if var('x') %} blocks are entered)
+    // var() → resolves from dbt_project.yml vars, then default, then truthy sentinel
+    let vars_map: HashMap<String, Value> = vars
+        .iter()
+        .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+        .collect();
     env.add_function(
         "var",
-        |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+            if let Some(key) = args.first() {
+                let key_str = key.to_string();
+                if let Some(val) = vars_map.get(&key_str) {
+                    return Ok(val.clone());
+                }
+            }
+            // Fall back to default argument (2nd arg) or truthy sentinel
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
@@ -355,6 +386,70 @@ mod tests {
         let ext = extract_via_jinja(sql, "").unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_default");
+    }
+
+    #[test]
+    fn test_var_resolved_from_project_vars() {
+        let sql = "SELECT * FROM {{ ref('model_' ~ var('suffix')) }}";
+        let mut vars = HashMap::new();
+        vars.insert(
+            "suffix".to_string(),
+            serde_json::Value::String("prod".to_string()),
+        );
+        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "model_prod");
+    }
+
+    #[test]
+    fn test_var_list_expansion_in_for_loop() {
+        // Reproduces the reported bug: var() returning a list should iterate
+        // as a list, not char-by-char as a string.
+        let sql = r#"
+            {%- set categories = var("product_categories") -%}
+            {%- for cat in categories -%}
+                SELECT * FROM {{ ref('stg_' ~ cat ~ '_summary') }}
+                {% if not loop.last %}UNION ALL{% endif %}
+            {% endfor -%}
+        "#;
+        let mut vars = HashMap::new();
+        vars.insert(
+            "product_categories".to_string(),
+            serde_json::json!(["electronics", "clothing"]),
+        );
+        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        assert_eq!(ext.refs.len(), 2);
+        assert!(ext.refs.iter().any(|r| r.name == "stg_electronics_summary"));
+        assert!(ext.refs.iter().any(|r| r.name == "stg_clothing_summary"));
+    }
+
+    #[test]
+    fn test_var_project_overrides_default() {
+        // When project vars are provided, they should take precedence over
+        // the default argument in var().
+        let sql = "SELECT * FROM {{ ref('model_' ~ var('env', 'dev')) }}";
+        let mut vars = HashMap::new();
+        vars.insert(
+            "env".to_string(),
+            serde_json::Value::String("staging".to_string()),
+        );
+        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "model_staging");
+    }
+
+    #[test]
+    fn test_var_unknown_falls_back_to_default() {
+        // When a var is not in project vars, fall back to the default argument.
+        let sql = "SELECT * FROM {{ ref('model_' ~ var('missing', 'fallback')) }}";
+        let mut vars = HashMap::new();
+        vars.insert(
+            "other_var".to_string(),
+            serde_json::Value::String("unused".to_string()),
+        );
+        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "model_fallback");
     }
 
     #[test]
