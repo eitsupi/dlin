@@ -28,11 +28,17 @@ pub struct NodeCounts {
     pub total: usize,
 }
 
+/// Maximum number of file names to show in text output.
+const MAX_FILES_TEXT: usize = 5;
+
 #[derive(Debug, Serialize)]
 pub struct ManifestStatus {
     pub found: bool,
     pub is_stale: bool,
     pub stale_file_count: usize,
+    pub stale_files: Vec<String>,
+    pub deleted_file_count: usize,
+    pub deleted_files: Vec<String>,
 }
 
 /// Count nodes by type from a lineage graph.
@@ -74,6 +80,23 @@ pub fn render_summary_json_stdout(report: &SummaryReport) {
     super::handle_stdout_result(render_summary_json(report, &mut stdout, pretty));
 }
 
+fn render_file_list<W: Write>(w: &mut W, label: &str, files: &[String], max: usize) -> io::Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let show = files.len().min(max);
+    //           "Manifest:    " is 13 chars; align sub-labels to same column
+    writeln!(w, "  {}:", label)?;
+    for f in &files[..show] {
+        writeln!(w, "  - {}", f)?;
+    }
+    let remaining = files.len() - show;
+    if remaining > 0 {
+        writeln!(w, "  ... and {} more", remaining)?;
+    }
+    Ok(())
+}
+
 pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::Result<()> {
     writeln!(w, "Project: {}", report.project_name)?;
     writeln!(w, "Source:  {}", report.source_mode)?;
@@ -99,23 +122,34 @@ pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::R
     }
     writeln!(w, "  {:<12} {}", "total", report.node_counts.total)?;
 
-    writeln!(w, "Edges:       {}", report.edge_count)?;
+    writeln!(w, "Edges:         {}", report.edge_count)?;
 
     if report.vars_count > 0 {
-        writeln!(w, "Vars:        {}", report.vars_count)?;
+        writeln!(w, "Vars:          {}", report.vars_count)?;
     }
 
     if let Some(ref ms) = report.manifest_status {
         writeln!(w)?;
         if !ms.found {
-            writeln!(w, "Manifest:    not found")?;
+            writeln!(w, "Manifest:      not found")?;
         } else if ms.is_stale {
-            writeln!(w, "Manifest:    stale ({} file{} newer)",
-                ms.stale_file_count,
-                if ms.stale_file_count == 1 { "" } else { "s" }
-            )?;
+            let mut parts = Vec::new();
+            if ms.stale_file_count > 0 {
+                parts.push(format!("{} file{} newer",
+                    ms.stale_file_count,
+                    if ms.stale_file_count == 1 { "" } else { "s" }
+                ));
+            }
+            if ms.deleted_file_count > 0 {
+                parts.push(format!("{} deleted",
+                    ms.deleted_file_count,
+                ));
+            }
+            writeln!(w, "Manifest:      stale ({})", parts.join(", "))?;
+            render_file_list(w, "newer", &ms.stale_files, MAX_FILES_TEXT)?;
+            render_file_list(w, "deleted", &ms.deleted_files, MAX_FILES_TEXT)?;
         } else {
-            writeln!(w, "Manifest:    up-to-date")?;
+            writeln!(w, "Manifest:      up-to-date")?;
         }
     }
 
@@ -203,11 +237,19 @@ mod tests {
             found: true,
             is_stale: true,
             stale_file_count: 3,
+            stale_files: vec![
+                "models/marts/orders.sql".to_string(),
+                "models/staging/stg_orders.sql".to_string(),
+                "models/staging/stg_payments.sql".to_string(),
+            ],
+            deleted_file_count: 0,
+            deleted_files: vec![],
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Manifest:    stale (3 files newer)"));
+        assert!(output.contains("Manifest:      stale (3 files newer)"));
+        assert!(output.contains("models/marts/orders.sql"));
     }
 
     #[test]
@@ -217,11 +259,14 @@ mod tests {
             found: true,
             is_stale: false,
             stale_file_count: 0,
+            stale_files: vec![],
+            deleted_file_count: 0,
+            deleted_files: vec![],
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Manifest:    up-to-date"));
+        assert!(output.contains("Manifest:      up-to-date"));
     }
 
     #[test]
@@ -231,11 +276,14 @@ mod tests {
             found: false,
             is_stale: false,
             stale_file_count: 0,
+            stale_files: vec![],
+            deleted_file_count: 0,
+            deleted_files: vec![],
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Manifest:    not found"));
+        assert!(output.contains("Manifest:      not found"));
     }
 
     #[test]
@@ -261,6 +309,12 @@ mod tests {
             found: true,
             is_stale: true,
             stale_file_count: 5,
+            stale_files: vec![
+                "a.sql".to_string(), "b.sql".to_string(), "c.sql".to_string(),
+                "d.sql".to_string(), "e.sql".to_string(),
+            ],
+            deleted_file_count: 0,
+            deleted_files: vec![],
         });
         let mut buf = Vec::new();
         render_summary_json(&report, &mut buf, false).unwrap();
@@ -338,10 +392,98 @@ mod tests {
             found: true,
             is_stale: true,
             stale_file_count: 1,
+            stale_files: vec!["models/staging/stg_orders.sql".to_string()],
+            deleted_file_count: 0,
+            deleted_files: vec![],
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("stale (1 file newer)"));
+        assert!(output.contains("Manifest:      stale (1 file newer)"));
+    }
+
+    #[test]
+    fn test_manifest_deleted_only() {
+        let mut report = make_report();
+        report.manifest_status = Some(ManifestStatus {
+            found: true,
+            is_stale: true,
+            stale_file_count: 0,
+            stale_files: vec![],
+            deleted_file_count: 2,
+            deleted_files: vec![
+                "models/old_model.sql".to_string(),
+                "models/removed.sql".to_string(),
+            ],
+        });
+        let mut buf = Vec::new();
+        render_summary_text(&report, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Manifest:      stale (2 deleted)"));
+        assert!(output.contains("models/old_model.sql"));
+        assert!(!output.contains("newer"));
+    }
+
+    #[test]
+    fn test_manifest_stale_and_deleted() {
+        let mut report = make_report();
+        report.manifest_status = Some(ManifestStatus {
+            found: true,
+            is_stale: true,
+            stale_file_count: 1,
+            stale_files: vec!["models/updated.sql".to_string()],
+            deleted_file_count: 1,
+            deleted_files: vec!["models/removed.sql".to_string()],
+        });
+        let mut buf = Vec::new();
+        render_summary_text(&report, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("stale (1 file newer, 1 deleted)"));
+        assert!(output.contains("models/updated.sql"));
+        assert!(output.contains("models/removed.sql"));
+    }
+
+    #[test]
+    fn test_manifest_file_list_truncation() {
+        let mut report = make_report();
+        let files: Vec<String> = (0..8).map(|i| format!("models/model_{}.sql", i)).collect();
+        report.manifest_status = Some(ManifestStatus {
+            found: true,
+            is_stale: true,
+            stale_file_count: 8,
+            stale_files: files,
+            deleted_file_count: 0,
+            deleted_files: vec![],
+        });
+        let mut buf = Vec::new();
+        render_summary_text(&report, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // Should show first 5 and "... and 3 more"
+        assert!(output.contains("model_0.sql"));
+        assert!(output.contains("model_4.sql"));
+        assert!(!output.contains("model_5.sql"));
+        assert!(output.contains("... and 3 more"));
+    }
+
+    #[test]
+    fn test_json_includes_file_lists() {
+        let mut report = make_report();
+        report.manifest_status = Some(ManifestStatus {
+            found: true,
+            is_stale: true,
+            stale_file_count: 1,
+            stale_files: vec!["models/a.sql".to_string()],
+            deleted_file_count: 1,
+            deleted_files: vec!["models/b.sql".to_string()],
+        });
+        let mut buf = Vec::new();
+        render_summary_json(&report, &mut buf, false).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let ms = &parsed["manifest_status"];
+        assert_eq!(ms["stale_file_count"], 1);
+        assert_eq!(ms["stale_files"][0], "models/a.sql");
+        assert_eq!(ms["deleted_file_count"], 1);
+        assert_eq!(ms["deleted_files"][0], "models/b.sql");
     }
 }

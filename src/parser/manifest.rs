@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::Result;
@@ -132,8 +132,8 @@ fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
     }
 }
 
-/// Build a LineageGraph from a parsed manifest.json file.
-pub fn build_graph_from_manifest(manifest_path: &Path) -> Result<LineageGraph> {
+/// Load and parse a manifest.json file without building a graph.
+pub fn load_manifest(manifest_path: &Path) -> Result<Manifest> {
     let content = std::fs::read_to_string(manifest_path).map_err(|e| {
         crate::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
@@ -148,6 +148,31 @@ pub fn build_graph_from_manifest(manifest_path: &Path) -> Result<LineageGraph> {
         }
     })?;
 
+    Ok(manifest)
+}
+
+impl Manifest {
+    /// Collect all unique file paths referenced by nodes and sources.
+    /// Returns relative paths as stored in the manifest (e.g. "models/staging/stg_orders.sql").
+    pub fn collect_file_paths(&self) -> BTreeSet<String> {
+        let mut paths = BTreeSet::new();
+        for node in self.nodes.values() {
+            if let Some(ref p) = node.path {
+                paths.insert(p.clone());
+            }
+        }
+        for source in self.sources.values() {
+            if let Some(ref p) = source.path {
+                paths.insert(p.clone());
+            }
+        }
+        paths
+    }
+}
+
+/// Build a LineageGraph from a parsed manifest.json file.
+pub fn build_graph_from_manifest(manifest_path: &Path) -> Result<LineageGraph> {
+    let manifest = load_manifest(manifest_path)?;
     build_graph_from_parsed_manifest(&manifest)
 }
 
@@ -908,5 +933,125 @@ mod tests {
 
         // Check edges exist
         assert!(graph.edge_count() > 0, "Should have edges");
+    }
+
+    #[test]
+    fn test_collect_file_paths() {
+        let manifest = Manifest {
+            nodes: HashMap::from([
+                (
+                    "model.proj.stg_orders".to_string(),
+                    ManifestNode {
+                        unique_id: "model.proj.stg_orders".to_string(),
+                        name: "stg_orders".to_string(),
+                        resource_type: "model".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: Some("models/staging/stg_orders.sql".to_string()),
+                        columns: HashMap::new(),
+                    },
+                ),
+                (
+                    "model.proj.orders".to_string(),
+                    ManifestNode {
+                        unique_id: "model.proj.orders".to_string(),
+                        name: "orders".to_string(),
+                        resource_type: "model".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: Some("models/marts/orders.sql".to_string()),
+                        columns: HashMap::new(),
+                    },
+                ),
+                (
+                    "model.proj.bare".to_string(),
+                    ManifestNode {
+                        unique_id: "model.proj.bare".to_string(),
+                        name: "bare".to_string(),
+                        resource_type: "model".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: None,
+                        columns: HashMap::new(),
+                    },
+                ),
+            ]),
+            sources: HashMap::from([(
+                "source.proj.raw.orders".to_string(),
+                ManifestSource {
+                    unique_id: "source.proj.raw.orders".to_string(),
+                    name: "orders".to_string(),
+                    source_name: "raw".to_string(),
+                    resource_type: "source".to_string(),
+                    description: None,
+                    path: Some("models/staging/schema.yml".to_string()),
+                    columns: HashMap::new(),
+                },
+            )]),
+            exposures: HashMap::new(),
+        };
+
+        let paths = manifest.collect_file_paths();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains("models/staging/stg_orders.sql"));
+        assert!(paths.contains("models/marts/orders.sql"));
+        assert!(paths.contains("models/staging/schema.yml"));
+        // bare has no path, should not appear
+        assert!(!paths.iter().any(|p| p.contains("bare")));
+    }
+
+    #[test]
+    fn test_collect_file_paths_deduplicates() {
+        // Multiple sources can reference the same YAML file
+        let manifest = Manifest {
+            nodes: HashMap::new(),
+            sources: HashMap::from([
+                (
+                    "source.proj.raw.orders".to_string(),
+                    ManifestSource {
+                        unique_id: "source.proj.raw.orders".to_string(),
+                        name: "orders".to_string(),
+                        source_name: "raw".to_string(),
+                        resource_type: "source".to_string(),
+                        description: None,
+                        path: Some("models/staging/schema.yml".to_string()),
+                        columns: HashMap::new(),
+                    },
+                ),
+                (
+                    "source.proj.raw.customers".to_string(),
+                    ManifestSource {
+                        unique_id: "source.proj.raw.customers".to_string(),
+                        name: "customers".to_string(),
+                        source_name: "raw".to_string(),
+                        resource_type: "source".to_string(),
+                        description: None,
+                        path: Some("models/staging/schema.yml".to_string()),
+                        columns: HashMap::new(),
+                    },
+                ),
+            ]),
+            exposures: HashMap::new(),
+        };
+
+        let paths = manifest.collect_file_paths();
+        assert_eq!(paths.len(), 1, "Duplicate paths should be deduplicated");
+    }
+
+    #[test]
+    fn test_load_manifest() {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/simple_project/target/manifest.json");
+
+        let manifest = load_manifest(&fixture_path).unwrap();
+        assert!(!manifest.nodes.is_empty());
+        assert!(!manifest.sources.is_empty());
+
+        let paths = manifest.collect_file_paths();
+        assert!(paths.contains("models/staging/stg_orders.sql"));
+        assert!(paths.contains("models/staging/schema.yml"));
     }
 }

@@ -132,6 +132,231 @@ mod artifacts {
     }
 }
 
+mod freshness {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
+
+    fn binary_path() -> std::path::PathBuf {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("target");
+        path.push("debug");
+        path.push("dlin");
+        path
+    }
+
+    /// Copy the fixture project into a temp directory and return the temp dir.
+    fn copy_fixture_to_temp() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = fixture_dir();
+
+        // Recursively copy fixture to temp dir
+        fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+            fs::create_dir_all(dst).unwrap();
+            for entry in fs::read_dir(src).unwrap() {
+                let entry = entry.unwrap();
+                let src_path = entry.path();
+                let dst_path = dst.join(entry.file_name());
+                if src_path.is_dir() {
+                    copy_dir_recursive(&src_path, &dst_path);
+                } else {
+                    fs::copy(&src_path, &dst_path).unwrap();
+                }
+            }
+        }
+
+        copy_dir_recursive(&fixture, tmp.path());
+        tmp
+    }
+
+    #[test]
+    fn test_check_manifest_up_to_date() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest to make it newer than all files
+        // Sleep briefly to ensure mtime difference
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "Should be up-to-date: {}", stdout);
+        assert!(stdout.contains("up-to-date"));
+    }
+
+    #[test]
+    fn test_check_manifest_detects_stale_file() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest first
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        // Now touch a model file to make it newer
+        thread::sleep(Duration::from_millis(50));
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
+        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!output.status.success(), "Should be stale");
+        assert!(stdout.contains("stale"));
+        assert!(stdout.contains("newer"));
+        assert!(stdout.contains("stg_orders.sql"));
+    }
+
+    #[test]
+    fn test_check_manifest_detects_deleted_file() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest to make it newer than all files
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        // Delete a model file that's referenced in the manifest
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
+        fs::remove_file(&model_path).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!output.status.success(), "Should be stale when file is deleted");
+        assert!(stdout.contains("deleted"), "Should mention deleted: {}", stdout);
+        assert!(
+            stdout.contains("stg_orders.sql"),
+            "Should list the deleted file: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_check_manifest_json_deleted_files() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest to make it newer
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        // Delete a model file
+        fs::remove_file(tmp.path().join("models/staging/stg_orders.sql")).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert_eq!(parsed["is_stale"], true);
+        assert!(parsed["deleted_file_count"].as_u64().unwrap() > 0);
+        let deleted = parsed["deleted_files"].as_array().unwrap();
+        assert!(
+            deleted.iter().any(|f| f.as_str().unwrap().contains("stg_orders.sql")),
+            "deleted_files should contain stg_orders.sql: {:?}",
+            deleted
+        );
+    }
+
+    #[test]
+    fn test_check_manifest_stale_and_deleted_combined() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest first
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        // Delete one file
+        fs::remove_file(tmp.path().join("models/staging/stg_orders.sql")).unwrap();
+
+        // Touch another file to make it newer
+        thread::sleep(Duration::from_millis(50));
+        let model_path = tmp.path().join("models/marts/orders.sql");
+        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert_eq!(parsed["is_stale"], true);
+        assert!(parsed["stale_file_count"].as_u64().unwrap() > 0);
+        assert!(parsed["deleted_file_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_check_manifest_json_up_to_date_has_empty_arrays() {
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest to make it newer
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "check-manifest",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert_eq!(parsed["is_stale"], false);
+        assert_eq!(parsed["stale_file_count"], 0);
+        assert_eq!(parsed["stale_files"].as_array().unwrap().len(), 0);
+        assert_eq!(parsed["deleted_file_count"], 0);
+        assert_eq!(parsed["deleted_files"].as_array().unwrap().len(), 0);
+    }
+}
+
 mod cli {
     use std::process::Command;
 

@@ -42,7 +42,7 @@ Examples:
   dlin impact orders -o json              # Downstream impact analysis
   dlin summary                            # Project overview (node counts, etc.)
   dlin summary -o json                    # Project overview as JSON
-  dlin check-manifest || dbt compile      # Recompile if manifest is stale
+  dlin check-manifest || dbt compile      # Recompile if stale or files deleted
   git diff --name-only main | dlin graph  # Lineage of changed files",
     version
 )]
@@ -292,8 +292,9 @@ Output formats:
 
 Manifest freshness is checked automatically when a manifest.json is found \
 at the default location (<project-dir>/target/manifest.json) or at the \
-path given by --manifest-path. The check reuses the same file-mtime logic \
-as `dlin check-manifest`.",
+path given by --manifest-path. The check detects both files newer than the \
+manifest (stale) and files referenced in the manifest but missing from disk \
+(deleted), using the same logic as `dlin check-manifest`.",
         after_long_help = "\
 Examples:
   # Quick project overview
@@ -307,7 +308,7 @@ Examples:
     )]
     Summary(SummaryArgs),
 
-    /// Check if manifest.json is up-to-date with project files
+    /// Check if manifest.json is up-to-date (detects stale and deleted files)
     #[command(
         name = "check-manifest",
         long_about = "\
@@ -317,15 +318,20 @@ Since `dbt compile` can be slow (seconds to tens of seconds depending on project
 size and warehouse connection), this command lets you skip unnecessary recompilation \
 by detecting whether any project files have changed since the manifest was last built.
 
-Compares the modification time of manifest.json against all project SQL and YAML \
-files (models, macros, tests, snapshots, seeds, and analyses). If any file is \
-newer than the manifest, exits with code 1 and lists the stale files.
+Performs two checks:
+  1. Compares the modification time of manifest.json against all project SQL and \
+YAML files (models, macros, tests, snapshots, seeds, and analyses). Files newer \
+than the manifest are reported as 'stale'.
+  2. Reads nodes and sources from manifest.json and checks that their referenced \
+source files still exist on disk. Missing files are reported as 'deleted'.
+
+If either stale or deleted files are found, exits with code 1.
 
 This command does not use dlin's extraction cache; it only compares file timestamps.
 
 Exit codes:
-  0   Manifest is up-to-date (all project files are older)
-  1   Manifest is stale (some files are newer) or manifest not found",
+  0   Manifest is up-to-date (no stale or deleted files)
+  1   Manifest is stale (files newer or deleted) or manifest not found",
         after_long_help = "\
 Examples:
   # Check and conditionally recompile

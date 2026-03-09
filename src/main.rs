@@ -448,22 +448,23 @@ fn check_manifest_freshness(
     manifest_path: Option<&PathBuf>,
     project: &parser::project::DbtProject,
 ) -> Option<render::summary::ManifestStatus> {
+    let not_found = render::summary::ManifestStatus {
+        found: false,
+        is_stale: false,
+        stale_file_count: 0,
+        stale_files: vec![],
+        deleted_file_count: 0,
+        deleted_files: vec![],
+    };
+
     let resolved = match resolve_manifest_path_or_default(manifest_path, project_dir) {
         Ok(p) => p,
-        Err(_) => return Some(render::summary::ManifestStatus {
-            found: false,
-            is_stale: false,
-            stale_file_count: 0,
-        }),
+        Err(_) => return Some(not_found),
     };
 
     let manifest_mtime = match std::fs::metadata(&resolved).and_then(|m| m.modified()) {
         Ok(t) => t,
-        Err(_) => return Some(render::summary::ManifestStatus {
-            found: false,
-            is_stale: false,
-            stale_file_count: 0,
-        }),
+        Err(_) => return Some(not_found),
     };
 
     let paths = project.resolve_paths(project_dir);
@@ -472,7 +473,7 @@ fn check_manifest_freshness(
         Err(_) => return None,
     };
 
-    let mut stale_count = 0usize;
+    let mut stale_files: Vec<String> = Vec::new();
     let all_files = files.model_sql_files.iter()
         .chain(files.macro_sql_files.iter())
         .chain(files.seed_files.iter())
@@ -484,16 +485,36 @@ fn check_manifest_freshness(
         if let Ok(meta) = std::fs::metadata(file) {
             if let Ok(mtime) = meta.modified() {
                 if mtime > manifest_mtime {
-                    stale_count += 1;
+                    let rel = file.strip_prefix(project_dir).unwrap_or(file);
+                    stale_files.push(rel.to_string_lossy().into_owned());
                 }
             }
         }
     }
+    stale_files.sort();
 
+    // Check for deleted files: paths referenced in manifest but missing on disk
+    let deleted_files = match parser::manifest::load_manifest(&resolved) {
+        Ok(manifest) => {
+            let mut deleted: Vec<String> = manifest
+                .collect_file_paths()
+                .into_iter()
+                .filter(|p| !project_dir.join(p).exists())
+                .collect();
+            deleted.sort();
+            deleted
+        }
+        Err(_) => vec![],
+    };
+
+    let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
     Some(render::summary::ManifestStatus {
         found: true,
-        is_stale: stale_count > 0,
-        stale_file_count: stale_count,
+        is_stale,
+        stale_file_count: stale_files.len(),
+        stale_files,
+        deleted_file_count: deleted_files.len(),
+        deleted_files,
     })
 }
 
@@ -548,19 +569,47 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     }
 
     stale_files.sort();
-    let is_stale = !stale_files.is_empty();
+
+    // Check for deleted files: paths referenced in manifest but missing on disk
+    let manifest = parser::manifest::load_manifest(&manifest_path)?;
+    let mut deleted_files: Vec<PathBuf> = manifest
+        .collect_file_paths()
+        .into_iter()
+        .filter(|p| !project_dir.join(p).exists())
+        .map(PathBuf::from)
+        .collect();
+    deleted_files.sort();
+
+    let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
 
     match args.output {
         CheckManifestOutputFormat::Text => {
             if !args.quiet {
                 if is_stale {
-                    println!(
-                        "manifest.json is stale ({} file{} newer):",
-                        stale_files.len(),
-                        if stale_files.len() == 1 { "" } else { "s" }
-                    );
-                    for f in &stale_files {
-                        println!("  {}", f.display());
+                    let mut parts = Vec::new();
+                    if !stale_files.is_empty() {
+                        parts.push(format!("{} file{} newer",
+                            stale_files.len(),
+                            if stale_files.len() == 1 { "" } else { "s" }
+                        ));
+                    }
+                    if !deleted_files.is_empty() {
+                        parts.push(format!("{} deleted",
+                            deleted_files.len(),
+                        ));
+                    }
+                    println!("manifest.json is stale ({}):", parts.join(", "));
+                    if !stale_files.is_empty() {
+                        println!("Files newer than manifest:");
+                        for f in &stale_files {
+                            println!("  {}", f.display());
+                        }
+                    }
+                    if !deleted_files.is_empty() {
+                        println!("Files referenced in manifest but not found:");
+                        for f in &deleted_files {
+                            println!("  {}", f.display());
+                        }
                     }
                 } else {
                     println!("manifest.json is up-to-date");
@@ -574,6 +623,8 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 "is_stale": is_stale,
                 "stale_file_count": stale_files.len(),
                 "stale_files": stale_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "deleted_file_count": deleted_files.len(),
+                "deleted_files": deleted_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             });
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
