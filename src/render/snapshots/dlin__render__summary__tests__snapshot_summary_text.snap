@@ -1,0 +1,16 @@
+---
+source: src/render/summary.rs
+expression: output
+---
+Project: my_project
+Source:  sql
+
+Nodes:
+  model        5
+  source       2
+  seed         1
+  test         3
+  exposure     1
+  total        12
+Edges:       10
+Vars:        2

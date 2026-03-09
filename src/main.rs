@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, GraphArgs, ListArgs, SourceType};
+use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, GraphArgs, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat};
 use dlin::graph;
 use dlin::input;
 use dlin::parser;
@@ -37,6 +37,10 @@ fn main() -> Result<()> {
         Command::List(args) => {
             dlin::set_quiet(args.quiet);
             run_list_command(args)
+        }
+        Command::Summary(args) => {
+            dlin::set_quiet(args.quiet);
+            run_summary_command(args)
         }
         Command::CheckManifest(args) => {
             dlin::set_quiet(args.quiet);
@@ -393,6 +397,104 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     } else {
         anyhow::bail!("Manifest path does not exist: {}", manifest_arg.display());
     }
+}
+
+/// Run the `summary` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_summary_command(args: SummaryArgs) -> Result<()> {
+    let project_dir = args
+        .project_dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot resolve project directory '{}': {}", args.project_dir.display(), e))?;
+
+    validate_source_flags(&args.source, args.manifest_path.as_ref())?;
+
+    let project = parser::project::DbtProject::load(&project_dir)?;
+    let vars_count = project.vars.len();
+    let project_name = project.name.clone();
+
+    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache)?;
+
+    let node_counts = render::summary::count_nodes(&dag);
+    let edge_count = dag.edge_count();
+
+    // Check manifest freshness (best-effort)
+    let manifest_status = check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
+
+    let report = render::summary::SummaryReport {
+        project_name,
+        source_mode: match args.source {
+            SourceType::Sql => "sql".to_string(),
+            SourceType::Manifest => "manifest".to_string(),
+        },
+        node_counts,
+        edge_count,
+        vars_count,
+        manifest_status,
+    };
+
+    match args.output {
+        SummaryOutputFormat::Text => render::summary::render_summary(&report, true),
+        SummaryOutputFormat::Json => render::summary::render_summary_json_stdout(&report),
+    }
+
+    Ok(())
+}
+
+/// Check manifest.json freshness, returning None if manifest is irrelevant.
+#[cfg(not(tarpaulin_include))]
+fn check_manifest_freshness(
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+    project: &parser::project::DbtProject,
+) -> Option<render::summary::ManifestStatus> {
+    let resolved = match resolve_manifest_path_or_default(manifest_path, project_dir) {
+        Ok(p) => p,
+        Err(_) => return Some(render::summary::ManifestStatus {
+            found: false,
+            is_stale: false,
+            stale_file_count: 0,
+        }),
+    };
+
+    let manifest_mtime = match std::fs::metadata(&resolved).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return Some(render::summary::ManifestStatus {
+            found: false,
+            is_stale: false,
+            stale_file_count: 0,
+        }),
+    };
+
+    let paths = project.resolve_paths(project_dir);
+    let files = match parser::discovery::discover_files(&paths) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    let mut stale_count = 0usize;
+    let all_files = files.model_sql_files.iter()
+        .chain(files.macro_sql_files.iter())
+        .chain(files.seed_files.iter())
+        .chain(files.snapshot_sql_files.iter())
+        .chain(files.test_sql_files.iter())
+        .chain(files.yaml_files.iter());
+
+    for file in all_files {
+        if let Ok(meta) = std::fs::metadata(file) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > manifest_mtime {
+                    stale_count += 1;
+                }
+            }
+        }
+    }
+
+    Some(render::summary::ManifestStatus {
+        found: true,
+        is_stale: stale_count > 0,
+        stale_file_count: stale_count,
+    })
 }
 
 /// Run the `check-manifest` subcommand

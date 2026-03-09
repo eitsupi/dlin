@@ -1,0 +1,20 @@
+---
+source: src/render/summary.rs
+expression: output
+---
+{
+  "project_name": "my_project",
+  "source_mode": "sql",
+  "node_counts": {
+    "model": 5,
+    "source": 2,
+    "seed": 1,
+    "snapshot": 0,
+    "test": 3,
+    "exposure": 1,
+    "phantom": 0,
+    "total": 12
+  },
+  "edge_count": 10,
+  "vars_count": 2
+}

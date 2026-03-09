@@ -9,6 +9,7 @@ pub mod layout;
 pub mod list;
 pub mod mermaid;
 pub mod plain;
+pub mod summary;
 pub mod svg;
 
 /// Handle an I/O result from writing to stdout.

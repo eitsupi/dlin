@@ -40,6 +40,8 @@ Examples:
   dlin list -o json                       # List all node names as JSON
   dlin list orders stg_orders -o json     # List specific models as JSON
   dlin impact orders -o json              # Downstream impact analysis
+  dlin summary                            # Project overview (node counts, etc.)
+  dlin summary -o json                    # Project overview as JSON
   dlin check-manifest || dbt compile      # Recompile if manifest is stale
   git diff --name-only main | dlin graph  # Lineage of changed files",
     version
@@ -276,6 +278,35 @@ Examples:
         quiet: bool,
     },
 
+    /// Show project summary (node counts, manifest status, etc.)
+    #[command(
+        long_about = "\
+Show a summary of the dbt project: node counts by type, edge count, \
+variable definitions, and manifest.json freshness.
+
+Useful for onboarding, CI logs, and feeding project context to AI agents.
+
+Output formats:
+  text (default)  Human-readable summary
+  json            Structured JSON for programmatic use
+
+Manifest freshness is checked automatically when a manifest.json is found \
+at the default location (<project-dir>/target/manifest.json) or at the \
+path given by --manifest-path. The check reuses the same file-mtime logic \
+as `dlin check-manifest`.",
+        after_long_help = "\
+Examples:
+  # Quick project overview
+  dlin summary
+
+  # JSON output for AI agents
+  dlin summary -o json
+
+  # Use manifest as data source
+  dlin summary --source manifest"
+    )]
+    Summary(SummaryArgs),
+
     /// Check if manifest.json is up-to-date with project files
     #[command(
         name = "check-manifest",
@@ -330,6 +361,43 @@ pub struct CheckManifestArgs {
     /// Suppress warning messages (exit code only)
     #[arg(short = 'q', long)]
     pub quiet: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SummaryArgs {
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+    #[arg(long, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable extraction cache (always re-parse all files)
+    #[arg(long, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
+    /// Output format: text (default) or json
+    #[arg(short = 'o', long, default_value = "text")]
+    pub output: SummaryOutputFormat,
+
+    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
+    #[arg(long, default_value = "sql")]
+    pub source: SourceType,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// Suppress warning messages
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum SummaryOutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -889,6 +957,58 @@ mod tests {
     #[test]
     fn test_list_invalid_output_format() {
         let result = Cli::try_parse_from(["dlin", "list", "-o", "dot"]);
+        assert!(result.is_err());
+    }
+
+    // -- Summary subcommand tests ---------------------------------------------
+
+    fn unwrap_summary(cli: Cli) -> SummaryArgs {
+        match cli.command {
+            Command::Summary(args) => args,
+            _ => panic!("Expected Summary subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_summary_default_args() {
+        let args = unwrap_summary(Cli::try_parse_from(["dlin", "summary"]).unwrap());
+        assert!(matches!(args.output, SummaryOutputFormat::Text));
+        assert_eq!(args.source, SourceType::Sql);
+        assert!(args.manifest_path.is_none());
+        assert!(!args.quiet);
+        assert!(!args.no_cache);
+    }
+
+    #[test]
+    fn test_summary_json_output() {
+        let args = unwrap_summary(
+            Cli::try_parse_from(["dlin", "summary", "-o", "json"]).unwrap(),
+        );
+        assert!(matches!(args.output, SummaryOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_summary_with_manifest() {
+        let args = unwrap_summary(
+            Cli::try_parse_from([
+                "dlin", "summary", "--source", "manifest", "--manifest-path", "/path/to/manifest.json",
+            ]).unwrap(),
+        );
+        assert_eq!(args.source, SourceType::Manifest);
+        assert_eq!(args.manifest_path, Some(PathBuf::from("/path/to/manifest.json")));
+    }
+
+    #[test]
+    fn test_summary_quiet_flag() {
+        let args = unwrap_summary(
+            Cli::try_parse_from(["dlin", "summary", "-q"]).unwrap(),
+        );
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_summary_invalid_output_format() {
+        let result = Cli::try_parse_from(["dlin", "summary", "-o", "dot"]);
         assert!(result.is_err());
     }
 }
