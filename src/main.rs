@@ -425,7 +425,7 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     let project_dir = args
         .project_dir
         .canonicalize()
-        .unwrap_or(args.project_dir);
+        .map_err(|e| anyhow::anyhow!("cannot resolve project directory '{}': {}", args.project_dir.display(), e))?;
 
     let manifest_path = resolve_manifest_path_or_default(
         args.manifest_path.as_ref(),
@@ -451,12 +451,20 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
         .chain(files.yaml_files.iter());
 
     for file in all_files {
-        if let Ok(meta) = std::fs::metadata(file) {
-            if let Ok(mtime) = meta.modified() {
-                if mtime > manifest_mtime {
-                    let rel = file.strip_prefix(&project_dir).unwrap_or(file);
-                    stale_files.push(rel.to_path_buf());
+        match std::fs::metadata(file) {
+            Ok(meta) => {
+                if let Ok(mtime) = meta.modified() {
+                    if mtime > manifest_mtime {
+                        let rel = file.strip_prefix(&project_dir).unwrap_or(file);
+                        stale_files.push(rel.to_path_buf());
+                    }
                 }
+            }
+            Err(e) => {
+                dlin::warn!("cannot read metadata for {}: {}", file.display(), e);
+                // Treat unreadable files as stale to fail safe
+                let rel = file.strip_prefix(&project_dir).unwrap_or(file);
+                stale_files.push(rel.to_path_buf());
             }
         }
     }
@@ -482,22 +490,36 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
             }
         }
         CheckManifestOutputFormat::Json => {
+            use std::io::Write;
             let result = serde_json::json!({
                 "manifest_path": manifest_path.to_string_lossy(),
                 "is_stale": is_stale,
                 "stale_file_count": stale_files.len(),
                 "stale_files": stale_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             });
-            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                serde_json::to_writer_pretty(std::io::stdout(), &result).unwrap();
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let res = if std::io::IsTerminal::is_terminal(&stdout) {
+                serde_json::to_writer_pretty(&mut out, &result)
             } else {
-                serde_json::to_writer(std::io::stdout(), &result).unwrap();
+                serde_json::to_writer(&mut out, &result)
+            };
+            if let Err(e) = res {
+                let io_err = std::io::Error::new(std::io::ErrorKind::Other, e);
+                if io_err.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(io_err.into());
+                }
+            } else if let Err(e) = writeln!(out) {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(e.into());
+                }
             }
-            println!();
         }
     }
 
     if is_stale {
+        // Flush stdout before exiting to ensure buffered output is written
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         std::process::exit(1);
     }
     Ok(())
