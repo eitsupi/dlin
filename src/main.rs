@@ -75,7 +75,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
+    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -142,11 +142,10 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents_for_source(
-            &args.source,
-            args.manifest_path.as_ref(),
+            manifest.as_ref(),
             &project_dir,
             &filtered,
-        )?)
+        ))
     } else {
         None
     };
@@ -168,7 +167,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
+    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -227,11 +226,10 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents_for_source(
-            &args.source,
-            args.manifest_path.as_ref(),
+            manifest.as_ref(),
             &project_dir,
             &filtered,
-        )?)
+        ))
     } else {
         None
     };
@@ -241,7 +239,11 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     Ok(())
 }
 
-/// Build the lineage DAG from either a manifest file or by parsing SQL files
+/// Build the lineage DAG from either a manifest file or by parsing SQL files.
+///
+/// Returns the graph and, in manifest mode, the parsed `Manifest` so that
+/// callers can extract additional data (e.g. `compiled_code`) without
+/// re-parsing the JSON.
 #[cfg(not(tarpaulin_include))]
 fn build_dag(
     project_dir: &Path,
@@ -249,17 +251,20 @@ fn build_dag(
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
     no_cache: bool,
-) -> Result<graph::types::LineageGraph> {
+) -> Result<(graph::types::LineageGraph, Option<parser::manifest::Manifest>)> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
-            parser::manifest::build_graph_from_manifest(&resolved)
+            let manifest = parser::manifest::load_manifest(&resolved)?;
+            let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
+            Ok((graph, Some(manifest)))
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, &project.vars)
+            let graph = graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, &project.vars)?;
+            Ok((graph, None))
         }
     }
 }
@@ -285,23 +290,18 @@ fn render_output(
 
 /// Collect SQL contents based on the data source.
 ///
-/// - **manifest**: reads `compiled_code` from manifest.json.
+/// - **manifest** (`Some`): reads `compiled_code` from the already-parsed manifest.
 ///   Users must run `dbt compile` beforehand so the manifest contains compiled SQL.
-/// - **sql**: reads raw SQL files from disk.
+/// - **sql** (`None`): reads raw SQL files from disk.
 #[cfg(not(tarpaulin_include))]
 fn collect_sql_contents_for_source(
-    source: &SourceType,
-    manifest_path: Option<&PathBuf>,
+    manifest: Option<&parser::manifest::Manifest>,
     project_dir: &Path,
     graph: &graph::types::LineageGraph,
-) -> Result<HashMap<String, String>> {
-    match source {
-        SourceType::Manifest => {
-            let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
-            let manifest = parser::manifest::load_manifest(&resolved)?;
-            Ok(manifest.collect_sql_contents())
-        }
-        SourceType::Sql => Ok(collect_sql_contents(graph, project_dir)),
+) -> HashMap<String, String> {
+    match manifest {
+        Some(m) => m.collect_sql_contents(),
+        None => collect_sql_contents(graph, project_dir),
     }
 }
 
@@ -345,7 +345,7 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let dag = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache)?;
+    let (dag, _manifest) = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache)?;
 
     let reports: Vec<_> = models
         .iter()
@@ -445,7 +445,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
     let vars_count = project.vars.len();
     let project_name = project.name.clone();
 
-    let dag = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache)?;
+    let (dag, _manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache)?;
 
     let node_counts = render::summary::count_nodes(&dag);
     let edge_count = dag.edge_count();
