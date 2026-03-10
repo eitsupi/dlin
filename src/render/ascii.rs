@@ -236,19 +236,7 @@ unsafe fn libc_ioctl(fd: i32, request: u64, arg: *mut libc_winsize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_node(unique_id: &str, label: &str, node_type: NodeType) -> NodeData {
-        NodeData {
-            unique_id: unique_id.into(),
-            label: label.into(),
-            node_type,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        }
-    }
+    use crate::render::test_helpers::make_node;
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();

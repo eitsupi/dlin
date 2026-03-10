@@ -169,27 +169,16 @@ mod tests {
         assert_eq!(layout.num_layers, 0);
     }
 
-    fn make_node(unique_id: &str, node_type: NodeType) -> NodeData {
-        NodeData {
-            unique_id: unique_id.into(),
-            label: unique_id.into(),
-            node_type,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        }
-    }
+    use crate::render::test_helpers::make_node;
 
     #[test]
     fn test_disconnected_node_in_layer() {
         // Create a graph where one node is disconnected from others
         // This exercises the f64::MAX barycenter fallback (line 146)
         let mut g = LineageGraph::new();
-        let a = g.add_node(make_node("a", NodeType::Source));
-        let b = g.add_node(make_node("b", NodeType::Model));
-        let c = g.add_node(make_node("c", NodeType::Model)); // disconnected
+        let a = g.add_node(make_node("a", "a", NodeType::Source));
+        let b = g.add_node(make_node("b", "b", NodeType::Model));
+        let c = g.add_node(make_node("c", "c", NodeType::Model)); // disconnected
         g.add_edge(
             a,
             b,
@@ -211,36 +200,9 @@ mod tests {
     #[test]
     fn test_linear_graph() {
         let mut g = LineageGraph::new();
-        let a = g.add_node(NodeData {
-            unique_id: "a".into(),
-            label: "a".into(),
-            node_type: NodeType::Source,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        });
-        let b = g.add_node(NodeData {
-            unique_id: "b".into(),
-            label: "b".into(),
-            node_type: NodeType::Model,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        });
-        let c = g.add_node(NodeData {
-            unique_id: "c".into(),
-            label: "c".into(),
-            node_type: NodeType::Model,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        });
+        let a = g.add_node(make_node("a", "a", NodeType::Source));
+        let b = g.add_node(make_node("b", "b", NodeType::Model));
+        let c = g.add_node(make_node("c", "c", NodeType::Model));
         g.add_edge(
             a,
             b,
@@ -270,8 +232,8 @@ mod tests {
     fn test_cyclic_graph_fallback() {
         // Covers lines 78-79: cyclic graph fallback in assign_layers
         let mut g = LineageGraph::new();
-        let a = g.add_node(make_node("a", NodeType::Model));
-        let b = g.add_node(make_node("b", NodeType::Model));
+        let a = g.add_node(make_node("a", "a", NodeType::Model));
+        let b = g.add_node(make_node("b", "b", NodeType::Model));
         // Create a cycle: a -> b -> a
         g.add_edge(
             a,

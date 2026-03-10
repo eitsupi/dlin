@@ -220,18 +220,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn make_node(unique_id: &str, label: &str, node_type: NodeType) -> NodeData {
-        NodeData {
-            unique_id: unique_id.into(),
-            label: label.into(),
-            node_type,
-            file_path: None,
-            description: None,
-            materialization: None,
-            tags: vec![],
-            columns: vec![],
-        }
-    }
+    use crate::render::test_helpers::make_node;
 
     fn all_fields() -> HashSet<String> {
         GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()
