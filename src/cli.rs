@@ -145,9 +145,13 @@ pub struct GraphArgs {
     #[arg(long, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable extraction cache (always re-parse all files)
+    /// Disable extraction cache (always re-parse all files, results are not saved)
     #[arg(long, env = "DLIN_NO_CACHE")]
     pub no_cache: bool,
+
+    /// Discard existing cache and rebuild from scratch
+    #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+    pub refresh_cache: bool,
 
     /// Upstream levels to show (default: all)
     #[arg(short = 'u', long)]
@@ -257,9 +261,13 @@ Examples:
         #[arg(long, env = "DLIN_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
 
-        /// Disable extraction cache (always re-parse all files)
+        /// Disable extraction cache (always re-parse all files, results are not saved)
         #[arg(long, env = "DLIN_NO_CACHE")]
         no_cache: bool,
+
+        /// Discard existing cache and rebuild from scratch
+        #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+        refresh_cache: bool,
 
         /// Output format: text (default) or json
         #[arg(short = 'o', long, default_value = "text")]
@@ -379,9 +387,13 @@ pub struct SummaryArgs {
     #[arg(long, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable extraction cache (always re-parse all files)
+    /// Disable extraction cache (always re-parse all files, results are not saved)
     #[arg(long, env = "DLIN_NO_CACHE")]
     pub no_cache: bool,
+
+    /// Discard existing cache and rebuild from scratch
+    #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+    pub refresh_cache: bool,
 
     /// Output format: text (default) or json
     #[arg(short = 'o', long, default_value = "text")]
@@ -471,9 +483,13 @@ pub struct ListArgs {
     #[arg(long, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable extraction cache (always re-parse all files)
+    /// Disable extraction cache (always re-parse all files, results are not saved)
     #[arg(long, env = "DLIN_NO_CACHE")]
     pub no_cache: bool,
+
+    /// Discard existing cache and rebuild from scratch
+    #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+    pub refresh_cache: bool,
 
     /// Output format: plain (default) or json
     #[arg(short = 'o', long, default_value = "plain")]

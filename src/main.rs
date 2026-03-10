@@ -54,10 +54,11 @@ fn main() -> Result<()> {
             manifest_path,
             cache_dir,
             no_cache,
+            refresh_cache,
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache)
+            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)
         }
     }
 }
@@ -67,6 +68,7 @@ fn main() -> Result<()> {
 fn run_graph_command(args: GraphArgs) -> Result<()> {
     let cache_dir = args.cache_dir;
     let no_cache = args.no_cache;
+    let refresh_cache = args.refresh_cache;
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -75,7 +77,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
+    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -160,6 +162,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 fn run_list_command(args: ListArgs) -> Result<()> {
     let cache_dir = args.cache_dir;
     let no_cache = args.no_cache;
+    let refresh_cache = args.refresh_cache;
     let project_dir = args
         .project_dir
         .canonicalize()
@@ -167,7 +170,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache)?;
+    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -251,6 +254,7 @@ fn build_dag(
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
     no_cache: bool,
+    refresh_cache: bool,
 ) -> Result<(graph::types::LineageGraph, Option<parser::manifest::Manifest>)> {
     match source {
         SourceType::Manifest => {
@@ -263,7 +267,7 @@ fn build_dag(
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            let graph = graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, &project.vars)?;
+            let graph = graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, refresh_cache, &project.vars)?;
             Ok((graph, None))
         }
     }
@@ -339,13 +343,14 @@ fn run_impact_command(
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
     no_cache: bool,
+    refresh_cache: bool,
 ) -> Result<()> {
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, _manifest) = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache)?;
+    let (dag, _manifest) = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache, refresh_cache)?;
 
     let reports: Vec<_> = models
         .iter()
@@ -445,7 +450,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
     let vars_count = project.vars.len();
     let project_name = project.name.clone();
 
-    let (dag, _manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache)?;
+    let (dag, _manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache, args.refresh_cache)?;
 
     let node_counts = render::summary::count_nodes(&dag);
     let edge_count = dag.edge_count();
