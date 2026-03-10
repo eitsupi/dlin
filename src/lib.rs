@@ -48,13 +48,27 @@ macro_rules! warn {
 /// Format a diagnostic message as a JSON object for stderr.
 pub fn format_json_diagnostic(level: &str, message: &str) -> String {
     // Manual JSON construction to avoid serde dependency in lib root.
-    let escaped = message
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("{{\"level\":\"{level}\",\"message\":\"{escaped}\"}}")
+    fn escape_json(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                // RFC 8259: control characters U+0000–U+001F must be escaped
+                c if c < '\x20' => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+    let level = escape_json(level);
+    let message = escape_json(message);
+    format!("{{\"level\":\"{level}\",\"message\":\"{message}\"}}")
 }
 
 /// Format an error for stderr output, respecting the current error format.
@@ -125,6 +139,19 @@ mod tests {
             json,
             r#"{"level":"error","message":"path\\to\\file"}"#
         );
+    }
+
+    #[test]
+    fn test_format_json_diagnostic_control_chars() {
+        // RFC 8259: control characters U+0000–U+001F must be \uXXXX escaped
+        let json = format_json_diagnostic("error", "null:\x00 bell:\x07 backspace:\x08");
+        assert_eq!(
+            json,
+            r#"{"level":"error","message":"null:\u0000 bell:\u0007 backspace:\u0008"}"#
+        );
+        // Verify output is valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["level"], "error");
     }
 
     #[test]
