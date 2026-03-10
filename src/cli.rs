@@ -30,7 +30,14 @@ or path separators) are resolved to model names automatically.
 
 Exit codes:
   0   Success
-  1   Error (project not found, all specified models not found, etc.)",
+  1   Error (project not found, all specified models not found, etc.)
+
+Error format (--error-format):
+  text (default)  Human-readable: 'Error: ...' and 'Warning: ...'
+  json            Machine-readable JSON on stderr:
+                  {\"level\":\"error\",\"message\":\"...\"}
+                  {\"level\":\"warning\",\"message\":\"...\"}
+                  Also settable via DLIN_ERROR_FORMAT=json",
     after_long_help = "\
 Examples:
   dlin graph                              # Full lineage (ASCII art)
@@ -47,8 +54,22 @@ Examples:
     version
 )]
 pub struct Cli {
+    /// Error/warning output format on stderr: text (default) or json.
+    /// When json, errors and warnings are emitted as JSON objects
+    /// ({"level":"error","message":"..."}) for programmatic parsing
+    #[arg(long, global = true, default_value = "text", env = "DLIN_ERROR_FORMAT")]
+    pub error_format: ErrorFormat,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ErrorFormat {
+    /// Human-readable error messages (default)
+    Text,
+    /// JSON objects on stderr: {"level":"error"|"warning","message":"..."}
+    Json,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1032,5 +1053,38 @@ mod tests {
     fn test_summary_invalid_output_format() {
         let result = Cli::try_parse_from(["dlin", "summary", "-o", "dot"]);
         assert!(result.is_err());
+    }
+
+    // -- Error format tests ---------------------------------------------------
+
+    #[test]
+    fn test_error_format_default() {
+        let cli = Cli::try_parse_from(["dlin", "graph"]).unwrap();
+        assert_eq!(cli.error_format, ErrorFormat::Text);
+    }
+
+    #[test]
+    fn test_error_format_json() {
+        let cli = Cli::try_parse_from(["dlin", "--error-format", "json", "graph"]).unwrap();
+        assert_eq!(cli.error_format, ErrorFormat::Json);
+    }
+
+    #[test]
+    fn test_error_format_json_after_subcommand() {
+        // global flags work after subcommand too
+        let cli = Cli::try_parse_from(["dlin", "graph", "--error-format", "json"]).unwrap();
+        assert_eq!(cli.error_format, ErrorFormat::Json);
+    }
+
+    #[test]
+    fn test_error_format_invalid() {
+        let result = Cli::try_parse_from(["dlin", "--error-format", "xml", "graph"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_error_format_with_impact() {
+        let cli = Cli::try_parse_from(["dlin", "--error-format", "json", "impact", "orders"]).unwrap();
+        assert_eq!(cli.error_format, ErrorFormat::Json);
     }
 }

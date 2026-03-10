@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, GraphArgs, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat};
+use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat};
 use dlin::graph;
 use dlin::input;
 use dlin::parser;
@@ -23,13 +23,16 @@ fn reset_sigpipe() {
 }
 
 #[cfg(not(tarpaulin_include))]
-fn main() -> Result<()> {
+fn main() {
     #[cfg(unix)]
     reset_sigpipe();
 
     let cli = Cli::parse();
 
-    match cli.command {
+    // Set error format before anything else so warnings/errors use it
+    dlin::set_error_format_json(cli.error_format == ErrorFormat::Json);
+
+    let result = match cli.command {
         Command::Graph(args) => {
             dlin::set_quiet(args.quiet);
             run_graph_command(args)
@@ -60,6 +63,11 @@ fn main() -> Result<()> {
             dlin::set_quiet(quiet);
             run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)
         }
+    };
+
+    if let Err(err) = result {
+        eprintln!("{}", dlin::format_error(&err));
+        std::process::exit(1);
     }
 }
 
