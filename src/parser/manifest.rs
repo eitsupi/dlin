@@ -36,6 +36,8 @@ pub struct ManifestNode {
     /// Column definitions keyed by column name
     #[serde(default)]
     pub columns: HashMap<String, ManifestColumn>,
+    /// Compiled SQL code (Jinja resolved) — present after `dbt compile` or `dbt run`
+    pub compiled_code: Option<String>,
 }
 
 /// A source entry in the manifest
@@ -152,6 +154,24 @@ pub fn load_manifest(manifest_path: &Path) -> Result<Manifest> {
 }
 
 impl Manifest {
+    /// Collect `compiled_code` from manifest nodes as a mapping from simplified
+    /// unique_id to SQL string.  Nodes without `compiled_code` are omitted.
+    ///
+    /// This is the manifest-mode counterpart of the file-based
+    /// `collect_sql_contents` used in SQL-parse mode.  Users must run
+    /// `dbt compile` (or `dbt run`) before invoking dlin so that the manifest
+    /// contains compiled SQL.
+    pub fn collect_sql_contents(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for (orig_id, node) in &self.nodes {
+            if let Some(ref code) = node.compiled_code {
+                let simple_id = simplify_unique_id(orig_id, &node.resource_type);
+                map.insert(simple_id, code.clone());
+            }
+        }
+        map
+    }
+
     /// Collect all unique file paths referenced by nodes and sources.
     /// Returns relative paths as stored in the manifest (e.g. "models/staging/stg_orders.sql").
     pub fn collect_file_paths(&self) -> BTreeSet<String> {
@@ -452,6 +472,7 @@ mod tests {
                     description: Some("Staged orders".to_string()),
                     path: Some("models/staging/stg_orders.sql".to_string()),
                     columns: HashMap::new(),
+                    compiled_code: None,
                 },
             )]),
             sources: HashMap::from([(
@@ -508,6 +529,7 @@ mod tests {
                     description: None,
                     path: None,
                     columns: HashMap::new(),
+                    compiled_code: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -554,6 +576,7 @@ mod tests {
                         description: None,
                         path: Some("seeds/countries.csv".to_string()),
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -570,6 +593,7 @@ mod tests {
                         description: None,
                         path: Some("snapshots/snap_orders.sql".to_string()),
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
             ]),
@@ -608,6 +632,7 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -623,6 +648,7 @@ mod tests {
                         description: None,
                         path: Some("tests/assert_positive.sql".to_string()),
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
             ]),
@@ -671,6 +697,7 @@ mod tests {
                     description: None,
                     path: None,
                     columns: HashMap::new(),
+                    compiled_code: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -699,6 +726,7 @@ mod tests {
                     description: None,
                     path: None,
                     columns: HashMap::new(),
+                    compiled_code: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -780,6 +808,7 @@ mod tests {
                     description: None,
                     path: None,
                     columns: HashMap::new(),
+                    compiled_code: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -812,6 +841,7 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -827,6 +857,7 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -848,6 +879,7 @@ mod tests {
                         description: Some("Order fact table".to_string()),
                         path: None,
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
             ]),
@@ -950,6 +982,7 @@ mod tests {
                         description: None,
                         path: Some("models/staging/stg_orders.sql".to_string()),
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -963,6 +996,7 @@ mod tests {
                         description: None,
                         path: Some("models/marts/orders.sql".to_string()),
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
                 (
@@ -976,6 +1010,7 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        compiled_code: None,
                     },
                 ),
             ]),
@@ -1053,5 +1088,96 @@ mod tests {
         let paths = manifest.collect_file_paths();
         assert!(paths.contains("models/staging/stg_orders.sql"));
         assert!(paths.contains("models/staging/schema.yml"));
+    }
+
+    #[test]
+    fn test_collect_sql_contents_from_manifest() {
+        let manifest = Manifest {
+            nodes: HashMap::from([
+                (
+                    "model.proj.stg_orders".to_string(),
+                    ManifestNode {
+                        unique_id: "model.proj.stg_orders".to_string(),
+                        name: "stg_orders".to_string(),
+                        resource_type: "model".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: None,
+                        columns: HashMap::new(),
+                        compiled_code: Some("select * from raw.orders".to_string()),
+                    },
+                ),
+                (
+                    "test.proj.not_null_orders_id.abc123".to_string(),
+                    ManifestNode {
+                        unique_id: "test.proj.not_null_orders_id.abc123".to_string(),
+                        name: "not_null_orders_id".to_string(),
+                        resource_type: "test".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: None,
+                        columns: HashMap::new(),
+                        compiled_code: Some("select count(*) from orders where id is null".to_string()),
+                    },
+                ),
+                (
+                    "model.proj.no_compile".to_string(),
+                    ManifestNode {
+                        unique_id: "model.proj.no_compile".to_string(),
+                        name: "no_compile".to_string(),
+                        resource_type: "model".to_string(),
+                        depends_on: DependsOn::default(),
+                        config: ManifestConfig::default(),
+                        description: None,
+                        path: None,
+                        columns: HashMap::new(),
+                        compiled_code: None,
+                    },
+                ),
+            ]),
+            sources: HashMap::new(),
+            exposures: HashMap::new(),
+        };
+
+        let sql_contents = manifest.collect_sql_contents();
+
+        // compiled_code present → included
+        assert_eq!(
+            sql_contents.get("model.stg_orders").map(|s| s.as_str()),
+            Some("select * from raw.orders")
+        );
+        // test unique_id is simplified (test.proj.name.hash → test.name)
+        assert_eq!(
+            sql_contents.get("test.not_null_orders_id").map(|s| s.as_str()),
+            Some("select count(*) from orders where id is null")
+        );
+        // compiled_code absent → omitted
+        assert!(sql_contents.get("model.no_compile").is_none());
+    }
+
+    #[test]
+    fn test_collect_sql_contents_from_fixture() {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/simple_project/target/manifest.json");
+
+        let manifest = load_manifest(&fixture_path).unwrap();
+        let sql_contents = manifest.collect_sql_contents();
+
+        // The fixture has compiled_code for stg_orders and the test node
+        assert!(
+            sql_contents.get("model.stg_orders").is_some(),
+            "stg_orders should have compiled_code"
+        );
+        assert!(
+            sql_contents.get("test.assert_orders_positive_amount").is_some(),
+            "test node should have compiled_code"
+        );
+        // Nodes without compiled_code should not appear
+        assert!(
+            sql_contents.get("model.customers").is_none(),
+            "customers has no compiled_code in fixture"
+        );
     }
 }

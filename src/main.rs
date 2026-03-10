@@ -141,7 +141,12 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
-        Some(collect_sql_contents(&filtered, &project_dir))
+        Some(collect_sql_contents_for_source(
+            &args.source,
+            args.manifest_path.as_ref(),
+            &project_dir,
+            &filtered,
+        )?)
     } else {
         None
     };
@@ -221,7 +226,12 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
-        Some(collect_sql_contents(&filtered, &project_dir))
+        Some(collect_sql_contents_for_source(
+            &args.source,
+            args.manifest_path.as_ref(),
+            &project_dir,
+            &filtered,
+        )?)
     } else {
         None
     };
@@ -270,6 +280,28 @@ fn render_output(
         cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),
+    }
+}
+
+/// Collect SQL contents based on the data source.
+///
+/// - **manifest**: reads `compiled_code` from manifest.json.
+///   Users must run `dbt compile` beforehand so the manifest contains compiled SQL.
+/// - **sql**: reads raw SQL files from disk.
+#[cfg(not(tarpaulin_include))]
+fn collect_sql_contents_for_source(
+    source: &SourceType,
+    manifest_path: Option<&PathBuf>,
+    project_dir: &Path,
+    graph: &graph::types::LineageGraph,
+) -> Result<HashMap<String, String>> {
+    match source {
+        SourceType::Manifest => {
+            let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
+            let manifest = parser::manifest::load_manifest(&resolved)?;
+            Ok(manifest.collect_sql_contents())
+        }
+        SourceType::Sql => Ok(collect_sql_contents(graph, project_dir)),
     }
 }
 

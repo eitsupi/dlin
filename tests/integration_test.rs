@@ -11,6 +11,39 @@ fn fixture_dir() -> PathBuf {
         .join("simple_project")
 }
 
+fn binary_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("target");
+    path.push("debug");
+    path.push("dlin");
+    path
+}
+
+/// Copy the fixture project into a temp directory and return the temp dir.
+fn copy_fixture_to_temp() -> tempfile::TempDir {
+    use std::fs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = fixture_dir();
+
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_recursive(&src_path, &dst_path);
+            } else {
+                fs::copy(&src_path, &dst_path).unwrap();
+            }
+        }
+    }
+
+    copy_dir_recursive(&fixture, tmp.path());
+    tmp
+}
+
 mod parsing {
     use super::*;
 
@@ -138,38 +171,6 @@ mod freshness {
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
-
-    fn binary_path() -> std::path::PathBuf {
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("target");
-        path.push("debug");
-        path.push("dlin");
-        path
-    }
-
-    /// Copy the fixture project into a temp directory and return the temp dir.
-    fn copy_fixture_to_temp() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        let fixture = fixture_dir();
-
-        // Recursively copy fixture to temp dir
-        fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
-            fs::create_dir_all(dst).unwrap();
-            for entry in fs::read_dir(src).unwrap() {
-                let entry = entry.unwrap();
-                let src_path = entry.path();
-                let dst_path = dst.join(entry.file_name());
-                if src_path.is_dir() {
-                    copy_dir_recursive(&src_path, &dst_path);
-                } else {
-                    fs::copy(&src_path, &dst_path).unwrap();
-                }
-            }
-        }
-
-        copy_dir_recursive(&fixture, tmp.path());
-        tmp
-    }
 
     #[test]
     fn test_check_manifest_up_to_date() {
@@ -358,16 +359,8 @@ mod freshness {
 }
 
 mod cli {
+    use super::*;
     use std::process::Command;
-
-    fn binary_path() -> std::path::PathBuf {
-        // The built binary path
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("target");
-        path.push("debug");
-        path.push("dlin");
-        path
-    }
 
     #[test]
     fn test_help_flag() {
@@ -850,19 +843,37 @@ mod cli {
         assert!(stdout.contains("assert_orders_positive_amount"));
     }
 
+    /// Create a temp fixture where manifest is stale (SQL files are newer).
+    fn stale_fixture() -> tempfile::TempDir {
+        use std::fs;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = copy_fixture_to_temp();
+        let manifest_path = tmp.path().join("target/manifest.json");
+
+        // Touch manifest first, then touch a SQL file to make it newer
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
+        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+
+        tmp
+    }
+
     #[test]
     fn test_check_manifest_text_output() {
-        let fixture = super::fixture_dir();
+        let tmp = stale_fixture();
         let output = Command::new(binary_path())
             .args([
                 "check-manifest",
                 "--project-dir",
-                fixture.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
             ])
             .output()
             .expect("Failed to run binary");
 
-        // Fixture SQL files are newer than the manifest, so it should be stale (exit 1)
         assert!(
             !output.status.success(),
             "Should exit 1 when manifest is stale"
@@ -877,12 +888,12 @@ mod cli {
 
     #[test]
     fn test_check_manifest_json_output() {
-        let fixture = super::fixture_dir();
+        let tmp = stale_fixture();
         let output = Command::new(binary_path())
             .args([
                 "check-manifest",
                 "--project-dir",
-                fixture.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
                 "-o",
                 "json",
             ])
@@ -898,12 +909,12 @@ mod cli {
 
     #[test]
     fn test_check_manifest_quiet_output() {
-        let fixture = super::fixture_dir();
+        let tmp = stale_fixture();
         let output = Command::new(binary_path())
             .args([
                 "check-manifest",
                 "--project-dir",
-                fixture.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
                 "-q",
             ])
             .output()

@@ -12,7 +12,8 @@
         "tags": ["staging"]
       },
       "description": "Staged orders data",
-      "path": "models/staging/stg_orders.sql"
+      "path": "models/staging/stg_orders.sql",
+      "compiled_code": "select order_id, customer_id, order_date, status from `raw`.`orders`"
     },
     "model.simple_project.stg_customers": {
       "unique_id": "model.simple_project.stg_customers",
@@ -102,7 +103,8 @@
         "tags": []
       },
       "description": "",
-      "path": "tests/assert_orders_positive_amount.sql"
+      "path": "tests/assert_orders_positive_amount.sql",
+      "compiled_code": "select count(*) from `raw`.`orders` where amount <= 0"
     }
   },
   "sources": {

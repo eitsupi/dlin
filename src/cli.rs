@@ -192,7 +192,7 @@ pub struct GraphArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
     #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
     pub json_fields: Option<Vec<String>>,
 
@@ -506,7 +506,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
     #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
     pub json_fields: Option<Vec<String>>,
 
