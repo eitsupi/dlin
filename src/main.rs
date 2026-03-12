@@ -61,7 +61,14 @@ fn main() {
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_impact_command(&model, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)
+            let stdin_lines = input::read_stdin_lines();
+            let mut raw_inputs = model;
+            raw_inputs.extend(stdin_lines);
+            if raw_inputs.is_empty() {
+                Err(anyhow::anyhow!("no model names provided (specify as arguments or via stdin)"))
+            } else {
+                run_impact_command(raw_inputs, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)
+            }
         }
     };
 
@@ -344,7 +351,7 @@ fn collect_sql_contents(
 /// Run the `impact` subcommand
 #[cfg(not(tarpaulin_include))]
 fn run_impact_command(
-    models: &[String],
+    raw_inputs: Vec<String>,
     project_dir: &Path,
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
@@ -359,6 +366,17 @@ fn run_impact_command(
 
     validate_source_flags(source, manifest_path)?;
     let (dag, _manifest) = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache, refresh_cache)?;
+
+    // Resolve file paths to model names (same as graph/list commands)
+    let models = if input::has_path_like_input(&raw_inputs) {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
+        let project = parser::project::DbtProject::load(&project_dir)?;
+        let resolved_paths = project.resolve_paths(&project_dir);
+        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+    } else {
+        raw_inputs
+    };
 
     let reports: Vec<_> = models
         .iter()

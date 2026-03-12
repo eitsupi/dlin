@@ -252,9 +252,14 @@ Finds all downstream dependents and assigns severity levels:
 Text output: human-readable report with severity and distance (degree).
 JSON output: structured array of impact reports for CI/programmatic use.
 
+Stdin/pipe support:
+  Accepts model names or file paths on stdin (one per line). \
+  File paths (detected by extension or path separator) are resolved to model names \
+  using the dbt project configuration.
+
 Exit codes:
   0   Success (impact computed, even if no downstream dependents)
-  1   Error (all specified models not found)",
+  1   Error (no models specified, or all specified models not found)",
         after_long_help = "\
 Examples:
   # Text report for a single model
@@ -266,12 +271,14 @@ Examples:
   # Multiple models at once
   dlin impact orders stg_orders -o json
 
+  # From git diff (pipe changed files)
+  git diff --name-only main | dlin impact -o json
+
   # Use manifest instead of SQL parsing
   dlin impact orders --source manifest --manifest-path target/manifest.json"
     )]
     Impact {
-        /// Model names to analyze impact for
-        #[arg(required = true)]
+        /// Model names to analyze impact for (also accepts stdin)
         model: Vec<String>,
 
         /// Path to dbt project directory
@@ -895,9 +902,13 @@ mod tests {
     }
 
     #[test]
-    fn test_impact_no_model_fails() {
-        let result = Cli::try_parse_from(["dlin", "impact"]);
-        assert!(result.is_err());
+    fn test_impact_no_model_parses_ok() {
+        // No positional args is allowed at parse time (stdin may provide models at runtime)
+        let cli = Cli::try_parse_from(["dlin", "impact"]).unwrap();
+        match cli.command {
+            Command::Impact { model, .. } => assert!(model.is_empty()),
+            _ => panic!("expected Impact command"),
+        }
     }
 
     #[test]
