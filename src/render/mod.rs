@@ -45,6 +45,7 @@ pub(crate) mod test_helpers {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         }
     }
 

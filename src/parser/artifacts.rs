@@ -292,6 +292,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_node(NodeData {
             unique_id: "model.orders".into(),
@@ -302,6 +303,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph
     }
@@ -475,6 +477,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let status = resolve_run_status(Some(&result), &node, tmp.path());
@@ -502,6 +505,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let status = resolve_run_status(Some(&result), &node, tmp.path());
@@ -525,6 +529,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let status = resolve_run_status(Some(&result), &node, tmp.path());
@@ -548,6 +553,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let status = resolve_run_status(Some(&result), &node, tmp.path());
@@ -587,6 +593,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
 
         // Use a timestamp in the past so the file modification is newer
@@ -613,6 +620,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
 
         // Use a timestamp far in the future
@@ -640,6 +648,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let status = resolve_run_status(Some(&result), &node, tmp.path());

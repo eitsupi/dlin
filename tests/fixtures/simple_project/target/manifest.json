@@ -5,11 +5,15 @@
       "name": "stg_orders",
       "resource_type": "model",
       "depends_on": {
-        "nodes": ["source.simple_project.raw.orders"]
+        "nodes": [
+          "source.simple_project.raw.orders"
+        ]
       },
       "config": {
         "materialized": "view",
-        "tags": ["staging"]
+        "tags": [
+          "staging"
+        ]
       },
       "description": "Staged orders data",
       "path": "models/staging/stg_orders.sql",
@@ -20,11 +24,15 @@
       "name": "stg_customers",
       "resource_type": "model",
       "depends_on": {
-        "nodes": ["source.simple_project.raw.customers"]
+        "nodes": [
+          "source.simple_project.raw.customers"
+        ]
       },
       "config": {
         "materialized": "view",
-        "tags": ["staging"]
+        "tags": [
+          "staging"
+        ]
       },
       "description": "Staged customers data",
       "path": "models/staging/stg_customers.sql"
@@ -34,11 +42,15 @@
       "name": "stg_payments",
       "resource_type": "model",
       "depends_on": {
-        "nodes": ["source.simple_project.raw.payments"]
+        "nodes": [
+          "source.simple_project.raw.payments"
+        ]
       },
       "config": {
         "materialized": "view",
-        "tags": ["staging"]
+        "tags": [
+          "staging"
+        ]
       },
       "description": "Staged payments data",
       "path": "models/staging/stg_payments.sql"
@@ -55,7 +67,9 @@
       },
       "config": {
         "materialized": "table",
-        "tags": ["marts"]
+        "tags": [
+          "marts"
+        ]
       },
       "description": "Order fact table with payment details",
       "path": "models/marts/orders.sql"
@@ -72,7 +86,9 @@
       },
       "config": {
         "materialized": "table",
-        "tags": ["marts"]
+        "tags": [
+          "marts"
+        ]
       },
       "description": "Customer dimension table with lifetime metrics",
       "path": "models/marts/customers.sql"
@@ -96,7 +112,9 @@
       "name": "assert_orders_positive_amount",
       "resource_type": "test",
       "depends_on": {
-        "nodes": ["model.simple_project.orders"]
+        "nodes": [
+          "model.simple_project.orders"
+        ]
       },
       "config": {
         "materialized": "test",
@@ -143,7 +161,15 @@
           "model.simple_project.customers"
         ]
       },
-      "description": "Weekly business performance dashboard"
+      "description": "Weekly business performance dashboard",
+      "label": "Weekly Report",
+      "type": "dashboard",
+      "url": "https://bi.example.com/weekly",
+      "maturity": "high",
+      "owner": {
+        "name": "Data Team",
+        "email": "data@example.com"
+      }
     }
   }
 }

@@ -326,6 +326,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         }
     }
 

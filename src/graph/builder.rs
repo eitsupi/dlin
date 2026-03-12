@@ -14,6 +14,7 @@ use crate::parser::sql::{
     extract_all_with_vars, extract_refs_and_sources_with_vars, RefCall, SourceCall,
 };
 use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
+use crate::graph::types::{ExposureInfo, OwnerInfo};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -77,6 +78,7 @@ impl GraphBuilder {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         })
     }
 
@@ -107,6 +109,7 @@ impl GraphBuilder {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         })
     }
 }
@@ -157,6 +160,7 @@ fn add_source_nodes(
                 materialization: None,
                 tags: vec![],
                 columns: vec![],
+            exposure: None,
             });
         }
     }
@@ -351,6 +355,7 @@ fn process_model_files(
             materialization,
             tags,
             columns,
+            exposure: None,
         });
     }
 
@@ -379,6 +384,7 @@ fn process_simple_nodes(
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
     }
 }
@@ -421,6 +427,7 @@ fn process_sql_edges(
                 materialization: None,
                 tags: vec![],
                 columns: vec![],
+            exposure: None,
             });
         }
 
@@ -482,6 +489,16 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: Some(ExposureInfo {
+                label: exposure.label.clone(),
+                exposure_type: exposure.exposure_type.clone(),
+                url: exposure.url.clone(),
+                maturity: exposure.maturity.clone(),
+                owner: exposure.owner.as_ref().map(|o| OwnerInfo {
+                    name: o.name.clone(),
+                    email: o.email.clone(),
+                }),
+            }),
         });
 
         for dep in &exposure.depends_on {
@@ -615,6 +632,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         node_map.insert("model.orders".to_string(), idx);
 
@@ -634,6 +652,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         node_map.insert("seed.countries".to_string(), idx);
 
@@ -653,6 +672,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         node_map.insert("snapshot.snap_orders".to_string(), idx);
 

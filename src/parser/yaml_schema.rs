@@ -77,8 +77,14 @@ pub struct ExposureDefinition {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(rename = "type", default)]
     pub exposure_type: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub maturity: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]

@@ -849,6 +849,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let stg = graph.add_node(NodeData {
             unique_id: "model.stg_orders".into(),
@@ -859,6 +860,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let mart = graph.add_node(NodeData {
             unique_id: "model.orders".into(),
@@ -869,6 +871,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let exp = graph.add_node(NodeData {
             unique_id: "exposure.dashboard".into(),
@@ -879,6 +882,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_edge(
             src,
@@ -1293,6 +1297,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let a = graph.add_node(NodeData {
             unique_id: "model.stg_a".into(),
@@ -1303,6 +1308,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let b = graph.add_node(NodeData {
             unique_id: "model.stg_b".into(),
@@ -1313,6 +1319,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         // src → a, src → b — a and b end up in the same layer
         graph.add_edge(
@@ -1398,6 +1405,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(
             group_key_for_node(&node_exp, std::path::Path::new("/tmp")),
@@ -1413,6 +1421,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(
             group_key_for_node(&node_phantom, std::path::Path::new("/tmp")),
@@ -1429,6 +1438,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(
             group_key_for_node(&node_model, std::path::Path::new("/tmp")),
@@ -1628,6 +1638,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let path = compute_path_through(&graph, n);
         assert_eq!(path.len(), 1);
@@ -1660,6 +1671,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let b = graph.add_node(NodeData {
             unique_id: "model.b".into(),
@@ -1670,6 +1682,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let c = graph.add_node(NodeData {
             unique_id: "model.c".into(),
@@ -1680,6 +1693,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_edge(
             a,
@@ -1795,6 +1809,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         let key = group_key_for_node(&node, &project_dir);
         assert_eq!(key, "models");
@@ -1812,6 +1827,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(group_key_for_node(&node, &project_dir), "(exposures)");
     }
@@ -1829,6 +1845,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let groups = build_node_groups(&[idx], &graph, std::path::Path::new("/project"));
         // File "a.sql" has no parent dir, so group key is ""
@@ -1878,6 +1895,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let s2 = graph.add_node(NodeData {
             unique_id: "source.b".into(),
@@ -1888,6 +1906,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let m = graph.add_node(NodeData {
             unique_id: "model.c".into(),
@@ -1898,6 +1917,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_edge(
             s1,

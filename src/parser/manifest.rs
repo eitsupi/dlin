@@ -69,6 +69,19 @@ pub struct ManifestExposure {
     #[serde(default)]
     pub depends_on: DependsOn,
     pub description: Option<String>,
+    pub label: Option<String>,
+    #[serde(rename = "type")]
+    pub exposure_type: Option<String>,
+    pub url: Option<String>,
+    pub maturity: Option<String>,
+    pub owner: Option<ManifestExposureOwner>,
+}
+
+/// Owner information in a manifest exposure entry
+#[derive(Debug, Deserialize)]
+pub struct ManifestExposureOwner {
+    pub name: Option<String>,
+    pub email: Option<String>,
 }
 
 /// depends_on section with a list of node unique_ids
@@ -243,6 +256,7 @@ fn add_source_nodes(
                 cols.sort();
                 cols
             },
+            exposure: None,
         });
         node_map.insert(orig_id.clone(), idx);
         // Also index by simplified id for edge resolution
@@ -272,6 +286,7 @@ fn add_regular_nodes(
                 cols.sort();
                 cols
             },
+            exposure: None,
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -295,6 +310,16 @@ fn add_exposure_nodes(
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: Some(ExposureInfo {
+                label: non_empty_string(&exposure.label),
+                exposure_type: non_empty_string(&exposure.exposure_type),
+                url: non_empty_string(&exposure.url),
+                maturity: non_empty_string(&exposure.maturity),
+                owner: exposure.owner.as_ref().map(|o| OwnerInfo {
+                    name: o.name.clone(),
+                    email: o.email.clone(),
+                }),
+            }),
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -542,6 +567,11 @@ mod tests {
                         nodes: vec!["model.proj.orders".to_string()],
                     },
                     description: Some("Weekly dashboard".to_string()),
+                    label: None,
+                    exposure_type: None,
+                    url: None,
+                    maturity: None,
+                    owner: None,
                 },
             )]),
         };
@@ -559,6 +589,71 @@ mod tests {
             graph[exposure].description.as_deref(),
             Some("Weekly dashboard")
         );
+    }
+
+    #[test]
+    fn test_exposure_metadata_parsed() {
+        let manifest = Manifest {
+            nodes: HashMap::new(),
+            sources: HashMap::new(),
+            exposures: HashMap::from([(
+                "exposure.proj.dashboard".to_string(),
+                ManifestExposure {
+                    unique_id: "exposure.proj.dashboard".to_string(),
+                    name: "dashboard".to_string(),
+                    depends_on: DependsOn { nodes: vec![] },
+                    description: Some("Main dashboard".to_string()),
+                    label: Some("Main Dashboard".to_string()),
+                    exposure_type: Some("dashboard".to_string()),
+                    url: Some("https://bi.example.com".to_string()),
+                    maturity: Some("high".to_string()),
+                    owner: Some(ManifestExposureOwner {
+                        name: Some("Data Team".to_string()),
+                        email: Some("data@example.com".to_string()),
+                    }),
+                },
+            )]),
+        };
+
+        let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
+        let exp_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Exposure)
+            .expect("Should have an exposure node");
+        let exp = &graph[exp_idx];
+
+        let info = exp.exposure.as_ref().expect("Should have exposure info");
+        assert_eq!(info.label.as_deref(), Some("Main Dashboard"));
+        assert_eq!(info.exposure_type.as_deref(), Some("dashboard"));
+        assert_eq!(info.url.as_deref(), Some("https://bi.example.com"));
+        assert_eq!(info.maturity.as_deref(), Some("high"));
+
+        let owner = info.owner.as_ref().expect("Should have owner");
+        assert_eq!(owner.name.as_deref(), Some("Data Team"));
+        assert_eq!(owner.email.as_deref(), Some("data@example.com"));
+    }
+
+    #[test]
+    fn test_exposure_metadata_from_fixture() {
+        let manifest_path = std::path::Path::new("tests/fixtures/simple_project/target/manifest.json");
+        let graph = build_graph_from_manifest(manifest_path).unwrap();
+
+        let exp_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Exposure)
+            .expect("Should have an exposure node from fixture");
+        let exp = &graph[exp_idx];
+        assert_eq!(exp.label, "weekly_report");
+
+        let info = exp.exposure.as_ref().expect("Should have exposure info");
+        assert_eq!(info.label.as_deref(), Some("Weekly Report"));
+        assert_eq!(info.exposure_type.as_deref(), Some("dashboard"));
+        assert_eq!(info.url.as_deref(), Some("https://bi.example.com/weekly"));
+        assert_eq!(info.maturity.as_deref(), Some("high"));
+
+        let owner = info.owner.as_ref().expect("Should have owner");
+        assert_eq!(owner.name.as_deref(), Some("Data Team"));
+        assert_eq!(owner.email.as_deref(), Some("data@example.com"));
     }
 
     #[test]

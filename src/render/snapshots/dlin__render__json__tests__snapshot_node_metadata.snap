@@ -10,6 +10,7 @@ expression: output
         "customer_id"
       ],
       "description": "Orders mart model",
+      "exposure": null,
       "file_path": "models/orders.sql",
       "label": "orders",
       "materialization": "table",

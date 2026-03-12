@@ -7,6 +7,7 @@ expression: output
     {
       "columns": [],
       "description": null,
+      "exposure": null,
       "file_path": null,
       "label": "dashboard",
       "materialization": null,
@@ -18,6 +19,7 @@ expression: output
     {
       "columns": [],
       "description": null,
+      "exposure": null,
       "file_path": null,
       "label": "orders",
       "materialization": null,
@@ -29,6 +31,7 @@ expression: output
     {
       "columns": [],
       "description": null,
+      "exposure": null,
       "file_path": null,
       "label": "stg_orders",
       "materialization": null,
@@ -40,6 +43,7 @@ expression: output
     {
       "columns": [],
       "description": null,
+      "exposure": null,
       "file_path": null,
       "label": "raw.orders",
       "materialization": null,
@@ -51,6 +55,7 @@ expression: output
     {
       "columns": [],
       "description": null,
+      "exposure": null,
       "file_path": null,
       "label": "orders_positive",
       "materialization": null,

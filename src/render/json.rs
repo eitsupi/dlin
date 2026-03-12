@@ -18,10 +18,11 @@ pub const GRAPH_NODE_FIELDS: &[&str] = &[
     "tags",
     "columns",
     "sql_content",
+    "exposure",
 ];
 
 /// Default node fields when neither --json-fields nor --json-full is specified.
-pub const GRAPH_DEFAULT_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path"];
+pub const GRAPH_DEFAULT_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path", "exposure"];
 
 /// Resolve which fields to emit, and validate field names.
 /// Returns `Err` with a message listing available fields if any name is unknown.
@@ -138,6 +139,70 @@ pub fn build_node_value(
             "sql_content".into(),
             match sql_contents.and_then(|m| m.get(&node.unique_id)) {
                 Some(sql) => Value::String(sql.clone()),
+                None => Value::Null,
+            },
+        );
+    }
+    if fields.contains("exposure") {
+        map.insert(
+            "exposure".into(),
+            match node.exposure {
+                Some(ref exp) => {
+                    let mut exp_map = serde_json::Map::new();
+                    exp_map.insert(
+                        "label".into(),
+                        match exp.label {
+                            Some(ref l) => Value::String(l.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    exp_map.insert(
+                        "type".into(),
+                        match exp.exposure_type {
+                            Some(ref t) => Value::String(t.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    exp_map.insert(
+                        "url".into(),
+                        match exp.url {
+                            Some(ref u) => Value::String(u.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    exp_map.insert(
+                        "maturity".into(),
+                        match exp.maturity {
+                            Some(ref m) => Value::String(m.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                    exp_map.insert(
+                        "owner".into(),
+                        match exp.owner {
+                            Some(ref o) => {
+                                let mut owner_map = serde_json::Map::new();
+                                owner_map.insert(
+                                    "name".into(),
+                                    match o.name {
+                                        Some(ref n) => Value::String(n.clone()),
+                                        None => Value::Null,
+                                    },
+                                );
+                                owner_map.insert(
+                                    "email".into(),
+                                    match o.email {
+                                        Some(ref e) => Value::String(e.clone()),
+                                        None => Value::Null,
+                                    },
+                                );
+                                Value::Object(owner_map)
+                            }
+                            None => Value::Null,
+                        },
+                    );
+                    Value::Object(exp_map)
+                }
                 None => Value::Null,
             },
         );
@@ -268,6 +333,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -412,6 +478,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec!["daily".into(), "core".into()],
             columns: vec!["order_id".into(), "customer_id".into()],
+            exposure: None,
         });
         let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
@@ -429,6 +496,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
         let sql_contents = HashMap::from([
@@ -466,6 +534,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec!["daily".into(), "core".into()],
             columns: vec!["order_id".into(), "customer_id".into()],
+            exposure: None,
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -491,6 +560,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec!["daily".into()],
             columns: vec!["id".into()],
+            exposure: None,
         });
         let fields = resolve_graph_fields(None, false).unwrap();
         let mut buf = Vec::new();
@@ -503,6 +573,7 @@ mod tests {
         assert_eq!(node["label"], "orders");
         assert_eq!(node["node_type"], "model");
         assert_eq!(node["file_path"], "models/orders.sql");
+        assert!(node["exposure"].is_null());
         // Non-default fields absent (not in default set)
         assert!(node.get("description").is_none());
         assert!(node.get("materialization").is_none());
@@ -522,6 +593,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let fields = resolve_graph_fields(
             Some(&["unique_id".into(), "description".into()]),
@@ -552,6 +624,7 @@ mod tests {
             materialization: Some("table".into()),
             tags: vec!["daily".into()],
             columns: vec!["id".into()],
+            exposure: None,
         });
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
@@ -575,5 +648,60 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("nonexistent"));
         assert!(err.contains("Available fields"));
+    }
+
+    #[test]
+    fn test_exposure_fields_in_json() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "exposure.dashboard".into(),
+            label: "dashboard".into(),
+            node_type: NodeType::Exposure,
+            file_path: None,
+            description: Some("Main dashboard".into()),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: Some(ExposureInfo {
+                label: Some("Main Dashboard".into()),
+                exposure_type: Some("dashboard".into()),
+                url: Some("https://bi.example.com".into()),
+                maturity: Some("high".into()),
+                owner: Some(OwnerInfo {
+                    name: Some("Data Team".into()),
+                    email: Some("data@example.com".into()),
+                }),
+            }),
+        });
+
+        let fields = resolve_graph_fields(None, true).unwrap();
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &fields, &mut buf, true).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let node = &parsed["nodes"][0];
+
+        let exposure = &node["exposure"];
+        assert_eq!(exposure["label"], "Main Dashboard");
+        assert_eq!(exposure["type"], "dashboard");
+        assert_eq!(exposure["url"], "https://bi.example.com");
+        assert_eq!(exposure["maturity"], "high");
+        assert_eq!(exposure["owner"]["name"], "Data Team");
+        assert_eq!(exposure["owner"]["email"], "data@example.com");
+    }
+
+    #[test]
+    fn test_exposure_null_for_non_exposure_nodes() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.orders", "orders", NodeType::Model));
+
+        let fields = resolve_graph_fields(None, true).unwrap();
+        let mut buf = Vec::new();
+        render_json_to_writer(&graph, None, &fields, &mut buf, true).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let node = &parsed["nodes"][0];
+
+        assert!(node["exposure"].is_null());
     }
 }

@@ -25,6 +25,7 @@ fn build_two_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     let b = graph.add_node(NodeData {
         unique_id: "model.proj.orders".into(),
@@ -35,6 +36,7 @@ fn build_two_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     graph.add_edge(
         a,
@@ -58,6 +60,7 @@ fn build_four_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     let stg = graph.add_node(NodeData {
         unique_id: "model.stg_orders".into(),
@@ -68,6 +71,7 @@ fn build_four_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     let mart = graph.add_node(NodeData {
         unique_id: "model.orders".into(),
@@ -78,6 +82,7 @@ fn build_four_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     let exp = graph.add_node(NodeData {
         unique_id: "exposure.dashboard".into(),
@@ -88,6 +93,7 @@ fn build_four_node_graph() -> LineageGraph {
         materialization: None,
         tags: vec![],
         columns: vec![],
+        exposure: None,
     });
     graph.add_edge(
         src,

@@ -198,6 +198,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let mut buf = Vec::new();
         render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();

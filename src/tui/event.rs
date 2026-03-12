@@ -599,6 +599,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let stg = graph.add_node(NodeData {
             unique_id: "model.stg_orders".into(),
@@ -609,6 +610,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let mart = graph.add_node(NodeData {
             unique_id: "model.orders".into(),
@@ -619,6 +621,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         let exp = graph.add_node(NodeData {
             unique_id: "exposure.dashboard".into(),
@@ -629,6 +632,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         });
         graph.add_edge(
             src,

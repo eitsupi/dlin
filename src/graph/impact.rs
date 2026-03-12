@@ -237,6 +237,7 @@ mod tests {
             materialization: materialization.map(|s| s.to_string()),
             tags: vec![],
             columns: vec![],
+            exposure: None,
         }
     }
 

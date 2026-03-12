@@ -43,6 +43,28 @@ impl NodeType {
     }
 }
 
+/// Owner information for exposures
+#[derive(Debug, Clone)]
+pub struct OwnerInfo {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+/// Exposure-specific metadata
+#[derive(Debug, Clone)]
+pub struct ExposureInfo {
+    /// Human-readable display label
+    pub label: Option<String>,
+    /// Exposure type (dashboard, notebook, analysis, ml, application)
+    pub exposure_type: Option<String>,
+    /// URL pointing to the exposure (e.g., dashboard link)
+    pub url: Option<String>,
+    /// Maturity level (high, medium, low)
+    pub maturity: Option<String>,
+    /// Owner information
+    pub owner: Option<OwnerInfo>,
+}
+
 /// Data associated with each node
 #[derive(Debug, Clone)]
 pub struct NodeData {
@@ -62,6 +84,8 @@ pub struct NodeData {
     pub tags: Vec<String>,
     /// Column names exposed by this model (from SELECT clause)
     pub columns: Vec<String>,
+    /// Exposure-specific metadata (only set for exposure nodes)
+    pub exposure: Option<ExposureInfo>,
 }
 
 impl NodeData {
@@ -133,6 +157,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(node.display_name(), "orders");
     }
@@ -148,6 +173,7 @@ mod tests {
             materialization: None,
             tags: vec![],
             columns: vec![],
+            exposure: None,
         };
         assert_eq!(node.display_name(), "src:raw.orders");
     }
@@ -171,6 +197,7 @@ mod tests {
                 materialization: None,
                 tags: vec![],
                 columns: vec![],
+                exposure: None,
             };
             assert_eq!(node.display_name(), expected, "Failed for {:?}", nt);
         }
