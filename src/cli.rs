@@ -217,7 +217,7 @@ pub struct GraphArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path, exposure. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes and must be explicitly requested via --json-fields or --json-full. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
     #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
     pub json_fields: Option<Vec<String>>,
 
@@ -550,7 +550,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path, exposure. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
+    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes and must be explicitly requested via --json-fields or --json-full. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
     #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
     pub json_fields: Option<Vec<String>>,
 

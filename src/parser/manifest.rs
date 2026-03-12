@@ -316,8 +316,8 @@ fn add_exposure_nodes(
                 url: non_empty_string(&exposure.url),
                 maturity: non_empty_string(&exposure.maturity),
                 owner: exposure.owner.as_ref().map(|o| OwnerInfo {
-                    name: o.name.clone(),
-                    email: o.email.clone(),
+                    name: non_empty_string(&o.name),
+                    email: non_empty_string(&o.email),
                 }),
             }),
         });

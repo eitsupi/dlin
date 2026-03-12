@@ -160,7 +160,7 @@ fn add_source_nodes(
                 materialization: None,
                 tags: vec![],
                 columns: vec![],
-            exposure: None,
+                exposure: None,
             });
         }
     }
@@ -427,7 +427,7 @@ fn process_sql_edges(
                 materialization: None,
                 tags: vec![],
                 columns: vec![],
-            exposure: None,
+                exposure: None,
             });
         }
 
@@ -495,8 +495,8 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
                 url: exposure.url.clone(),
                 maturity: exposure.maturity.clone(),
                 owner: exposure.owner.as_ref().map(|o| OwnerInfo {
-                    name: o.name.clone(),
-                    email: o.email.clone(),
+                    name: o.name.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
+                    email: o.email.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
                 }),
             }),
         });

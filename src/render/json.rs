@@ -22,7 +22,7 @@ pub const GRAPH_NODE_FIELDS: &[&str] = &[
 ];
 
 /// Default node fields when neither --json-fields nor --json-full is specified.
-pub const GRAPH_DEFAULT_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path", "exposure"];
+pub const GRAPH_DEFAULT_FIELDS: &[&str] = &["unique_id", "label", "node_type", "file_path"];
 
 /// Resolve which fields to emit, and validate field names.
 /// Returns `Err` with a message listing available fields if any name is unknown.
@@ -144,58 +144,25 @@ pub fn build_node_value(
         );
     }
     if fields.contains("exposure") {
+        let opt_str = |v: &Option<String>| -> Value {
+            v.as_ref().map_or(Value::Null, |s| Value::String(s.clone()))
+        };
         map.insert(
             "exposure".into(),
             match node.exposure {
                 Some(ref exp) => {
                     let mut exp_map = serde_json::Map::new();
-                    exp_map.insert(
-                        "label".into(),
-                        match exp.label {
-                            Some(ref l) => Value::String(l.clone()),
-                            None => Value::Null,
-                        },
-                    );
-                    exp_map.insert(
-                        "type".into(),
-                        match exp.exposure_type {
-                            Some(ref t) => Value::String(t.clone()),
-                            None => Value::Null,
-                        },
-                    );
-                    exp_map.insert(
-                        "url".into(),
-                        match exp.url {
-                            Some(ref u) => Value::String(u.clone()),
-                            None => Value::Null,
-                        },
-                    );
-                    exp_map.insert(
-                        "maturity".into(),
-                        match exp.maturity {
-                            Some(ref m) => Value::String(m.clone()),
-                            None => Value::Null,
-                        },
-                    );
+                    exp_map.insert("label".into(), opt_str(&exp.label));
+                    exp_map.insert("type".into(), opt_str(&exp.exposure_type));
+                    exp_map.insert("url".into(), opt_str(&exp.url));
+                    exp_map.insert("maturity".into(), opt_str(&exp.maturity));
                     exp_map.insert(
                         "owner".into(),
                         match exp.owner {
                             Some(ref o) => {
                                 let mut owner_map = serde_json::Map::new();
-                                owner_map.insert(
-                                    "name".into(),
-                                    match o.name {
-                                        Some(ref n) => Value::String(n.clone()),
-                                        None => Value::Null,
-                                    },
-                                );
-                                owner_map.insert(
-                                    "email".into(),
-                                    match o.email {
-                                        Some(ref e) => Value::String(e.clone()),
-                                        None => Value::Null,
-                                    },
-                                );
+                                owner_map.insert("name".into(), opt_str(&o.name));
+                                owner_map.insert("email".into(), opt_str(&o.email));
                                 Value::Object(owner_map)
                             }
                             None => Value::Null,
@@ -573,12 +540,12 @@ mod tests {
         assert_eq!(node["label"], "orders");
         assert_eq!(node["node_type"], "model");
         assert_eq!(node["file_path"], "models/orders.sql");
-        assert!(node["exposure"].is_null());
         // Non-default fields absent (not in default set)
         assert!(node.get("description").is_none());
         assert!(node.get("materialization").is_none());
         assert!(node.get("tags").is_none());
         assert!(node.get("columns").is_none());
+        assert!(node.get("exposure").is_none());
     }
 
     #[test]
