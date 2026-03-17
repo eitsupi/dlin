@@ -49,6 +49,15 @@ fn main() {
             dlin::set_quiet(args.quiet);
             run_check_manifest_command(args)
         }
+        Command::ColumnLineage {
+            model,
+            project_dir,
+            manifest_path,
+            quiet,
+        } => {
+            dlin::set_quiet(quiet);
+            run_column_lineage_command(model, &project_dir, manifest_path.as_ref())
+        }
         Command::Impact {
             model,
             project_dir,
@@ -460,6 +469,58 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     } else {
         anyhow::bail!("Manifest path does not exist: {}", manifest_arg.display());
     }
+}
+
+/// Run the `column-lineage` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_column_lineage_command(
+    models: Vec<String>,
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+) -> Result<()> {
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved)?;
+
+    if models.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments)");
+    }
+
+    let reports: Vec<_> = models
+        .iter()
+        .map(|model| graph::column_lineage::compute_column_lineage(&manifest, model))
+        .collect();
+
+    // Print warnings for errors
+    for report in &reports {
+        for err in &report.errors {
+            dlin::warn!("{}", err);
+        }
+    }
+
+    // Output JSON
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let pretty = std::io::IsTerminal::is_terminal(&stdout);
+    let res = if pretty {
+        serde_json::to_writer_pretty(&mut out, &reports)
+    } else {
+        serde_json::to_writer(&mut out, &reports)
+    };
+    if let Err(e) = res {
+        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+            return Err(anyhow::anyhow!(e));
+        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n") {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
 }
 
 /// Run the `summary` subcommand

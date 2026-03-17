@@ -344,6 +344,51 @@ Examples:
     )]
     Summary(SummaryArgs),
 
+    /// Compute column-level lineage for a model (requires manifest.json)
+    #[command(
+        name = "column-lineage",
+        long_about = "\
+Compute column-level lineage for one or more models.
+
+Traces each output column back to its source columns using SQL analysis \
+(powered by polyglot-sql). Requires manifest.json with compiled_code \
+(run `dbt compile` first) and column definitions in YAML.
+
+Only models with both compiled_code and YAML-defined columns are supported.
+
+Output: JSON array of column lineage reports.
+
+Exit codes:
+  0   Success
+  1   Error (model not found, no manifest, etc.)",
+        after_long_help = "\
+Examples:
+  # Column lineage for a single model
+  dlin column-lineage orders
+
+  # Multiple models
+  dlin column-lineage orders stg_orders
+
+  # With explicit manifest path
+  dlin column-lineage orders --manifest-path target/manifest.json"
+    )]
+    ColumnLineage {
+        /// Model names to analyze column lineage for
+        model: Vec<String>,
+
+        /// Path to dbt project directory
+        #[arg(short = 'p', long = "project-dir", default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+
+        /// Suppress warning messages
+        #[arg(short = 'q', long)]
+        quiet: bool,
+    },
+
     /// Check if manifest.json is up-to-date (detects stale and deleted files)
     #[command(
         name = "check-manifest",
