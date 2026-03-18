@@ -100,8 +100,18 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
     let mut columns = Vec::new();
     let mut errors = Vec::new();
 
+    // Pre-expand CTE stars using schema for external table column lookup.
+    // This is done before lineage() because qualify_columns may fail on complex
+    // CTEs with ambiguous column references.
+    let mut expanded_expr = expr.clone();
+    polyglot_sql::lineage::expand_cte_stars(
+        &mut expanded_expr,
+        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
+    );
+
     for col_name in &column_names {
-        // Try with schema first for better column resolution, fall back to without
+        // Try with schema (qualification + star expansion), fall back to
+        // star-expanded expression without qualification
         let lineage_result = if let Some(ref s) = schema {
             polyglot_sql::lineage::lineage_with_schema(
                 col_name,
@@ -110,9 +120,9 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
                 None,
                 false,
             )
-            .or_else(|_| polyglot_sql::lineage::lineage(col_name, &expr, None, false))
+            .or_else(|_| polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false))
         } else {
-            polyglot_sql::lineage::lineage(col_name, &expr, None, false)
+            polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
         };
 
         match lineage_result {
@@ -137,6 +147,14 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
 }
 
 /// Build a MappingSchema from the manifest's upstream nodes for column qualification.
+///
+/// For each upstream dependency, columns are determined by:
+/// 1. YAML-defined columns in the manifest (preferred)
+/// 2. Inferring output columns from the upstream model's compiled SQL (fallback)
+///
+/// Tables are registered with their fully-qualified name (database.schema.name)
+/// when database/schema info is available, so that references like
+/// `"jaffle_shop"."main"."stg_orders"` can be resolved.
 fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
@@ -148,17 +166,25 @@ fn build_schema_from_manifest(
     for dep_id in &node.depends_on.nodes {
         // Try as a node (model/seed/snapshot)
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            if !dep_node.columns.is_empty() {
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_node
-                    .columns
-                    .keys()
+            let col_names = resolve_node_columns(dep_node, manifest);
+            if !col_names.is_empty() {
+                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = col_names
+                    .iter()
                     .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                     .collect();
-                // Use the table name as it appears in compiled SQL
-                // dbt replaces ref('stg_orders') with `project`.`stg_orders` or just the table name
-                let table_name = &dep_node.name;
-                if schema.add_table(table_name, &cols, None).is_ok() {
+
+                // Register with fully-qualified name if database/schema available
+                let fq_name = make_fq_table_name(
+                    dep_node.database.as_deref(),
+                    dep_node.schema.as_deref(),
+                    &dep_node.name,
+                );
+                if schema.add_table(&fq_name, &cols, None).is_ok() {
                     has_entries = true;
+                }
+                // Also register with short name for non-qualified references
+                if fq_name != dep_node.name {
+                    let _ = schema.add_table(&dep_node.name, &cols, None);
                 }
             }
             continue;
@@ -172,7 +198,6 @@ fn build_schema_from_manifest(
                     .keys()
                     .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                     .collect();
-                // Sources appear as `schema`.`table` in compiled SQL
                 let table_name = &dep_source.name;
                 if schema.add_table(table_name, &cols, None).is_ok() {
                     has_entries = true;
@@ -185,6 +210,47 @@ fn build_schema_from_manifest(
         Some(schema)
     } else {
         None
+    }
+}
+
+/// Resolve columns for a manifest node.
+///
+/// Prefers SQL inference (which gives the complete output column list) over YAML columns
+/// (which may be incomplete). Falls back to YAML columns when compiled SQL is unavailable
+/// or SQL inference fails.
+fn resolve_node_columns(
+    dep_node: &crate::parser::manifest::ManifestNode,
+    _manifest: &Manifest,
+) -> Vec<String> {
+    // Try SQL inference first — gives the complete column list
+    if let Some(ref code) = dep_node.compiled_code {
+        let inferred = infer_output_columns(code);
+        if !inferred.is_empty() {
+            return inferred;
+        }
+    }
+    // Fall back to YAML-defined columns
+    dep_node.columns.keys().cloned().collect()
+}
+
+/// Infer output column names from a model's compiled SQL by parsing it and extracting
+/// the top-level SELECT column list. Handles CTE patterns by using lineage's
+/// expand_cte_stars logic.
+fn infer_output_columns(sql: &str) -> Vec<String> {
+    let expr = match polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    // Use polyglot-sql's extract_select_columns to get the output column names
+    crate::parser::columns::extract_select_columns_from_expr(&expr)
+}
+
+/// Build a fully-qualified table name from optional database, schema, and table name.
+fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
+    match (database, schema) {
+        (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
+        (None, Some(s)) => format!("{}.{}", s, name),
+        _ => name.to_string(),
     }
 }
 
@@ -246,6 +312,8 @@ mod tests {
             path: None,
             columns: stg_orders_cols,
             compiled_code: Some("select id as order_id, user_id as customer_id, order_date, status from raw.orders".to_string()),
+            database: None,
+            schema: None,
         });
 
         // orders: SELECT o.order_id, o.customer_id, p.amount as total_amount FROM stg_orders o LEFT JOIN stg_payments p ON o.order_id = p.order_id
@@ -266,6 +334,8 @@ mod tests {
             path: None,
             columns: orders_cols,
             compiled_code: Some("select o.order_id, o.customer_id, p.amount as total_amount from stg_orders o left join stg_payments p on o.order_id = p.order_id".to_string()),
+            database: None,
+            schema: None,
         });
 
         // stg_payments (upstream, for schema)
@@ -283,6 +353,8 @@ mod tests {
             path: None,
             columns: stg_payments_cols,
             compiled_code: Some("select id as payment_id, order_id, amount, payment_method from raw.payments".to_string()),
+            database: None,
+            schema: None,
         });
 
         // Source: raw.orders
@@ -378,19 +450,112 @@ mod tests {
     }
 
     #[test]
-    fn test_cte_select_star_limitation() {
-        // polyglot-sql v0.1.15 cannot resolve columns through CTE + SELECT *.
-        // This is a known limitation: the lineage function cannot expand * from a CTE
-        // without external schema information.
+    fn test_cte_select_star() {
+        // CTE + SELECT * now works with the expand_cte_stars preprocessing
         let sql = r#"with renamed as (select id as customer_id from source) select * from renamed"#;
         let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
         let result = polyglot_sql::lineage::lineage("customer_id", &expr, None, false);
-        assert!(result.is_err(), "CTE + SELECT * is a known limitation");
+        assert!(result.is_ok(), "CTE + SELECT * should work: {:?}", result.err());
+        let node = result.unwrap();
+        assert_eq!(node.name, "customer_id");
+    }
 
-        // Direct SELECT (no CTE wrapping) works fine
-        let sql2 = "select id as customer_id from source";
-        let expr2 = polyglot_sql::parse_one(sql2, polyglot_sql::DialectType::Generic).unwrap();
-        assert!(polyglot_sql::lineage::lineage("customer_id", &expr2, None, false).is_ok());
+    #[test]
+    fn test_nested_cte_select_star() {
+        // Nested CTE: cte2 references cte1 via SELECT *
+        let sql = r#"
+            with
+                cte1 as (select id as order_id, amount from raw_orders),
+                cte2 as (select * from cte1)
+            select * from cte2
+        "#;
+        let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let result = polyglot_sql::lineage::lineage("order_id", &expr, None, false);
+        assert!(result.is_ok(), "nested CTE + SELECT * should work: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_cte_select_star_in_manifest_model() {
+        // Integration test: typical dbt pattern with CTE + SELECT *
+        let mut manifest = make_test_manifest();
+        let sql = r#"with renamed as (
+            select
+                id as order_id,
+                user_id as customer_id,
+                order_date,
+                status
+            from raw.orders
+        )
+        select * from renamed"#;
+        manifest.nodes.get_mut("model.proj.stg_orders").unwrap().compiled_code = Some(sql.to_string());
+        let result = compute_column_lineage(&manifest, "stg_orders");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.columns.len(), 4);
+
+        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        assert_eq!(order_id.sources[0].column, "id");
+    }
+
+    #[test]
+    fn test_schema_resolves_cte_star_from_external_table() {
+        // Test that lineage_with_schema can resolve columns through CTEs that
+        // reference external tables registered in the schema.
+        let sql = r#"with
+orders as (
+    select * from stg_orders
+),
+enriched as (
+    select orders.*, 'extra' as extra_col
+    from orders
+)
+select * from enriched"#;
+        let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+
+        let mut schema = polyglot_sql::MappingSchema::new();
+        let cols = vec![
+            ("order_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
+            ("customer_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
+            ("order_total".to_string(), polyglot_sql::expressions::DataType::Unknown),
+        ];
+        schema.add_table("stg_orders", &cols, None).unwrap();
+
+        let result = polyglot_sql::lineage::lineage_with_schema(
+            "order_id",
+            &expr,
+            Some(&schema as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        );
+        assert!(result.is_ok(), "should resolve order_id: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_schema_resolves_three_part_name() {
+        // Test with fully-qualified 3-part table name as dbt generates
+        let sql = r#"with
+orders as (
+    select * from "jaffle_shop"."main"."stg_orders"
+)
+select * from orders"#;
+        let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+
+        let mut schema = polyglot_sql::MappingSchema::new();
+        let cols = vec![
+            ("order_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
+            ("customer_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
+        ];
+        // Register with 3-part name
+        schema.add_table("jaffle_shop.main.stg_orders", &cols, None).unwrap();
+
+        let result = polyglot_sql::lineage::lineage_with_schema(
+            "order_id",
+            &expr,
+            Some(&schema as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        );
+        assert!(result.is_ok(), "should resolve order_id via 3-part name: {:?}", result.err());
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub struct ManifestNode {
     pub columns: HashMap<String, ManifestColumn>,
     /// Compiled SQL code (Jinja resolved) — present after `dbt compile` or `dbt run`
     pub compiled_code: Option<String>,
+    /// Database name (e.g., "jaffle_shop")
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Schema name (e.g., "main")
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 /// A source entry in the manifest
@@ -498,6 +504,8 @@ mod tests {
                     path: Some("models/staging/stg_orders.sql".to_string()),
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::from([(
@@ -555,6 +563,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -672,6 +682,8 @@ mod tests {
                         path: Some("seeds/countries.csv".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -689,6 +701,8 @@ mod tests {
                         path: Some("snapshots/snap_orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
             ]),
@@ -728,6 +742,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -744,6 +760,8 @@ mod tests {
                         path: Some("tests/assert_positive.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
             ]),
@@ -793,6 +811,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -822,6 +842,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -904,6 +926,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -937,6 +961,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -953,6 +979,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -975,6 +1003,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
             ]),
@@ -1078,6 +1108,8 @@ mod tests {
                         path: Some("models/staging/stg_orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -1092,6 +1124,8 @@ mod tests {
                         path: Some("models/marts/orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
                 (
@@ -1106,6 +1140,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
             ]),
@@ -1201,6 +1237,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: Some("select * from raw.orders".to_string()),
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1215,6 +1253,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: Some("select count(*) from orders where id is null".to_string()),
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1229,6 +1269,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                    database: None,
+                    schema: None,
                     },
                 ),
             ]),

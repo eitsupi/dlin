@@ -1,3 +1,4 @@
+use polyglot_sql::expressions::Expression;
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -317,9 +318,86 @@ fn clean_identifier(s: &str) -> String {
     s.to_string()
 }
 
+/// Extract output column names from a parsed polyglot-sql Expression.
+///
+/// Applies CTE star expansion to resolve `SELECT *` through CTEs,
+/// then reads the output column names from the outermost SELECT.
+/// Returns an empty Vec if the expression is not a SELECT or parsing fails.
+pub fn extract_select_columns_from_expr(expr: &Expression) -> Vec<String> {
+    let mut owned = expr.clone();
+    polyglot_sql::lineage::expand_cte_stars(&mut owned, None);
+    match &owned {
+        Expression::Select(select) => select
+            .expressions
+            .iter()
+            .filter_map(|e| match e {
+                Expression::Alias(a) => Some(a.alias.name.clone()),
+                Expression::Column(c) => {
+                    if c.name.name == "*" {
+                        None // unresolved qualified star
+                    } else {
+                        Some(c.name.name.clone())
+                    }
+                }
+                Expression::Identifier(id) => Some(id.name.clone()),
+                Expression::Star(_) => None, // unresolved star
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_from_expr_cte_star() {
+        let sql = r#"with
+source as (select * from "raw"."raw_orders"),
+renamed as (
+    select id as order_id, customer as customer_id, ordered_at
+    from source
+)
+select * from renamed"#;
+        let expr =
+            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let cols = extract_select_columns_from_expr(&expr);
+        assert_eq!(cols, vec!["order_id", "customer_id", "ordered_at"]);
+    }
+
+    #[test]
+    fn test_extract_from_expr_cte_star_with_cast() {
+        // Realistic dbt stg_orders pattern with ::numeric cast
+        let sql = r#"with
+source as (
+    select * from "jaffle_shop"."raw"."raw_orders"
+),
+renamed as (
+    select
+        id as order_id,
+        store_id as location_id,
+        customer as customer_id,
+        subtotal as subtotal_cents,
+        tax_paid as tax_paid_cents,
+        order_total as order_total_cents,
+        (subtotal / 100)::numeric(16, 2) as subtotal,
+        (tax_paid / 100)::numeric(16, 2) as tax_paid,
+        (order_total / 100)::numeric(16, 2) as order_total,
+        date_trunc('day', ordered_at) as ordered_at
+    from source
+)
+select * from renamed"#;
+        let expr =
+            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let cols = extract_select_columns_from_expr(&expr);
+        assert!(cols.contains(&"order_id".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"customer_id".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"ordered_at".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"order_total".to_string()), "cols: {:?}", cols);
+        assert_eq!(cols.len(), 10, "cols: {:?}", cols);
+    }
 
     #[test]
     fn test_simple_select() {
