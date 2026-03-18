@@ -64,9 +64,13 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         }
     };
 
-    // Get column names from manifest (YAML-defined columns)
+    // Get column names: prefer YAML-defined columns, fall back to SQL inference
     let column_names: Vec<String> = {
         let mut names: Vec<String> = node.columns.keys().cloned().collect();
+        if names.is_empty() {
+            // Infer from compiled SQL
+            names = infer_output_columns(compiled_code);
+        }
         names.sort();
         names
     };
@@ -76,7 +80,7 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
             model: model_name.to_string(),
             columns: vec![],
             errors: vec![format!(
-                "model '{}' has no columns defined in manifest (add column definitions to YAML)",
+                "model '{}': could not determine output columns (no YAML columns and SQL inference failed)",
                 model_name
             )],
         };
@@ -440,13 +444,29 @@ mod tests {
     }
 
     #[test]
-    fn test_no_columns_defined() {
+    fn test_no_yaml_columns_uses_sql_inference() {
+        // When YAML columns are empty, column names should be inferred from compiled SQL
         let mut manifest = make_test_manifest();
         manifest.nodes.get_mut("model.proj.stg_orders").unwrap().columns.clear();
         let result = compute_column_lineage(&manifest, "stg_orders");
 
+        // SQL inference should find: customer_id, order_date, order_id, status
+        assert_eq!(result.columns.len(), 4, "should infer 4 columns from SQL: {:?}", result.errors);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_no_columns_and_no_sql() {
+        // When YAML columns are empty AND compiled SQL cannot be parsed, error
+        let mut manifest = make_test_manifest();
+        let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+        node.columns.clear();
+        node.compiled_code = Some("INVALID SQL %%%".to_string());
+        let result = compute_column_lineage(&manifest, "stg_orders");
+
         assert!(result.columns.is_empty());
-        assert!(result.errors[0].contains("no columns defined"));
+        assert!(!result.errors.is_empty());
+        assert!(result.errors[0].contains("could not determine output columns"));
     }
 
     #[test]

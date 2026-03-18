@@ -1,0 +1,123 @@
+use std::path::PathBuf;
+
+fn column_lineage_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("column_lineage_project")
+}
+
+fn load_fixture_manifest() -> dlin::parser::manifest::Manifest {
+    let manifest_path = column_lineage_fixture_dir().join("target").join("manifest.json");
+    dlin::parser::manifest::load_manifest(&manifest_path).unwrap()
+}
+
+#[test]
+fn test_stg_orders_cte_star_with_rename() {
+    // stg_orders uses: WITH renamed AS (SELECT id AS order_id, ...) SELECT * FROM renamed
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_column_lineage(&manifest, "stg_orders");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.columns.len(), 4);
+
+    // order_id is renamed from id
+    let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+    assert_eq!(order_id.sources[0].column, "id", "order_id should trace to raw.orders.id");
+
+    // customer_id is renamed from user_id
+    let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+    assert_eq!(customer_id.sources[0].column, "user_id");
+
+    // Passthrough columns
+    let order_date = result.columns.iter().find(|c| c.column == "order_date").unwrap();
+    assert_eq!(order_date.sources[0].column, "order_date");
+}
+
+#[test]
+fn test_orders_cte_star_with_schema_and_join() {
+    // orders model: CTEs with SELECT * FROM 3-part qualified tables, then JOIN
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_column_lineage(&manifest, "orders");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.columns.len(), 6);
+
+    // order_id from stg_orders
+    let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+    assert!(!order_id.sources.is_empty(), "order_id should have sources");
+    assert_eq!(order_id.sources[0].column, "order_id");
+
+    // total_amount renamed from stg_payments.amount
+    let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
+    assert!(!total_amount.sources.is_empty(), "total_amount should have sources");
+    assert_eq!(total_amount.sources[0].column, "amount");
+}
+
+#[test]
+fn test_customers_sql_inference_without_yaml_columns() {
+    // customers model has no YAML columns — columns should be inferred from SQL
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_column_lineage(&manifest, "customers");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    // Should infer: customer_id, first_name, last_name, email, order_count, lifetime_value
+    assert_eq!(result.columns.len(), 6, "should infer 6 columns from SQL");
+
+    let col_names: Vec<&str> = result.columns.iter().map(|c| c.column.as_str()).collect();
+    assert!(col_names.contains(&"customer_id"));
+    assert!(col_names.contains(&"first_name"));
+    assert!(col_names.contains(&"order_count"));
+    assert!(col_names.contains(&"lifetime_value"));
+}
+
+#[test]
+fn test_order_enriched_nested_cte_star() {
+    // 3-level nested CTE: base_orders -> with_payments -> final, all using SELECT *
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_column_lineage(&manifest, "order_enriched");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.columns.len(), 5);
+
+    // order_id should trace through the CTE chain to stg_orders
+    let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+    assert!(!order_id.sources.is_empty(), "order_id should have sources");
+    assert_eq!(order_id.sources[0].column, "order_id");
+    assert_eq!(order_id.sources[0].table, "stg_orders");
+
+    // amount should trace to stg_payments (via alias "p")
+    let amount = result.columns.iter().find(|c| c.column == "amount").unwrap();
+    assert!(!amount.sources.is_empty(), "amount should have sources");
+    assert_eq!(amount.sources[0].column, "amount");
+
+    // All columns should have non-empty source tables
+    for entry in &result.columns {
+        for src in &entry.sources {
+            assert!(
+                !src.table.is_empty(),
+                "column '{}' has empty table for source '{}'",
+                entry.column, src.column
+            );
+        }
+    }
+}
+
+#[test]
+fn test_source_table_not_empty() {
+    // Verify that leaf sources have non-empty table names
+    let manifest = load_fixture_manifest();
+
+    for model in ["stg_orders", "orders"] {
+        let result = dlin::graph::column_lineage::compute_column_lineage(&manifest, model);
+        for entry in &result.columns {
+            for src in &entry.sources {
+                assert!(
+                    !src.table.is_empty(),
+                    "model '{}' column '{}' has empty table for source column '{}'",
+                    model, entry.column, src.column
+                );
+            }
+        }
+    }
+}
