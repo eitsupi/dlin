@@ -114,20 +114,26 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
     );
 
     for col_name in &column_names {
-        // Try with schema (qualification + star expansion), fall back to
-        // star-expanded expression without qualification
-        let lineage_result = if let Some(ref s) = schema {
-            polyglot_sql::lineage::lineage_with_schema(
-                col_name,
-                &expr,
-                Some(s as &dyn polyglot_sql::Schema),
-                None,
-                false,
-            )
-            .or_else(|_| polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false))
-        } else {
-            polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
-        };
+        // Try lineage without schema first (cheaper, no qualify_columns overhead),
+        // then fall back to lineage_with_schema for better resolution.
+        // This order avoids stack overflow in qualify_columns on complex SQL.
+        let lineage_result = polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
+            .or_else(|_| {
+                if let Some(ref s) = schema {
+                    polyglot_sql::lineage::lineage_with_schema(
+                        col_name,
+                        &expr,
+                        Some(s as &dyn polyglot_sql::Schema),
+                        None,
+                        false,
+                    )
+                } else {
+                    Err(polyglot_sql::Error::internal(format!(
+                        "column '{}' not found",
+                        col_name
+                    )))
+                }
+            });
 
         match lineage_result {
             Ok(lineage_node) => {
@@ -587,4 +593,5 @@ select * from orders"#;
         assert_eq!(parsed["model"], "stg_orders");
         assert!(parsed["columns"].is_array());
     }
+
 }
