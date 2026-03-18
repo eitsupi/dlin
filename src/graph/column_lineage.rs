@@ -116,13 +116,12 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
     for col_name in &column_names {
         // Try lineage without schema first (cheaper, no qualify_columns overhead),
         // then fall back to lineage_with_schema for better resolution.
-        // This order avoids stack overflow in qualify_columns on complex SQL.
         let lineage_result = polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
             .or_else(|_| {
                 if let Some(ref s) = schema {
                     polyglot_sql::lineage::lineage_with_schema(
                         col_name,
-                        &expr,
+                        &expanded_expr,
                         Some(s as &dyn polyglot_sql::Schema),
                         None,
                         false,
@@ -176,7 +175,7 @@ fn build_schema_from_manifest(
     for dep_id in &node.depends_on.nodes {
         // Try as a node (model/seed/snapshot)
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let col_names = resolve_node_columns(dep_node, manifest);
+            let col_names = resolve_node_columns(dep_node);
             if !col_names.is_empty() {
                 let cols: Vec<(String, polyglot_sql::expressions::DataType)> = col_names
                     .iter()
@@ -228,10 +227,7 @@ fn build_schema_from_manifest(
 /// Prefers SQL inference (which gives the complete output column list) over YAML columns
 /// (which may be incomplete). Falls back to YAML columns when compiled SQL is unavailable
 /// or SQL inference fails.
-fn resolve_node_columns(
-    dep_node: &crate::parser::manifest::ManifestNode,
-    _manifest: &Manifest,
-) -> Vec<String> {
+fn resolve_node_columns(dep_node: &crate::parser::manifest::ManifestNode) -> Vec<String> {
     // Try SQL inference first — gives the complete column list
     if let Some(ref code) = dep_node.compiled_code {
         let inferred = infer_output_columns(code);

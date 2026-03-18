@@ -478,16 +478,16 @@ fn run_column_lineage_command(
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
 ) -> Result<()> {
+    if models.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments)");
+    }
+
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
-
-    if models.is_empty() {
-        anyhow::bail!("no model names provided (specify as arguments)");
-    }
 
     let reports: Vec<_> = models
         .iter()
