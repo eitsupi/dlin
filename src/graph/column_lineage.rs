@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use polyglot_sql::Schema;
+use polyglot_sql::{Expression, Schema};
 use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
@@ -88,9 +88,8 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         };
     }
 
-    // Parse the compiled SQL
-    let expr = match polyglot_sql::parse_one(compiled_code, polyglot_sql::DialectType::Generic) {
-        Ok(e) => e,
+    let ctx = match prepare_lineage_context(compiled_code, manifest, node) {
+        Ok(ctx) => ctx,
         Err(e) => {
             return ModelColumnLineage {
                 model: model_name.to_string(),
@@ -100,43 +99,12 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         }
     };
 
-    // Build schema from manifest for better column resolution
-    let schema = build_schema_from_manifest(manifest, node);
-
     let mut columns = Vec::new();
     let mut errors = Vec::new();
 
-    // Pre-expand CTE stars using schema for external table column lookup.
-    // This is done before lineage() because qualify_columns may fail on complex
-    // CTEs with ambiguous column references.
-    let mut expanded_expr = expr.clone();
-    polyglot_sql::lineage::expand_cte_stars(
-        &mut expanded_expr,
-        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
-    );
-
     for col_name in &column_names {
-        // When schema is available, prefer lineage_with_schema for proper table name
-        // resolution (aliases like "o" are resolved to actual table names like "stg_orders").
-        // Fall back to lineage without schema if lineage_with_schema fails.
-        let lineage_result = if let Some(ref s) = schema {
-            polyglot_sql::lineage::lineage_with_schema(
-                col_name,
-                &expanded_expr,
-                Some(s as &dyn polyglot_sql::Schema),
-                None,
-                false,
-            )
-            .or_else(|_| {
-                polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
-            })
-        } else {
-            polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
-        };
-
-        match lineage_result {
-            Ok(lineage_node) => {
-                let sources = extract_leaf_sources(&lineage_node);
+        match run_column_lineage(col_name, &ctx) {
+            Ok(sources) => {
                 columns.push(ColumnLineageEntry {
                     column: col_name.clone(),
                     sources,
@@ -155,6 +123,68 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
     }
 }
 
+/// Prepared context for running column lineage on a model's SQL.
+struct LineageContext {
+    expanded_expr: Expression,
+    schema: Option<polyglot_sql::MappingSchema>,
+}
+
+/// Parse compiled SQL, build schema from manifest, and expand CTE stars.
+fn prepare_lineage_context(
+    compiled_code: &str,
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+) -> Result<LineageContext, String> {
+    let expr = polyglot_sql::parse_one(compiled_code, polyglot_sql::DialectType::Generic)
+        .map_err(|e| format!("{}", e))?;
+
+    let schema = build_schema_from_manifest(manifest, node);
+
+    // Pre-expand CTE stars using schema for external table column lookup.
+    // This is done before lineage() because qualify_columns may fail on complex
+    // CTEs with ambiguous column references.
+    let mut expanded_expr = expr;
+    polyglot_sql::lineage::expand_cte_stars(
+        &mut expanded_expr,
+        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
+    );
+
+    Ok(LineageContext {
+        expanded_expr,
+        schema,
+    })
+}
+
+/// Run lineage analysis for a single column on a prepared context.
+///
+/// When schema is available, prefers lineage_with_schema for proper table name
+/// resolution (aliases like "o" are resolved to actual table names like "stg_orders").
+/// Falls back to lineage without schema if lineage_with_schema fails.
+/// The schema-first order is intentional: cross-model lineage needs table name
+/// resolution that only works with schema. The polyglot-sql MAX_LINEAGE_DEPTH=64
+/// limit mitigates the qualify_columns stack overflow risk.
+fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<Vec<ColumnSource>, String> {
+    let lineage_result = if let Some(ref s) = ctx.schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            col_name,
+            &ctx.expanded_expr,
+            Some(s as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        )
+        .or_else(|_| {
+            polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false)
+        })
+    } else {
+        polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false)
+    };
+
+    match lineage_result {
+        Ok(node) => Ok(extract_leaf_sources(&node)),
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
 /// Compute column-level lineage with cross-model chain tracking.
 ///
 /// Like `compute_column_lineage`, but recursively follows source references
@@ -168,13 +198,19 @@ pub fn compute_cross_model_column_lineage(
     model_name: &str,
 ) -> ModelColumnLineage {
     let mut cache: HashMap<String, ModelColumnLineage> = HashMap::new();
-    compute_cross_model_inner(manifest, model_name, &mut cache)
+    // Track models currently being computed to detect cycles (A → B → A).
+    // This is separate from the per-column visited set which prevents
+    // self-references within a single resolution path.
+    let mut computing = HashSet::new();
+    computing.insert(model_name.to_string());
+    compute_cross_model_inner(manifest, model_name, &mut cache, &mut computing)
 }
 
 fn compute_cross_model_inner(
     manifest: &Manifest,
     model_name: &str,
     cache: &mut HashMap<String, ModelColumnLineage>,
+    computing: &mut HashSet<String>,
 ) -> ModelColumnLineage {
     // Compute single-model lineage first
     let mut result = compute_column_lineage(manifest, model_name);
@@ -183,7 +219,8 @@ fn compute_cross_model_inner(
     // for the current model's upstream dependencies
     let upstream_models = build_upstream_model_names(manifest, model_name);
 
-    // For each column, resolve sources through upstream models
+    // For each column, resolve sources through upstream models.
+    // Each column gets its own visited set to avoid cross-column interference.
     for entry in &mut result.columns {
         let mut resolved_sources = Vec::new();
         let mut visited = HashSet::new();
@@ -198,6 +235,7 @@ fn compute_cross_model_inner(
                 &mut resolved_sources,
                 &mut result.errors,
                 cache,
+                computing,
             );
         }
 
@@ -270,6 +308,7 @@ fn resolve_source_recursive(
     resolved: &mut Vec<ColumnSource>,
     errors: &mut Vec<String>,
     cache: &mut HashMap<String, ModelColumnLineage>,
+    computing: &mut HashSet<String>,
 ) {
     // Check if the source table matches an upstream model
     let model_name = upstream_models
@@ -292,7 +331,14 @@ fn resolve_source_recursive(
 
     // Get or compute the upstream model's lineage
     if !cache.contains_key(&model_name) {
-        let upstream_result = compute_cross_model_inner(manifest, &model_name, cache);
+        if computing.contains(&model_name) {
+            // Cycle detected (A → B → A) — treat as leaf
+            resolved.push(source.clone());
+            return;
+        }
+        computing.insert(model_name.clone());
+        let upstream_result =
+            compute_cross_model_inner(manifest, &model_name, cache, computing);
         cache.insert(model_name.clone(), upstream_result);
     }
     let upstream_result = cache.get(&model_name).unwrap();
@@ -337,6 +383,7 @@ fn resolve_source_recursive(
                     resolved,
                     errors,
                     cache,
+                    computing,
                 );
             }
         }
@@ -367,38 +414,12 @@ fn compute_single_column_lineage(
         None => return vec![],
     };
 
-    let expr = match polyglot_sql::parse_one(compiled_code, polyglot_sql::DialectType::Generic) {
-        Ok(e) => e,
+    let ctx = match prepare_lineage_context(compiled_code, manifest, node) {
+        Ok(ctx) => ctx,
         Err(_) => return vec![],
     };
 
-    let schema = build_schema_from_manifest(manifest, node);
-
-    let mut expanded_expr = expr.clone();
-    polyglot_sql::lineage::expand_cte_stars(
-        &mut expanded_expr,
-        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
-    );
-
-    let lineage_result = if let Some(ref s) = schema {
-        polyglot_sql::lineage::lineage_with_schema(
-            column_name,
-            &expanded_expr,
-            Some(s as &dyn polyglot_sql::Schema),
-            None,
-            false,
-        )
-        .or_else(|_| {
-            polyglot_sql::lineage::lineage(column_name, &expanded_expr, None, false)
-        })
-    } else {
-        polyglot_sql::lineage::lineage(column_name, &expanded_expr, None, false)
-    };
-
-    match lineage_result {
-        Ok(lineage_node) => extract_leaf_sources(&lineage_node),
-        Err(_) => vec![],
-    }
+    run_column_lineage(column_name, &ctx).unwrap_or_default()
 }
 
 /// Build a MappingSchema from the manifest's upstream nodes for column qualification.
@@ -977,9 +998,9 @@ select * from orders"#;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
         let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
-        // Should trace through stg_orders to raw source
+        // Should trace through stg_orders to raw source (orders table)
         assert!(
-            order_id.sources.iter().any(|s| s.column == "id"),
+            order_id.sources.iter().any(|s| s.column == "id" && s.table.contains("orders")),
             "order_id should trace to raw orders.id, got: {:?}",
             order_id.sources
         );
@@ -995,7 +1016,7 @@ select * from orders"#;
 
         let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
         assert!(
-            customer_id.sources.iter().any(|s| s.column == "user_id"),
+            customer_id.sources.iter().any(|s| s.column == "user_id" && s.table.contains("orders")),
             "customer_id should trace to raw orders.user_id, got: {:?}",
             customer_id.sources
         );
@@ -1009,7 +1030,7 @@ select * from orders"#;
 
         let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
         assert!(
-            total_amount.sources.iter().any(|s| s.column == "amount"),
+            total_amount.sources.iter().any(|s| s.column == "amount" && s.table.contains("payments")),
             "total_amount should trace to raw payments.amount, got: {:?}",
             total_amount.sources
         );
@@ -1257,11 +1278,20 @@ select * from orders"#;
         assert_eq!(result.columns.len(), 4, "should have 4 columns, got: {:?}",
             result.columns.iter().map(|c| &c.column).collect::<Vec<_>>());
 
-        // area should trace through to raw source
+        // area should trace through to raw users source
         let area = result.columns.iter().find(|c| c.column == "area").unwrap();
         assert!(
-            !area.sources.is_empty(),
-            "area should have sources"
+            area.sources.iter().any(|s| s.column == "area" && s.table.contains("users")),
+            "area should trace to raw users.area, got: {:?}",
+            area.sources
+        );
+
+        // region_name should trace through to raw regions source
+        let region = result.columns.iter().find(|c| c.column == "region_name").unwrap();
+        assert!(
+            region.sources.iter().any(|s| s.column == "region_name" && s.table.contains("regions")),
+            "region_name should trace to raw regions.region_name, got: {:?}",
+            region.sources
         );
     }
 
@@ -1386,20 +1416,20 @@ select * from orders"#;
         assert_eq!(result.columns.len(), 4, "should have 4 columns, got: {:?}",
             result.columns.iter().map(|c| &c.column).collect::<Vec<_>>());
 
-        // area should trace through CTE alias "u" → import_users → stg_users → raw
+        // area should trace through CTE alias "u" → import_users → stg_users → raw users
         let area = result.columns.iter().find(|c| c.column == "area").unwrap();
         assert!(
-            !area.sources.is_empty(),
-            "area should have sources, got: {:?}",
-            area
+            area.sources.iter().any(|s| s.column == "area" && s.table.contains("users")),
+            "area should trace to raw users.area, got: {:?}",
+            area.sources
         );
 
-        // region_name should trace through import_regions → stg_regions → raw
+        // region_name should trace through import_regions → stg_regions → raw regions
         let region = result.columns.iter().find(|c| c.column == "region_name").unwrap();
         assert!(
-            !region.sources.is_empty(),
-            "region_name should have sources, got: {:?}",
-            region
+            region.sources.iter().any(|s| s.column == "region_name" && s.table.contains("regions")),
+            "region_name should trace to raw regions.region_name, got: {:?}",
+            region.sources
         );
     }
 
