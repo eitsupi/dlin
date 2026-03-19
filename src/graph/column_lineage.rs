@@ -1048,7 +1048,6 @@ select * from orders"#;
     // --- Regression tests for known issues ---
 
     #[test]
-    #[ignore = "CTE alias resolution not yet implemented"]
     fn test_cte_alias_resolution() {
         // Issue mml.6: FROM cte_name AS alias causes lineage to stop at alias
         // Pattern: WITH import_model AS (...) SELECT base.col FROM import_model AS base

@@ -918,7 +918,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "polyglot-sql"
 version = "0.1.15"
-source = "git+https://github.com/tobilg/polyglot.git?rev=264c33e#264c33e7ee2e880dd42d3cc70eb3c07ee523b443"
+source = "git+https://github.com/tobilg/polyglot.git?rev=0da044c#0da044c7086b5a9c88bc038a63a59bb9a20cd89c"
 dependencies = [
  "serde",
  "serde_json",
