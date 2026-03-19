@@ -59,6 +59,16 @@ fn main() {
             dlin::set_quiet(quiet);
             run_column_lineage_command(model, &column, &project_dir, manifest_path.as_ref())
         }
+        Command::ColumnImpact {
+            model,
+            column,
+            project_dir,
+            manifest_path,
+            quiet,
+        } => {
+            dlin::set_quiet(quiet);
+            run_column_impact_command(&model, &column, &project_dir, manifest_path.as_ref())
+        }
         Command::Impact {
             model,
             project_dir,
@@ -505,6 +515,59 @@ fn run_column_lineage_command(
             }
             report
         })
+        .collect();
+
+    // Print warnings for errors
+    for report in &reports {
+        for err in &report.errors {
+            dlin::warn!("{}", err);
+        }
+    }
+
+    // Output JSON
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let pretty = std::io::IsTerminal::is_terminal(&stdout);
+    let res = if pretty {
+        serde_json::to_writer_pretty(&mut out, &reports)
+    } else {
+        serde_json::to_writer(&mut out, &reports)
+    };
+    if let Err(e) = res {
+        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+            return Err(anyhow::anyhow!(e));
+        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n") {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the `column-impact` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_column_impact_command(
+    model: &str,
+    columns: &[String],
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+) -> Result<()> {
+    if columns.is_empty() {
+        anyhow::bail!("no columns specified (use --column)");
+    }
+
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved)?;
+
+    let reports: Vec<_> = columns
+        .iter()
+        .map(|col| graph::column_lineage::compute_column_impact(&manifest, model, col))
         .collect();
 
     // Print warnings for errors

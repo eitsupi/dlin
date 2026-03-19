@@ -396,6 +396,58 @@ Examples:
         quiet: bool,
     },
 
+    /// Analyze downstream column-level impact of changing a column
+    ///
+    /// Shows which downstream models and columns would be affected if a
+    /// specific column is modified. This is the reverse direction of
+    /// column-lineage (which traces upstream sources).
+    ///
+    /// Requires manifest.json with compiled SQL (run `dbt compile` first).
+    #[command(
+        long_about = "\
+Analyze downstream column-level impact of changing a column.
+
+Shows which downstream models and columns depend on a specific column,
+tracing through the DAG to find all affected outputs. This is the reverse
+direction of column-lineage (which traces upstream sources).
+
+Requires compiled SQL in manifest.json — run `dbt compile` first.
+
+Exit codes:
+  0   Success
+  1   Error (model not found, no manifest, etc.)",
+        after_long_help = "\
+Examples:
+  # Impact of changing a single column
+  dlin column-impact stg_orders --column order_id
+
+  # Impact of multiple columns
+  dlin column-impact stg_orders --column order_id --column status
+
+  # With explicit manifest path
+  dlin column-impact stg_orders --column order_id --manifest-path target/manifest.json"
+    )]
+    ColumnImpact {
+        /// Model name to analyze column impact for
+        model: String,
+
+        /// Columns to analyze impact for (required)
+        #[arg(long, required = true)]
+        column: Vec<String>,
+
+        /// Path to dbt project directory
+        #[arg(short = 'p', long = "project-dir", default_value = ".")]
+        project_dir: PathBuf,
+
+        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+
+        /// Suppress warning messages
+        #[arg(short = 'q', long)]
+        quiet: bool,
+    },
+
     /// Check if manifest.json is up-to-date (detects stale and deleted files)
     #[command(
         name = "check-manifest",
@@ -1183,6 +1235,41 @@ mod tests {
         match cli.command {
             Command::ColumnLineage { model, .. } => assert!(model.is_empty()),
             _ => panic!("Expected ColumnLineage subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_impact_subcommand() {
+        let cli = Cli::try_parse_from([
+            "dlin", "column-impact", "stg_orders", "--column", "order_id",
+        ]).unwrap();
+        match cli.command {
+            Command::ColumnImpact { ref model, ref column, .. } => {
+                assert_eq!(model, "stg_orders");
+                assert_eq!(column, &["order_id"]);
+            }
+            _ => panic!("Expected ColumnImpact subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_impact_requires_column() {
+        // --column is required for column-impact
+        let result = Cli::try_parse_from(["dlin", "column-impact", "stg_orders"]);
+        assert!(result.is_err(), "column-impact should require --column");
+    }
+
+    #[test]
+    fn test_column_impact_multiple_columns() {
+        let cli = Cli::try_parse_from([
+            "dlin", "column-impact", "stg_orders",
+            "--column", "order_id", "--column", "status",
+        ]).unwrap();
+        match cli.command {
+            Command::ColumnImpact { ref column, .. } => {
+                assert_eq!(column, &["order_id", "status"]);
+            }
+            _ => panic!("Expected ColumnImpact subcommand"),
         }
     }
 }

@@ -52,6 +52,30 @@ pub struct ColumnSource {
     pub model_path: Vec<String>,
 }
 
+/// Column impact result for a single model+column pair
+#[derive(Debug, Serialize)]
+pub struct ColumnImpactReport {
+    pub model: String,
+    pub column: String,
+    pub impacted_columns: Vec<ImpactedColumn>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// A downstream column affected by a change to the source column
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ImpactedColumn {
+    /// Downstream model name
+    pub model: String,
+    /// Downstream column name
+    pub column: String,
+    /// How the downstream column uses this source
+    pub transformation: TransformationType,
+    /// Models traversed from source to this downstream column
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_path: Vec<String>,
+}
+
 /// Compute column-level lineage for a model using polyglot-sql.
 ///
 /// Takes the manifest and a model name (short label like "orders"),
@@ -272,6 +296,126 @@ pub fn compute_cross_model_column_lineage(
     };
     ctx.computing.insert(model_name.to_string());
     compute_cross_model_inner(model_name, &mut ctx)
+}
+
+/// Compute downstream column-level impact for a specific model+column.
+///
+/// Traces through the DAG to find all downstream columns that depend on the
+/// specified column, one hop at a time.
+pub fn compute_column_impact(
+    manifest: &Manifest,
+    model_name: &str,
+    column_name: &str,
+) -> ColumnImpactReport {
+    // Verify the model exists
+    let model_exists = manifest
+        .nodes
+        .values()
+        .any(|n| n.name == model_name && n.resource_type == "model");
+    if !model_exists {
+        return ColumnImpactReport {
+            model: model_name.to_string(),
+            column: column_name.to_string(),
+            impacted_columns: vec![],
+            errors: vec![format!("model '{}' not found in manifest", model_name)],
+        };
+    }
+
+    // Build reverse dependency map: model_name → list of downstream model names
+    let downstream_map = build_downstream_model_map(manifest);
+
+    let mut impacted = Vec::new();
+    let mut errors = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(model_name.to_string());
+
+    // Seed: find direct dependents of the target model
+    // and check which of their columns reference target model+column
+    let mut queue: Vec<(String, String, Vec<String>)> = vec![
+        (model_name.to_string(), column_name.to_string(), vec![]),
+    ];
+
+    while let Some((source_model, source_column, current_path)) = queue.pop() {
+        let dependents = match downstream_map.get(&source_model) {
+            Some(deps) => deps,
+            None => continue,
+        };
+
+        for dep_model in dependents {
+            if visited.contains(dep_model) {
+                continue;
+            }
+
+            let lineage = compute_column_lineage(manifest, dep_model);
+            for err in &lineage.errors {
+                if !errors.contains(err) {
+                    errors.push(err.clone());
+                }
+            }
+
+            for entry in &lineage.columns {
+                // Check if any source of this column references the source model+column
+                let references_source = entry.sources.iter().any(|s| {
+                    let table_matches = s.table == source_model
+                        || normalize_table_name(&s.table) == source_model;
+                    table_matches && s.column == source_column
+                });
+
+                if references_source {
+                    let mut path = current_path.clone();
+                    path.push(dep_model.clone());
+
+                    impacted.push(ImpactedColumn {
+                        model: dep_model.clone(),
+                        column: entry.column.clone(),
+                        transformation: entry.transformation.clone(),
+                        model_path: path.clone(),
+                    });
+
+                    // Enqueue for further downstream tracing
+                    queue.push((dep_model.clone(), entry.column.clone(), path));
+                }
+            }
+
+            visited.insert(dep_model.clone());
+        }
+    }
+
+    // Sort for deterministic output
+    impacted.sort_by(|a, b| (&a.model, &a.column).cmp(&(&b.model, &b.column)));
+    impacted.dedup();
+
+    ColumnImpactReport {
+        model: model_name.to_string(),
+        column: column_name.to_string(),
+        impacted_columns: impacted,
+        errors,
+    }
+}
+
+/// Build a mapping from model name → list of downstream model names.
+///
+/// This is the reverse of depends_on: for each model that depends on X,
+/// X maps to that model.
+fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for node in manifest.nodes.values() {
+        if node.resource_type != "model" {
+            continue;
+        }
+        for dep_id in &node.depends_on.nodes {
+            if let Some(dep_node) = manifest.nodes.get(dep_id) {
+                if dep_node.resource_type == "model" {
+                    map.entry(dep_node.name.clone())
+                        .or_default()
+                        .push(node.name.clone());
+                }
+            }
+        }
+    }
+
+    map
 }
 
 /// Shared context for cross-model resolution to avoid passing many arguments.
@@ -1728,6 +1872,119 @@ select * from orders"#;
             region.sources.iter().any(|s| s.column == "region_name" && s.table.contains("regions")),
             "region_name should trace to raw regions.region_name, got: {:?}",
             region.sources
+        );
+    }
+
+    // --- Column impact tests ---
+
+    #[test]
+    fn test_column_impact_direct_dependent() {
+        // stg_orders.order_id is used by orders.order_id
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "stg_orders", "order_id");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(
+            result.impacted_columns.iter().any(|ic| ic.model == "orders" && ic.column == "order_id"),
+            "orders.order_id should be impacted, got: {:?}",
+            result.impacted_columns
+        );
+    }
+
+    #[test]
+    fn test_column_impact_two_hops() {
+        // stg_orders.order_id → orders.order_id → customers (via count)
+        // stg_orders.customer_id → orders.customer_id → customers.customer_id
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "stg_orders", "customer_id");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        // orders.customer_id should be impacted (direct dependent)
+        assert!(
+            result.impacted_columns.iter().any(|ic| ic.model == "orders" && ic.column == "customer_id"),
+            "orders.customer_id should be impacted, got: {:?}",
+            result.impacted_columns
+        );
+        // customers.customer_id should also be impacted (two hops)
+        assert!(
+            result.impacted_columns.iter().any(|ic| ic.model == "customers" && ic.column == "customer_id"),
+            "customers.customer_id should be impacted, got: {:?}",
+            result.impacted_columns
+        );
+    }
+
+    #[test]
+    fn test_column_impact_model_path() {
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "stg_orders", "customer_id");
+
+        // customers.customer_id goes through orders
+        let cust = result.impacted_columns.iter()
+            .find(|ic| ic.model == "customers" && ic.column == "customer_id")
+            .unwrap();
+        assert!(
+            cust.model_path.contains(&"orders".to_string()),
+            "model_path should include orders, got: {:?}",
+            cust.model_path
+        );
+    }
+
+    #[test]
+    fn test_column_impact_no_dependents() {
+        // customers is a leaf model — no downstream
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "customers", "customer_id");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert!(
+            result.impacted_columns.is_empty(),
+            "leaf model should have no impacted columns, got: {:?}",
+            result.impacted_columns
+        );
+    }
+
+    #[test]
+    fn test_column_impact_model_not_found() {
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "nonexistent", "col");
+
+        assert!(!result.errors.is_empty());
+        assert!(result.errors[0].contains("not found"));
+    }
+
+    #[test]
+    fn test_column_impact_json_serialization() {
+        let manifest = make_cross_model_manifest();
+        let result = compute_column_impact(&manifest, "stg_orders", "order_id");
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["model"], "stg_orders");
+        assert_eq!(parsed["column"], "order_id");
+        assert!(parsed["impacted_columns"].is_array());
+    }
+
+    #[test]
+    fn test_build_downstream_model_map() {
+        let manifest = make_cross_model_manifest();
+        let map = build_downstream_model_map(&manifest);
+
+        // stg_orders is depended on by orders
+        assert!(
+            map.get("stg_orders").map_or(false, |deps| deps.contains(&"orders".to_string())),
+            "stg_orders should have orders as downstream, got: {:?}",
+            map.get("stg_orders")
+        );
+        // orders is depended on by customers
+        assert!(
+            map.get("orders").map_or(false, |deps| deps.contains(&"customers".to_string())),
+            "orders should have customers as downstream, got: {:?}",
+            map.get("orders")
+        );
+        // customers has no downstream
+        assert!(
+            map.get("customers").is_none(),
+            "customers should have no downstream"
         );
     }
 
