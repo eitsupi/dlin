@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -51,12 +51,13 @@ fn main() {
         }
         Command::ColumnLineage {
             model,
+            column,
             project_dir,
             manifest_path,
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_column_lineage_command(model, &project_dir, manifest_path.as_ref())
+            run_column_lineage_command(model, &column, &project_dir, manifest_path.as_ref())
         }
         Command::Impact {
             model,
@@ -475,6 +476,7 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 #[cfg(not(tarpaulin_include))]
 fn run_column_lineage_command(
     models: Vec<String>,
+    columns: &[String],
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
 ) -> Result<()> {
@@ -489,9 +491,20 @@ fn run_column_lineage_command(
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
 
+    let column_filter: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
+
     let reports: Vec<_> = models
         .iter()
-        .map(|model| graph::column_lineage::compute_cross_model_column_lineage(&manifest, model))
+        .map(|model| {
+            let mut report =
+                graph::column_lineage::compute_cross_model_column_lineage(&manifest, model);
+            if !column_filter.is_empty() {
+                report
+                    .columns
+                    .retain(|entry| column_filter.contains(entry.column.as_str()));
+            }
+            report
+        })
         .collect();
 
     // Print warnings for errors

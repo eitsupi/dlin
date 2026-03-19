@@ -366,6 +366,9 @@ Examples:
   # Column lineage for a single model
   dlin column-lineage orders
 
+  # Specific columns only
+  dlin column-lineage orders --column order_id --column status
+
   # Multiple models
   dlin column-lineage orders stg_orders
 
@@ -375,6 +378,10 @@ Examples:
     ColumnLineage {
         /// Model names to analyze column lineage for
         model: Vec<String>,
+
+        /// Specific columns to analyze (analyzes all columns if omitted)
+        #[arg(long)]
+        column: Vec<String>,
 
         /// Path to dbt project directory
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1142,5 +1149,40 @@ mod tests {
     fn test_error_format_with_impact() {
         let cli = Cli::try_parse_from(["dlin", "--error-format", "json", "impact", "orders"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormat::Json);
+    }
+
+    #[test]
+    fn test_column_lineage_subcommand() {
+        let cli = Cli::try_parse_from(["dlin", "column-lineage", "orders"]).unwrap();
+        match cli.command {
+            Command::ColumnLineage { ref model, ref column, .. } => {
+                assert_eq!(model, &["orders"]);
+                assert!(column.is_empty());
+            }
+            _ => panic!("Expected ColumnLineage subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_lineage_with_column_filter() {
+        let cli = Cli::try_parse_from([
+            "dlin", "column-lineage", "orders", "--column", "order_id", "--column", "status",
+        ]).unwrap();
+        match cli.command {
+            Command::ColumnLineage { ref model, ref column, .. } => {
+                assert_eq!(model, &["orders"]);
+                assert_eq!(column, &["order_id", "status"]);
+            }
+            _ => panic!("Expected ColumnLineage subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_lineage_no_model() {
+        let cli = Cli::try_parse_from(["dlin", "column-lineage"]).unwrap();
+        match cli.command {
+            Command::ColumnLineage { model, .. } => assert!(model.is_empty()),
+            _ => panic!("Expected ColumnLineage subcommand"),
+        }
     }
 }
