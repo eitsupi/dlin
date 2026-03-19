@@ -18,7 +18,26 @@ pub struct ModelColumnLineage {
 #[derive(Debug, Serialize)]
 pub struct ColumnLineageEntry {
     pub column: String,
+    pub transformation: TransformationType,
     pub sources: Vec<ColumnSource>,
+}
+
+/// Classification of the transformation applied to produce an output column.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformationType {
+    /// Direct column reference or rename (e.g. `SELECT id AS order_id`)
+    Direct,
+    /// Aggregate function (e.g. `COUNT(*)`, `SUM(amount)`)
+    Aggregation,
+    /// Arithmetic or other expression (e.g. `price * quantity`)
+    Expression,
+    /// Type cast (e.g. `CAST(x AS INT)`)
+    Cast,
+    /// Conditional expression (e.g. `CASE WHEN ...`)
+    Conditional,
+    /// Could not classify the transformation
+    Unknown,
 }
 
 /// A source column reference
@@ -28,6 +47,9 @@ pub struct ColumnSource {
     pub table: String,
     /// Source column name
     pub column: String,
+    /// Cross-model path: intermediate model names traversed to reach this source
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_path: Vec<String>,
 }
 
 /// Compute column-level lineage for a model using polyglot-sql.
@@ -104,10 +126,11 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
 
     for col_name in &column_names {
         match run_column_lineage(col_name, &ctx) {
-            Ok(sources) => {
+            Ok(result) => {
                 columns.push(ColumnLineageEntry {
                     column: col_name.clone(),
-                    sources,
+                    transformation: result.transformation,
+                    sources: result.sources,
                 });
             }
             Err(e) => {
@@ -163,7 +186,7 @@ fn prepare_lineage_context(
 /// The schema-first order is intentional: cross-model lineage needs table name
 /// resolution that only works with schema. The polyglot-sql MAX_LINEAGE_DEPTH=64
 /// limit mitigates the qualify_columns stack overflow risk.
-fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<Vec<ColumnSource>, String> {
+fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLineageResult, String> {
     let lineage_result = if let Some(ref s) = ctx.schema {
         polyglot_sql::lineage::lineage_with_schema(
             col_name,
@@ -197,27 +220,35 @@ pub fn compute_cross_model_column_lineage(
     manifest: &Manifest,
     model_name: &str,
 ) -> ModelColumnLineage {
-    let mut cache: HashMap<String, ModelColumnLineage> = HashMap::new();
     // Track models currently being computed to detect cycles (A → B → A).
     // This is separate from the per-column visited set which prevents
     // self-references within a single resolution path.
-    let mut computing = HashSet::new();
-    computing.insert(model_name.to_string());
-    compute_cross_model_inner(manifest, model_name, &mut cache, &mut computing)
+    let mut ctx = CrossModelContext {
+        manifest,
+        cache: HashMap::new(),
+        computing: HashSet::new(),
+    };
+    ctx.computing.insert(model_name.to_string());
+    compute_cross_model_inner(model_name, &mut ctx)
+}
+
+/// Shared context for cross-model resolution to avoid passing many arguments.
+struct CrossModelContext<'a> {
+    manifest: &'a Manifest,
+    cache: HashMap<String, ModelColumnLineage>,
+    computing: HashSet<String>,
 }
 
 fn compute_cross_model_inner(
-    manifest: &Manifest,
     model_name: &str,
-    cache: &mut HashMap<String, ModelColumnLineage>,
-    computing: &mut HashSet<String>,
+    ctx: &mut CrossModelContext<'_>,
 ) -> ModelColumnLineage {
     // Compute single-model lineage first
-    let mut result = compute_column_lineage(manifest, model_name);
+    let mut result = compute_column_lineage(ctx.manifest, model_name);
 
     // Build a mapping: table name (as appears in SQL output) → model name
     // for the current model's upstream dependencies
-    let upstream_models = build_upstream_model_names(manifest, model_name);
+    let upstream_models = build_upstream_model_names(ctx.manifest, model_name);
 
     // For each column, resolve sources through upstream models.
     // Each column gets its own visited set to avoid cross-column interference.
@@ -228,14 +259,13 @@ fn compute_cross_model_inner(
 
         for source in &entry.sources {
             resolve_source_recursive(
-                manifest,
                 source,
                 &upstream_models,
                 &mut visited,
                 &mut resolved_sources,
                 &mut result.errors,
-                cache,
-                computing,
+                ctx,
+                &[],
             );
         }
 
@@ -301,14 +331,13 @@ fn normalize_table_name(table: &str) -> String {
 }
 
 fn resolve_source_recursive(
-    manifest: &Manifest,
     source: &ColumnSource,
     upstream_models: &HashMap<String, String>,
     visited: &mut HashSet<String>,
     resolved: &mut Vec<ColumnSource>,
     errors: &mut Vec<String>,
-    cache: &mut HashMap<String, ModelColumnLineage>,
-    computing: &mut HashSet<String>,
+    ctx: &mut CrossModelContext<'_>,
+    current_path: &[String],
 ) {
     // Check if the source table matches an upstream model
     let model_name = upstream_models
@@ -324,24 +353,31 @@ fn resolve_source_recursive(
         Some(name) if !visited.contains(&name) => name,
         _ => {
             // Source is a raw table, a dbt source, or already visited (cycle) — leaf
-            resolved.push(source.clone());
+            let mut leaf = source.clone();
+            leaf.model_path = current_path.to_vec();
+            resolved.push(leaf);
             return;
         }
     };
 
+    // Extend the path with the current upstream model
+    let mut extended_path = current_path.to_vec();
+    extended_path.push(model_name.clone());
+
     // Get or compute the upstream model's lineage
-    if !cache.contains_key(&model_name) {
-        if computing.contains(&model_name) {
+    if !ctx.cache.contains_key(&model_name) {
+        if ctx.computing.contains(&model_name) {
             // Cycle detected (A → B → A) — treat as leaf
-            resolved.push(source.clone());
+            let mut leaf = source.clone();
+            leaf.model_path = current_path.to_vec();
+            resolved.push(leaf);
             return;
         }
-        computing.insert(model_name.clone());
-        let upstream_result =
-            compute_cross_model_inner(manifest, &model_name, cache, computing);
-        cache.insert(model_name.clone(), upstream_result);
+        ctx.computing.insert(model_name.clone());
+        let upstream_result = compute_cross_model_inner(&model_name, ctx);
+        ctx.cache.insert(model_name.clone(), upstream_result);
     }
-    let upstream_result = cache.get(&model_name).unwrap();
+    let upstream_result = ctx.cache.get(&model_name).unwrap();
 
     // Propagate upstream errors
     for err in &upstream_result.errors {
@@ -358,32 +394,41 @@ fn resolve_source_recursive(
     {
         if col_entry.sources.is_empty() {
             // Upstream column has no sources — keep original
-            resolved.push(source.clone());
+            let mut leaf = source.clone();
+            leaf.model_path = extended_path;
+            resolved.push(leaf);
         } else {
-            // The upstream's sources are already fully resolved (cross-model)
-            // because compute_cross_model_inner was used
-            resolved.extend(col_entry.sources.iter().cloned());
+            // The upstream's sources are already fully resolved (cross-model).
+            // Prepend our path to each resolved source's model_path.
+            for s in &col_entry.sources {
+                let mut merged = s.clone();
+                let mut full_path = extended_path.clone();
+                full_path.extend(s.model_path.iter().cloned());
+                merged.model_path = full_path;
+                resolved.push(merged);
+            }
         }
     } else {
         // Column not in precomputed lineage (e.g. not in YAML columns).
         // Try on-demand single-column lineage from the upstream model's SQL.
-        let on_demand = compute_single_column_lineage(manifest, &model_name, &source.column);
+        let on_demand = compute_single_column_lineage(ctx.manifest, &model_name, &source.column);
         if on_demand.is_empty() {
             // Cannot resolve — keep as leaf
-            resolved.push(source.clone());
+            let mut leaf = source.clone();
+            leaf.model_path = extended_path;
+            resolved.push(leaf);
         } else {
             // Recursively resolve the on-demand results through further upstream models
-            let further_upstream = build_upstream_model_names(manifest, &model_name);
+            let further_upstream = build_upstream_model_names(ctx.manifest, &model_name);
             for s in &on_demand {
                 resolve_source_recursive(
-                    manifest,
                     s,
                     &further_upstream,
                     visited,
                     resolved,
                     errors,
-                    cache,
-                    computing,
+                    ctx,
+                    &extended_path,
                 );
             }
         }
@@ -419,7 +464,9 @@ fn compute_single_column_lineage(
         Err(_) => return vec![],
     };
 
-    run_column_lineage(column_name, &ctx).unwrap_or_default()
+    run_column_lineage(column_name, &ctx)
+        .map(|r| r.sources)
+        .unwrap_or_default()
 }
 
 /// Build a MappingSchema from the manifest's upstream nodes for column qualification.
@@ -527,14 +574,53 @@ fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) 
     }
 }
 
-/// Walk the lineage tree and extract leaf-level source columns.
-fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> Vec<ColumnSource> {
+/// Classify the transformation applied by the root expression of a lineage node.
+fn classify_transformation(node: &polyglot_sql::lineage::LineageNode) -> TransformationType {
+    classify_expression(&node.expression)
+}
+
+fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
+    use polyglot_sql::Expression;
+    match expr {
+        Expression::Column(_) | Expression::Identifier(_) => TransformationType::Direct,
+        // Alias wraps the actual expression — classify the inner expression
+        Expression::Alias(alias) => classify_expression(&alias.this),
+        Expression::Count(_)
+        | Expression::Sum(_)
+        | Expression::Avg(_)
+        | Expression::Min(_)
+        | Expression::Max(_) => TransformationType::Aggregation,
+        Expression::Cast(_) => TransformationType::Cast,
+        Expression::Case(_) => TransformationType::Conditional,
+        Expression::Add(_)
+        | Expression::Sub(_)
+        | Expression::Mul(_)
+        | Expression::Div(_) => TransformationType::Expression,
+        Expression::Anonymous(_) | Expression::Coalesce(_) | Expression::NullIf(_) => {
+            TransformationType::Expression
+        }
+        _ => TransformationType::Unknown,
+    }
+}
+
+/// Result of extracting lineage from a single column.
+struct ColumnLineageResult {
+    sources: Vec<ColumnSource>,
+    transformation: TransformationType,
+}
+
+/// Walk the lineage tree and extract leaf-level source columns plus transformation type.
+fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLineageResult {
+    let transformation = classify_transformation(node);
     let mut sources = Vec::new();
     collect_leaves(node, &mut sources);
     // Deduplicate
     sources.sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
     sources.dedup();
-    sources
+    ColumnLineageResult {
+        sources,
+        transformation,
+    }
 }
 
 fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<ColumnSource>) {
@@ -546,11 +632,13 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
             sources.push(ColumnSource {
                 table: table.to_string(),
                 column: column.to_string(),
+                model_path: vec![],
             });
         } else {
             sources.push(ColumnSource {
                 table: String::new(),
                 column: name.to_string(),
+                model_path: vec![],
             });
         }
     } else {
@@ -665,10 +753,13 @@ mod tests {
         let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
         assert!(!order_id.sources.is_empty(), "order_id should have sources");
         assert_eq!(order_id.sources[0].column, "id");
+        // Rename is classified as direct (the rename is evident from column name difference)
+        assert_eq!(order_id.transformation, TransformationType::Direct);
 
         // customer_id comes from orders.user_id (renamed)
         let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
         assert_eq!(customer_id.sources[0].column, "user_id");
+        assert_eq!(customer_id.transformation, TransformationType::Direct);
     }
 
     #[test]
@@ -1004,6 +1095,13 @@ select * from orders"#;
             "order_id should trace to raw orders.id, got: {:?}",
             order_id.sources
         );
+        // model_path should show the hop through stg_orders
+        let src = order_id.sources.iter().find(|s| s.column == "id").unwrap();
+        assert!(
+            src.model_path.contains(&"stg_orders".to_string()),
+            "model_path should include stg_orders, got: {:?}",
+            src.model_path
+        );
     }
 
     #[test]
@@ -1020,6 +1118,18 @@ select * from orders"#;
             "customer_id should trace to raw orders.user_id, got: {:?}",
             customer_id.sources
         );
+        // model_path should show both hops: orders → stg_orders
+        let src = customer_id.sources.iter().find(|s| s.column == "user_id").unwrap();
+        assert!(
+            src.model_path.contains(&"orders".to_string())
+                && src.model_path.contains(&"stg_orders".to_string()),
+            "model_path should include orders and stg_orders, got: {:?}",
+            src.model_path
+        );
+        // orders should come before stg_orders in the path
+        let orders_pos = src.model_path.iter().position(|m| m == "orders").unwrap();
+        let stg_pos = src.model_path.iter().position(|m| m == "stg_orders").unwrap();
+        assert!(orders_pos < stg_pos, "orders should precede stg_orders in path");
     }
 
     #[test]
@@ -1033,6 +1143,13 @@ select * from orders"#;
             total_amount.sources.iter().any(|s| s.column == "amount" && s.table.contains("payments")),
             "total_amount should trace to raw payments.amount, got: {:?}",
             total_amount.sources
+        );
+        // model_path should show the hop through stg_payments
+        let src = total_amount.sources.iter().find(|s| s.column == "amount").unwrap();
+        assert!(
+            src.model_path.contains(&"stg_payments".to_string()),
+            "model_path should include stg_payments, got: {:?}",
+            src.model_path
         );
     }
 
@@ -1064,6 +1181,79 @@ select * from orders"#;
         assert_eq!(normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""), "stg_orders");
         assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
         assert_eq!(normalize_table_name("schema.table"), "table");
+    }
+
+    #[test]
+    fn test_transformation_classification() {
+        // customers model has: customer_id (direct) and order_count (aggregation via count(*))
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "customers");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+        assert_eq!(
+            customer_id.transformation,
+            TransformationType::Direct,
+            "customer_id should be direct"
+        );
+
+        let order_count = result.columns.iter().find(|c| c.column == "order_count").unwrap();
+        assert_eq!(
+            order_count.transformation,
+            TransformationType::Aggregation,
+            "order_count (count(*)) should be aggregation"
+        );
+    }
+
+    #[test]
+    fn test_source_table_has_empty_model_path() {
+        // stg_orders references raw source directly — model_path should be empty
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "stg_orders");
+
+        for entry in &result.columns {
+            for source in &entry.sources {
+                assert!(
+                    source.model_path.is_empty(),
+                    "source {}.{} should have empty model_path (no cross-model hops), got: {:?}",
+                    source.table,
+                    source.column,
+                    source.model_path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_includes_new_fields() {
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "customers");
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // transformation field should be present on all columns
+        for col in parsed["columns"].as_array().unwrap() {
+            assert!(
+                col["transformation"].is_string(),
+                "transformation should be serialized: {:?}",
+                col
+            );
+        }
+
+        // model_path should be present on sources with cross-model hops
+        let customer_id = parsed["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["column"] == "customer_id")
+            .unwrap();
+        let first_source = &customer_id["sources"][0];
+        assert!(
+            first_source["model_path"].is_array(),
+            "model_path should be present for cross-model source: {:?}",
+            first_source
+        );
     }
 
     // --- Regression tests for known issues ---
