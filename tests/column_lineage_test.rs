@@ -121,3 +121,84 @@ fn test_source_table_not_empty() {
         }
     }
 }
+
+// --- Cross-model lineage integration tests ---
+
+#[test]
+fn test_cross_model_orders_traces_to_raw_sources() {
+    // orders depends on stg_orders + stg_payments which depend on raw sources.
+    // Cross-model should trace through to raw source columns.
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_cross_model_column_lineage(&manifest, "orders");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.columns.len(), 6);
+
+    // order_id: orders → stg_orders → raw.orders.id (renamed via stg_orders)
+    let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+    assert!(
+        order_id.sources.iter().any(|s| s.column == "id"),
+        "order_id should trace to raw source's 'id' column, got: {:?}",
+        order_id.sources
+    );
+
+    // total_amount: orders → stg_payments.amount → raw.payments.amount
+    let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
+    assert!(
+        total_amount.sources.iter().any(|s| s.column == "amount"),
+        "total_amount should trace to raw payments.amount, got: {:?}",
+        total_amount.sources
+    );
+
+    // All sources should be raw tables (not intermediate models)
+    for entry in &result.columns {
+        for src in &entry.sources {
+            assert!(
+                !src.table.is_empty(),
+                "column '{}' has empty source table",
+                entry.column
+            );
+            // Source tables should not be stg_ models (those are intermediate)
+            assert!(
+                !src.table.contains("stg_"),
+                "column '{}' still references intermediate model '{}' instead of raw source",
+                entry.column, src.table
+            );
+        }
+    }
+}
+
+#[test]
+fn test_cross_model_stg_orders_unchanged() {
+    // stg_orders only depends on raw sources, so cross-model should give same result
+    let manifest = load_fixture_manifest();
+    let single = dlin::graph::column_lineage::compute_column_lineage(&manifest, "stg_orders");
+    let cross = dlin::graph::column_lineage::compute_cross_model_column_lineage(&manifest, "stg_orders");
+
+    assert_eq!(single.columns.len(), cross.columns.len());
+    for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
+        assert_eq!(s.column, c.column);
+        assert_eq!(s.sources.len(), c.sources.len(), "column '{}' source count differs", s.column);
+    }
+}
+
+#[test]
+fn test_cross_model_customers_three_levels() {
+    // customers → orders → stg_orders/stg_payments → raw sources
+    // This tests 3-level deep tracing
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_cross_model_column_lineage(&manifest, "customers");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // All sources should reach raw tables
+    for entry in &result.columns {
+        for src in &entry.sources {
+            assert!(
+                !src.table.is_empty(),
+                "column '{}' has empty source table",
+                entry.column
+            );
+        }
+    }
+}

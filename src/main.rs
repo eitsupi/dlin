@@ -491,7 +491,7 @@ fn run_column_lineage_command(
 
     let reports: Vec<_> = models
         .iter()
-        .map(|model| graph::column_lineage::compute_column_lineage(&manifest, model))
+        .map(|model| graph::column_lineage::compute_cross_model_column_lineage(&manifest, model))
         .collect();
 
     // Print warnings for errors

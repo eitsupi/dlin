@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use polyglot_sql::Schema;
 use serde::Serialize;
 
@@ -114,25 +116,23 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
     );
 
     for col_name in &column_names {
-        // Try lineage without schema first (cheaper, no qualify_columns overhead),
-        // then fall back to lineage_with_schema for better resolution.
-        let lineage_result = polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
+        // When schema is available, prefer lineage_with_schema for proper table name
+        // resolution (aliases like "o" are resolved to actual table names like "stg_orders").
+        // Fall back to lineage without schema if lineage_with_schema fails.
+        let lineage_result = if let Some(ref s) = schema {
+            polyglot_sql::lineage::lineage_with_schema(
+                col_name,
+                &expanded_expr,
+                Some(s as &dyn polyglot_sql::Schema),
+                None,
+                false,
+            )
             .or_else(|_| {
-                if let Some(ref s) = schema {
-                    polyglot_sql::lineage::lineage_with_schema(
-                        col_name,
-                        &expanded_expr,
-                        Some(s as &dyn polyglot_sql::Schema),
-                        None,
-                        false,
-                    )
-                } else {
-                    Err(polyglot_sql::Error::internal(format!(
-                        "column '{}' not found",
-                        col_name
-                    )))
-                }
-            });
+                polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
+            })
+        } else {
+            polyglot_sql::lineage::lineage(col_name, &expanded_expr, None, false)
+        };
 
         match lineage_result {
             Ok(lineage_node) => {
@@ -152,6 +152,175 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         model: model_name.to_string(),
         columns,
         errors,
+    }
+}
+
+/// Compute column-level lineage with cross-model chain tracking.
+///
+/// Like `compute_column_lineage`, but recursively follows source references
+/// through upstream models until reaching dbt source tables (raw tables).
+///
+/// For example, if `orders.total_amount` traces to `stg_payments.amount`,
+/// and `stg_payments.amount` traces to `raw.payments.amount`, the final result
+/// will show `raw.payments.amount` as the ultimate source.
+pub fn compute_cross_model_column_lineage(
+    manifest: &Manifest,
+    model_name: &str,
+) -> ModelColumnLineage {
+    let mut cache: HashMap<String, ModelColumnLineage> = HashMap::new();
+    compute_cross_model_inner(manifest, model_name, &mut cache)
+}
+
+fn compute_cross_model_inner(
+    manifest: &Manifest,
+    model_name: &str,
+    cache: &mut HashMap<String, ModelColumnLineage>,
+) -> ModelColumnLineage {
+    // Compute single-model lineage first
+    let mut result = compute_column_lineage(manifest, model_name);
+
+    // Build a mapping: table name (as appears in SQL output) → model name
+    // for the current model's upstream dependencies
+    let upstream_models = build_upstream_model_names(manifest, model_name);
+
+    // For each column, resolve sources through upstream models
+    for entry in &mut result.columns {
+        let mut resolved_sources = Vec::new();
+        let mut visited = HashSet::new();
+        visited.insert(model_name.to_string());
+
+        for source in &entry.sources {
+            resolve_source_recursive(
+                manifest,
+                source,
+                &upstream_models,
+                &mut visited,
+                &mut resolved_sources,
+                &mut result.errors,
+                cache,
+            );
+        }
+
+        // Deduplicate and sort
+        resolved_sources.sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
+        resolved_sources.dedup();
+        entry.sources = resolved_sources;
+    }
+
+    result
+}
+
+/// Build a mapping from table names (as they may appear in SQL lineage output)
+/// to model names for upstream model dependencies.
+fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    let node = manifest
+        .nodes
+        .values()
+        .find(|n| n.name == model_name && n.resource_type == "model");
+
+    let node = match node {
+        Some(n) => n,
+        None => return map,
+    };
+
+    for dep_id in &node.depends_on.nodes {
+        if let Some(dep_node) = manifest.nodes.get(dep_id) {
+            if dep_node.resource_type != "model" {
+                continue;
+            }
+            // Register short name
+            map.insert(dep_node.name.clone(), dep_node.name.clone());
+            // Register FQ name (database.schema.name)
+            let fq = make_fq_table_name(
+                dep_node.database.as_deref(),
+                dep_node.schema.as_deref(),
+                &dep_node.name,
+            );
+            if fq != dep_node.name {
+                map.insert(fq, dep_node.name.clone());
+            }
+        }
+    }
+
+    map
+}
+
+/// Normalize a table name by stripping quotes and extracting the short name.
+///
+/// Handles patterns like:
+/// - `"jaffle_shop"."main"."stg_orders"` → `stg_orders`
+/// - `` `raw`.`orders` `` → `orders`
+/// - `stg_orders` → `stg_orders`
+fn normalize_table_name(table: &str) -> String {
+    let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
+    stripped
+        .rsplit('.')
+        .next()
+        .unwrap_or(&stripped)
+        .to_string()
+}
+
+fn resolve_source_recursive(
+    manifest: &Manifest,
+    source: &ColumnSource,
+    upstream_models: &HashMap<String, String>,
+    visited: &mut HashSet<String>,
+    resolved: &mut Vec<ColumnSource>,
+    errors: &mut Vec<String>,
+    cache: &mut HashMap<String, ModelColumnLineage>,
+) {
+    // Check if the source table matches an upstream model
+    let model_name = upstream_models
+        .get(&source.table)
+        .or_else(|| {
+            // Try normalized name (strip quotes, take last component)
+            let normalized = normalize_table_name(&source.table);
+            upstream_models.get(&normalized)
+        })
+        .cloned();
+
+    let model_name = match model_name {
+        Some(name) if !visited.contains(&name) => name,
+        _ => {
+            // Source is a raw table, a dbt source, or already visited (cycle) — leaf
+            resolved.push(source.clone());
+            return;
+        }
+    };
+
+    // Get or compute the upstream model's lineage
+    if !cache.contains_key(&model_name) {
+        let upstream_result = compute_cross_model_inner(manifest, &model_name, cache);
+        cache.insert(model_name.clone(), upstream_result);
+    }
+    let upstream_result = cache.get(&model_name).unwrap();
+
+    // Propagate upstream errors
+    for err in &upstream_result.errors {
+        if !errors.contains(err) {
+            errors.push(err.clone());
+        }
+    }
+
+    // Find the matching column in the upstream model's lineage
+    if let Some(col_entry) = upstream_result
+        .columns
+        .iter()
+        .find(|c| c.column == source.column)
+    {
+        if col_entry.sources.is_empty() {
+            // Upstream column has no sources — keep original
+            resolved.push(source.clone());
+        } else {
+            // The upstream's sources are already fully resolved (cross-model)
+            // because compute_cross_model_inner was used
+            resolved.extend(col_entry.sources.iter().cloned());
+        }
+    } else {
+        // Column not found in upstream model lineage — keep as leaf
+        resolved.push(source.clone());
     }
 }
 
@@ -296,7 +465,6 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::parser::manifest::{ManifestNode, ManifestSource, ManifestColumn, DependsOn, ManifestConfig};
 
     /// Build a minimal manifest for testing column lineage.
@@ -588,6 +756,216 @@ select * from orders"#;
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["model"], "stg_orders");
         assert!(parsed["columns"].is_array());
+    }
+
+    // --- Cross-model lineage tests ---
+
+    /// Build a manifest with 3 levels: customers → orders → stg_orders → raw.orders
+    fn make_cross_model_manifest() -> Manifest {
+        let mut nodes = HashMap::new();
+
+        // Source: raw.orders
+        let mut raw_orders_cols = HashMap::new();
+        for name in ["id", "user_id", "order_date", "status"] {
+            raw_orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        let mut sources = HashMap::new();
+        sources.insert("source.proj.raw.orders".to_string(), ManifestSource {
+            unique_id: "source.proj.raw.orders".to_string(),
+            name: "orders".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            columns: raw_orders_cols,
+        });
+
+        // Source: raw.payments
+        let mut raw_payments_cols = HashMap::new();
+        for name in ["id", "order_id", "amount", "payment_method"] {
+            raw_payments_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        sources.insert("source.proj.raw.payments".to_string(), ManifestSource {
+            unique_id: "source.proj.raw.payments".to_string(),
+            name: "payments".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            columns: raw_payments_cols,
+        });
+
+        // stg_orders: renames id→order_id, user_id→customer_id
+        let mut stg_orders_cols = HashMap::new();
+        for name in ["order_id", "customer_id", "order_date", "status"] {
+            stg_orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.stg_orders".to_string(), ManifestNode {
+            unique_id: "model.proj.stg_orders".to_string(),
+            name: "stg_orders".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["source.proj.raw.orders".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: stg_orders_cols,
+            compiled_code: Some("select id as order_id, user_id as customer_id, order_date, status from orders".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // stg_payments: renames id→payment_id
+        let mut stg_payments_cols = HashMap::new();
+        for name in ["payment_id", "order_id", "amount", "payment_method"] {
+            stg_payments_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.stg_payments".to_string(), ManifestNode {
+            unique_id: "model.proj.stg_payments".to_string(),
+            name: "stg_payments".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["source.proj.raw.payments".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: stg_payments_cols,
+            compiled_code: Some("select id as payment_id, order_id, amount, payment_method from payments".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // orders: joins stg_orders + stg_payments (CTE pattern like real dbt compiled SQL)
+        let mut orders_cols = HashMap::new();
+        for name in ["order_id", "customer_id", "total_amount"] {
+            orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.orders".to_string(), ManifestNode {
+            unique_id: "model.proj.orders".to_string(),
+            name: "orders".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![
+                "model.proj.stg_orders".to_string(),
+                "model.proj.stg_payments".to_string(),
+            ] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: orders_cols,
+            compiled_code: Some(concat!(
+                "with stg_orders as (select * from stg_orders), ",
+                "stg_payments as (select * from stg_payments) ",
+                "select stg_orders.order_id, stg_orders.customer_id, ",
+                "stg_payments.amount as total_amount ",
+                "from stg_orders left join stg_payments ",
+                "on stg_orders.order_id = stg_payments.order_id"
+            ).to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // customers: aggregates from orders model (CTE pattern)
+        let mut customers_cols = HashMap::new();
+        for name in ["customer_id", "order_count"] {
+            customers_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.customers".to_string(), ManifestNode {
+            unique_id: "model.proj.customers".to_string(),
+            name: "customers".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["model.proj.orders".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: customers_cols,
+            compiled_code: Some(concat!(
+                "with orders as (select * from orders) ",
+                "select customer_id, count(*) as order_count from orders group by customer_id"
+            ).to_string()),
+            database: None,
+            schema: None,
+        });
+
+        Manifest {
+            nodes,
+            sources,
+            exposures: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_cross_model_single_hop() {
+        // orders.order_id → stg_orders.order_id → raw.orders.id
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "orders");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        // Should trace through stg_orders to raw source
+        assert!(
+            order_id.sources.iter().any(|s| s.column == "id"),
+            "order_id should trace to raw orders.id, got: {:?}",
+            order_id.sources
+        );
+    }
+
+    #[test]
+    fn test_cross_model_two_hops() {
+        // customers.customer_id → orders.customer_id → stg_orders.customer_id → raw.orders.user_id
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "customers");
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+        assert!(
+            customer_id.sources.iter().any(|s| s.column == "user_id"),
+            "customer_id should trace to raw orders.user_id, got: {:?}",
+            customer_id.sources
+        );
+    }
+
+    #[test]
+    fn test_cross_model_join_sources() {
+        // orders.total_amount → stg_payments.amount → raw.payments.amount
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "orders");
+
+        let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
+        assert!(
+            total_amount.sources.iter().any(|s| s.column == "amount"),
+            "total_amount should trace to raw payments.amount, got: {:?}",
+            total_amount.sources
+        );
+    }
+
+    #[test]
+    fn test_cross_model_source_table_is_leaf() {
+        // stg_orders directly references a source — cross-model should not change the result
+        let manifest = make_cross_model_manifest();
+        let single = compute_column_lineage(&manifest, "stg_orders");
+        let cross = compute_cross_model_column_lineage(&manifest, "stg_orders");
+
+        assert_eq!(single.columns.len(), cross.columns.len());
+        for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
+            assert_eq!(s.column, c.column);
+            assert_eq!(s.sources, c.sources);
+        }
+    }
+
+    #[test]
+    fn test_cross_model_model_not_found() {
+        let manifest = make_cross_model_manifest();
+        let result = compute_cross_model_column_lineage(&manifest, "nonexistent");
+        assert!(!result.errors.is_empty());
+        assert!(result.errors[0].contains("not found"));
+    }
+
+    #[test]
+    fn test_normalize_table_name() {
+        assert_eq!(normalize_table_name("stg_orders"), "stg_orders");
+        assert_eq!(normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""), "stg_orders");
+        assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
+        assert_eq!(normalize_table_name("schema.table"), "table");
     }
 
 }
