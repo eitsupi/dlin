@@ -402,6 +402,9 @@ fn resolve_source_recursive(
         }
     };
 
+    // Mark as visited to prevent re-entry in diamond dependencies (A → B → D, A → C → D)
+    visited.insert(model_name.clone());
+
     // Extend the path with the current upstream model
     let mut extended_path = current_path.to_vec();
     extended_path.push(model_name.clone());
