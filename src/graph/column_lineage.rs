@@ -1265,4 +1265,142 @@ select * from orders"#;
         );
     }
 
+    #[test]
+    fn test_select_star_chain_with_cte_alias_and_join() {
+        // Combination of mml.6 + mml.7: SELECT * chain + CTE alias + JOIN
+        // This is the most common dbt pattern in mart/warehouse layers
+        let mut nodes = HashMap::new();
+        let mut sources = HashMap::new();
+
+        // Source: raw.users
+        let mut user_cols = HashMap::new();
+        for name in ["id", "name", "area"] {
+            user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        sources.insert("source.proj.raw.users".to_string(), ManifestSource {
+            unique_id: "source.proj.raw.users".to_string(),
+            name: "users".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            columns: user_cols,
+        });
+
+        // Source: raw.regions
+        let mut region_cols = HashMap::new();
+        for name in ["id", "region_name"] {
+            region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        sources.insert("source.proj.raw.regions".to_string(), ManifestSource {
+            unique_id: "source.proj.raw.regions".to_string(),
+            name: "regions".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            columns: region_cols,
+        });
+
+        // stg_users
+        let mut stg_user_cols = HashMap::new();
+        for name in ["id", "name", "area"] {
+            stg_user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.stg_users".to_string(), ManifestNode {
+            unique_id: "model.proj.stg_users".to_string(),
+            name: "stg_users".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["source.proj.raw.users".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: stg_user_cols,
+            compiled_code: Some("select id, name, area from users".to_string()),
+            database: Some("mydb".to_string()),
+            schema: Some("myschema".to_string()),
+        });
+
+        // stg_regions
+        let mut stg_region_cols = HashMap::new();
+        for name in ["id", "region_name"] {
+            stg_region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.stg_regions".to_string(), ManifestNode {
+            unique_id: "model.proj.stg_regions".to_string(),
+            name: "stg_regions".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["source.proj.raw.regions".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: stg_region_cols,
+            compiled_code: Some("select id, region_name from regions".to_string()),
+            database: Some("mydb".to_string()),
+            schema: Some("myschema".to_string()),
+        });
+
+        // mart_users: SELECT * chain + CTE alias + JOIN
+        // Pattern from mml.7 description but with CTE aliases (mml.6)
+        let mut mart_cols = HashMap::new();
+        for name in ["id", "name", "area", "region_name"] {
+            mart_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.mart_users".to_string(), ManifestNode {
+            unique_id: "model.proj.mart_users".to_string(),
+            name: "mart_users".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![
+                "model.proj.stg_users".to_string(),
+                "model.proj.stg_regions".to_string(),
+            ] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: mart_cols,
+            compiled_code: Some(concat!(
+                "with\n",
+                "import_users as (\n",
+                "    select * from `mydb`.`myschema`.`stg_users`\n",
+                "),\n",
+                "import_regions as (\n",
+                "    select * from `mydb`.`myschema`.`stg_regions`\n",
+                ")\n",
+                "select u.*, import_regions.region_name\n",
+                "from import_users as u\n",
+                "left join import_regions on u.area = import_regions.id"
+            ).to_string()),
+            database: Some("mydb".to_string()),
+            schema: Some("myschema".to_string()),
+        });
+
+        let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
+        let result = compute_cross_model_column_lineage(&manifest, "mart_users");
+
+        // All 4 columns should resolve without errors
+        assert!(
+            result.errors.is_empty(),
+            "should resolve all columns without errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.columns.len(), 4, "should have 4 columns, got: {:?}",
+            result.columns.iter().map(|c| &c.column).collect::<Vec<_>>());
+
+        // area should trace through CTE alias "u" → import_users → stg_users → raw
+        let area = result.columns.iter().find(|c| c.column == "area").unwrap();
+        assert!(
+            !area.sources.is_empty(),
+            "area should have sources, got: {:?}",
+            area
+        );
+
+        // region_name should trace through import_regions → stg_regions → raw
+        let region = result.columns.iter().find(|c| c.column == "region_name").unwrap();
+        assert!(
+            !region.sources.is_empty(),
+            "region_name should have sources, got: {:?}",
+            region
+        );
+    }
+
 }
