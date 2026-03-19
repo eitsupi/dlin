@@ -123,6 +123,7 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
 
     let mut columns = Vec::new();
     let mut errors = Vec::new();
+    let total = column_names.len();
 
     for col_name in &column_names {
         match run_column_lineage(col_name, &ctx) {
@@ -137,6 +138,21 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
                 errors.push(format!("column '{}': {}", col_name, e));
             }
         }
+    }
+
+    // Add summary when some columns failed but not all
+    let failed = total - columns.len();
+    if failed > 0 && !columns.is_empty() {
+        errors.insert(
+            0,
+            format!(
+                "model '{}': traced {}/{} columns ({} failed)",
+                model_name,
+                columns.len(),
+                total,
+                failed
+            ),
+        );
     }
 
     ModelColumnLineage {
@@ -204,7 +220,33 @@ fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLine
 
     match lineage_result {
         Ok(node) => Ok(extract_leaf_sources(&node)),
-        Err(e) => Err(format!("{}", e)),
+        Err(e) => Err(format_lineage_error(&e)),
+    }
+}
+
+/// Format a polyglot-sql error into a user-friendly message.
+///
+/// Strips meaningless position info ("at line 0, column 0") that polyglot-sql
+/// emits for lineage errors where no source position is available.
+fn format_lineage_error(e: &polyglot_sql::Error) -> String {
+    let msg = e.to_string();
+    // polyglot-sql lineage errors use line=0, column=0 as placeholder values.
+    // "Parse error at line 0, column 0: Cannot find column 'x'" →
+    // "lineage failed: Cannot find column 'x'"
+    if let Some(rest) = msg
+        .strip_prefix("Parse error at line 0, column 0: ")
+        .or_else(|| msg.strip_prefix("Syntax error at line 0, column 0: "))
+    {
+        format!("lineage failed: {}", rest)
+    } else if msg.starts_with("Internal error: ") {
+        // "Internal error: lineage recursion depth exceeded..." →
+        // "lineage failed: recursion depth exceeded..."
+        format!(
+            "lineage failed: {}",
+            msg.strip_prefix("Internal error: ").unwrap()
+        )
+    } else {
+        msg
     }
 }
 
@@ -1181,6 +1223,69 @@ select * from orders"#;
         assert_eq!(normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""), "stg_orders");
         assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
         assert_eq!(normalize_table_name("schema.table"), "table");
+    }
+
+    #[test]
+    fn test_format_lineage_error_strips_position() {
+        let err = polyglot_sql::Error::parse("Cannot find column 'x' in query", 0, 0, 0, 0);
+        let formatted = format_lineage_error(&err);
+        assert_eq!(
+            formatted,
+            "lineage failed: Cannot find column 'x' in query"
+        );
+        assert!(
+            !formatted.contains("line 0"),
+            "should strip meaningless position info"
+        );
+    }
+
+    #[test]
+    fn test_format_lineage_error_preserves_real_position() {
+        let err = polyglot_sql::Error::parse("unexpected token", 5, 10, 0, 0);
+        let formatted = format_lineage_error(&err);
+        assert!(
+            formatted.contains("line 5"),
+            "should preserve real position info: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn test_format_lineage_error_internal() {
+        let err = polyglot_sql::Error::internal("lineage recursion depth exceeded");
+        let formatted = format_lineage_error(&err);
+        assert_eq!(
+            formatted,
+            "lineage failed: lineage recursion depth exceeded"
+        );
+    }
+
+    #[test]
+    fn test_partial_failure_summary() {
+        // Model with some columns that can be traced and some that fail
+        let mut manifest = make_test_manifest();
+        // Add a column to stg_orders that doesn't exist in the SQL
+        let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+        node.columns.insert(
+            "nonexistent_col".to_string(),
+            ManifestColumn {
+                name: "nonexistent_col".to_string(),
+            },
+        );
+        let result = compute_column_lineage(&manifest, "stg_orders");
+
+        // Should have 4 successful columns and 1 failed
+        assert_eq!(result.columns.len(), 4);
+        assert!(
+            result.errors.iter().any(|e| e.contains("traced 4/5 columns (1 failed)")),
+            "should include summary, got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors.iter().any(|e| e.contains("nonexistent_col")),
+            "should include per-column error, got: {:?}",
+            result.errors
+        );
     }
 
     #[test]
