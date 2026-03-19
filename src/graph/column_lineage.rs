@@ -319,8 +319,85 @@ fn resolve_source_recursive(
             resolved.extend(col_entry.sources.iter().cloned());
         }
     } else {
-        // Column not found in upstream model lineage — keep as leaf
-        resolved.push(source.clone());
+        // Column not in precomputed lineage (e.g. not in YAML columns).
+        // Try on-demand single-column lineage from the upstream model's SQL.
+        let on_demand = compute_single_column_lineage(manifest, &model_name, &source.column);
+        if on_demand.is_empty() {
+            // Cannot resolve — keep as leaf
+            resolved.push(source.clone());
+        } else {
+            // Recursively resolve the on-demand results through further upstream models
+            let further_upstream = build_upstream_model_names(manifest, &model_name);
+            for s in &on_demand {
+                resolve_source_recursive(
+                    manifest,
+                    s,
+                    &further_upstream,
+                    visited,
+                    resolved,
+                    errors,
+                    cache,
+                );
+            }
+        }
+    }
+}
+
+/// Compute lineage for a single column from a model's compiled SQL.
+///
+/// Used when the column isn't in the model's YAML-defined columns but exists
+/// in the SQL output (common in dbt projects with incomplete column documentation).
+fn compute_single_column_lineage(
+    manifest: &Manifest,
+    model_name: &str,
+    column_name: &str,
+) -> Vec<ColumnSource> {
+    let node = manifest
+        .nodes
+        .values()
+        .find(|n| n.name == model_name && n.resource_type == "model");
+
+    let node = match node {
+        Some(n) => n,
+        None => return vec![],
+    };
+
+    let compiled_code = match &node.compiled_code {
+        Some(code) => code,
+        None => return vec![],
+    };
+
+    let expr = match polyglot_sql::parse_one(compiled_code, polyglot_sql::DialectType::Generic) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let schema = build_schema_from_manifest(manifest, node);
+
+    let mut expanded_expr = expr.clone();
+    polyglot_sql::lineage::expand_cte_stars(
+        &mut expanded_expr,
+        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
+    );
+
+    let lineage_result = if let Some(ref s) = schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            column_name,
+            &expanded_expr,
+            Some(s as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        )
+        .or_else(|_| {
+            polyglot_sql::lineage::lineage(column_name, &expanded_expr, None, false)
+        })
+    } else {
+        polyglot_sql::lineage::lineage(column_name, &expanded_expr, None, false)
+    };
+
+    match lineage_result {
+        Ok(lineage_node) => extract_leaf_sources(&lineage_node),
+        Err(_) => vec![],
     }
 }
 
