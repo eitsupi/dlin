@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use polyglot_sql::{DialectType, Expression, Schema};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
@@ -149,22 +150,28 @@ pub fn compute_column_lineage(
         }
     };
 
-    let mut columns = Vec::new();
-    let mut errors = Vec::new();
     let total = column_names.len();
 
-    for col_name in &column_names {
-        match run_column_lineage(col_name, &ctx) {
-            Ok(result) => {
-                columns.push(ColumnLineageEntry {
+    let results: Vec<_> = column_names
+        .par_iter()
+        .map(|col_name| {
+            match run_column_lineage(col_name, &ctx) {
+                Ok(result) => Ok(ColumnLineageEntry {
                     column: col_name.clone(),
                     transformation: result.transformation,
                     sources: result.sources,
-                });
+                }),
+                Err(e) => Err(format!("column '{}': {}", col_name, e)),
             }
-            Err(e) => {
-                errors.push(format!("column '{}': {}", col_name, e));
-            }
+        })
+        .collect();
+
+    let mut columns = Vec::new();
+    let mut errors = Vec::new();
+    for result in results {
+        match result {
+            Ok(entry) => columns.push(entry),
+            Err(e) => errors.push(e),
         }
     }
 
