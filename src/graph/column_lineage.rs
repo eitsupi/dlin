@@ -67,6 +67,12 @@ struct ColumnLineageCacheEntry {
     compiled_code_hash: u64,
     /// Dialect used for parsing (e.g. "bigquery", "generic")
     dialect: String,
+    /// FNV-1a hash of manifest column definitions that affect the lineage result
+    /// (the model's own columns + upstream dependencies' columns from manifest.json).
+    /// Defaults to 0 for cache entries created before this field was added,
+    /// which effectively invalidates them since the computed hash will differ.
+    #[serde(default)]
+    manifest_columns_hash: u64,
     /// Cached lineage result
     lineage: ModelColumnLineage,
 }
@@ -145,17 +151,21 @@ impl ColumnLineageCache {
     }
 
     /// Look up a cached lineage result for the given model.
-    /// Returns `None` if not cached or if compiled_code/dialect have changed.
+    /// Returns `None` if not cached or if compiled_code/dialect/manifest_columns_hash have changed.
     pub fn get(
         &self,
         model_name: &str,
         compiled_code: &str,
         dialect: DialectType,
+        manifest_columns_hash: u64,
     ) -> Option<&ModelColumnLineage> {
         let entry = self.entries.get(model_name)?;
         let code_hash = hash_str(compiled_code);
         let dialect_str = format!("{:?}", dialect);
-        if entry.compiled_code_hash == code_hash && entry.dialect == dialect_str {
+        if entry.compiled_code_hash == code_hash
+            && entry.dialect == dialect_str
+            && entry.manifest_columns_hash == manifest_columns_hash
+        {
             Some(&entry.lineage)
         } else {
             None
@@ -168,6 +178,7 @@ impl ColumnLineageCache {
         model_name: &str,
         compiled_code: &str,
         dialect: DialectType,
+        manifest_columns_hash: u64,
         lineage: ModelColumnLineage,
     ) {
         self.entries.insert(
@@ -175,6 +186,7 @@ impl ColumnLineageCache {
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
                 dialect: format!("{:?}", dialect),
+                manifest_columns_hash,
                 lineage,
             },
         );
@@ -282,8 +294,11 @@ pub fn compute_column_lineage(
         }
     };
 
+    // Compute YAML hash for cache key (own columns + upstream deps' YAML columns)
+    let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
+
     // Check disk cache
-    if let Some(cached) = cache.get(model_name, compiled_code, dialect) {
+    if let Some(cached) = cache.get(model_name, compiled_code, dialect, manifest_columns_hash) {
         return cached.clone();
     }
 
@@ -366,7 +381,7 @@ pub fn compute_column_lineage(
     };
 
     // Store in disk cache
-    cache.insert(model_name, compiled_code, dialect, result.clone());
+    cache.insert(model_name, compiled_code, dialect, manifest_columns_hash, result.clone());
 
     result
 }
@@ -1048,6 +1063,49 @@ fn infer_output_columns(
         &expr,
         schema.map(|s| s as &dyn polyglot_sql::Schema),
     )
+}
+
+/// Compute a deterministic hash of manifest column definitions that affect lineage results.
+///
+/// Includes the model's own columns and those of its direct upstream
+/// dependencies (nodes and sources) from manifest.json. Changes to any of
+/// these invalidate the cache.
+fn compute_manifest_columns_hash(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+) -> u64 {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Own YAML columns (sorted for determinism)
+    let mut own_cols: Vec<&String> = node.columns.keys().collect();
+    own_cols.sort();
+    for col in own_cols {
+        parts.push(col.clone());
+    }
+    parts.push("|".to_string()); // separator between own and upstream
+
+    // Upstream dependencies' YAML columns
+    let mut dep_ids: Vec<&String> = node.depends_on.nodes.iter().collect();
+    dep_ids.sort();
+    for dep_id in dep_ids {
+        if let Some(dep_node) = manifest.nodes.get(dep_id) {
+            let mut cols: Vec<&String> = dep_node.columns.keys().collect();
+            cols.sort();
+            parts.push(dep_id.clone());
+            for col in cols {
+                parts.push(col.clone());
+            }
+        } else if let Some(dep_source) = manifest.sources.get(dep_id) {
+            let mut cols: Vec<&String> = dep_source.columns.keys().collect();
+            cols.sort();
+            parts.push(dep_id.clone());
+            for col in cols {
+                parts.push(col.clone());
+            }
+        }
+    }
+
+    hash_str(&parts.join("\0"))
 }
 
 /// Build a fully-qualified table name from optional database, schema, and table name.
@@ -3129,6 +3187,7 @@ select * from orders"#;
             "test_model",
             "SELECT id FROM raw",
             DialectType::Generic,
+            0,
             lineage,
         );
         cache.save();
@@ -3136,7 +3195,7 @@ select * from orders"#;
         // Reload from disk
         let cache2 = ColumnLineageCache::load(project_dir, None);
         let hit = cache2
-            .get("test_model", "SELECT id FROM raw", DialectType::Generic)
+            .get("test_model", "SELECT id FROM raw", DialectType::Generic, 0)
             .unwrap();
         assert_eq!(hit.columns.len(), 1);
         assert_eq!(hit.columns[0].column, "id");
@@ -3153,11 +3212,11 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
         cache.save();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
-        assert!(cache2.get("m", "SELECT 2", DialectType::Generic).is_none());
+        assert!(cache2.get("m", "SELECT 2", DialectType::Generic, 0).is_none());
     }
 
     #[test]
@@ -3171,12 +3230,37 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        cache.insert("m", "SELECT 1", DialectType::BigQuery, lineage);
+        cache.insert("m", "SELECT 1", DialectType::BigQuery, 0, lineage);
         cache.save();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
         assert!(cache2
-            .get("m", "SELECT 1", DialectType::Snowflake)
+            .get("m", "SELECT 1", DialectType::Snowflake, 0)
+            .is_none());
+    }
+
+    #[test]
+    fn test_column_cache_miss_on_manifest_columns_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::Generic, 42, lineage);
+        cache.save();
+
+        let cache2 = ColumnLineageCache::load(project_dir, None);
+        // Same hash → hit
+        assert!(cache2
+            .get("m", "SELECT 1", DialectType::Generic, 42)
+            .is_some());
+        // Different hash → miss (YAML columns changed in manifest)
+        assert!(cache2
+            .get("m", "SELECT 1", DialectType::Generic, 99)
             .is_none());
     }
 
@@ -3191,7 +3275,7 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
         cache.save();
 
         // Tamper with version in saved file
@@ -3204,7 +3288,7 @@ select * from orders"#;
         std::fs::write(&cache_path, serde_json::to_string(&cf).unwrap()).unwrap();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
-        assert!(cache2.get("m", "SELECT 1", DialectType::Generic).is_none());
+        assert!(cache2.get("m", "SELECT 1", DialectType::Generic, 0).is_none());
     }
 
     #[test]
@@ -3215,9 +3299,9 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
         // Disabled cache still works in-memory (only disk persistence is disabled)
-        assert!(cache.get("m", "SELECT 1", DialectType::Generic).is_some());
+        assert!(cache.get("m", "SELECT 1", DialectType::Generic, 0).is_some());
         // But save is a no-op (no cache_path)
         cache.save();
     }
@@ -3234,12 +3318,12 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
         cache.save();
 
         // Fresh cache ignores existing entries
         let fresh = ColumnLineageCache::fresh(project_dir, None);
-        assert!(fresh.get("m", "SELECT 1", DialectType::Generic).is_none());
+        assert!(fresh.get("m", "SELECT 1", DialectType::Generic, 0).is_none());
 
         // But can save new entries
         let mut fresh = ColumnLineageCache::fresh(project_dir, None);
@@ -3248,12 +3332,12 @@ select * from orders"#;
             columns: vec![],
             errors: vec![],
         };
-        fresh.insert("m2", "SELECT 2", DialectType::Generic, lineage2);
+        fresh.insert("m2", "SELECT 2", DialectType::Generic, 0, lineage2);
         fresh.save();
 
         let reloaded = ColumnLineageCache::load(project_dir, None);
         assert!(reloaded
-            .get("m2", "SELECT 2", DialectType::Generic)
+            .get("m2", "SELECT 2", DialectType::Generic, 0)
             .is_some());
     }
 }
