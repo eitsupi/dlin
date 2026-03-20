@@ -1010,6 +1010,8 @@ fn run_debug_command(args: cli::DebugArgs) -> Result<()> {
 /// Run `debug parse-sql`
 #[cfg(not(tarpaulin_include))]
 fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
+    use std::io::Write;
+
     let sql = read_sql_input(args.sql.as_deref())?;
     let expr = polyglot_sql::parse_one(&sql, args.dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
@@ -1020,15 +1022,12 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
         DebugOutputFormat::Sql => {
             let regenerated = polyglot_sql::generate(&expr, args.dialect)
                 .map_err(|e| anyhow::anyhow!("generate error: {}", e))?;
-            use std::io::Write;
             writeln!(out, "{}", regenerated)?;
         }
         DebugOutputFormat::Ast => {
-            use std::io::Write;
             writeln!(out, "{:#?}", expr)?;
         }
         DebugOutputFormat::Json => {
-            use std::io::Write;
             let pretty = std::io::IsTerminal::is_terminal(&stdout);
             let res = if pretty {
                 serde_json::to_writer_pretty(&mut out, &expr)
@@ -1076,6 +1075,8 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
 /// Run `debug trace-column`
 #[cfg(not(tarpaulin_include))]
 fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
+    use std::io::Write;
+
     let sql = read_sql_input(args.sql.as_deref())?;
     let mut expr = polyglot_sql::parse_one(&sql, args.dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
@@ -1102,7 +1103,11 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
             Some(args.dialect),
             false,
         )
-        .or_else(|_| {
+        .or_else(|err| {
+            dlin::warn!(
+                "lineage_with_schema failed: {}, falling back to schema-less lineage",
+                err
+            );
             polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
         })
     } else {
@@ -1124,7 +1129,6 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
                     return Err(anyhow::anyhow!(e));
                 }
             }
-            use std::io::Write;
             writeln!(out)?;
         }
         Err(e) => {
