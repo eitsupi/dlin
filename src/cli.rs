@@ -499,16 +499,16 @@ Subcommands:
         after_long_help = "\
 Examples:
   # Parse SQL and show regenerated output
-  dlin debug parse-sql --sql 'SELECT a, b FROM t' --dialect bigquery
+  dlin debug parse-sql 'SELECT a, b FROM t' --dialect bigquery
 
-  # Parse SQL from a file
-  dlin debug parse-sql --file query.sql --dialect snowflake
+  # Parse SQL from a file via stdin
+  dlin debug parse-sql --dialect snowflake < query.sql
 
   # Trace a column's lineage
-  dlin debug trace-column --sql 'SELECT t.id AS order_id FROM t' --column order_id
+  dlin debug trace-column 'SELECT t.id AS order_id FROM t' --column order_id
 
   # Trace with schema information
-  dlin debug trace-column --sql 'SELECT * FROM t' --column id --schema 't:id,name'"
+  dlin debug trace-column 'SELECT * FROM t' --column id --schema 't:id,name'"
     )]
     Debug(DebugArgs),
 
@@ -593,19 +593,19 @@ This does not require a dbt project — it operates on raw SQL strings.",
         after_long_help = "\
 Examples:
   # Parse and regenerate SQL (default)
-  dlin debug parse-sql --sql 'SELECT a, b FROM t'
+  dlin debug parse-sql 'SELECT a, b FROM t'
 
   # Show AST debug representation
-  dlin debug parse-sql --sql 'SELECT a FROM t' --format ast
+  dlin debug parse-sql 'SELECT a FROM t' --format ast
 
   # Show AST as JSON
-  dlin debug parse-sql --sql 'SELECT a FROM t' --format json
+  dlin debug parse-sql 'SELECT a FROM t' --format json
 
   # Parse with BigQuery dialect
-  dlin debug parse-sql --sql 'SELECT CAST(x AS ARRAY<STRING>) FROM t' --dialect bigquery
+  dlin debug parse-sql 'SELECT CAST(x AS ARRAY<STRING>) FROM t' --dialect bigquery
 
-  # Parse from file
-  dlin debug parse-sql --file compiled_query.sql --dialect snowflake"
+  # Parse from file via stdin
+  dlin debug parse-sql --dialect snowflake < compiled_query.sql"
     )]
     ParseSql(DebugParseSqlArgs),
 
@@ -623,32 +623,27 @@ This does not require a dbt project — it operates on raw SQL strings.",
         after_long_help = "\
 Examples:
   # Basic column trace
-  dlin debug trace-column --sql 'SELECT t.id AS order_id FROM t' --column order_id
+  dlin debug trace-column 'SELECT t.id AS order_id FROM t' --column order_id
 
   # With schema (table:col1,col2 format, semicolon-separated tables)
   dlin debug trace-column \\
-    --sql 'SELECT * FROM orders JOIN customers ON orders.cid = customers.id' \\
+    'SELECT * FROM orders JOIN customers ON orders.cid = customers.id' \\
     --column cid \\
     --schema 'orders:id,cid,amount;customers:id,name'
 
   # With explicit dialect
-  dlin debug trace-column --sql 'SELECT a FROM t' --column a --dialect bigquery
+  dlin debug trace-column 'SELECT a FROM t' --column a --dialect bigquery
 
-  # From file
-  dlin debug trace-column --file query.sql --column order_id --dialect snowflake"
+  # From file via stdin
+  dlin debug trace-column --column order_id --dialect snowflake < query.sql"
     )]
     TraceColumn(DebugTraceColumnArgs),
 }
 
 #[derive(Debug, clap::Args)]
 pub struct DebugParseSqlArgs {
-    /// SQL string to parse
-    #[arg(long, group = "sql_input")]
+    /// SQL string to parse (reads from stdin if omitted)
     pub sql: Option<String>,
-
-    /// Path to a SQL file to parse
-    #[arg(long, group = "sql_input")]
-    pub file: Option<PathBuf>,
 
     /// SQL dialect for parsing (default: generic)
     #[arg(long, default_value = "generic")]
@@ -661,13 +656,8 @@ pub struct DebugParseSqlArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct DebugTraceColumnArgs {
-    /// SQL string to parse
-    #[arg(long, group = "sql_input")]
+    /// SQL string to parse (reads from stdin if omitted)
     pub sql: Option<String>,
-
-    /// Path to a SQL file to parse
-    #[arg(long, group = "sql_input")]
-    pub file: Option<PathBuf>,
 
     /// Column name to trace
     #[arg(long)]
@@ -1613,14 +1603,13 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_parse_sql_with_sql_flag() {
+    fn test_debug_parse_sql_positional_arg() {
         let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--sql", "SELECT 1"]).unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap(),
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert_eq!(a.sql.as_deref(), Some("SELECT 1"));
-                assert!(a.file.is_none());
                 assert!(matches!(a.format, DebugOutputFormat::Sql));
             }
             _ => panic!("Expected ParseSql"),
@@ -1628,46 +1617,24 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_parse_sql_with_file_flag() {
+    fn test_debug_parse_sql_no_arg_ok() {
+        // No positional arg is allowed (stdin will be read at runtime)
         let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--file", "query.sql"]).unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "parse-sql"]).unwrap(),
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert!(a.sql.is_none());
-                assert_eq!(a.file.as_deref(), Some(std::path::Path::new("query.sql")));
             }
             _ => panic!("Expected ParseSql"),
         }
     }
 
     #[test]
-    fn test_debug_parse_sql_sql_and_file_conflict() {
-        let result = Cli::try_parse_from([
-            "dlin",
-            "debug",
-            "parse-sql",
-            "--sql",
-            "SELECT 1",
-            "--file",
-            "q.sql",
-        ]);
-        assert!(result.is_err(), "--sql and --file should conflict");
-    }
-
-    #[test]
     fn test_debug_parse_sql_format_ast() {
         let args = unwrap_debug(
-            Cli::try_parse_from([
-                "dlin",
-                "debug",
-                "parse-sql",
-                "--sql",
-                "SELECT 1",
-                "--format",
-                "ast",
-            ])
-            .unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1", "--format", "ast"])
+                .unwrap(),
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
@@ -1680,16 +1647,8 @@ mod tests {
     #[test]
     fn test_debug_parse_sql_format_json() {
         let args = unwrap_debug(
-            Cli::try_parse_from([
-                "dlin",
-                "debug",
-                "parse-sql",
-                "--sql",
-                "SELECT 1",
-                "--format",
-                "json",
-            ])
-            .unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1", "--format", "json"])
+                .unwrap(),
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
@@ -1706,7 +1665,6 @@ mod tests {
                 "dlin",
                 "debug",
                 "parse-sql",
-                "--sql",
                 "SELECT 1",
                 "--dialect",
                 "bigquery",
@@ -1724,7 +1682,7 @@ mod tests {
     #[test]
     fn test_debug_parse_sql_default_dialect_is_generic() {
         let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--sql", "SELECT 1"]).unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap(),
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
@@ -1741,7 +1699,6 @@ mod tests {
                 "dlin",
                 "debug",
                 "trace-column",
-                "--sql",
                 "SELECT a FROM t",
                 "--column",
                 "a",
@@ -1766,7 +1723,6 @@ mod tests {
                 "dlin",
                 "debug",
                 "trace-column",
-                "--sql",
                 "SELECT * FROM t",
                 "--column",
                 "a",
@@ -1784,23 +1740,14 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_trace_column_with_file() {
+    fn test_debug_trace_column_no_sql_ok() {
+        // No positional arg is allowed (stdin will be read at runtime)
         let args = unwrap_debug(
-            Cli::try_parse_from([
-                "dlin",
-                "debug",
-                "trace-column",
-                "--file",
-                "query.sql",
-                "--column",
-                "x",
-            ])
-            .unwrap(),
+            Cli::try_parse_from(["dlin", "debug", "trace-column", "--column", "x"]).unwrap(),
         );
         match args.command {
             DebugCommand::TraceColumn(ref a) => {
                 assert!(a.sql.is_none());
-                assert_eq!(a.file.as_deref(), Some(std::path::Path::new("query.sql")));
                 assert_eq!(a.column, "x");
             }
             _ => panic!("Expected TraceColumn"),
@@ -1813,7 +1760,6 @@ mod tests {
             "dlin",
             "debug",
             "trace-column",
-            "--sql",
             "SELECT a FROM t",
         ]);
         assert!(result.is_err(), "trace-column should require --column");

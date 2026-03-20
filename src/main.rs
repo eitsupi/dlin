@@ -6,7 +6,7 @@ use clap::Parser;
 use polyglot_sql::{DialectType, Schema as _};
 
 use dlin::cli::{
-    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, DebugArgs, DebugCommand,
+    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, DebugCommand,
     DebugOutputFormat, ErrorFormat, GraphArgs, ListArgs, SourceType, SummaryArgs,
     SummaryOutputFormat,
 };
@@ -980,20 +980,27 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     Ok(())
 }
 
-/// Read SQL input from --sql or --file argument.
+/// Read SQL input from positional argument or stdin.
 #[cfg(not(tarpaulin_include))]
-fn read_sql_input(sql: Option<&str>, file: Option<&std::path::Path>) -> Result<String> {
-    match (sql, file) {
-        (Some(s), _) => Ok(s.to_string()),
-        (_, Some(f)) => std::fs::read_to_string(f)
-            .map_err(|e| anyhow::anyhow!("cannot read SQL file '{}': {}", f.display(), e)),
-        (None, None) => anyhow::bail!("provide SQL via --sql or --file"),
+fn read_sql_input(sql: Option<&str>) -> Result<String> {
+    if let Some(s) = sql {
+        return Ok(s.to_string());
     }
+    // Read from stdin
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        anyhow::bail!("provide SQL as an argument or via stdin");
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+    if buf.is_empty() {
+        anyhow::bail!("no SQL input received from stdin");
+    }
+    Ok(buf)
 }
 
 /// Run the `debug` subcommand
 #[cfg(not(tarpaulin_include))]
-fn run_debug_command(args: DebugArgs) -> Result<()> {
+fn run_debug_command(args: cli::DebugArgs) -> Result<()> {
     match args.command {
         DebugCommand::ParseSql(args) => run_debug_parse_sql(args),
         DebugCommand::TraceColumn(args) => run_debug_trace_column(args),
@@ -1003,7 +1010,7 @@ fn run_debug_command(args: DebugArgs) -> Result<()> {
 /// Run `debug parse-sql`
 #[cfg(not(tarpaulin_include))]
 fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
-    let sql = read_sql_input(args.sql.as_deref(), args.file.as_deref())?;
+    let sql = read_sql_input(args.sql.as_deref())?;
     let expr = polyglot_sql::parse_one(&sql, args.dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
@@ -1069,7 +1076,7 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
 /// Run `debug trace-column`
 #[cfg(not(tarpaulin_include))]
 fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
-    let sql = read_sql_input(args.sql.as_deref(), args.file.as_deref())?;
+    let sql = read_sql_input(args.sql.as_deref())?;
     let mut expr = polyglot_sql::parse_one(&sql, args.dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
