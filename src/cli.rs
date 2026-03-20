@@ -203,7 +203,11 @@ pub struct GraphArgs {
     /// Available types: model, source, seed, snapshot, test, exposure.
     /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
     /// use manifest mode for full test coverage
-    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
+    #[arg(
+        long = "node-type",
+        value_delimiter = ',',
+        conflicts_with = "node_type_all"
+    )]
     pub node_types: Option<Vec<String>>,
 
     /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
@@ -396,6 +400,18 @@ Examples:
         #[arg(long)]
         manifest_path: Option<PathBuf>,
 
+        /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
+        #[arg(long, env = "DLIN_CACHE_DIR")]
+        cache_dir: Option<PathBuf>,
+
+        /// Disable column lineage cache
+        #[arg(long, env = "DLIN_NO_CACHE")]
+        no_cache: bool,
+
+        /// Discard existing cache and rebuild from scratch
+        #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+        refresh_cache: bool,
+
         /// Suppress warning messages
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -452,6 +468,18 @@ Examples:
         #[arg(long)]
         manifest_path: Option<PathBuf>,
 
+        /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
+        #[arg(long, env = "DLIN_CACHE_DIR")]
+        cache_dir: Option<PathBuf>,
+
+        /// Disable column lineage cache
+        #[arg(long, env = "DLIN_NO_CACHE")]
+        no_cache: bool,
+
+        /// Discard existing cache and rebuild from scratch
+        #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+        refresh_cache: bool,
+
         /// Suppress warning messages
         #[arg(short = 'q', long)]
         quiet: bool,
@@ -496,7 +524,6 @@ Examples:
   dlin check-manifest --manifest-path path/to/manifest.json"
     )]
     CheckManifest(CheckManifestArgs),
-
 }
 
 #[derive(Debug, clap::Args)]
@@ -648,7 +675,11 @@ pub struct ListArgs {
     /// Available types: model, source, seed, snapshot, test, exposure.
     /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
     /// use manifest mode for full test coverage
-    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
+    #[arg(
+        long = "node-type",
+        value_delimiter = ',',
+        conflicts_with = "node_type_all"
+    )]
     pub node_types: Option<Vec<String>>,
 
     /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
@@ -722,7 +753,6 @@ pub enum ListOutputFormat {
     Json,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,11 +797,9 @@ mod tests {
 
     #[test]
     fn test_graph_quiet_flag() {
-        let args =
-            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-q"]).unwrap());
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-q"]).unwrap());
         assert!(args.quiet);
-        let args =
-            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--quiet"]).unwrap());
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--quiet"]).unwrap());
         assert!(args.quiet);
     }
 
@@ -833,8 +861,7 @@ mod tests {
     #[test]
     fn test_graph_multiple_models() {
         let args = unwrap_graph(
-            Cli::try_parse_from(["dlin", "graph", "stg_orders", "raw.orders", "-u", "0"])
-                .unwrap(),
+            Cli::try_parse_from(["dlin", "graph", "stg_orders", "raw.orders", "-u", "0"]).unwrap(),
         );
         assert_eq!(args.model, vec!["stg_orders", "raw.orders"]);
         assert_eq!(args.upstream, Some(0));
@@ -842,8 +869,9 @@ mod tests {
 
     #[test]
     fn test_graph_select_short_flag() {
-        let args =
-            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-s", "orders,tag:nightly"]).unwrap());
+        let args = unwrap_graph(
+            Cli::try_parse_from(["dlin", "graph", "-s", "orders,tag:nightly"]).unwrap(),
+        );
         assert_eq!(args.select.as_deref(), Some("orders,tag:nightly"));
     }
 
@@ -869,18 +897,15 @@ mod tests {
 
     #[test]
     fn test_graph_json_full() {
-        let args = unwrap_graph(
-            Cli::try_parse_from(["dlin", "graph", "--json-full"]).unwrap(),
-        );
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--json-full"]).unwrap());
         assert!(args.json_full);
         assert!(args.json_fields.is_none());
     }
 
     #[test]
     fn test_graph_json_fields_and_full_conflict() {
-        let result = Cli::try_parse_from([
-            "dlin", "graph", "--json-fields", "unique_id", "--json-full",
-        ]);
+        let result =
+            Cli::try_parse_from(["dlin", "graph", "--json-fields", "unique_id", "--json-full"]);
         assert!(result.is_err());
     }
 
@@ -932,10 +957,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(args.source, SourceType::Manifest);
-        assert_eq!(
-            args.manifest_path,
-            Some(PathBuf::from("/path/to/project"))
-        );
+        assert_eq!(args.manifest_path, Some(PathBuf::from("/path/to/project")));
     }
 
     #[test]
@@ -949,8 +971,7 @@ mod tests {
             ("svg", "Svg"),
             ("html", "Html"),
         ] {
-            let args =
-                unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-o", fmt]).unwrap());
+            let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph", "-o", fmt]).unwrap());
             assert_eq!(format!("{:?}", args.output), expected);
         }
 
@@ -962,8 +983,7 @@ mod tests {
     #[test]
     fn test_impact_subcommand() {
         let cli =
-            Cli::try_parse_from(["dlin", "impact", "orders", "-p", "/path/to/project"])
-                .unwrap();
+            Cli::try_parse_from(["dlin", "impact", "orders", "-p", "/path/to/project"]).unwrap();
         match cli.command {
             Command::Impact {
                 ref model,
@@ -991,7 +1011,12 @@ mod tests {
     #[test]
     fn test_impact_multiple_models() {
         let cli = Cli::try_parse_from([
-            "dlin", "impact", "orders", "stg_orders", "-p", "/path/to/project",
+            "dlin",
+            "impact",
+            "orders",
+            "stg_orders",
+            "-p",
+            "/path/to/project",
         ])
         .unwrap();
         match cli.command {
@@ -1026,9 +1051,8 @@ mod tests {
 
     #[test]
     fn test_graph_node_type_single() {
-        let args = unwrap_graph(
-            Cli::try_parse_from(["dlin", "graph", "--node-type", "model"]).unwrap(),
-        );
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--node-type", "model"]).unwrap());
         assert_eq!(args.node_types, Some(vec!["model".to_string()]));
     }
 
@@ -1072,16 +1096,24 @@ mod tests {
 
     #[test]
     fn test_list_with_models() {
-        let args = unwrap_list(
-            Cli::try_parse_from(["dlin", "list", "orders", "stg_orders"]).unwrap(),
-        );
+        let args =
+            unwrap_list(Cli::try_parse_from(["dlin", "list", "orders", "stg_orders"]).unwrap());
         assert_eq!(args.model, vec!["orders", "stg_orders"]);
     }
 
     #[test]
     fn test_list_with_models_and_flags() {
         let args = unwrap_list(
-            Cli::try_parse_from(["dlin", "list", "orders", "-o", "json", "--json-fields", "unique_id,sql_content"]).unwrap(),
+            Cli::try_parse_from([
+                "dlin",
+                "list",
+                "orders",
+                "-o",
+                "json",
+                "--json-fields",
+                "unique_id,sql_content",
+            ])
+            .unwrap(),
         );
         assert_eq!(args.model, vec!["orders"]);
         assert!(matches!(args.output, ListOutputFormat::Json));
@@ -1093,9 +1125,7 @@ mod tests {
 
     #[test]
     fn test_list_json_output() {
-        let args = unwrap_list(
-            Cli::try_parse_from(["dlin", "list", "-o", "json"]).unwrap(),
-        );
+        let args = unwrap_list(Cli::try_parse_from(["dlin", "list", "-o", "json"]).unwrap());
         assert!(matches!(args.output, ListOutputFormat::Json));
     }
 
@@ -1115,7 +1145,11 @@ mod tests {
         );
         assert_eq!(
             args.node_types,
-            Some(vec!["model".to_string(), "source".to_string(), "test".to_string()])
+            Some(vec![
+                "model".to_string(),
+                "source".to_string(),
+                "test".to_string()
+            ])
         );
         assert_eq!(args.select.as_deref(), Some("tag:nightly"));
         assert!(args.quiet);
@@ -1148,9 +1182,7 @@ mod tests {
 
     #[test]
     fn test_summary_json_output() {
-        let args = unwrap_summary(
-            Cli::try_parse_from(["dlin", "summary", "-o", "json"]).unwrap(),
-        );
+        let args = unwrap_summary(Cli::try_parse_from(["dlin", "summary", "-o", "json"]).unwrap());
         assert!(matches!(args.output, SummaryOutputFormat::Json));
     }
 
@@ -1158,18 +1190,25 @@ mod tests {
     fn test_summary_with_manifest() {
         let args = unwrap_summary(
             Cli::try_parse_from([
-                "dlin", "summary", "--source", "manifest", "--manifest-path", "/path/to/manifest.json",
-            ]).unwrap(),
+                "dlin",
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                "/path/to/manifest.json",
+            ])
+            .unwrap(),
         );
         assert_eq!(args.source, SourceType::Manifest);
-        assert_eq!(args.manifest_path, Some(PathBuf::from("/path/to/manifest.json")));
+        assert_eq!(
+            args.manifest_path,
+            Some(PathBuf::from("/path/to/manifest.json"))
+        );
     }
 
     #[test]
     fn test_summary_quiet_flag() {
-        let args = unwrap_summary(
-            Cli::try_parse_from(["dlin", "summary", "-q"]).unwrap(),
-        );
+        let args = unwrap_summary(Cli::try_parse_from(["dlin", "summary", "-q"]).unwrap());
         assert!(args.quiet);
     }
 
@@ -1208,7 +1247,8 @@ mod tests {
 
     #[test]
     fn test_error_format_with_impact() {
-        let cli = Cli::try_parse_from(["dlin", "--error-format", "json", "impact", "orders"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["dlin", "--error-format", "json", "impact", "orders"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormat::Json);
     }
 
@@ -1216,7 +1256,11 @@ mod tests {
     fn test_column_lineage_subcommand() {
         let cli = Cli::try_parse_from(["dlin", "column-lineage", "orders"]).unwrap();
         match cli.command {
-            Command::ColumnLineage { ref model, ref column, .. } => {
+            Command::ColumnLineage {
+                ref model,
+                ref column,
+                ..
+            } => {
                 assert_eq!(model, &["orders"]);
                 assert!(column.is_empty());
             }
@@ -1227,10 +1271,21 @@ mod tests {
     #[test]
     fn test_column_lineage_with_column_filter() {
         let cli = Cli::try_parse_from([
-            "dlin", "column-lineage", "orders", "--column", "order_id", "--column", "status",
-        ]).unwrap();
+            "dlin",
+            "column-lineage",
+            "orders",
+            "--column",
+            "order_id",
+            "--column",
+            "status",
+        ])
+        .unwrap();
         match cli.command {
-            Command::ColumnLineage { ref model, ref column, .. } => {
+            Command::ColumnLineage {
+                ref model,
+                ref column,
+                ..
+            } => {
                 assert_eq!(model, &["orders"]);
                 assert_eq!(column, &["order_id", "status"]);
             }
@@ -1250,10 +1305,19 @@ mod tests {
     #[test]
     fn test_column_impact_subcommand() {
         let cli = Cli::try_parse_from([
-            "dlin", "column-impact", "stg_orders", "--column", "order_id",
-        ]).unwrap();
+            "dlin",
+            "column-impact",
+            "stg_orders",
+            "--column",
+            "order_id",
+        ])
+        .unwrap();
         match cli.command {
-            Command::ColumnImpact { ref model, ref column, .. } => {
+            Command::ColumnImpact {
+                ref model,
+                ref column,
+                ..
+            } => {
                 assert_eq!(model, "stg_orders");
                 assert_eq!(column, &["order_id"]);
             }
@@ -1271,9 +1335,15 @@ mod tests {
     #[test]
     fn test_column_impact_multiple_columns() {
         let cli = Cli::try_parse_from([
-            "dlin", "column-impact", "stg_orders",
-            "--column", "order_id", "--column", "status",
-        ]).unwrap();
+            "dlin",
+            "column-impact",
+            "stg_orders",
+            "--column",
+            "order_id",
+            "--column",
+            "status",
+        ])
+        .unwrap();
         match cli.command {
             Command::ColumnImpact { ref column, .. } => {
                 assert_eq!(column, &["order_id", "status"]);
@@ -1284,9 +1354,9 @@ mod tests {
 
     #[test]
     fn test_column_lineage_with_dialect() {
-        let cli = Cli::try_parse_from([
-            "dlin", "column-lineage", "orders", "--dialect", "bigquery",
-        ]).unwrap();
+        let cli =
+            Cli::try_parse_from(["dlin", "column-lineage", "orders", "--dialect", "bigquery"])
+                .unwrap();
         match cli.command {
             Command::ColumnLineage { dialect, .. } => {
                 assert_eq!(dialect, Some(polyglot_sql::DialectType::BigQuery));
@@ -1309,8 +1379,15 @@ mod tests {
     #[test]
     fn test_column_impact_with_dialect() {
         let cli = Cli::try_parse_from([
-            "dlin", "column-impact", "stg_orders", "--column", "order_id", "--dialect", "snowflake",
-        ]).unwrap();
+            "dlin",
+            "column-impact",
+            "stg_orders",
+            "--column",
+            "order_id",
+            "--dialect",
+            "snowflake",
+        ])
+        .unwrap();
         match cli.command {
             Command::ColumnImpact { dialect, .. } => {
                 assert_eq!(dialect, Some(polyglot_sql::DialectType::Snowflake));
@@ -1322,26 +1399,59 @@ mod tests {
     #[test]
     fn test_dialect_all_known_values_parse() {
         let dialects = [
-            "bigquery", "snowflake", "postgres", "redshift", "databricks",
-            "spark", "trino", "duckdb", "mysql", "clickhouse", "oracle",
-            "hive", "sqlite", "presto", "athena", "teradata", "doris",
-            "starrocks", "materialize", "risingwave", "singlestore",
-            "cockroachdb", "tidb", "tsql", "druid", "solr", "tableau",
-            "dune", "fabric", "drill", "dremio", "exasol", "datafusion",
+            "bigquery",
+            "snowflake",
+            "postgres",
+            "redshift",
+            "databricks",
+            "spark",
+            "trino",
+            "duckdb",
+            "mysql",
+            "clickhouse",
+            "oracle",
+            "hive",
+            "sqlite",
+            "presto",
+            "athena",
+            "teradata",
+            "doris",
+            "starrocks",
+            "materialize",
+            "risingwave",
+            "singlestore",
+            "cockroachdb",
+            "tidb",
+            "tsql",
+            "druid",
+            "solr",
+            "tableau",
+            "dune",
+            "fabric",
+            "drill",
+            "dremio",
+            "exasol",
+            "datafusion",
         ];
         for dialect in dialects {
-            let cli = Cli::try_parse_from([
-                "dlin", "column-lineage", "model", "--dialect", dialect,
-            ]);
-            assert!(cli.is_ok(), "dialect '{}' should parse successfully, got: {:?}", dialect, cli.err());
+            let cli =
+                Cli::try_parse_from(["dlin", "column-lineage", "model", "--dialect", dialect]);
+            assert!(
+                cli.is_ok(),
+                "dialect '{}' should parse successfully, got: {:?}",
+                dialect,
+                cli.err()
+            );
         }
     }
 
     #[test]
     fn test_dialect_invalid_value_rejected() {
-        let result = Cli::try_parse_from([
-            "dlin", "column-lineage", "model", "--dialect", "unknown_db",
-        ]);
-        assert!(result.is_err(), "invalid dialect should be rejected by clap");
+        let result =
+            Cli::try_parse_from(["dlin", "column-lineage", "model", "--dialect", "unknown_db"]);
+        assert!(
+            result.is_err(),
+            "invalid dialect should be rejected by clap"
+        );
     }
 }

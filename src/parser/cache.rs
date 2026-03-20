@@ -177,10 +177,7 @@ impl ExtractionCache {
             // Auto-create .gitignore to prevent accidental commits
             let gitignore = parent.join(".gitignore");
             if !gitignore.exists() {
-                if let Err(e) = std::fs::write(
-                    &gitignore,
-                    "# Automatically created by dlin\n*\n",
-                ) {
+                if let Err(e) = std::fs::write(&gitignore, "# Automatically created by dlin\n*\n") {
                     crate::warn!("could not create {}: {}", gitignore.display(), e);
                 }
             }
@@ -199,7 +196,7 @@ impl ExtractionCache {
 }
 
 /// Simple string hash using FNV-1a for deterministic, fast hashing
-fn hash_str(s: &str) -> u64 {
+pub(crate) fn hash_str(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in s.bytes() {
         hash ^= byte as u64;
@@ -388,7 +385,8 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), Some(&cache_dir));
+        let mut cache =
+            ExtractionCache::load(project_dir, "prefix", &HashMap::new(), Some(&cache_dir));
         cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
@@ -479,7 +477,10 @@ mod tests {
         // But can still save new entries
         let mut fresh = ExtractionCache::fresh(project_dir, "prefix", &HashMap::new(), None);
         let extraction = JinjaExtraction {
-            refs: vec![RefCall { package: None, name: "fresh_ref".to_string() }],
+            refs: vec![RefCall {
+                package: None,
+                name: "fresh_ref".to_string(),
+            }],
             sources: vec![],
             config: SqlConfig::default(),
         };

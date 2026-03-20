@@ -1,22 +1,24 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use polyglot_sql::{DialectType, Expression, Schema};
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
 /// Column lineage result for a single model
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelColumnLineage {
     pub model: String,
     pub columns: Vec<ColumnLineageEntry>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
 }
 
 /// Lineage for a single output column
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnLineageEntry {
     pub column: String,
     pub transformation: TransformationType,
@@ -24,7 +26,7 @@ pub struct ColumnLineageEntry {
 }
 
 /// Classification of the transformation applied to produce an output column.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransformationType {
     /// Direct column reference or rename (e.g. `SELECT id AS order_id`)
@@ -42,15 +44,177 @@ pub enum TransformationType {
 }
 
 /// A source column reference
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ColumnSource {
     /// Source table/model name as it appears in SQL (e.g. "stg_orders", "`raw`.`orders`")
     pub table: String,
     /// Source column name
     pub column: String,
     /// Cross-model path: intermediate model names traversed to reach this source
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_path: Vec<String>,
+}
+
+// --- Column lineage disk cache ---
+
+const COLUMN_LINEAGE_CACHE_FILENAME: &str = "column_lineage_cache.json";
+const CACHE_DIR: &str = ".dlin_cache";
+
+/// A single cached column lineage entry for one model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ColumnLineageCacheEntry {
+    /// FNV-1a hash of the model's compiled SQL
+    compiled_code_hash: u64,
+    /// Dialect used for parsing (e.g. "bigquery", "generic")
+    dialect: String,
+    /// Cached lineage result
+    lineage: ModelColumnLineage,
+}
+
+/// On-disk cache file structure
+#[derive(Debug, Serialize, Deserialize)]
+struct ColumnLineageCacheFile {
+    /// dlin version that created this cache
+    #[serde(default)]
+    version: String,
+    /// Per-model cached entries keyed by model name
+    entries: HashMap<String, ColumnLineageCacheEntry>,
+}
+
+/// In-memory cache for column lineage results that can be loaded from and saved to disk
+pub struct ColumnLineageCache {
+    version: String,
+    entries: HashMap<String, ColumnLineageCacheEntry>,
+    /// `None` when the cache is disabled (no-op mode).
+    cache_path: Option<PathBuf>,
+    dirty: bool,
+}
+
+impl ColumnLineageCache {
+    /// Create a no-op cache that never reads from or writes to disk.
+    pub fn disabled() -> Self {
+        Self {
+            version: String::new(),
+            entries: HashMap::new(),
+            cache_path: None,
+            dirty: false,
+        }
+    }
+
+    /// Load the cache from disk, or create an empty one.
+    /// Entries are discarded when the dlin version doesn't match.
+    pub fn load(project_dir: &Path, cache_dir: Option<&Path>) -> Self {
+        let cache_path = match cache_dir {
+            Some(dir) => dir.join(COLUMN_LINEAGE_CACHE_FILENAME),
+            None => project_dir
+                .join(CACHE_DIR)
+                .join(COLUMN_LINEAGE_CACHE_FILENAME),
+        };
+        let version = env!("CARGO_PKG_VERSION").to_string();
+
+        let entries = std::fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<ColumnLineageCacheFile>(&content).ok())
+            .filter(|cf| cf.version == version)
+            .map(|cf| cf.entries)
+            .unwrap_or_default();
+
+        Self {
+            version,
+            entries,
+            cache_path: Some(cache_path),
+            dirty: false,
+        }
+    }
+
+    /// Create an empty cache that ignores existing on-disk entries but
+    /// still writes results to disk on [`save`](Self::save).
+    pub fn fresh(project_dir: &Path, cache_dir: Option<&Path>) -> Self {
+        let cache_path = match cache_dir {
+            Some(dir) => dir.join(COLUMN_LINEAGE_CACHE_FILENAME),
+            None => project_dir
+                .join(CACHE_DIR)
+                .join(COLUMN_LINEAGE_CACHE_FILENAME),
+        };
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            entries: HashMap::new(),
+            cache_path: Some(cache_path),
+            dirty: false,
+        }
+    }
+
+    /// Look up a cached lineage result for the given model.
+    /// Returns `None` if not cached or if compiled_code/dialect have changed.
+    pub fn get(
+        &self,
+        model_name: &str,
+        compiled_code: &str,
+        dialect: DialectType,
+    ) -> Option<&ModelColumnLineage> {
+        let entry = self.entries.get(model_name)?;
+        let code_hash = hash_str(compiled_code);
+        let dialect_str = format!("{:?}", dialect);
+        if entry.compiled_code_hash == code_hash && entry.dialect == dialect_str {
+            Some(&entry.lineage)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a lineage result into the cache.
+    pub fn insert(
+        &mut self,
+        model_name: &str,
+        compiled_code: &str,
+        dialect: DialectType,
+        lineage: ModelColumnLineage,
+    ) {
+        self.entries.insert(
+            model_name.to_string(),
+            ColumnLineageCacheEntry {
+                compiled_code_hash: hash_str(compiled_code),
+                dialect: format!("{:?}", dialect),
+                lineage,
+            },
+        );
+        self.dirty = true;
+    }
+
+    /// Save the cache to disk if it has been modified.
+    pub fn save(&self) {
+        let cache_path = match (&self.cache_path, self.dirty) {
+            (Some(p), true) => p,
+            _ => return,
+        };
+        let cf = ColumnLineageCacheFile {
+            version: self.version.clone(),
+            entries: self.entries.clone(),
+        };
+        if let Some(parent) = cache_path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                crate::warn!("could not create cache directory: {}", parent.display());
+                return;
+            }
+            // Auto-create .gitignore to prevent accidental commits
+            let gitignore = parent.join(".gitignore");
+            if !gitignore.exists() {
+                if let Err(e) = std::fs::write(&gitignore, "# Automatically created by dlin\n*\n") {
+                    crate::warn!("could not create {}: {}", gitignore.display(), e);
+                }
+            }
+        }
+        match serde_json::to_string(&cf) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(cache_path, json) {
+                    crate::warn!("could not write cache file {}: {}", cache_path.display(), e);
+                }
+            }
+            Err(e) => {
+                crate::warn!("could not serialize column lineage cache: {}", e);
+            }
+        }
+    }
 }
 
 /// Column impact result for a single model+column pair
@@ -85,6 +249,7 @@ pub fn compute_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     dialect: DialectType,
+    cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     // Find the node in the manifest
     let node = manifest
@@ -116,6 +281,11 @@ pub fn compute_column_lineage(
             };
         }
     };
+
+    // Check disk cache
+    if let Some(cached) = cache.get(model_name, compiled_code, dialect) {
+        return cached.clone();
+    }
 
     // Get column names: prefer YAML-defined columns, fall back to SQL inference
     let column_names: Vec<String> = {
@@ -154,15 +324,13 @@ pub fn compute_column_lineage(
 
     let results: Vec<_> = column_names
         .par_iter()
-        .map(|col_name| {
-            match run_column_lineage(col_name, &ctx) {
-                Ok(result) => Ok(ColumnLineageEntry {
-                    column: col_name.clone(),
-                    transformation: result.transformation,
-                    sources: result.sources,
-                }),
-                Err(e) => Err(format!("column '{}': {}", col_name, e)),
-            }
+        .map(|col_name| match run_column_lineage(col_name, &ctx) {
+            Ok(result) => Ok(ColumnLineageEntry {
+                column: col_name.clone(),
+                transformation: result.transformation,
+                sources: result.sources,
+            }),
+            Err(e) => Err(format!("column '{}': {}", col_name, e)),
         })
         .collect();
 
@@ -190,11 +358,16 @@ pub fn compute_column_lineage(
         );
     }
 
-    ModelColumnLineage {
+    let result = ModelColumnLineage {
         model: model_name.to_string(),
         columns,
         errors,
-    }
+    };
+
+    // Store in disk cache
+    cache.insert(model_name, compiled_code, dialect, result.clone());
+
+    result
 }
 
 /// Prepared context for running column lineage on a model's SQL.
@@ -210,8 +383,7 @@ fn prepare_lineage_context(
     node: &crate::parser::manifest::ManifestNode,
     dialect: DialectType,
 ) -> Result<LineageContext, String> {
-    let expr = polyglot_sql::parse_one(compiled_code, dialect)
-        .map_err(|e| format!("{}", e))?;
+    let expr = polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?;
 
     let schema = build_schema_from_manifest(manifest, node, dialect);
 
@@ -247,9 +419,7 @@ fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLine
             None,
             false,
         )
-        .or_else(|_| {
-            polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false)
-        })
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false))
     } else {
         polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false)
     };
@@ -298,6 +468,7 @@ pub fn compute_cross_model_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     dialect: DialectType,
+    cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     // Track models currently being computed to detect cycles (A → B → A).
     // This is separate from the per-column visited set which prevents
@@ -305,11 +476,11 @@ pub fn compute_cross_model_column_lineage(
     let mut ctx = CrossModelContext {
         manifest,
         dialect,
-        cache: HashMap::new(),
+        in_memory_cache: HashMap::new(),
         computing: HashSet::new(),
     };
     ctx.computing.insert(model_name.to_string());
-    compute_cross_model_inner(model_name, &mut ctx)
+    compute_cross_model_inner(model_name, &mut ctx, cache)
 }
 
 /// Compute downstream column-level impact for a specific model+column.
@@ -321,6 +492,7 @@ pub fn compute_column_impact(
     model_name: &str,
     column_name: &str,
     dialect: DialectType,
+    cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
     // Verify the model exists
     let model_exists = manifest
@@ -352,9 +524,8 @@ pub fn compute_column_impact(
 
     // Seed: find direct dependents of the target model
     // and check which of their columns reference target model+column
-    let mut queue: Vec<(String, String, Vec<String>)> = vec![
-        (model_name.to_string(), column_name.to_string(), vec![]),
-    ];
+    let mut queue: Vec<(String, String, Vec<String>)> =
+        vec![(model_name.to_string(), column_name.to_string(), vec![])];
 
     while let Some((source_model, source_column, current_path)) = queue.pop() {
         let dependents = match downstream_map.get(&source_model) {
@@ -365,7 +536,7 @@ pub fn compute_column_impact(
         for dep_model in dependents {
             let lineage = lineage_cache
                 .entry(dep_model.clone())
-                .or_insert_with(|| compute_column_lineage(manifest, dep_model, dialect));
+                .or_insert_with(|| compute_column_lineage(manifest, dep_model, dialect, cache));
             for err in &lineage.errors {
                 if !errors.contains(err) {
                     errors.push(err.clone());
@@ -380,8 +551,8 @@ pub fn compute_column_impact(
 
                 // Check if any source of this column references the source model+column
                 let references_source = entry.sources.iter().any(|s| {
-                    let table_matches = s.table == source_model
-                        || normalize_table_name(&s.table) == source_model;
+                    let table_matches =
+                        s.table == source_model || normalize_table_name(&s.table) == source_model;
                     table_matches && s.column == source_column
                 });
 
@@ -446,16 +617,17 @@ fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String
 struct CrossModelContext<'a> {
     manifest: &'a Manifest,
     dialect: DialectType,
-    cache: HashMap<String, ModelColumnLineage>,
+    in_memory_cache: HashMap<String, ModelColumnLineage>,
     computing: HashSet<String>,
 }
 
 fn compute_cross_model_inner(
     model_name: &str,
     ctx: &mut CrossModelContext<'_>,
+    disk_cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     // Compute single-model lineage first
-    let mut result = compute_column_lineage(ctx.manifest, model_name, ctx.dialect);
+    let mut result = compute_column_lineage(ctx.manifest, model_name, ctx.dialect, disk_cache);
 
     // Build a mapping: table name (as appears in SQL output) → model name
     // for the current model's upstream dependencies
@@ -478,6 +650,7 @@ fn compute_cross_model_inner(
                 &mut resolved_sources,
                 &mut result.errors,
                 ctx,
+                disk_cache,
                 &[],
             );
         }
@@ -536,13 +709,10 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
 /// - `stg_orders` → `stg_orders`
 fn normalize_table_name(table: &str) -> String {
     let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
-    stripped
-        .rsplit('.')
-        .next()
-        .unwrap_or(&stripped)
-        .to_string()
+    stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
     source: &ColumnSource,
     upstream_models: &HashMap<String, String>,
@@ -550,6 +720,7 @@ fn resolve_source_recursive(
     resolved: &mut Vec<ColumnSource>,
     errors: &mut Vec<String>,
     ctx: &mut CrossModelContext<'_>,
+    disk_cache: &mut ColumnLineageCache,
     current_path: &[String],
 ) {
     // Check if the source table matches an upstream model
@@ -592,7 +763,7 @@ fn resolve_source_recursive(
     extended_path.push(model_name.clone());
 
     // Get or compute the upstream model's lineage
-    if !ctx.cache.contains_key(&model_name) {
+    if !ctx.in_memory_cache.contains_key(&model_name) {
         if ctx.computing.contains(&model_name) {
             // Cycle detected (A → B → A) — treat as leaf
             let mut leaf = source.clone();
@@ -601,10 +772,11 @@ fn resolve_source_recursive(
             return;
         }
         ctx.computing.insert(model_name.clone());
-        let upstream_result = compute_cross_model_inner(&model_name, ctx);
-        ctx.cache.insert(model_name.clone(), upstream_result);
+        let upstream_result = compute_cross_model_inner(&model_name, ctx, disk_cache);
+        ctx.in_memory_cache
+            .insert(model_name.clone(), upstream_result);
     }
-    let upstream_result = ctx.cache.get(&model_name).unwrap();
+    let upstream_result = ctx.in_memory_cache.get(&model_name).unwrap();
 
     // Propagate upstream errors
     for err in &upstream_result.errors {
@@ -638,7 +810,8 @@ fn resolve_source_recursive(
     } else {
         // Column not in precomputed lineage (e.g. not in YAML columns).
         // Try on-demand single-column lineage from the upstream model's SQL.
-        let on_demand = compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
+        let on_demand =
+            compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
         if on_demand.is_empty() {
             // Cannot resolve — keep as leaf
             let mut leaf = source.clone();
@@ -655,6 +828,7 @@ fn resolve_source_recursive(
                     resolved,
                     errors,
                     ctx,
+                    disk_cache,
                     &extended_path,
                 );
             }
@@ -770,7 +944,10 @@ fn build_schema_from_manifest(
 /// Prefers SQL inference (which gives the complete output column list) over YAML columns
 /// (which may be incomplete). Falls back to YAML columns when compiled SQL is unavailable
 /// or SQL inference fails.
-fn resolve_node_columns(dep_node: &crate::parser::manifest::ManifestNode, dialect: DialectType) -> Vec<String> {
+fn resolve_node_columns(
+    dep_node: &crate::parser::manifest::ManifestNode,
+    dialect: DialectType,
+) -> Vec<String> {
     // Try SQL inference first — gives the complete column list
     if let Some(ref code) = dep_node.compiled_code {
         let inferred = infer_output_columns(code, dialect);
@@ -821,10 +998,9 @@ fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
         | Expression::Max(_) => TransformationType::Aggregation,
         Expression::Cast(_) => TransformationType::Cast,
         Expression::Case(_) => TransformationType::Conditional,
-        Expression::Add(_)
-        | Expression::Sub(_)
-        | Expression::Mul(_)
-        | Expression::Div(_) => TransformationType::Expression,
+        Expression::Add(_) | Expression::Sub(_) | Expression::Mul(_) | Expression::Div(_) => {
+            TransformationType::Expression
+        }
         Expression::Anonymous(_) | Expression::Coalesce(_) | Expression::NullIf(_) => {
             TransformationType::Expression
         }
@@ -880,7 +1056,9 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::manifest::{ManifestNode, ManifestSource, ManifestColumn, DependsOn, ManifestConfig};
+    use crate::parser::manifest::{
+        DependsOn, ManifestColumn, ManifestConfig, ManifestNode, ManifestSource,
+    };
 
     /// Build a minimal manifest for testing column lineage.
     fn make_test_manifest() -> Manifest {
@@ -889,7 +1067,12 @@ mod tests {
         // stg_orders: SELECT id as order_id, user_id as customer_id, order_date, status FROM raw.orders
         let mut stg_orders_cols = HashMap::new();
         for name in ["order_id", "customer_id", "order_date", "status"] {
-            stg_orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_orders_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
         nodes.insert("model.proj.stg_orders".to_string(), ManifestNode {
             unique_id: "model.proj.stg_orders".to_string(),
@@ -908,7 +1091,12 @@ mod tests {
         // orders: SELECT o.order_id, o.customer_id, p.amount as total_amount FROM stg_orders o LEFT JOIN stg_payments p ON o.order_id = p.order_id
         let mut orders_cols = HashMap::new();
         for name in ["order_id", "customer_id", "total_amount"] {
-            orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            orders_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
         nodes.insert("model.proj.orders".to_string(), ManifestNode {
             unique_id: "model.proj.orders".to_string(),
@@ -930,37 +1118,56 @@ mod tests {
         // stg_payments (upstream, for schema)
         let mut stg_payments_cols = HashMap::new();
         for name in ["payment_id", "order_id", "amount", "payment_method"] {
-            stg_payments_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_payments_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_payments".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_payments".to_string(),
-            name: "stg_payments".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_payments_cols,
-            compiled_code: Some("select id as payment_id, order_id, amount, payment_method from raw.payments".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.stg_payments".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_payments".to_string(),
+                name: "stg_payments".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn { nodes: vec![] },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_payments_cols,
+                compiled_code: Some(
+                    "select id as payment_id, order_id, amount, payment_method from raw.payments"
+                        .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
         // Source: raw.orders
         let mut source_cols = HashMap::new();
         for name in ["id", "user_id", "order_date", "status"] {
-            source_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            source_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
         let mut sources = HashMap::new();
-        sources.insert("source.proj.raw.orders".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.orders".to_string(),
-            name: "orders".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: source_cols,
-        });
+        sources.insert(
+            "source.proj.raw.orders".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.orders".to_string(),
+                name: "orders".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: source_cols,
+            },
+        );
 
         Manifest {
             nodes,
@@ -972,21 +1179,34 @@ mod tests {
     #[test]
     fn test_rename_detection() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert_eq!(result.model, "stg_orders");
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 4);
 
         // order_id comes from orders.id (renamed)
-        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        let order_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "order_id")
+            .unwrap();
         assert!(!order_id.sources.is_empty(), "order_id should have sources");
         assert_eq!(order_id.sources[0].column, "id");
         // Rename is classified as direct (the rename is evident from column name difference)
         assert_eq!(order_id.transformation, TransformationType::Direct);
 
         // customer_id comes from orders.user_id (renamed)
-        let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+        let customer_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "customer_id")
+            .unwrap();
         assert_eq!(customer_id.sources[0].column, "user_id");
         assert_eq!(customer_id.transformation, TransformationType::Direct);
     }
@@ -994,26 +1214,44 @@ mod tests {
     #[test]
     fn test_join_lineage() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "orders", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert_eq!(result.model, "orders");
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 3);
 
         // total_amount is aliased from p.amount
-        let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
+        let total_amount = result
+            .columns
+            .iter()
+            .find(|c| c.column == "total_amount")
+            .unwrap();
         assert!(!total_amount.sources.is_empty());
         assert_eq!(total_amount.sources[0].column, "amount");
 
         // order_id comes from o.order_id
-        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        let order_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "order_id")
+            .unwrap();
         assert_eq!(order_id.sources[0].column, "order_id");
     }
 
     #[test]
     fn test_model_not_found() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "nonexistent", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "nonexistent",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert_eq!(result.columns.len(), 0);
         assert!(!result.errors.is_empty());
@@ -1024,8 +1262,17 @@ mod tests {
     fn test_no_compiled_code() {
         let mut manifest = make_test_manifest();
         // Remove compiled_code from stg_orders
-        manifest.nodes.get_mut("model.proj.stg_orders").unwrap().compiled_code = None;
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = None;
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.columns.is_empty());
         assert!(result.errors[0].contains("compiled_code"));
@@ -1035,11 +1282,26 @@ mod tests {
     fn test_no_yaml_columns_uses_sql_inference() {
         // When YAML columns are empty, column names should be inferred from compiled SQL
         let mut manifest = make_test_manifest();
-        manifest.nodes.get_mut("model.proj.stg_orders").unwrap().columns.clear();
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns
+            .clear();
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         // SQL inference should find: customer_id, order_date, order_id, status
-        assert_eq!(result.columns.len(), 4, "should infer 4 columns from SQL: {:?}", result.errors);
+        assert_eq!(
+            result.columns.len(),
+            4,
+            "should infer 4 columns from SQL: {:?}",
+            result.errors
+        );
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     }
 
@@ -1050,7 +1312,12 @@ mod tests {
         let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
         node.columns.clear();
         node.compiled_code = Some("INVALID SQL %%%".to_string());
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.columns.is_empty());
         assert!(!result.errors.is_empty());
@@ -1063,7 +1330,11 @@ mod tests {
         let sql = r#"with renamed as (select id as customer_id from source) select * from renamed"#;
         let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
         let result = polyglot_sql::lineage::lineage("customer_id", &expr, None, false);
-        assert!(result.is_ok(), "CTE + SELECT * should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "CTE + SELECT * should work: {:?}",
+            result.err()
+        );
         let node = result.unwrap();
         assert_eq!(node.name, "customer_id");
     }
@@ -1079,7 +1350,11 @@ mod tests {
         "#;
         let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
         let result = polyglot_sql::lineage::lineage("order_id", &expr, None, false);
-        assert!(result.is_ok(), "nested CTE + SELECT * should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "nested CTE + SELECT * should work: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1095,13 +1370,26 @@ mod tests {
             from raw.orders
         )
         select * from renamed"#;
-        manifest.nodes.get_mut("model.proj.stg_orders").unwrap().compiled_code = Some(sql.to_string());
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(sql.to_string());
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 4);
 
-        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        let order_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "order_id")
+            .unwrap();
         assert_eq!(order_id.sources[0].column, "id");
     }
 
@@ -1122,9 +1410,18 @@ select * from enriched"#;
 
         let mut schema = polyglot_sql::MappingSchema::new();
         let cols = vec![
-            ("order_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
-            ("customer_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
-            ("order_total".to_string(), polyglot_sql::expressions::DataType::Unknown),
+            (
+                "order_id".to_string(),
+                polyglot_sql::expressions::DataType::Unknown,
+            ),
+            (
+                "customer_id".to_string(),
+                polyglot_sql::expressions::DataType::Unknown,
+            ),
+            (
+                "order_total".to_string(),
+                polyglot_sql::expressions::DataType::Unknown,
+            ),
         ];
         schema.add_table("stg_orders", &cols, None).unwrap();
 
@@ -1135,7 +1432,11 @@ select * from enriched"#;
             None,
             false,
         );
-        assert!(result.is_ok(), "should resolve order_id: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should resolve order_id: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1150,11 +1451,19 @@ select * from orders"#;
 
         let mut schema = polyglot_sql::MappingSchema::new();
         let cols = vec![
-            ("order_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
-            ("customer_id".to_string(), polyglot_sql::expressions::DataType::Unknown),
+            (
+                "order_id".to_string(),
+                polyglot_sql::expressions::DataType::Unknown,
+            ),
+            (
+                "customer_id".to_string(),
+                polyglot_sql::expressions::DataType::Unknown,
+            ),
         ];
         // Register with 3-part name
-        schema.add_table("jaffle_shop.main.stg_orders", &cols, None).unwrap();
+        schema
+            .add_table("jaffle_shop.main.stg_orders", &cols, None)
+            .unwrap();
 
         let result = polyglot_sql::lineage::lineage_with_schema(
             "order_id",
@@ -1163,13 +1472,22 @@ select * from orders"#;
             None,
             false,
         );
-        assert!(result.is_ok(), "should resolve order_id via 3-part name: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "should resolve order_id via 3-part name: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_json_serialization() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["model"], "stg_orders");
@@ -1185,122 +1503,190 @@ select * from orders"#;
         // Source: raw.orders
         let mut raw_orders_cols = HashMap::new();
         for name in ["id", "user_id", "order_date", "status"] {
-            raw_orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            raw_orders_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
         let mut sources = HashMap::new();
-        sources.insert("source.proj.raw.orders".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.orders".to_string(),
-            name: "orders".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: raw_orders_cols,
-        });
+        sources.insert(
+            "source.proj.raw.orders".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.orders".to_string(),
+                name: "orders".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: raw_orders_cols,
+            },
+        );
 
         // Source: raw.payments
         let mut raw_payments_cols = HashMap::new();
         for name in ["id", "order_id", "amount", "payment_method"] {
-            raw_payments_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            raw_payments_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.payments".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.payments".to_string(),
-            name: "payments".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: raw_payments_cols,
-        });
+        sources.insert(
+            "source.proj.raw.payments".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.payments".to_string(),
+                name: "payments".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: raw_payments_cols,
+            },
+        );
 
         // stg_orders: renames id→order_id, user_id→customer_id
         let mut stg_orders_cols = HashMap::new();
         for name in ["order_id", "customer_id", "order_date", "status"] {
-            stg_orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_orders_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_orders".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_orders".to_string(),
-            name: "stg_orders".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.orders".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_orders_cols,
-            compiled_code: Some("select id as order_id, user_id as customer_id, order_date, status from orders".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.stg_orders".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_orders".to_string(),
+                name: "stg_orders".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.orders".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_orders_cols,
+                compiled_code: Some(
+                    "select id as order_id, user_id as customer_id, order_date, status from orders"
+                        .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
         // stg_payments: renames id→payment_id
         let mut stg_payments_cols = HashMap::new();
         for name in ["payment_id", "order_id", "amount", "payment_method"] {
-            stg_payments_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_payments_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_payments".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_payments".to_string(),
-            name: "stg_payments".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.payments".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_payments_cols,
-            compiled_code: Some("select id as payment_id, order_id, amount, payment_method from payments".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.stg_payments".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_payments".to_string(),
+                name: "stg_payments".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.payments".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_payments_cols,
+                compiled_code: Some(
+                    "select id as payment_id, order_id, amount, payment_method from payments"
+                        .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
         // orders: joins stg_orders + stg_payments (CTE pattern like real dbt compiled SQL)
         let mut orders_cols = HashMap::new();
         for name in ["order_id", "customer_id", "total_amount"] {
-            orders_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            orders_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.orders".to_string(), ManifestNode {
-            unique_id: "model.proj.orders".to_string(),
-            name: "orders".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![
-                "model.proj.stg_orders".to_string(),
-                "model.proj.stg_payments".to_string(),
-            ] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: orders_cols,
-            compiled_code: Some(concat!(
-                "with stg_orders as (select * from stg_orders), ",
-                "stg_payments as (select * from stg_payments) ",
-                "select stg_orders.order_id, stg_orders.customer_id, ",
-                "stg_payments.amount as total_amount ",
-                "from stg_orders left join stg_payments ",
-                "on stg_orders.order_id = stg_payments.order_id"
-            ).to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.orders".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.orders".to_string(),
+                name: "orders".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec![
+                        "model.proj.stg_orders".to_string(),
+                        "model.proj.stg_payments".to_string(),
+                    ],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: orders_cols,
+                compiled_code: Some(
+                    concat!(
+                        "with stg_orders as (select * from stg_orders), ",
+                        "stg_payments as (select * from stg_payments) ",
+                        "select stg_orders.order_id, stg_orders.customer_id, ",
+                        "stg_payments.amount as total_amount ",
+                        "from stg_orders left join stg_payments ",
+                        "on stg_orders.order_id = stg_payments.order_id"
+                    )
+                    .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
         // customers: aggregates from orders model (CTE pattern)
         let mut customers_cols = HashMap::new();
         for name in ["customer_id", "order_count"] {
-            customers_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            customers_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.customers".to_string(), ManifestNode {
-            unique_id: "model.proj.customers".to_string(),
-            name: "customers".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["model.proj.orders".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: customers_cols,
-            compiled_code: Some(concat!(
+        nodes.insert(
+            "model.proj.customers".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.customers".to_string(),
+                name: "customers".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.proj.orders".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: customers_cols,
+                compiled_code: Some(
+                    concat!(
                 "with orders as (select * from orders) ",
                 "select customer_id, count(*) as order_count from orders group by customer_id"
-            ).to_string()),
-            database: None,
-            schema: None,
-        });
+            )
+                    .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
         Manifest {
             nodes,
@@ -1313,14 +1699,26 @@ select * from orders"#;
     fn test_cross_model_single_hop() {
         // orders.order_id → stg_orders.order_id → raw.orders.id
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "orders", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-        let order_id = result.columns.iter().find(|c| c.column == "order_id").unwrap();
+        let order_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "order_id")
+            .unwrap();
         // Should trace through stg_orders to raw source (orders table)
         assert!(
-            order_id.sources.iter().any(|s| s.column == "id" && s.table.contains("orders")),
+            order_id
+                .sources
+                .iter()
+                .any(|s| s.column == "id" && s.table.contains("orders")),
             "order_id should trace to raw orders.id, got: {:?}",
             order_id.sources
         );
@@ -1337,18 +1735,34 @@ select * from orders"#;
     fn test_cross_model_two_hops() {
         // customers.customer_id → orders.customer_id → stg_orders.customer_id → raw.orders.user_id
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "customers",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-        let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+        let customer_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "customer_id")
+            .unwrap();
         assert!(
-            customer_id.sources.iter().any(|s| s.column == "user_id" && s.table.contains("orders")),
+            customer_id
+                .sources
+                .iter()
+                .any(|s| s.column == "user_id" && s.table.contains("orders")),
             "customer_id should trace to raw orders.user_id, got: {:?}",
             customer_id.sources
         );
         // model_path should show both hops: orders → stg_orders
-        let src = customer_id.sources.iter().find(|s| s.column == "user_id").unwrap();
+        let src = customer_id
+            .sources
+            .iter()
+            .find(|s| s.column == "user_id")
+            .unwrap();
         assert!(
             src.model_path.contains(&"orders".to_string())
                 && src.model_path.contains(&"stg_orders".to_string()),
@@ -1357,24 +1771,47 @@ select * from orders"#;
         );
         // orders should come before stg_orders in the path
         let orders_pos = src.model_path.iter().position(|m| m == "orders").unwrap();
-        let stg_pos = src.model_path.iter().position(|m| m == "stg_orders").unwrap();
-        assert!(orders_pos < stg_pos, "orders should precede stg_orders in path");
+        let stg_pos = src
+            .model_path
+            .iter()
+            .position(|m| m == "stg_orders")
+            .unwrap();
+        assert!(
+            orders_pos < stg_pos,
+            "orders should precede stg_orders in path"
+        );
     }
 
     #[test]
     fn test_cross_model_join_sources() {
         // orders.total_amount → stg_payments.amount → raw.payments.amount
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "orders", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
-        let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
+        let total_amount = result
+            .columns
+            .iter()
+            .find(|c| c.column == "total_amount")
+            .unwrap();
         assert!(
-            total_amount.sources.iter().any(|s| s.column == "amount" && s.table.contains("payments")),
+            total_amount
+                .sources
+                .iter()
+                .any(|s| s.column == "amount" && s.table.contains("payments")),
             "total_amount should trace to raw payments.amount, got: {:?}",
             total_amount.sources
         );
         // model_path should show the hop through stg_payments
-        let src = total_amount.sources.iter().find(|s| s.column == "amount").unwrap();
+        let src = total_amount
+            .sources
+            .iter()
+            .find(|s| s.column == "amount")
+            .unwrap();
         assert!(
             src.model_path.contains(&"stg_payments".to_string()),
             "model_path should include stg_payments, got: {:?}",
@@ -1386,8 +1823,18 @@ select * from orders"#;
     fn test_cross_model_source_table_is_leaf() {
         // stg_orders directly references a source — cross-model should not change the result
         let manifest = make_cross_model_manifest();
-        let single = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
-        let cross = compute_cross_model_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let single = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        let cross = compute_cross_model_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert_eq!(single.columns.len(), cross.columns.len());
         for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
@@ -1399,7 +1846,12 @@ select * from orders"#;
     #[test]
     fn test_cross_model_model_not_found() {
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "nonexistent", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "nonexistent",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         assert!(!result.errors.is_empty());
         assert!(result.errors[0].contains("not found"));
     }
@@ -1407,7 +1859,10 @@ select * from orders"#;
     #[test]
     fn test_normalize_table_name() {
         assert_eq!(normalize_table_name("stg_orders"), "stg_orders");
-        assert_eq!(normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""), "stg_orders");
+        assert_eq!(
+            normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""),
+            "stg_orders"
+        );
         assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
         assert_eq!(normalize_table_name("schema.table"), "table");
     }
@@ -1416,10 +1871,7 @@ select * from orders"#;
     fn test_format_lineage_error_strips_position() {
         let err = polyglot_sql::Error::parse("Cannot find column 'x' in query", 0, 0, 0, 0);
         let formatted = format_lineage_error(&err);
-        assert_eq!(
-            formatted,
-            "lineage failed: Cannot find column 'x' in query"
-        );
+        assert_eq!(formatted, "lineage failed: Cannot find column 'x' in query");
         assert!(
             !formatted.contains("line 0"),
             "should strip meaningless position info"
@@ -1459,12 +1911,20 @@ select * from orders"#;
                 name: "nonexistent_col".to_string(),
             },
         );
-        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         // Should have 4 successful columns and 1 failed
         assert_eq!(result.columns.len(), 4);
         assert!(
-            result.errors.iter().any(|e| e.contains("traced 4/5 columns (1 failed)")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("traced 4/5 columns (1 failed)")),
             "should include summary, got: {:?}",
             result.errors
         );
@@ -1479,18 +1939,31 @@ select * from orders"#;
     fn test_transformation_classification() {
         // customers model has: customer_id (direct) and order_count (aggregation via count(*))
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "customers",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-        let customer_id = result.columns.iter().find(|c| c.column == "customer_id").unwrap();
+        let customer_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "customer_id")
+            .unwrap();
         assert_eq!(
             customer_id.transformation,
             TransformationType::Direct,
             "customer_id should be direct"
         );
 
-        let order_count = result.columns.iter().find(|c| c.column == "order_count").unwrap();
+        let order_count = result
+            .columns
+            .iter()
+            .find(|c| c.column == "order_count")
+            .unwrap();
         assert_eq!(
             order_count.transformation,
             TransformationType::Aggregation,
@@ -1502,7 +1975,12 @@ select * from orders"#;
     fn test_source_table_has_empty_model_path() {
         // stg_orders references raw source directly — model_path should be empty
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         for entry in &result.columns {
             for source in &entry.sources {
@@ -1520,7 +1998,12 @@ select * from orders"#;
     #[test]
     fn test_json_includes_new_fields() {
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "customers",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -1560,71 +2043,115 @@ select * from orders"#;
         // Source table
         let mut src_cols = HashMap::new();
         for name in ["id", "name", "status"] {
-            src_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            src_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.items".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.items".to_string(),
-            name: "items".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: src_cols,
-        });
+        sources.insert(
+            "source.proj.raw.items".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.items".to_string(),
+                name: "items".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: src_cols,
+            },
+        );
 
         // stg_items: simple staging model
         let mut stg_cols = HashMap::new();
         for name in ["item_id", "name", "status"] {
-            stg_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_items".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_items".to_string(),
-            name: "stg_items".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.items".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_cols,
-            compiled_code: Some("select id as item_id, name, status from items".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.stg_items".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_items".to_string(),
+                name: "stg_items".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.items".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_cols,
+                compiled_code: Some("select id as item_id, name, status from items".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
 
         // mart_items: uses FROM cte AS alias pattern
         let mut mart_cols = HashMap::new();
         for name in ["item_id", "status"] {
-            mart_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            mart_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.mart_items".to_string(), ManifestNode {
-            unique_id: "model.proj.mart_items".to_string(),
-            name: "mart_items".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["model.proj.stg_items".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: mart_cols,
-            compiled_code: Some(concat!(
-                "with import_stg_items as (\n",
-                "    select * from stg_items\n",
-                ")\n",
-                "select base.item_id, base.status\n",
-                "from import_stg_items as base"
-            ).to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.mart_items".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.mart_items".to_string(),
+                name: "mart_items".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.proj.stg_items".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: mart_cols,
+                compiled_code: Some(
+                    concat!(
+                        "with import_stg_items as (\n",
+                        "    select * from stg_items\n",
+                        ")\n",
+                        "select base.item_id, base.status\n",
+                        "from import_stg_items as base"
+                    )
+                    .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
-        let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_items", DialectType::Generic);
+        let manifest = Manifest {
+            nodes,
+            sources,
+            exposures: HashMap::new(),
+        };
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "mart_items",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 2);
 
         // item_id should trace through stg_items to raw items.id
         // NOT stop at alias "base"
-        let item_id = result.columns.iter().find(|c| c.column == "item_id").unwrap();
+        let item_id = result
+            .columns
+            .iter()
+            .find(|c| c.column == "item_id")
+            .unwrap();
         assert!(
             item_id.sources.iter().all(|s| s.table != "base"),
             "item_id should not reference alias 'base', got: {:?}",
@@ -1646,110 +2173,168 @@ select * from orders"#;
         // Source: raw.users
         let mut user_cols = HashMap::new();
         for name in ["id", "name", "area"] {
-            user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            user_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.users".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.users".to_string(),
-            name: "users".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: user_cols,
-        });
+        sources.insert(
+            "source.proj.raw.users".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.users".to_string(),
+                name: "users".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: user_cols,
+            },
+        );
 
         // Source: raw.regions
         let mut region_cols = HashMap::new();
         for name in ["id", "region_name"] {
-            region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            region_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.regions".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.regions".to_string(),
-            name: "regions".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: region_cols,
-        });
+        sources.insert(
+            "source.proj.raw.regions".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.regions".to_string(),
+                name: "regions".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: region_cols,
+            },
+        );
 
         // stg_users: SELECT * from raw
         let mut stg_user_cols = HashMap::new();
         for name in ["id", "name", "area"] {
-            stg_user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_user_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_users".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_users".to_string(),
-            name: "stg_users".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.users".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_user_cols,
-            compiled_code: Some("select id, name, area from users".to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.stg_users".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_users".to_string(),
+                name: "stg_users".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.users".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_user_cols,
+                compiled_code: Some("select id, name, area from users".to_string()),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
         // stg_regions
         let mut stg_region_cols = HashMap::new();
         for name in ["id", "region_name"] {
-            stg_region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_region_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_regions".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_regions".to_string(),
-            name: "stg_regions".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.regions".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_region_cols,
-            compiled_code: Some("select id, region_name from regions".to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.stg_regions".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_regions".to_string(),
+                name: "stg_regions".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.regions".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_region_cols,
+                compiled_code: Some("select id, region_name from regions".to_string()),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
         // mart_users: multi-level SELECT * chain + JOIN
         // Uses backtick-quoted 3-part names like real dbt BigQuery compiled SQL
         let mut mart_cols = HashMap::new();
         for name in ["id", "name", "area", "region_name"] {
-            mart_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            mart_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.mart_users".to_string(), ManifestNode {
-            unique_id: "model.proj.mart_users".to_string(),
-            name: "mart_users".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![
-                "model.proj.stg_users".to_string(),
-                "model.proj.stg_regions".to_string(),
-            ] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: mart_cols,
-            compiled_code: Some(concat!(
-                "with\n",
-                "import_users as (\n",
-                "    select * from `mydb`.`myschema`.`stg_users`\n",
-                "),\n",
-                "base as (\n",
-                "    select * from import_users\n",
-                "),\n",
-                "import_regions as (\n",
-                "    select * from `mydb`.`myschema`.`stg_regions`\n",
-                ")\n",
-                "select base.*, import_regions.region_name\n",
-                "from base\n",
-                "left join import_regions on base.area = import_regions.id"
-            ).to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.mart_users".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.mart_users".to_string(),
+                name: "mart_users".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec![
+                        "model.proj.stg_users".to_string(),
+                        "model.proj.stg_regions".to_string(),
+                    ],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: mart_cols,
+                compiled_code: Some(
+                    concat!(
+                        "with\n",
+                        "import_users as (\n",
+                        "    select * from `mydb`.`myschema`.`stg_users`\n",
+                        "),\n",
+                        "base as (\n",
+                        "    select * from import_users\n",
+                        "),\n",
+                        "import_regions as (\n",
+                        "    select * from `mydb`.`myschema`.`stg_regions`\n",
+                        ")\n",
+                        "select base.*, import_regions.region_name\n",
+                        "from base\n",
+                        "left join import_regions on base.area = import_regions.id"
+                    )
+                    .to_string(),
+                ),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
-        let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_users", DialectType::Generic);
+        let manifest = Manifest {
+            nodes,
+            sources,
+            exposures: HashMap::new(),
+        };
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "mart_users",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         // All 4 columns should resolve without errors
         assert!(
@@ -1757,21 +2342,34 @@ select * from orders"#;
             "should resolve all columns without errors, got: {:?}",
             result.errors
         );
-        assert_eq!(result.columns.len(), 4, "should have 4 columns, got: {:?}",
-            result.columns.iter().map(|c| &c.column).collect::<Vec<_>>());
+        assert_eq!(
+            result.columns.len(),
+            4,
+            "should have 4 columns, got: {:?}",
+            result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
+        );
 
         // area should trace through to raw users source
         let area = result.columns.iter().find(|c| c.column == "area").unwrap();
         assert!(
-            area.sources.iter().any(|s| s.column == "area" && s.table.contains("users")),
+            area.sources
+                .iter()
+                .any(|s| s.column == "area" && s.table.contains("users")),
             "area should trace to raw users.area, got: {:?}",
             area.sources
         );
 
         // region_name should trace through to raw regions source
-        let region = result.columns.iter().find(|c| c.column == "region_name").unwrap();
+        let region = result
+            .columns
+            .iter()
+            .find(|c| c.column == "region_name")
+            .unwrap();
         assert!(
-            region.sources.iter().any(|s| s.column == "region_name" && s.table.contains("regions")),
+            region
+                .sources
+                .iter()
+                .any(|s| s.column == "region_name" && s.table.contains("regions")),
             "region_name should trace to raw regions.region_name, got: {:?}",
             region.sources
         );
@@ -1787,107 +2385,165 @@ select * from orders"#;
         // Source: raw.users
         let mut user_cols = HashMap::new();
         for name in ["id", "name", "area"] {
-            user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            user_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.users".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.users".to_string(),
-            name: "users".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: user_cols,
-        });
+        sources.insert(
+            "source.proj.raw.users".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.users".to_string(),
+                name: "users".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: user_cols,
+            },
+        );
 
         // Source: raw.regions
         let mut region_cols = HashMap::new();
         for name in ["id", "region_name"] {
-            region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            region_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        sources.insert("source.proj.raw.regions".to_string(), ManifestSource {
-            unique_id: "source.proj.raw.regions".to_string(),
-            name: "regions".to_string(),
-            source_name: "raw".to_string(),
-            resource_type: "source".to_string(),
-            description: None,
-            path: None,
-            columns: region_cols,
-        });
+        sources.insert(
+            "source.proj.raw.regions".to_string(),
+            ManifestSource {
+                unique_id: "source.proj.raw.regions".to_string(),
+                name: "regions".to_string(),
+                source_name: "raw".to_string(),
+                resource_type: "source".to_string(),
+                description: None,
+                path: None,
+                columns: region_cols,
+            },
+        );
 
         // stg_users
         let mut stg_user_cols = HashMap::new();
         for name in ["id", "name", "area"] {
-            stg_user_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_user_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_users".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_users".to_string(),
-            name: "stg_users".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.users".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_user_cols,
-            compiled_code: Some("select id, name, area from users".to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.stg_users".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_users".to_string(),
+                name: "stg_users".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.users".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_user_cols,
+                compiled_code: Some("select id, name, area from users".to_string()),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
         // stg_regions
         let mut stg_region_cols = HashMap::new();
         for name in ["id", "region_name"] {
-            stg_region_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            stg_region_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.stg_regions".to_string(), ManifestNode {
-            unique_id: "model.proj.stg_regions".to_string(),
-            name: "stg_regions".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["source.proj.raw.regions".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: stg_region_cols,
-            compiled_code: Some("select id, region_name from regions".to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.stg_regions".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.stg_regions".to_string(),
+                name: "stg_regions".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["source.proj.raw.regions".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: stg_region_cols,
+                compiled_code: Some("select id, region_name from regions".to_string()),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
         // mart_users: SELECT * chain + CTE alias + JOIN
         // Pattern from mml.7 description but with CTE aliases (mml.6)
         let mut mart_cols = HashMap::new();
         for name in ["id", "name", "area", "region_name"] {
-            mart_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            mart_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.mart_users".to_string(), ManifestNode {
-            unique_id: "model.proj.mart_users".to_string(),
-            name: "mart_users".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![
-                "model.proj.stg_users".to_string(),
-                "model.proj.stg_regions".to_string(),
-            ] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: mart_cols,
-            compiled_code: Some(concat!(
-                "with\n",
-                "import_users as (\n",
-                "    select * from `mydb`.`myschema`.`stg_users`\n",
-                "),\n",
-                "import_regions as (\n",
-                "    select * from `mydb`.`myschema`.`stg_regions`\n",
-                ")\n",
-                "select u.*, import_regions.region_name\n",
-                "from import_users as u\n",
-                "left join import_regions on u.area = import_regions.id"
-            ).to_string()),
-            database: Some("mydb".to_string()),
-            schema: Some("myschema".to_string()),
-        });
+        nodes.insert(
+            "model.proj.mart_users".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.mart_users".to_string(),
+                name: "mart_users".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec![
+                        "model.proj.stg_users".to_string(),
+                        "model.proj.stg_regions".to_string(),
+                    ],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: mart_cols,
+                compiled_code: Some(
+                    concat!(
+                        "with\n",
+                        "import_users as (\n",
+                        "    select * from `mydb`.`myschema`.`stg_users`\n",
+                        "),\n",
+                        "import_regions as (\n",
+                        "    select * from `mydb`.`myschema`.`stg_regions`\n",
+                        ")\n",
+                        "select u.*, import_regions.region_name\n",
+                        "from import_users as u\n",
+                        "left join import_regions on u.area = import_regions.id"
+                    )
+                    .to_string(),
+                ),
+                database: Some("mydb".to_string()),
+                schema: Some("myschema".to_string()),
+            },
+        );
 
-        let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_users", DialectType::Generic);
+        let manifest = Manifest {
+            nodes,
+            sources,
+            exposures: HashMap::new(),
+        };
+        let result = compute_cross_model_column_lineage(
+            &manifest,
+            "mart_users",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         // All 4 columns should resolve without errors
         assert!(
@@ -1895,21 +2551,34 @@ select * from orders"#;
             "should resolve all columns without errors, got: {:?}",
             result.errors
         );
-        assert_eq!(result.columns.len(), 4, "should have 4 columns, got: {:?}",
-            result.columns.iter().map(|c| &c.column).collect::<Vec<_>>());
+        assert_eq!(
+            result.columns.len(),
+            4,
+            "should have 4 columns, got: {:?}",
+            result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
+        );
 
         // area should trace through CTE alias "u" → import_users → stg_users → raw users
         let area = result.columns.iter().find(|c| c.column == "area").unwrap();
         assert!(
-            area.sources.iter().any(|s| s.column == "area" && s.table.contains("users")),
+            area.sources
+                .iter()
+                .any(|s| s.column == "area" && s.table.contains("users")),
             "area should trace to raw users.area, got: {:?}",
             area.sources
         );
 
         // region_name should trace through import_regions → stg_regions → raw regions
-        let region = result.columns.iter().find(|c| c.column == "region_name").unwrap();
+        let region = result
+            .columns
+            .iter()
+            .find(|c| c.column == "region_name")
+            .unwrap();
         assert!(
-            region.sources.iter().any(|s| s.column == "region_name" && s.table.contains("regions")),
+            region
+                .sources
+                .iter()
+                .any(|s| s.column == "region_name" && s.table.contains("regions")),
             "region_name should trace to raw regions.region_name, got: {:?}",
             region.sources
         );
@@ -1921,11 +2590,20 @@ select * from orders"#;
     fn test_column_impact_direct_dependent() {
         // stg_orders.order_id is used by orders.order_id
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "order_id", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "stg_orders",
+            "order_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(
-            result.impacted_columns.iter().any(|ic| ic.model == "orders" && ic.column == "order_id"),
+            result
+                .impacted_columns
+                .iter()
+                .any(|ic| ic.model == "orders" && ic.column == "order_id"),
             "orders.order_id should be impacted, got: {:?}",
             result.impacted_columns
         );
@@ -1936,18 +2614,30 @@ select * from orders"#;
         // stg_orders.order_id → orders.order_id → customers (via count)
         // stg_orders.customer_id → orders.customer_id → customers.customer_id
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "customer_id", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "stg_orders",
+            "customer_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         // orders.customer_id should be impacted (direct dependent)
         assert!(
-            result.impacted_columns.iter().any(|ic| ic.model == "orders" && ic.column == "customer_id"),
+            result
+                .impacted_columns
+                .iter()
+                .any(|ic| ic.model == "orders" && ic.column == "customer_id"),
             "orders.customer_id should be impacted, got: {:?}",
             result.impacted_columns
         );
         // customers.customer_id should also be impacted (two hops)
         assert!(
-            result.impacted_columns.iter().any(|ic| ic.model == "customers" && ic.column == "customer_id"),
+            result
+                .impacted_columns
+                .iter()
+                .any(|ic| ic.model == "customers" && ic.column == "customer_id"),
             "customers.customer_id should be impacted, got: {:?}",
             result.impacted_columns
         );
@@ -1956,10 +2646,18 @@ select * from orders"#;
     #[test]
     fn test_column_impact_model_path() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "customer_id", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "stg_orders",
+            "customer_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         // customers.customer_id goes through orders
-        let cust = result.impacted_columns.iter()
+        let cust = result
+            .impacted_columns
+            .iter()
             .find(|ic| ic.model == "customers" && ic.column == "customer_id")
             .unwrap();
         assert!(
@@ -1973,7 +2671,13 @@ select * from orders"#;
     fn test_column_impact_no_dependents() {
         // customers is a leaf model — no downstream
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "customers", "customer_id", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "customers",
+            "customer_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(
@@ -1986,7 +2690,13 @@ select * from orders"#;
     #[test]
     fn test_column_impact_model_not_found() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "nonexistent", "col", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "nonexistent",
+            "col",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
 
         assert!(!result.errors.is_empty());
         assert!(result.errors[0].contains("not found"));
@@ -1995,7 +2705,13 @@ select * from orders"#;
     #[test]
     fn test_column_impact_json_serialization() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "order_id", DialectType::Generic);
+        let result = compute_column_impact(
+            &manifest,
+            "stg_orders",
+            "order_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -2019,98 +2735,153 @@ select * from orders"#;
         // raw_data: source with columns x, y
         let mut raw_cols = HashMap::new();
         for name in ["x", "y"] {
-            raw_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            raw_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.raw_data".to_string(), ManifestNode {
-            unique_id: "model.proj.raw_data".to_string(),
-            name: "raw_data".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: raw_cols,
-            compiled_code: Some("select x, y from source_table".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.raw_data".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.raw_data".to_string(),
+                name: "raw_data".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn { nodes: vec![] },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: raw_cols,
+                compiled_code: Some("select x, y from source_table".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
 
         // shared: passes x and y through from raw_data
         let mut shared_cols = HashMap::new();
         for name in ["x", "y"] {
-            shared_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            shared_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.shared".to_string(), ManifestNode {
-            unique_id: "model.proj.shared".to_string(),
-            name: "shared".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["model.proj.raw_data".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: shared_cols,
-            compiled_code: Some("select x, y from raw_data".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.shared".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.shared".to_string(),
+                name: "shared".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.proj.raw_data".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: shared_cols,
+                compiled_code: Some("select x, y from raw_data".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
 
         // left: uses column x from shared
         let mut left_cols = HashMap::new();
-        left_cols.insert("x".to_string(), ManifestColumn { name: "x".to_string() });
-        nodes.insert("model.proj.left_model".to_string(), ManifestNode {
-            unique_id: "model.proj.left_model".to_string(),
-            name: "left_model".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["model.proj.shared".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: left_cols,
-            compiled_code: Some("select x from shared".to_string()),
-            database: None,
-            schema: None,
-        });
+        left_cols.insert(
+            "x".to_string(),
+            ManifestColumn {
+                name: "x".to_string(),
+            },
+        );
+        nodes.insert(
+            "model.proj.left_model".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.left_model".to_string(),
+                name: "left_model".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.proj.shared".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: left_cols,
+                compiled_code: Some("select x from shared".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
 
         // right: uses column y from shared
         let mut right_cols = HashMap::new();
-        right_cols.insert("y".to_string(), ManifestColumn { name: "y".to_string() });
-        nodes.insert("model.proj.right_model".to_string(), ManifestNode {
-            unique_id: "model.proj.right_model".to_string(),
-            name: "right_model".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec!["model.proj.shared".to_string()] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: right_cols,
-            compiled_code: Some("select y from shared".to_string()),
-            database: None,
-            schema: None,
-        });
+        right_cols.insert(
+            "y".to_string(),
+            ManifestColumn {
+                name: "y".to_string(),
+            },
+        );
+        nodes.insert(
+            "model.proj.right_model".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.right_model".to_string(),
+                name: "right_model".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.proj.shared".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: right_cols,
+                compiled_code: Some("select y from shared".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
 
         // diamond_out: combines left.x and right.y
         let mut out_cols = HashMap::new();
         for name in ["lx", "ry"] {
-            out_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+            out_cols.insert(
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            );
         }
-        nodes.insert("model.proj.diamond_out".to_string(), ManifestNode {
-            unique_id: "model.proj.diamond_out".to_string(),
-            name: "diamond_out".to_string(),
-            resource_type: "model".to_string(),
-            depends_on: DependsOn { nodes: vec![
-                "model.proj.left_model".to_string(),
-                "model.proj.right_model".to_string(),
-            ] },
-            config: ManifestConfig::default(),
-            description: None,
-            path: None,
-            columns: out_cols,
-            compiled_code: Some("select l.x as lx, r.y as ry from left_model l join right_model r on 1=1".to_string()),
-            database: None,
-            schema: None,
-        });
+        nodes.insert(
+            "model.proj.diamond_out".to_string(),
+            ManifestNode {
+                unique_id: "model.proj.diamond_out".to_string(),
+                name: "diamond_out".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec![
+                        "model.proj.left_model".to_string(),
+                        "model.proj.right_model".to_string(),
+                    ],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: out_cols,
+                compiled_code: Some(
+                    "select l.x as lx, r.y as ry from left_model l join right_model r on 1=1"
+                        .to_string(),
+                ),
+                database: None,
+                schema: None,
+            },
+        );
 
-        Manifest { nodes, sources: HashMap::new(), exposures: HashMap::new() }
+        Manifest {
+            nodes,
+            sources: HashMap::new(),
+            exposures: HashMap::new(),
+        }
     }
 
     #[test]
@@ -2121,21 +2892,33 @@ select * from orders"#;
         let manifest = make_diamond_manifest();
 
         // Verify left_model traces x through shared to raw_data
-        let left = compute_cross_model_column_lineage(&manifest, "left_model", DialectType::Generic);
+        let left = compute_cross_model_column_lineage(
+            &manifest,
+            "left_model",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         assert!(left.errors.is_empty(), "left errors: {:?}", left.errors);
         let left_x = left.columns.iter().find(|c| c.column == "x").unwrap();
         assert!(
             left_x.sources.iter().any(|s| s.column == "x"),
-            "left_model.x should trace through shared, got: {:?}", left_x.sources
+            "left_model.x should trace through shared, got: {:?}",
+            left_x.sources
         );
 
         // Verify right_model traces y through shared to raw_data
-        let right = compute_cross_model_column_lineage(&manifest, "right_model", DialectType::Generic);
+        let right = compute_cross_model_column_lineage(
+            &manifest,
+            "right_model",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         assert!(right.errors.is_empty(), "right errors: {:?}", right.errors);
         let right_y = right.columns.iter().find(|c| c.column == "y").unwrap();
         assert!(
             right_y.sources.iter().any(|s| s.column == "y"),
-            "right_model.y should trace through shared, got: {:?}", right_y.sources
+            "right_model.y should trace through shared, got: {:?}",
+            right_y.sources
         );
 
         // Both left and right depend on 'shared' — the key assertion is that
@@ -2155,19 +2938,29 @@ select * from orders"#;
         // Both should be detected independently despite sharing the 'shared' model.
         let manifest = make_diamond_manifest();
 
-        let impact_x = compute_column_impact(&manifest, "raw_data", "x", DialectType::Generic);
+        let impact_x = compute_column_impact(
+            &manifest,
+            "raw_data",
+            "x",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         assert!(impact_x.errors.is_empty(), "errors: {:?}", impact_x.errors);
 
-        let impacted_names: Vec<(&str, &str)> = impact_x.impacted_columns.iter()
+        let impacted_names: Vec<(&str, &str)> = impact_x
+            .impacted_columns
+            .iter()
             .map(|ic| (ic.model.as_str(), ic.column.as_str()))
             .collect();
         assert!(
             impacted_names.contains(&("shared", "x")),
-            "x should impact shared.x, got: {:?}", impacted_names
+            "x should impact shared.x, got: {:?}",
+            impacted_names
         );
         assert!(
             impacted_names.contains(&("left_model", "x")),
-            "x should impact left_model.x, got: {:?}", impacted_names
+            "x should impact left_model.x, got: {:?}",
+            impacted_names
         );
         // x should NOT impact right_model.y
         assert!(
@@ -2175,19 +2968,29 @@ select * from orders"#;
             "x should not impact right_model.y"
         );
 
-        let impact_y = compute_column_impact(&manifest, "raw_data", "y", DialectType::Generic);
+        let impact_y = compute_column_impact(
+            &manifest,
+            "raw_data",
+            "y",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
         assert!(impact_y.errors.is_empty(), "errors: {:?}", impact_y.errors);
 
-        let impacted_names_y: Vec<(&str, &str)> = impact_y.impacted_columns.iter()
+        let impacted_names_y: Vec<(&str, &str)> = impact_y
+            .impacted_columns
+            .iter()
             .map(|ic| (ic.model.as_str(), ic.column.as_str()))
             .collect();
         assert!(
             impacted_names_y.contains(&("shared", "y")),
-            "y should impact shared.y, got: {:?}", impacted_names_y
+            "y should impact shared.y, got: {:?}",
+            impacted_names_y
         );
         assert!(
             impacted_names_y.contains(&("right_model", "y")),
-            "y should impact right_model.y, got: {:?}", impacted_names_y
+            "y should impact right_model.y, got: {:?}",
+            impacted_names_y
         );
         // y should NOT impact left_model.x
         assert!(
@@ -2203,13 +3006,15 @@ select * from orders"#;
 
         // stg_orders is depended on by orders
         assert!(
-            map.get("stg_orders").map_or(false, |deps| deps.contains(&"orders".to_string())),
+            map.get("stg_orders")
+                .map_or(false, |deps| deps.contains(&"orders".to_string())),
             "stg_orders should have orders as downstream, got: {:?}",
             map.get("stg_orders")
         );
         // orders is depended on by customers
         assert!(
-            map.get("orders").map_or(false, |deps| deps.contains(&"customers".to_string())),
+            map.get("orders")
+                .map_or(false, |deps| deps.contains(&"customers".to_string())),
             "orders should have customers as downstream, got: {:?}",
             map.get("orders")
         );
@@ -2220,4 +3025,156 @@ select * from orders"#;
         );
     }
 
+    // --- ColumnLineageCache tests ---
+
+    #[test]
+    fn test_column_cache_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "test_model".to_string(),
+            columns: vec![ColumnLineageEntry {
+                column: "id".to_string(),
+                transformation: TransformationType::Direct,
+                sources: vec![ColumnSource {
+                    table: "raw".to_string(),
+                    column: "id".to_string(),
+                    model_path: vec![],
+                }],
+            }],
+            errors: vec![],
+        };
+        cache.insert(
+            "test_model",
+            "SELECT id FROM raw",
+            DialectType::Generic,
+            lineage,
+        );
+        cache.save();
+
+        // Reload from disk
+        let cache2 = ColumnLineageCache::load(project_dir, None);
+        let hit = cache2
+            .get("test_model", "SELECT id FROM raw", DialectType::Generic)
+            .unwrap();
+        assert_eq!(hit.columns.len(), 1);
+        assert_eq!(hit.columns[0].column, "id");
+    }
+
+    #[test]
+    fn test_column_cache_miss_on_code_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.save();
+
+        let cache2 = ColumnLineageCache::load(project_dir, None);
+        assert!(cache2.get("m", "SELECT 2", DialectType::Generic).is_none());
+    }
+
+    #[test]
+    fn test_column_cache_miss_on_dialect_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::BigQuery, lineage);
+        cache.save();
+
+        let cache2 = ColumnLineageCache::load(project_dir, None);
+        assert!(cache2
+            .get("m", "SELECT 1", DialectType::Snowflake)
+            .is_none());
+    }
+
+    #[test]
+    fn test_column_cache_version_invalidation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.save();
+
+        // Tamper with version in saved file
+        let cache_path = project_dir
+            .join(CACHE_DIR)
+            .join(COLUMN_LINEAGE_CACHE_FILENAME);
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let mut cf: ColumnLineageCacheFile = serde_json::from_str(&content).unwrap();
+        cf.version = "0.0.0-fake".to_string();
+        std::fs::write(&cache_path, serde_json::to_string(&cf).unwrap()).unwrap();
+
+        let cache2 = ColumnLineageCache::load(project_dir, None);
+        assert!(cache2.get("m", "SELECT 1", DialectType::Generic).is_none());
+    }
+
+    #[test]
+    fn test_column_cache_disabled() {
+        let mut cache = ColumnLineageCache::disabled();
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        // Disabled cache returns None
+        assert!(cache.get("m", "SELECT 1", DialectType::Generic).is_some());
+        // But save is a no-op (no cache_path)
+        cache.save();
+    }
+
+    #[test]
+    fn test_column_cache_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+
+        // Populate cache
+        let mut cache = ColumnLineageCache::load(project_dir, None);
+        let lineage = ModelColumnLineage {
+            model: "m".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
+        cache.save();
+
+        // Fresh cache ignores existing entries
+        let fresh = ColumnLineageCache::fresh(project_dir, None);
+        assert!(fresh.get("m", "SELECT 1", DialectType::Generic).is_none());
+
+        // But can save new entries
+        let mut fresh = ColumnLineageCache::fresh(project_dir, None);
+        let lineage2 = ModelColumnLineage {
+            model: "m2".to_string(),
+            columns: vec![],
+            errors: vec![],
+        };
+        fresh.insert("m2", "SELECT 2", DialectType::Generic, lineage2);
+        fresh.save();
+
+        let reloaded = ColumnLineageCache::load(project_dir, None);
+        assert!(reloaded
+            .get("m2", "SELECT 2", DialectType::Generic)
+            .is_some());
+    }
 }
