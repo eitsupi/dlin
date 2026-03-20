@@ -339,6 +339,9 @@ pub fn compute_column_impact(
     // shared intermediate model independently.
     let mut visited: HashSet<(String, String)> = HashSet::new();
     visited.insert((model_name.to_string(), column_name.to_string()));
+    // Cache lineage results per model to avoid redundant compute_column_lineage calls
+    // when the same downstream model appears as a dependent of multiple queue items.
+    let mut lineage_cache: HashMap<String, ModelColumnLineage> = HashMap::new();
 
     // Seed: find direct dependents of the target model
     // and check which of their columns reference target model+column
@@ -353,7 +356,9 @@ pub fn compute_column_impact(
         };
 
         for dep_model in dependents {
-            let lineage = compute_column_lineage(manifest, dep_model, dialect);
+            let lineage = lineage_cache
+                .entry(dep_model.clone())
+                .or_insert_with(|| compute_column_lineage(manifest, dep_model, dialect));
             for err in &lineage.errors {
                 if !errors.contains(err) {
                     errors.push(err.clone());
@@ -550,25 +555,30 @@ fn resolve_source_recursive(
         })
         .cloned();
 
-    let pair = model_name
-        .as_ref()
-        .map(|name| (name.clone(), source.column.clone()));
-
     let model_name = match model_name {
-        Some(name) if !visited.contains(&(name.clone(), source.column.clone())) => name,
-        _ => {
-            // Source is a raw table, a dbt source, or already visited (cycle) — leaf
+        Some(name) => {
+            let pair = (name.clone(), source.column.clone());
+            if visited.contains(&pair) {
+                // Already visited this (model, column) — treat as leaf
+                let mut leaf = source.clone();
+                leaf.model_path = current_path.to_vec();
+                resolved.push(leaf);
+                return;
+            }
+            // Mark as visited to prevent re-entry for the same (model, column) pair
+            // in diamond dependencies. Different columns through the same model are
+            // resolved independently.
+            visited.insert(pair);
+            name
+        }
+        None => {
+            // Source is a raw table or dbt source — leaf
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
             return;
         }
     };
-
-    // Mark as visited to prevent re-entry for the same (model, column) pair
-    // in diamond dependencies. Different columns through the same model are
-    // resolved independently.
-    visited.insert(pair.unwrap());
 
     // Extend the path with the current upstream model
     let mut extended_path = current_path.to_vec();
@@ -1985,6 +1995,198 @@ select * from orders"#;
         assert_eq!(parsed["model"], "stg_orders");
         assert_eq!(parsed["column"], "order_id");
         assert!(parsed["impacted_columns"].is_array());
+    }
+
+    /// Build a diamond DAG manifest where different columns flow through a shared model:
+    ///
+    ///   raw_data (x, y)
+    ///      |
+    ///   shared (x, y)   -- passes both columns through
+    ///    /        \
+    ///  left(x)  right(y)  -- each uses a different column from shared
+    ///    \        /
+    ///   diamond_out(lx, ry) -- combines left.x and right.y
+    fn make_diamond_manifest() -> Manifest {
+        let mut nodes = HashMap::new();
+
+        // raw_data: source with columns x, y
+        let mut raw_cols = HashMap::new();
+        for name in ["x", "y"] {
+            raw_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.raw_data".to_string(), ManifestNode {
+            unique_id: "model.proj.raw_data".to_string(),
+            name: "raw_data".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: raw_cols,
+            compiled_code: Some("select x, y from source_table".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // shared: passes x and y through from raw_data
+        let mut shared_cols = HashMap::new();
+        for name in ["x", "y"] {
+            shared_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.shared".to_string(), ManifestNode {
+            unique_id: "model.proj.shared".to_string(),
+            name: "shared".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["model.proj.raw_data".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: shared_cols,
+            compiled_code: Some("select x, y from raw_data".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // left: uses column x from shared
+        let mut left_cols = HashMap::new();
+        left_cols.insert("x".to_string(), ManifestColumn { name: "x".to_string() });
+        nodes.insert("model.proj.left_model".to_string(), ManifestNode {
+            unique_id: "model.proj.left_model".to_string(),
+            name: "left_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["model.proj.shared".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: left_cols,
+            compiled_code: Some("select x from shared".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // right: uses column y from shared
+        let mut right_cols = HashMap::new();
+        right_cols.insert("y".to_string(), ManifestColumn { name: "y".to_string() });
+        nodes.insert("model.proj.right_model".to_string(), ManifestNode {
+            unique_id: "model.proj.right_model".to_string(),
+            name: "right_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec!["model.proj.shared".to_string()] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: right_cols,
+            compiled_code: Some("select y from shared".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        // diamond_out: combines left.x and right.y
+        let mut out_cols = HashMap::new();
+        for name in ["lx", "ry"] {
+            out_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        }
+        nodes.insert("model.proj.diamond_out".to_string(), ManifestNode {
+            unique_id: "model.proj.diamond_out".to_string(),
+            name: "diamond_out".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![
+                "model.proj.left_model".to_string(),
+                "model.proj.right_model".to_string(),
+            ] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: out_cols,
+            compiled_code: Some("select l.x as lx, r.y as ry from left_model l join right_model r on 1=1".to_string()),
+            database: None,
+            schema: None,
+        });
+
+        Manifest { nodes, sources: HashMap::new(), exposures: HashMap::new() }
+    }
+
+    #[test]
+    fn test_cross_model_diamond_different_columns_through_shared_model() {
+        // In a diamond DAG, different columns (x and y) flow through a shared
+        // upstream model. Both should be resolved independently — the visited set
+        // must not truncate the second column's path through the shared model.
+        let manifest = make_diamond_manifest();
+
+        // Verify left_model traces x through shared to raw_data
+        let left = compute_cross_model_column_lineage(&manifest, "left_model", DialectType::Generic);
+        assert!(left.errors.is_empty(), "left errors: {:?}", left.errors);
+        let left_x = left.columns.iter().find(|c| c.column == "x").unwrap();
+        assert!(
+            left_x.sources.iter().any(|s| s.column == "x"),
+            "left_model.x should trace through shared, got: {:?}", left_x.sources
+        );
+
+        // Verify right_model traces y through shared to raw_data
+        let right = compute_cross_model_column_lineage(&manifest, "right_model", DialectType::Generic);
+        assert!(right.errors.is_empty(), "right errors: {:?}", right.errors);
+        let right_y = right.columns.iter().find(|c| c.column == "y").unwrap();
+        assert!(
+            right_y.sources.iter().any(|s| s.column == "y"),
+            "right_model.y should trace through shared, got: {:?}", right_y.sources
+        );
+
+        // Both left and right depend on 'shared' — the key assertion is that
+        // resolving one does not prevent the other from being resolved.
+        // With the old model-only visited set, whichever resolved first would
+        // block the other from tracing through 'shared'.
+        assert!(
+            !left_x.sources.is_empty() && !right_y.sources.is_empty(),
+            "both paths through shared should resolve independently"
+        );
+    }
+
+    #[test]
+    fn test_column_impact_diamond_different_columns_through_shared_model() {
+        // Impact of raw_data.x should flow through shared → left_model
+        // Impact of raw_data.y should flow through shared → right_model
+        // Both should be detected independently despite sharing the 'shared' model.
+        let manifest = make_diamond_manifest();
+
+        let impact_x = compute_column_impact(&manifest, "raw_data", "x", DialectType::Generic);
+        assert!(impact_x.errors.is_empty(), "errors: {:?}", impact_x.errors);
+
+        let impacted_names: Vec<(&str, &str)> = impact_x.impacted_columns.iter()
+            .map(|ic| (ic.model.as_str(), ic.column.as_str()))
+            .collect();
+        assert!(
+            impacted_names.contains(&("shared", "x")),
+            "x should impact shared.x, got: {:?}", impacted_names
+        );
+        assert!(
+            impacted_names.contains(&("left_model", "x")),
+            "x should impact left_model.x, got: {:?}", impacted_names
+        );
+        // x should NOT impact right_model.y
+        assert!(
+            !impacted_names.contains(&("right_model", "y")),
+            "x should not impact right_model.y"
+        );
+
+        let impact_y = compute_column_impact(&manifest, "raw_data", "y", DialectType::Generic);
+        assert!(impact_y.errors.is_empty(), "errors: {:?}", impact_y.errors);
+
+        let impacted_names_y: Vec<(&str, &str)> = impact_y.impacted_columns.iter()
+            .map(|ic| (ic.model.as_str(), ic.column.as_str()))
+            .collect();
+        assert!(
+            impacted_names_y.contains(&("shared", "y")),
+            "y should impact shared.y, got: {:?}", impacted_names_y
+        );
+        assert!(
+            impacted_names_y.contains(&("right_model", "y")),
+            "y should impact right_model.y, got: {:?}", impacted_names_y
+        );
+        // y should NOT impact left_model.x
+        assert!(
+            !impacted_names_y.contains(&("left_model", "x")),
+            "y should not impact left_model.x"
+        );
     }
 
     #[test]
