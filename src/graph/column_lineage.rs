@@ -3137,7 +3137,7 @@ select * from orders"#;
             errors: vec![],
         };
         cache.insert("m", "SELECT 1", DialectType::Generic, lineage);
-        // Disabled cache returns None
+        // Disabled cache still works in-memory (only disk persistence is disabled)
         assert!(cache.get("m", "SELECT 1", DialectType::Generic).is_some());
         // But save is a no-op (no cache_path)
         cache.save();
