@@ -323,9 +323,12 @@ fn clean_identifier(s: &str) -> String {
 /// Applies CTE star expansion to resolve `SELECT *` through CTEs,
 /// then reads the output column names from the outermost SELECT.
 /// Returns an empty Vec if the expression is not a SELECT or parsing fails.
-pub fn extract_select_columns_from_expr(expr: &Expression) -> Vec<String> {
+pub fn extract_select_columns_from_expr(
+    expr: &Expression,
+    schema: Option<&dyn polyglot_sql::Schema>,
+) -> Vec<String> {
     let mut owned = expr.clone();
-    polyglot_sql::lineage::expand_cte_stars(&mut owned, None);
+    polyglot_sql::lineage::expand_cte_stars(&mut owned, schema);
     match &owned {
         Expression::Select(select) => select
             .expressions
@@ -363,7 +366,7 @@ renamed as (
 select * from renamed"#;
         let expr =
             polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-        let cols = extract_select_columns_from_expr(&expr);
+        let cols = extract_select_columns_from_expr(&expr, None);
         assert_eq!(cols, vec!["order_id", "customer_id", "ordered_at"]);
     }
 
@@ -391,7 +394,7 @@ renamed as (
 select * from renamed"#;
         let expr =
             polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-        let cols = extract_select_columns_from_expr(&expr);
+        let cols = extract_select_columns_from_expr(&expr, None);
         assert!(cols.contains(&"order_id".to_string()), "cols: {:?}", cols);
         assert!(cols.contains(&"customer_id".to_string()), "cols: {:?}", cols);
         assert!(cols.contains(&"ordered_at".to_string()), "cols: {:?}", cols);

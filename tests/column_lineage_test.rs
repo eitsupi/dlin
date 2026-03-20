@@ -188,6 +188,48 @@ fn test_source_table_not_empty() {
     }
 }
 
+// --- YAML column completion tests ---
+
+#[test]
+fn test_yaml_columns_supplement_partial_sql_inference() {
+    // stg_orders_passthrough: "SELECT id, * FROM raw.orders"
+    //   SQL inference only captures "id" (the star is unresolvable without schema).
+    //   YAML defines: id, user_id, order_date, status.
+    //
+    // mart_yaml_star: "WITH source AS (SELECT * FROM stg_orders_passthrough) SELECT * FROM source"
+    //   Expanding this CTE star requires knowing stg_orders_passthrough's columns.
+    //   With YAML+SQL merge in resolve_node_columns, the schema has all 4 columns,
+    //   enabling full star expansion and lineage tracing.
+    let manifest = load_fixture_manifest();
+    let result = dlin::graph::column_lineage::compute_column_lineage(
+        &manifest,
+        "mart_yaml_star",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(
+        result.errors.is_empty(),
+        "errors: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        result.columns.len(),
+        4,
+        "should resolve all 4 YAML columns, got: {:?}",
+        result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
+    );
+
+    // All columns should have sources tracing to stg_orders_passthrough
+    for entry in &result.columns {
+        assert!(
+            !entry.sources.is_empty(),
+            "column '{}' should have sources",
+            entry.column
+        );
+    }
+}
+
 // --- Cross-model lineage integration tests ---
 
 #[test]

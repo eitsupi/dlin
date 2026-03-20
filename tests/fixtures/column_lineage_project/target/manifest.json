@@ -102,6 +102,46 @@
       "database": "shop",
       "schema": "main"
     },
+    "model.clp.stg_orders_passthrough": {
+      "unique_id": "model.clp.stg_orders_passthrough",
+      "name": "stg_orders_passthrough",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": ["source.clp.raw.orders"]
+      },
+      "config": { "materialized": "view", "tags": ["staging"] },
+      "description": "Passthrough with SELECT id, * — SQL inference only captures 'id', not the star columns",
+      "path": "models/staging/stg_orders_passthrough.sql",
+      "columns": {
+        "id": { "name": "id" },
+        "user_id": { "name": "user_id" },
+        "order_date": { "name": "order_date" },
+        "status": { "name": "status" }
+      },
+      "compiled_code": "select id, * from `raw`.`orders`",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.mart_yaml_star": {
+      "unique_id": "model.clp.mart_yaml_star",
+      "name": "mart_yaml_star",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": ["model.clp.stg_orders_passthrough"]
+      },
+      "config": { "materialized": "table", "tags": ["marts"] },
+      "description": "Tests YAML column completion: upstream SQL inference is partial, YAML fills the gaps",
+      "path": "models/marts/mart_yaml_star.sql",
+      "columns": {
+        "id": { "name": "id" },
+        "user_id": { "name": "user_id" },
+        "order_date": { "name": "order_date" },
+        "status": { "name": "status" }
+      },
+      "compiled_code": "with source as (\n    select * from \"shop\".\"main\".\"stg_orders_passthrough\"\n)\nselect * from source",
+      "database": "shop",
+      "schema": "main"
+    },
     "model.clp.order_enriched": {
       "unique_id": "model.clp.order_enriched",
       "name": "order_enriched",

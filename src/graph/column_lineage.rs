@@ -292,7 +292,8 @@ pub fn compute_column_lineage(
         let mut names: Vec<String> = node.columns.keys().cloned().collect();
         if names.is_empty() {
             // Infer from compiled SQL
-            names = infer_output_columns(compiled_code, dialect);
+            let schema = build_yaml_schema_for_node(manifest, node);
+            names = infer_output_columns(compiled_code, dialect, schema.as_ref());
         }
         names.sort();
         names
@@ -892,7 +893,7 @@ fn build_schema_from_manifest(
     for dep_id in &node.depends_on.nodes {
         // Try as a node (model/seed/snapshot)
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let col_names = resolve_node_columns(dep_node, dialect);
+            let col_names = resolve_node_columns(dep_node, manifest, dialect);
             if !col_names.is_empty() {
                 let cols: Vec<(String, polyglot_sql::expressions::DataType)> = col_names
                     .iter()
@@ -941,34 +942,112 @@ fn build_schema_from_manifest(
 
 /// Resolve columns for a manifest node.
 ///
-/// Prefers SQL inference (which gives the complete output column list) over YAML columns
-/// (which may be incomplete). Falls back to YAML columns when compiled SQL is unavailable
-/// or SQL inference fails.
+/// Merges SQL-inferred columns with YAML-defined columns to produce the most
+/// complete column list possible. SQL inference alone may miss columns when
+/// upstream models use `SELECT *` that can't be expanded; YAML definitions
+/// alone may be incomplete. The union of both sources maximizes the chance
+/// that `expand_cte_stars` can fully resolve star expressions.
+///
+/// A YAML-only schema of the node's own dependencies is built and passed to
+/// the SQL inference so that `SELECT * FROM <upstream>` can be expanded when
+/// the upstream's columns are defined in YAML. Only YAML columns are used for
+/// the schema to avoid recursion (`build_schema_from_manifest` calls this
+/// function, so calling it back would recurse).
 fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
+    manifest: &Manifest,
     dialect: DialectType,
 ) -> Vec<String> {
-    // Try SQL inference first — gives the complete column list
-    if let Some(ref code) = dep_node.compiled_code {
-        let inferred = infer_output_columns(code, dialect);
-        if !inferred.is_empty() {
-            return inferred;
+    let yaml_cols: HashSet<String> = dep_node.columns.keys().cloned().collect();
+    let inferred_cols: HashSet<String> = dep_node
+        .compiled_code
+        .as_ref()
+        .map(|code| {
+            let schema = build_yaml_schema_for_node(manifest, dep_node);
+            infer_output_columns(code, dialect, schema.as_ref())
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let merged: Vec<String> = yaml_cols.union(&inferred_cols).cloned().collect();
+    merged
+}
+
+/// Build a lightweight schema from YAML-defined columns of a node's direct dependencies.
+///
+/// Unlike `build_schema_from_manifest`, this does NOT call `resolve_node_columns`
+/// (which would cause recursion). It only uses YAML columns from the manifest,
+/// providing enough info for `expand_cte_stars` to resolve `SELECT *` when
+/// upstream tables have YAML column definitions.
+fn build_yaml_schema_for_node(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+) -> Option<polyglot_sql::MappingSchema> {
+    let mut schema = polyglot_sql::MappingSchema::new();
+    let mut has_entries = false;
+
+    for dep_id in &node.depends_on.nodes {
+        if let Some(dep_node) = manifest.nodes.get(dep_id) {
+            if !dep_node.columns.is_empty() {
+                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_node
+                    .columns
+                    .keys()
+                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
+                    .collect();
+                let fq_name = make_fq_table_name(
+                    dep_node.database.as_deref(),
+                    dep_node.schema.as_deref(),
+                    &dep_node.name,
+                );
+                if schema.add_table(&fq_name, &cols, None).is_ok() {
+                    has_entries = true;
+                }
+                if fq_name != dep_node.name {
+                    let _ = schema.add_table(&dep_node.name, &cols, None);
+                }
+            }
+            continue;
+        }
+
+        if let Some(dep_source) = manifest.sources.get(dep_id) {
+            if !dep_source.columns.is_empty() {
+                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
+                    .columns
+                    .keys()
+                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
+                    .collect();
+                if schema.add_table(&dep_source.name, &cols, None).is_ok() {
+                    has_entries = true;
+                }
+            }
         }
     }
-    // Fall back to YAML-defined columns
-    dep_node.columns.keys().cloned().collect()
+
+    if has_entries {
+        Some(schema)
+    } else {
+        None
+    }
 }
 
 /// Infer output column names from a model's compiled SQL by parsing it and extracting
 /// the top-level SELECT column list. Handles CTE patterns by using lineage's
-/// expand_cte_stars logic.
-fn infer_output_columns(sql: &str, dialect: DialectType) -> Vec<String> {
+/// expand_cte_stars logic. When a schema is provided, `SELECT *` from external
+/// tables can be expanded using the schema's column information.
+fn infer_output_columns(
+    sql: &str,
+    dialect: DialectType,
+    schema: Option<&polyglot_sql::MappingSchema>,
+) -> Vec<String> {
     let expr = match polyglot_sql::parse_one(sql, dialect) {
         Ok(e) => e,
         Err(_) => return vec![],
     };
-    // Use polyglot-sql's extract_select_columns to get the output column names
-    crate::parser::columns::extract_select_columns_from_expr(&expr)
+    crate::parser::columns::extract_select_columns_from_expr(
+        &expr,
+        schema.map(|s| s as &dyn polyglot_sql::Schema),
+    )
 }
 
 /// Build a fully-qualified table name from optional database, schema, and table name.
