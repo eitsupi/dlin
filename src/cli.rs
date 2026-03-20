@@ -485,6 +485,33 @@ Examples:
         quiet: bool,
     },
 
+    /// Low-level debugging tools for polyglot-sql parsing and lineage
+    #[command(
+        long_about = "\
+Low-level debugging tools for polyglot-sql parsing and column lineage.
+
+These subcommands operate on raw SQL strings without requiring a dbt project \
+or manifest.json, making them useful for isolating parsing or lineage issues.
+
+Subcommands:
+  parse-sql       Parse SQL and display the AST or regenerated SQL
+  trace-column    Trace a single column's lineage through a SQL statement",
+        after_long_help = "\
+Examples:
+  # Parse SQL and show regenerated output
+  dlin debug parse-sql --sql 'SELECT a, b FROM t' --dialect bigquery
+
+  # Parse SQL from a file
+  dlin debug parse-sql --file query.sql --dialect snowflake
+
+  # Trace a column's lineage
+  dlin debug trace-column --sql 'SELECT t.id AS order_id FROM t' --column order_id
+
+  # Trace with schema information
+  dlin debug trace-column --sql 'SELECT * FROM t' --column id --schema 't:id,name'"
+    )]
+    Debug(DebugArgs),
+
     /// Check if manifest.json is up-to-date (detects stale and deleted files)
     #[command(
         name = "check-manifest",
@@ -543,6 +570,127 @@ pub struct CheckManifestArgs {
     /// Suppress warning messages (exit code only)
     #[arg(short = 'q', long)]
     pub quiet: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DebugArgs {
+    #[command(subcommand)]
+    pub command: DebugCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DebugCommand {
+    /// Parse SQL and display the AST or regenerated SQL
+    #[command(
+        name = "parse-sql",
+        long_about = "\
+Parse a SQL statement using polyglot-sql and display the result.
+
+By default, shows the regenerated SQL (round-trip through the parser). \
+Use --format to choose between regenerated SQL, AST debug output, or JSON AST.
+
+This does not require a dbt project — it operates on raw SQL strings.",
+        after_long_help = "\
+Examples:
+  # Parse and regenerate SQL (default)
+  dlin debug parse-sql --sql 'SELECT a, b FROM t'
+
+  # Show AST debug representation
+  dlin debug parse-sql --sql 'SELECT a FROM t' --format ast
+
+  # Show AST as JSON
+  dlin debug parse-sql --sql 'SELECT a FROM t' --format json
+
+  # Parse with BigQuery dialect
+  dlin debug parse-sql --sql 'SELECT CAST(x AS ARRAY<STRING>) FROM t' --dialect bigquery
+
+  # Parse from file
+  dlin debug parse-sql --file compiled_query.sql --dialect snowflake"
+    )]
+    ParseSql(DebugParseSqlArgs),
+
+    /// Trace a single column's lineage through a SQL statement
+    #[command(
+        name = "trace-column",
+        long_about = "\
+Trace a single column's upstream lineage through a SQL statement.
+
+Uses polyglot-sql's lineage engine to find where a column comes from. \
+Optionally provide table schema information for more accurate resolution \
+(especially needed for SELECT * expansion).
+
+This does not require a dbt project — it operates on raw SQL strings.",
+        after_long_help = "\
+Examples:
+  # Basic column trace
+  dlin debug trace-column --sql 'SELECT t.id AS order_id FROM t' --column order_id
+
+  # With schema (table:col1,col2 format, semicolon-separated tables)
+  dlin debug trace-column \\
+    --sql 'SELECT * FROM orders JOIN customers ON orders.cid = customers.id' \\
+    --column cid \\
+    --schema 'orders:id,cid,amount;customers:id,name'
+
+  # With explicit dialect
+  dlin debug trace-column --sql 'SELECT a FROM t' --column a --dialect bigquery
+
+  # From file
+  dlin debug trace-column --file query.sql --column order_id --dialect snowflake"
+    )]
+    TraceColumn(DebugTraceColumnArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DebugParseSqlArgs {
+    /// SQL string to parse
+    #[arg(long, group = "sql_input")]
+    pub sql: Option<String>,
+
+    /// Path to a SQL file to parse
+    #[arg(long, group = "sql_input")]
+    pub file: Option<PathBuf>,
+
+    /// SQL dialect for parsing (default: generic)
+    #[arg(long, default_value = "generic")]
+    pub dialect: DialectType,
+
+    /// Output format: sql (regenerated SQL), ast (Debug representation), json (JSON AST)
+    #[arg(long, default_value = "sql")]
+    pub format: DebugOutputFormat,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DebugTraceColumnArgs {
+    /// SQL string to parse
+    #[arg(long, group = "sql_input")]
+    pub sql: Option<String>,
+
+    /// Path to a SQL file to parse
+    #[arg(long, group = "sql_input")]
+    pub file: Option<PathBuf>,
+
+    /// Column name to trace
+    #[arg(long)]
+    pub column: String,
+
+    /// SQL dialect for parsing (default: generic)
+    #[arg(long, default_value = "generic")]
+    pub dialect: DialectType,
+
+    /// Table schema definitions for accurate lineage resolution.
+    /// Format: table1:col1,col2;table2:col3,col4
+    #[arg(long)]
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+pub enum DebugOutputFormat {
+    /// Regenerated SQL (round-trip through parser)
+    Sql,
+    /// Rust Debug representation of the AST
+    Ast,
+    /// JSON serialization of the AST
+    Json,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1453,5 +1601,227 @@ mod tests {
             result.is_err(),
             "invalid dialect should be rejected by clap"
         );
+    }
+
+    // -- Debug subcommand tests -----------------------------------------------
+
+    fn unwrap_debug(cli: Cli) -> DebugArgs {
+        match cli.command {
+            Command::Debug(args) => args,
+            _ => panic!("Expected Debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_with_sql_flag() {
+        let args = unwrap_debug(
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--sql", "SELECT 1"]).unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert_eq!(a.sql.as_deref(), Some("SELECT 1"));
+                assert!(a.file.is_none());
+                assert!(matches!(a.format, DebugOutputFormat::Sql));
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_with_file_flag() {
+        let args = unwrap_debug(
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--file", "query.sql"]).unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert!(a.sql.is_none());
+                assert_eq!(a.file.as_deref(), Some(std::path::Path::new("query.sql")));
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_sql_and_file_conflict() {
+        let result = Cli::try_parse_from([
+            "dlin",
+            "debug",
+            "parse-sql",
+            "--sql",
+            "SELECT 1",
+            "--file",
+            "q.sql",
+        ]);
+        assert!(result.is_err(), "--sql and --file should conflict");
+    }
+
+    #[test]
+    fn test_debug_parse_sql_format_ast() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "parse-sql",
+                "--sql",
+                "SELECT 1",
+                "--format",
+                "ast",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert!(matches!(a.format, DebugOutputFormat::Ast));
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_format_json() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "parse-sql",
+                "--sql",
+                "SELECT 1",
+                "--format",
+                "json",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert!(matches!(a.format, DebugOutputFormat::Json));
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_with_dialect() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "parse-sql",
+                "--sql",
+                "SELECT 1",
+                "--dialect",
+                "bigquery",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert_eq!(a.dialect, polyglot_sql::DialectType::BigQuery);
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_parse_sql_default_dialect_is_generic() {
+        let args = unwrap_debug(
+            Cli::try_parse_from(["dlin", "debug", "parse-sql", "--sql", "SELECT 1"]).unwrap(),
+        );
+        match args.command {
+            DebugCommand::ParseSql(ref a) => {
+                assert_eq!(a.dialect, polyglot_sql::DialectType::Generic);
+            }
+            _ => panic!("Expected ParseSql"),
+        }
+    }
+
+    #[test]
+    fn test_debug_trace_column_basic() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "trace-column",
+                "--sql",
+                "SELECT a FROM t",
+                "--column",
+                "a",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::TraceColumn(ref a) => {
+                assert_eq!(a.sql.as_deref(), Some("SELECT a FROM t"));
+                assert_eq!(a.column, "a");
+                assert!(a.schema.is_none());
+                assert_eq!(a.dialect, polyglot_sql::DialectType::Generic);
+            }
+            _ => panic!("Expected TraceColumn"),
+        }
+    }
+
+    #[test]
+    fn test_debug_trace_column_with_schema() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "trace-column",
+                "--sql",
+                "SELECT * FROM t",
+                "--column",
+                "a",
+                "--schema",
+                "t:a,b,c",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::TraceColumn(ref a) => {
+                assert_eq!(a.schema.as_deref(), Some("t:a,b,c"));
+            }
+            _ => panic!("Expected TraceColumn"),
+        }
+    }
+
+    #[test]
+    fn test_debug_trace_column_with_file() {
+        let args = unwrap_debug(
+            Cli::try_parse_from([
+                "dlin",
+                "debug",
+                "trace-column",
+                "--file",
+                "query.sql",
+                "--column",
+                "x",
+            ])
+            .unwrap(),
+        );
+        match args.command {
+            DebugCommand::TraceColumn(ref a) => {
+                assert!(a.sql.is_none());
+                assert_eq!(a.file.as_deref(), Some(std::path::Path::new("query.sql")));
+                assert_eq!(a.column, "x");
+            }
+            _ => panic!("Expected TraceColumn"),
+        }
+    }
+
+    #[test]
+    fn test_debug_trace_column_requires_column() {
+        let result = Cli::try_parse_from([
+            "dlin",
+            "debug",
+            "trace-column",
+            "--sql",
+            "SELECT a FROM t",
+        ]);
+        assert!(result.is_err(), "trace-column should require --column");
+    }
+
+    #[test]
+    fn test_debug_no_subcommand_shows_help() {
+        let result = Cli::try_parse_from(["dlin", "debug"]);
+        assert!(result.is_err());
     }
 }

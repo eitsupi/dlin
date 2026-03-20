@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use polyglot_sql::DialectType;
+use polyglot_sql::{DialectType, Schema as _};
 
 use dlin::cli::{
-    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs,
-    ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, DebugArgs, DebugCommand,
+    DebugOutputFormat, ErrorFormat, GraphArgs, ListArgs, SourceType, SummaryArgs,
+    SummaryOutputFormat,
 };
 use dlin::graph;
 use dlin::input;
@@ -99,6 +100,7 @@ fn main() {
                 refresh_cache,
             )
         }
+        Command::Debug(args) => run_debug_command(args),
         Command::Impact {
             model,
             project_dir,
@@ -976,4 +978,200 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Read SQL input from --sql or --file argument.
+#[cfg(not(tarpaulin_include))]
+fn read_sql_input(sql: Option<&str>, file: Option<&std::path::Path>) -> Result<String> {
+    match (sql, file) {
+        (Some(s), _) => Ok(s.to_string()),
+        (_, Some(f)) => std::fs::read_to_string(f)
+            .map_err(|e| anyhow::anyhow!("cannot read SQL file '{}': {}", f.display(), e)),
+        (None, None) => anyhow::bail!("provide SQL via --sql or --file"),
+    }
+}
+
+/// Run the `debug` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_debug_command(args: DebugArgs) -> Result<()> {
+    match args.command {
+        DebugCommand::ParseSql(args) => run_debug_parse_sql(args),
+        DebugCommand::TraceColumn(args) => run_debug_trace_column(args),
+    }
+}
+
+/// Run `debug parse-sql`
+#[cfg(not(tarpaulin_include))]
+fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
+    let sql = read_sql_input(args.sql.as_deref(), args.file.as_deref())?;
+    let expr = polyglot_sql::parse_one(&sql, args.dialect)
+        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match args.format {
+        DebugOutputFormat::Sql => {
+            let regenerated = polyglot_sql::generate(&expr, args.dialect)
+                .map_err(|e| anyhow::anyhow!("generate error: {}", e))?;
+            use std::io::Write;
+            writeln!(out, "{}", regenerated)?;
+        }
+        DebugOutputFormat::Ast => {
+            use std::io::Write;
+            writeln!(out, "{:#?}", expr)?;
+        }
+        DebugOutputFormat::Json => {
+            use std::io::Write;
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &expr)
+            } else {
+                serde_json::to_writer(&mut out, &expr)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            }
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse a schema string like "table1:col1,col2;table2:col3,col4" into a MappingSchema.
+fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> {
+    let mut schema = polyglot_sql::MappingSchema::new();
+    for table_def in schema_str.split(';') {
+        let table_def = table_def.trim();
+        if table_def.is_empty() {
+            continue;
+        }
+        let (table_name, cols_str) = table_def
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid schema format '{}': expected table:col1,col2", table_def))?;
+        let columns: Vec<(String, polyglot_sql::expressions::DataType)> = cols_str
+            .split(',')
+            .map(|c| {
+                (
+                    c.trim().to_string(),
+                    polyglot_sql::expressions::DataType::Unknown,
+                )
+            })
+            .collect();
+        schema
+            .add_table(table_name.trim(), &columns, None)
+            .map_err(|e| anyhow::anyhow!("schema error: {}", e))?;
+    }
+    Ok(schema)
+}
+
+/// Run `debug trace-column`
+#[cfg(not(tarpaulin_include))]
+fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
+    let sql = read_sql_input(args.sql.as_deref(), args.file.as_deref())?;
+    let mut expr = polyglot_sql::parse_one(&sql, args.dialect)
+        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
+
+    let schema = args
+        .schema
+        .as_deref()
+        .map(parse_schema_string)
+        .transpose()?;
+
+    // Expand CTE stars if schema is provided
+    if let Some(ref s) = schema {
+        polyglot_sql::lineage::expand_cte_stars(
+            &mut expr,
+            Some(s as &dyn polyglot_sql::Schema),
+        );
+    }
+
+    let lineage_result = if let Some(ref s) = schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            &args.column,
+            &expr,
+            Some(s as &dyn polyglot_sql::Schema),
+            Some(args.dialect),
+            false,
+        )
+        .or_else(|_| {
+            polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
+        })
+    } else {
+        polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
+    };
+
+    match lineage_result {
+        Ok(node) => {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &node)
+            } else {
+                serde_json::to_writer(&mut out, &node)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            }
+            use std::io::Write;
+            writeln!(out)?;
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("lineage error: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyglot_sql::Schema;
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn test_parse_schema_string_single_table() {
+        let schema = parse_schema_string("t:a,b,c").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_multiple_tables() {
+        let schema = parse_schema_string("orders:id,amount;customers:id,name").unwrap();
+        let order_cols = schema.column_names("orders").unwrap();
+        assert_eq!(sorted(order_cols), vec!["amount", "id"]);
+        let cust_cols = schema.column_names("customers").unwrap();
+        assert_eq!(sorted(cust_cols), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_whitespace_tolerance() {
+        let schema = parse_schema_string(" t : a , b ; u : x ").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b"]);
+        let cols2 = schema.column_names("u").unwrap();
+        assert_eq!(cols2, vec!["x"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_empty() {
+        let schema = parse_schema_string("").unwrap();
+        assert!(schema.column_names("t").is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_invalid_format() {
+        let result = parse_schema_string("no_colon");
+        assert!(result.is_err());
+    }
 }
