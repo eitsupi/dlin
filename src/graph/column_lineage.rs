@@ -334,8 +334,11 @@ pub fn compute_column_impact(
 
     let mut impacted = Vec::new();
     let mut errors = Vec::new();
-    let mut visited = HashSet::new();
-    visited.insert(model_name.to_string());
+    // Track (model, column) pairs to avoid re-processing the same column through
+    // the same model, while still allowing different columns to flow through a
+    // shared intermediate model independently.
+    let mut visited: HashSet<(String, String)> = HashSet::new();
+    visited.insert((model_name.to_string(), column_name.to_string()));
 
     // Seed: find direct dependents of the target model
     // and check which of their columns reference target model+column
@@ -350,10 +353,6 @@ pub fn compute_column_impact(
         };
 
         for dep_model in dependents {
-            if visited.contains(dep_model) {
-                continue;
-            }
-
             let lineage = compute_column_lineage(manifest, dep_model, dialect);
             for err in &lineage.errors {
                 if !errors.contains(err) {
@@ -362,6 +361,11 @@ pub fn compute_column_impact(
             }
 
             for entry in &lineage.columns {
+                let pair = (dep_model.clone(), entry.column.clone());
+                if visited.contains(&pair) {
+                    continue;
+                }
+
                 // Check if any source of this column references the source model+column
                 let references_source = entry.sources.iter().any(|s| {
                     let table_matches = s.table == source_model
@@ -370,6 +374,8 @@ pub fn compute_column_impact(
                 });
 
                 if references_source {
+                    visited.insert(pair);
+
                     let mut path = current_path.clone();
                     path.push(dep_model.clone());
 
@@ -384,8 +390,6 @@ pub fn compute_column_impact(
                     queue.push((dep_model.clone(), entry.column.clone(), path));
                 }
             }
-
-            visited.insert(dep_model.clone());
         }
     }
 
@@ -447,10 +451,12 @@ fn compute_cross_model_inner(
 
     // For each column, resolve sources through upstream models.
     // Each column gets its own visited set to avoid cross-column interference.
+    // Tracks (model, column) pairs so different columns through a shared upstream
+    // model are independently resolved.
     for entry in &mut result.columns {
         let mut resolved_sources = Vec::new();
-        let mut visited = HashSet::new();
-        visited.insert(model_name.to_string());
+        let mut visited: HashSet<(String, String)> = HashSet::new();
+        visited.insert((model_name.to_string(), entry.column.clone()));
 
         for source in &entry.sources {
             resolve_source_recursive(
@@ -528,7 +534,7 @@ fn normalize_table_name(table: &str) -> String {
 fn resolve_source_recursive(
     source: &ColumnSource,
     upstream_models: &HashMap<String, String>,
-    visited: &mut HashSet<String>,
+    visited: &mut HashSet<(String, String)>,
     resolved: &mut Vec<ColumnSource>,
     errors: &mut Vec<String>,
     ctx: &mut CrossModelContext<'_>,
@@ -544,8 +550,12 @@ fn resolve_source_recursive(
         })
         .cloned();
 
+    let pair = model_name
+        .as_ref()
+        .map(|name| (name.clone(), source.column.clone()));
+
     let model_name = match model_name {
-        Some(name) if !visited.contains(&name) => name,
+        Some(name) if !visited.contains(&(name.clone(), source.column.clone())) => name,
         _ => {
             // Source is a raw table, a dbt source, or already visited (cycle) — leaf
             let mut leaf = source.clone();
@@ -555,8 +565,10 @@ fn resolve_source_recursive(
         }
     };
 
-    // Mark as visited to prevent re-entry in diamond dependencies (A → B → D, A → C → D)
-    visited.insert(model_name.clone());
+    // Mark as visited to prevent re-entry for the same (model, column) pair
+    // in diamond dependencies. Different columns through the same model are
+    // resolved independently.
+    visited.insert(pair.unwrap());
 
     // Extend the path with the current upstream model
     let mut extended_path = current_path.to_vec();
