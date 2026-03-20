@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use polyglot_sql::DialectType;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -383,6 +384,10 @@ Examples:
         #[arg(long)]
         column: Vec<String>,
 
+        /// SQL dialect for parsing [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+        #[arg(long)]
+        dialect: Option<DialectType>,
+
         /// Path to dbt project directory
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
         project_dir: PathBuf,
@@ -434,6 +439,10 @@ Examples:
         /// Columns to analyze impact for (required)
         #[arg(long, required = true)]
         column: Vec<String>,
+
+        /// SQL dialect for parsing [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+        #[arg(long)]
+        dialect: Option<DialectType>,
 
         /// Path to dbt project directory
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1271,5 +1280,68 @@ mod tests {
             }
             _ => panic!("Expected ColumnImpact subcommand"),
         }
+    }
+
+    #[test]
+    fn test_column_lineage_with_dialect() {
+        let cli = Cli::try_parse_from([
+            "dlin", "column-lineage", "orders", "--dialect", "bigquery",
+        ]).unwrap();
+        match cli.command {
+            Command::ColumnLineage { dialect, .. } => {
+                assert_eq!(dialect, Some(polyglot_sql::DialectType::BigQuery));
+            }
+            _ => panic!("Expected ColumnLineage subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_lineage_default_dialect() {
+        let cli = Cli::try_parse_from(["dlin", "column-lineage", "orders"]).unwrap();
+        match cli.command {
+            Command::ColumnLineage { dialect, .. } => {
+                assert!(dialect.is_none());
+            }
+            _ => panic!("Expected ColumnLineage subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_column_impact_with_dialect() {
+        let cli = Cli::try_parse_from([
+            "dlin", "column-impact", "stg_orders", "--column", "order_id", "--dialect", "snowflake",
+        ]).unwrap();
+        match cli.command {
+            Command::ColumnImpact { dialect, .. } => {
+                assert_eq!(dialect, Some(polyglot_sql::DialectType::Snowflake));
+            }
+            _ => panic!("Expected ColumnImpact subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_dialect_all_known_values_parse() {
+        let dialects = [
+            "bigquery", "snowflake", "postgres", "redshift", "databricks",
+            "spark", "trino", "duckdb", "mysql", "clickhouse", "oracle",
+            "hive", "sqlite", "presto", "athena", "teradata", "doris",
+            "starrocks", "materialize", "risingwave", "singlestore",
+            "cockroachdb", "tidb", "tsql", "druid", "solr", "tableau",
+            "dune", "fabric", "drill", "dremio", "exasol", "datafusion",
+        ];
+        for dialect in dialects {
+            let cli = Cli::try_parse_from([
+                "dlin", "column-lineage", "model", "--dialect", dialect,
+            ]);
+            assert!(cli.is_ok(), "dialect '{}' should parse successfully, got: {:?}", dialect, cli.err());
+        }
+    }
+
+    #[test]
+    fn test_dialect_invalid_value_rejected() {
+        let result = Cli::try_parse_from([
+            "dlin", "column-lineage", "model", "--dialect", "unknown_db",
+        ]);
+        assert!(result.is_err(), "invalid dialect should be rejected by clap");
     }
 }

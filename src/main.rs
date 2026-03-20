@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
+use polyglot_sql::DialectType;
 
 use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat};
 use dlin::graph;
@@ -52,22 +53,24 @@ fn main() {
         Command::ColumnLineage {
             model,
             column,
+            dialect,
             project_dir,
             manifest_path,
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_column_lineage_command(model, &column, &project_dir, manifest_path.as_ref())
+            run_column_lineage_command(model, &column, dialect, &project_dir, manifest_path.as_ref())
         }
         Command::ColumnImpact {
             model,
             column,
+            dialect,
             project_dir,
             manifest_path,
             quiet,
         } => {
             dlin::set_quiet(quiet);
-            run_column_impact_command(&model, &column, &project_dir, manifest_path.as_ref())
+            run_column_impact_command(&model, &column, dialect, &project_dir, manifest_path.as_ref())
         }
         Command::Impact {
             model,
@@ -487,9 +490,12 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 fn run_column_lineage_command(
     models: Vec<String>,
     columns: &[String],
+    dialect: Option<DialectType>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
 ) -> Result<()> {
+    let dialect = dialect.unwrap_or(DialectType::Generic);
+
     if models.is_empty() {
         anyhow::bail!("no model names provided (specify as arguments)");
     }
@@ -507,7 +513,7 @@ fn run_column_lineage_command(
         .iter()
         .map(|model| {
             let mut report =
-                graph::column_lineage::compute_cross_model_column_lineage(&manifest, model);
+                graph::column_lineage::compute_cross_model_column_lineage(&manifest, model, dialect);
             if !column_filter.is_empty() {
                 report
                     .columns
@@ -551,9 +557,12 @@ fn run_column_lineage_command(
 fn run_column_impact_command(
     model: &str,
     columns: &[String],
+    dialect: Option<DialectType>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
 ) -> Result<()> {
+    let dialect = dialect.unwrap_or(DialectType::Generic);
+
     if columns.is_empty() {
         anyhow::bail!("no columns specified (use --column)");
     }
@@ -567,7 +576,7 @@ fn run_column_impact_command(
 
     let reports: Vec<_> = columns
         .iter()
-        .map(|col| graph::column_lineage::compute_column_impact(&manifest, model, col))
+        .map(|col| graph::column_lineage::compute_column_impact(&manifest, model, col, dialect))
         .collect();
 
     // Print warnings for errors

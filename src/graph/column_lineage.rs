@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use polyglot_sql::{Expression, Schema};
+use polyglot_sql::{DialectType, Expression, Schema};
 use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
@@ -80,7 +80,11 @@ pub struct ImpactedColumn {
 ///
 /// Takes the manifest and a model name (short label like "orders"),
 /// and returns the column lineage for that model.
-pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelColumnLineage {
+pub fn compute_column_lineage(
+    manifest: &Manifest,
+    model_name: &str,
+    dialect: DialectType,
+) -> ModelColumnLineage {
     // Find the node in the manifest
     let node = manifest
         .nodes
@@ -117,7 +121,7 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         let mut names: Vec<String> = node.columns.keys().cloned().collect();
         if names.is_empty() {
             // Infer from compiled SQL
-            names = infer_output_columns(compiled_code);
+            names = infer_output_columns(compiled_code, dialect);
         }
         names.sort();
         names
@@ -134,7 +138,7 @@ pub fn compute_column_lineage(manifest: &Manifest, model_name: &str) -> ModelCol
         };
     }
 
-    let ctx = match prepare_lineage_context(compiled_code, manifest, node) {
+    let ctx = match prepare_lineage_context(compiled_code, manifest, node, dialect) {
         Ok(ctx) => ctx,
         Err(e) => {
             return ModelColumnLineage {
@@ -197,11 +201,12 @@ fn prepare_lineage_context(
     compiled_code: &str,
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
+    dialect: DialectType,
 ) -> Result<LineageContext, String> {
-    let expr = polyglot_sql::parse_one(compiled_code, polyglot_sql::DialectType::Generic)
+    let expr = polyglot_sql::parse_one(compiled_code, dialect)
         .map_err(|e| format!("{}", e))?;
 
-    let schema = build_schema_from_manifest(manifest, node);
+    let schema = build_schema_from_manifest(manifest, node, dialect);
 
     // Pre-expand CTE stars using schema for external table column lookup.
     // This is done before lineage() because qualify_columns may fail on complex
@@ -285,12 +290,14 @@ fn format_lineage_error(e: &polyglot_sql::Error) -> String {
 pub fn compute_cross_model_column_lineage(
     manifest: &Manifest,
     model_name: &str,
+    dialect: DialectType,
 ) -> ModelColumnLineage {
     // Track models currently being computed to detect cycles (A → B → A).
     // This is separate from the per-column visited set which prevents
     // self-references within a single resolution path.
     let mut ctx = CrossModelContext {
         manifest,
+        dialect,
         cache: HashMap::new(),
         computing: HashSet::new(),
     };
@@ -306,6 +313,7 @@ pub fn compute_column_impact(
     manifest: &Manifest,
     model_name: &str,
     column_name: &str,
+    dialect: DialectType,
 ) -> ColumnImpactReport {
     // Verify the model exists
     let model_exists = manifest
@@ -346,7 +354,7 @@ pub fn compute_column_impact(
                 continue;
             }
 
-            let lineage = compute_column_lineage(manifest, dep_model);
+            let lineage = compute_column_lineage(manifest, dep_model, dialect);
             for err in &lineage.errors {
                 if !errors.contains(err) {
                     errors.push(err.clone());
@@ -421,6 +429,7 @@ fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String
 /// Shared context for cross-model resolution to avoid passing many arguments.
 struct CrossModelContext<'a> {
     manifest: &'a Manifest,
+    dialect: DialectType,
     cache: HashMap<String, ModelColumnLineage>,
     computing: HashSet<String>,
 }
@@ -430,7 +439,7 @@ fn compute_cross_model_inner(
     ctx: &mut CrossModelContext<'_>,
 ) -> ModelColumnLineage {
     // Compute single-model lineage first
-    let mut result = compute_column_lineage(ctx.manifest, model_name);
+    let mut result = compute_column_lineage(ctx.manifest, model_name, ctx.dialect);
 
     // Build a mapping: table name (as appears in SQL output) → model name
     // for the current model's upstream dependencies
@@ -600,7 +609,7 @@ fn resolve_source_recursive(
     } else {
         // Column not in precomputed lineage (e.g. not in YAML columns).
         // Try on-demand single-column lineage from the upstream model's SQL.
-        let on_demand = compute_single_column_lineage(ctx.manifest, &model_name, &source.column);
+        let on_demand = compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
         if on_demand.is_empty() {
             // Cannot resolve — keep as leaf
             let mut leaf = source.clone();
@@ -632,6 +641,7 @@ fn compute_single_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     column_name: &str,
+    dialect: DialectType,
 ) -> Vec<ColumnSource> {
     let node = manifest
         .nodes
@@ -648,7 +658,7 @@ fn compute_single_column_lineage(
         None => return vec![],
     };
 
-    let ctx = match prepare_lineage_context(compiled_code, manifest, node) {
+    let ctx = match prepare_lineage_context(compiled_code, manifest, node, dialect) {
         Ok(ctx) => ctx,
         Err(_) => return vec![],
     };
@@ -670,6 +680,7 @@ fn compute_single_column_lineage(
 fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
+    dialect: DialectType,
 ) -> Option<polyglot_sql::MappingSchema> {
     let mut schema = polyglot_sql::MappingSchema::new();
     let mut has_entries = false;
@@ -678,7 +689,7 @@ fn build_schema_from_manifest(
     for dep_id in &node.depends_on.nodes {
         // Try as a node (model/seed/snapshot)
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let col_names = resolve_node_columns(dep_node);
+            let col_names = resolve_node_columns(dep_node, dialect);
             if !col_names.is_empty() {
                 let cols: Vec<(String, polyglot_sql::expressions::DataType)> = col_names
                     .iter()
@@ -730,10 +741,10 @@ fn build_schema_from_manifest(
 /// Prefers SQL inference (which gives the complete output column list) over YAML columns
 /// (which may be incomplete). Falls back to YAML columns when compiled SQL is unavailable
 /// or SQL inference fails.
-fn resolve_node_columns(dep_node: &crate::parser::manifest::ManifestNode) -> Vec<String> {
+fn resolve_node_columns(dep_node: &crate::parser::manifest::ManifestNode, dialect: DialectType) -> Vec<String> {
     // Try SQL inference first — gives the complete column list
     if let Some(ref code) = dep_node.compiled_code {
-        let inferred = infer_output_columns(code);
+        let inferred = infer_output_columns(code, dialect);
         if !inferred.is_empty() {
             return inferred;
         }
@@ -745,8 +756,8 @@ fn resolve_node_columns(dep_node: &crate::parser::manifest::ManifestNode) -> Vec
 /// Infer output column names from a model's compiled SQL by parsing it and extracting
 /// the top-level SELECT column list. Handles CTE patterns by using lineage's
 /// expand_cte_stars logic.
-fn infer_output_columns(sql: &str) -> Vec<String> {
-    let expr = match polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic) {
+fn infer_output_columns(sql: &str, dialect: DialectType) -> Vec<String> {
+    let expr = match polyglot_sql::parse_one(sql, dialect) {
         Ok(e) => e,
         Err(_) => return vec![],
     };
@@ -932,7 +943,7 @@ mod tests {
     #[test]
     fn test_rename_detection() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         assert_eq!(result.model, "stg_orders");
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -954,7 +965,7 @@ mod tests {
     #[test]
     fn test_join_lineage() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "orders");
+        let result = compute_column_lineage(&manifest, "orders", DialectType::Generic);
 
         assert_eq!(result.model, "orders");
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -973,7 +984,7 @@ mod tests {
     #[test]
     fn test_model_not_found() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "nonexistent");
+        let result = compute_column_lineage(&manifest, "nonexistent", DialectType::Generic);
 
         assert_eq!(result.columns.len(), 0);
         assert!(!result.errors.is_empty());
@@ -985,7 +996,7 @@ mod tests {
         let mut manifest = make_test_manifest();
         // Remove compiled_code from stg_orders
         manifest.nodes.get_mut("model.proj.stg_orders").unwrap().compiled_code = None;
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         assert!(result.columns.is_empty());
         assert!(result.errors[0].contains("compiled_code"));
@@ -996,7 +1007,7 @@ mod tests {
         // When YAML columns are empty, column names should be inferred from compiled SQL
         let mut manifest = make_test_manifest();
         manifest.nodes.get_mut("model.proj.stg_orders").unwrap().columns.clear();
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         // SQL inference should find: customer_id, order_date, order_id, status
         assert_eq!(result.columns.len(), 4, "should infer 4 columns from SQL: {:?}", result.errors);
@@ -1010,7 +1021,7 @@ mod tests {
         let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
         node.columns.clear();
         node.compiled_code = Some("INVALID SQL %%%".to_string());
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         assert!(result.columns.is_empty());
         assert!(!result.errors.is_empty());
@@ -1056,7 +1067,7 @@ mod tests {
         )
         select * from renamed"#;
         manifest.nodes.get_mut("model.proj.stg_orders").unwrap().compiled_code = Some(sql.to_string());
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 4);
@@ -1129,7 +1140,7 @@ select * from orders"#;
     #[test]
     fn test_json_serialization() {
         let manifest = make_test_manifest();
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["model"], "stg_orders");
@@ -1273,7 +1284,7 @@ select * from orders"#;
     fn test_cross_model_single_hop() {
         // orders.order_id → stg_orders.order_id → raw.orders.id
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "orders");
+        let result = compute_cross_model_column_lineage(&manifest, "orders", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
@@ -1297,7 +1308,7 @@ select * from orders"#;
     fn test_cross_model_two_hops() {
         // customers.customer_id → orders.customer_id → stg_orders.customer_id → raw.orders.user_id
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers");
+        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
@@ -1325,7 +1336,7 @@ select * from orders"#;
     fn test_cross_model_join_sources() {
         // orders.total_amount → stg_payments.amount → raw.payments.amount
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "orders");
+        let result = compute_cross_model_column_lineage(&manifest, "orders", DialectType::Generic);
 
         let total_amount = result.columns.iter().find(|c| c.column == "total_amount").unwrap();
         assert!(
@@ -1346,8 +1357,8 @@ select * from orders"#;
     fn test_cross_model_source_table_is_leaf() {
         // stg_orders directly references a source — cross-model should not change the result
         let manifest = make_cross_model_manifest();
-        let single = compute_column_lineage(&manifest, "stg_orders");
-        let cross = compute_cross_model_column_lineage(&manifest, "stg_orders");
+        let single = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
+        let cross = compute_cross_model_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         assert_eq!(single.columns.len(), cross.columns.len());
         for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
@@ -1359,7 +1370,7 @@ select * from orders"#;
     #[test]
     fn test_cross_model_model_not_found() {
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "nonexistent");
+        let result = compute_cross_model_column_lineage(&manifest, "nonexistent", DialectType::Generic);
         assert!(!result.errors.is_empty());
         assert!(result.errors[0].contains("not found"));
     }
@@ -1419,7 +1430,7 @@ select * from orders"#;
                 name: "nonexistent_col".to_string(),
             },
         );
-        let result = compute_column_lineage(&manifest, "stg_orders");
+        let result = compute_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         // Should have 4 successful columns and 1 failed
         assert_eq!(result.columns.len(), 4);
@@ -1439,7 +1450,7 @@ select * from orders"#;
     fn test_transformation_classification() {
         // customers model has: customer_id (direct) and order_count (aggregation via count(*))
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers");
+        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
@@ -1462,7 +1473,7 @@ select * from orders"#;
     fn test_source_table_has_empty_model_path() {
         // stg_orders references raw source directly — model_path should be empty
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "stg_orders");
+        let result = compute_cross_model_column_lineage(&manifest, "stg_orders", DialectType::Generic);
 
         for entry in &result.columns {
             for source in &entry.sources {
@@ -1480,7 +1491,7 @@ select * from orders"#;
     #[test]
     fn test_json_includes_new_fields() {
         let manifest = make_cross_model_manifest();
-        let result = compute_cross_model_column_lineage(&manifest, "customers");
+        let result = compute_cross_model_column_lineage(&manifest, "customers", DialectType::Generic);
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -1577,7 +1588,7 @@ select * from orders"#;
         });
 
         let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_items");
+        let result = compute_cross_model_column_lineage(&manifest, "mart_items", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.columns.len(), 2);
@@ -1709,7 +1720,7 @@ select * from orders"#;
         });
 
         let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_users");
+        let result = compute_cross_model_column_lineage(&manifest, "mart_users", DialectType::Generic);
 
         // All 4 columns should resolve without errors
         assert!(
@@ -1847,7 +1858,7 @@ select * from orders"#;
         });
 
         let manifest = Manifest { nodes, sources, exposures: HashMap::new() };
-        let result = compute_cross_model_column_lineage(&manifest, "mart_users");
+        let result = compute_cross_model_column_lineage(&manifest, "mart_users", DialectType::Generic);
 
         // All 4 columns should resolve without errors
         assert!(
@@ -1881,7 +1892,7 @@ select * from orders"#;
     fn test_column_impact_direct_dependent() {
         // stg_orders.order_id is used by orders.order_id
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "order_id");
+        let result = compute_column_impact(&manifest, "stg_orders", "order_id", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(
@@ -1896,7 +1907,7 @@ select * from orders"#;
         // stg_orders.order_id → orders.order_id → customers (via count)
         // stg_orders.customer_id → orders.customer_id → customers.customer_id
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "customer_id");
+        let result = compute_column_impact(&manifest, "stg_orders", "customer_id", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         // orders.customer_id should be impacted (direct dependent)
@@ -1916,7 +1927,7 @@ select * from orders"#;
     #[test]
     fn test_column_impact_model_path() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "customer_id");
+        let result = compute_column_impact(&manifest, "stg_orders", "customer_id", DialectType::Generic);
 
         // customers.customer_id goes through orders
         let cust = result.impacted_columns.iter()
@@ -1933,7 +1944,7 @@ select * from orders"#;
     fn test_column_impact_no_dependents() {
         // customers is a leaf model — no downstream
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "customers", "customer_id");
+        let result = compute_column_impact(&manifest, "customers", "customer_id", DialectType::Generic);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(
@@ -1946,7 +1957,7 @@ select * from orders"#;
     #[test]
     fn test_column_impact_model_not_found() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "nonexistent", "col");
+        let result = compute_column_impact(&manifest, "nonexistent", "col", DialectType::Generic);
 
         assert!(!result.errors.is_empty());
         assert!(result.errors[0].contains("not found"));
@@ -1955,7 +1966,7 @@ select * from orders"#;
     #[test]
     fn test_column_impact_json_serialization() {
         let manifest = make_cross_model_manifest();
-        let result = compute_column_impact(&manifest, "stg_orders", "order_id");
+        let result = compute_column_impact(&manifest, "stg_orders", "order_id", DialectType::Generic);
         let json = serde_json::to_string_pretty(&result).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
