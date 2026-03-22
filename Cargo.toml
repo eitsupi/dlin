@@ -1,6 +1,6 @@
 [package]
 name = "dlin"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 edition = "2021"
 description = "A fast CLI tool for dbt model lineage analysis"
 license = "MIT"
@@ -44,6 +44,14 @@ crossterm = { version = "0.28", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "s"
+panic = "abort"
 
 [dev-dependencies]
 tempfile = "3"
