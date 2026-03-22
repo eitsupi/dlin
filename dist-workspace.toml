@@ -4,18 +4,18 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.31.0"
 ci = "github"
-installers = ["shell", "powershell"]
+installers = ["shell"]
 targets = [
   "aarch64-apple-darwin",
   "aarch64-unknown-linux-gnu",
   "x86_64-apple-darwin",
   "x86_64-unknown-linux-gnu",
-  "x86_64-pc-windows-msvc",
-  "aarch64-pc-windows-msvc",
+  # "x86_64-pc-windows-msvc",
+  # "aarch64-pc-windows-msvc",
 ]
 install-path = "CARGO_HOME"
 install-updater = false
 
 [dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
-aarch64-pc-windows-msvc = "windows-11-arm"
+# aarch64-pc-windows-msvc = "windows-11-arm"
