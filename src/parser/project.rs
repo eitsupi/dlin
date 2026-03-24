@@ -196,12 +196,15 @@ analysis-paths: ["analyses", "custom_analyses"]
     fn test_resolve_paths() {
         let yaml = "name: my_project\n";
         let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
-        let paths = project.resolve_paths(Path::new("/proj"));
-        assert_eq!(paths.model_paths, vec![PathBuf::from("/proj/models")]);
-        assert_eq!(paths.seed_paths, vec![PathBuf::from("/proj/seeds")]);
-        assert_eq!(paths.snapshot_paths, vec![PathBuf::from("/proj/snapshots")]);
-        assert_eq!(paths.test_paths, vec![PathBuf::from("/proj/tests")]);
-        assert_eq!(paths.macro_paths, vec![PathBuf::from("/proj/macros")]);
-        assert_eq!(paths.analysis_paths, vec![PathBuf::from("/proj/analyses")]);
+        let base = Path::new("/proj");
+        let paths = project.resolve_paths(base);
+        // resolve_paths normalizes paths, so expected values must also be normalized
+        let expected = |name: &str| vec![normalize_path(&base.join(name))];
+        assert_eq!(paths.model_paths, expected("models"));
+        assert_eq!(paths.seed_paths, expected("seeds"));
+        assert_eq!(paths.snapshot_paths, expected("snapshots"));
+        assert_eq!(paths.test_paths, expected("tests"));
+        assert_eq!(paths.macro_paths, expected("macros"));
+        assert_eq!(paths.analysis_paths, expected("analyses"));
     }
 }
