@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 
-use dlin::cli::{self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat};
+use dlin::cli::{
+    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs,
+    ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+};
 use dlin::graph;
 use dlin::input;
 use dlin::parser;
@@ -65,9 +68,20 @@ fn main() {
             let mut raw_inputs = model;
             raw_inputs.extend(stdin_lines);
             if raw_inputs.is_empty() {
-                Err(anyhow::anyhow!("no model names provided (specify as arguments or via stdin)"))
+                Err(anyhow::anyhow!(
+                    "no model names provided (specify as arguments or via stdin)"
+                ))
             } else {
-                run_impact_command(raw_inputs, &project_dir, &output, &source, manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)
+                run_impact_command(
+                    raw_inputs,
+                    &project_dir,
+                    &output,
+                    &source,
+                    manifest_path.as_ref(),
+                    cache_dir.as_deref(),
+                    no_cache,
+                    refresh_cache,
+                )
             }
         }
     };
@@ -84,15 +98,19 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     let cache_dir = args.cache_dir;
     let no_cache = args.no_cache;
     let refresh_cache = args.refresh_cache;
-    let project_dir = args
-        .project_dir
-        .canonicalize()
-        .unwrap_or(args.project_dir);
+    let project_dir = args.project_dir.canonicalize().unwrap_or(args.project_dir);
 
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)?;
+    let (dag, manifest) = build_dag(
+        &project_dir,
+        &args.source,
+        args.manifest_path.as_ref(),
+        cache_dir.as_deref(),
+        no_cache,
+        refresh_cache,
+    )?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -116,32 +134,33 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         .unwrap_or_default();
 
     // Filter graph
-    let filtered = graph::filter::filter_graph(
-        &dag,
-        &models,
-        args.upstream,
-        args.downstream,
-        &selectors,
-    )?;
+    let filtered =
+        graph::filter::filter_graph(&dag, &models, args.upstream, args.downstream, &selectors)?;
 
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
-        dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+        dlin::warn!(
+            "unknown node type '{}'. Known types: {}",
+            t,
+            graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
+        );
     }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
 
     // Resolve JSON fields
-    let json_fields = render::json::resolve_graph_fields(
-        args.json_fields.as_deref(),
-        args.json_full,
-    ).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let json_fields =
+        render::json::resolve_graph_fields(args.json_fields.as_deref(), args.json_full)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Warn if --json-fields/--json-full used with non-JSON output
     if !matches!(args.output, cli::OutputFormat::Json)
         && (args.json_fields.is_some() || args.json_full)
     {
-        dlin::warn!("--json-fields/--json-full have no effect with -o {}", args.output.label());
+        dlin::warn!(
+            "--json-fields/--json-full have no effect with -o {}",
+            args.output.label()
+        );
     }
 
     // Collect SQL contents only when sql_content field is requested
@@ -166,14 +185,18 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     let cache_dir = args.cache_dir;
     let no_cache = args.no_cache;
     let refresh_cache = args.refresh_cache;
-    let project_dir = args
-        .project_dir
-        .canonicalize()
-        .unwrap_or(args.project_dir);
+    let project_dir = args.project_dir.canonicalize().unwrap_or(args.project_dir);
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), cache_dir.as_deref(), no_cache, refresh_cache)?;
+    let (dag, manifest) = build_dag(
+        &project_dir,
+        &args.source,
+        args.manifest_path.as_ref(),
+        cache_dir.as_deref(),
+        no_cache,
+        refresh_cache,
+    )?;
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -202,26 +225,23 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     } else {
         (Some(0), Some(0))
     };
-    let filtered = graph::filter::filter_graph(
-        &dag,
-        &models,
-        upstream,
-        downstream,
-        &selectors,
-    )?;
+    let filtered = graph::filter::filter_graph(&dag, &models, upstream, downstream, &selectors)?;
 
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
-        dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
+        dlin::warn!(
+            "unknown node type '{}'. Known types: {}",
+            t,
+            graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
+        );
     }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
 
     // Resolve JSON fields for list
-    let json_fields = render::list::resolve_list_fields(
-        args.json_fields.as_deref(),
-        args.json_full,
-    ).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let json_fields =
+        render::list::resolve_list_fields(args.json_fields.as_deref(), args.json_full)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if !matches!(args.output, cli::ListOutputFormat::Json)
         && (args.json_fields.is_some() || args.json_full)
@@ -258,7 +278,10 @@ fn build_dag(
     cache_dir: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
-) -> Result<(graph::types::LineageGraph, Option<parser::manifest::Manifest>)> {
+) -> Result<(
+    graph::types::LineageGraph,
+    Option<parser::manifest::Manifest>,
+)> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
@@ -270,7 +293,14 @@ fn build_dag(
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            let graph = graph::builder::build_graph(project_dir, &files, cache_dir, no_cache, refresh_cache, &project.vars)?;
+            let graph = graph::builder::build_graph(
+                project_dir,
+                &files,
+                cache_dir,
+                no_cache,
+                refresh_cache,
+                &project.vars,
+            )?;
             Ok((graph, None))
         }
     }
@@ -338,6 +368,7 @@ fn collect_sql_contents(
 
 /// Run the `impact` subcommand
 #[cfg(not(tarpaulin_include))]
+#[allow(clippy::too_many_arguments)]
 fn run_impact_command(
     raw_inputs: Vec<String>,
     project_dir: &Path,
@@ -353,7 +384,14 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, _manifest) = build_dag(&project_dir, source, manifest_path, cache_dir, no_cache, refresh_cache)?;
+    let (dag, _manifest) = build_dag(
+        &project_dir,
+        source,
+        manifest_path,
+        cache_dir,
+        no_cache,
+        refresh_cache,
+    )?;
 
     // Resolve file paths to model names (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {
@@ -375,10 +413,7 @@ fn run_impact_command(
         .collect();
 
     if reports.is_empty() {
-        anyhow::bail!(
-            "no models found matching: {}",
-            models.join(", ")
-        );
+        anyhow::bail!("no models found matching: {}", models.join(", "));
     }
 
     match output {
@@ -396,12 +431,12 @@ fn run_impact_command(
 /// Validate that --source and --manifest-path flags are consistent.
 #[cfg(not(tarpaulin_include))]
 fn validate_source_flags(source: &SourceType, manifest_path: Option<&PathBuf>) -> Result<()> {
-    if let SourceType::Sql = source {
-        if manifest_path.is_some() {
-            anyhow::bail!(
-                "--manifest-path cannot be used with --source sql; did you mean --source manifest?"
-            );
-        }
+    if let SourceType::Sql = source
+        && manifest_path.is_some()
+    {
+        anyhow::bail!(
+            "--manifest-path cannot be used with --source sql; did you mean --source manifest?"
+        );
     }
     Ok(())
 }
@@ -453,10 +488,13 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 /// Run the `summary` subcommand
 #[cfg(not(tarpaulin_include))]
 fn run_summary_command(args: SummaryArgs) -> Result<()> {
-    let project_dir = args
-        .project_dir
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("cannot resolve project directory '{}': {}", args.project_dir.display(), e))?;
+    let project_dir = args.project_dir.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "cannot resolve project directory '{}': {}",
+            args.project_dir.display(),
+            e
+        )
+    })?;
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
@@ -464,13 +502,21 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
     let vars_count = project.vars.len();
     let project_name = project.name.clone();
 
-    let (dag, _manifest) = build_dag(&project_dir, &args.source, args.manifest_path.as_ref(), args.cache_dir.as_deref(), args.no_cache, args.refresh_cache)?;
+    let (dag, _manifest) = build_dag(
+        &project_dir,
+        &args.source,
+        args.manifest_path.as_ref(),
+        args.cache_dir.as_deref(),
+        args.no_cache,
+        args.refresh_cache,
+    )?;
 
     let node_counts = render::summary::count_nodes(&dag);
     let edge_count = dag.edge_count();
 
     // Check manifest freshness (best-effort)
-    let manifest_status = check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
+    let manifest_status =
+        check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
 
     let report = render::summary::SummaryReport {
         project_name,
@@ -539,7 +585,9 @@ fn check_manifest_freshness(
     };
 
     let mut stale_files: Vec<String> = Vec::new();
-    let all_files = files.model_sql_files.iter()
+    let all_files = files
+        .model_sql_files
+        .iter()
         .chain(files.macro_sql_files.iter())
         .chain(files.seed_files.iter())
         .chain(files.snapshot_sql_files.iter())
@@ -547,13 +595,12 @@ fn check_manifest_freshness(
         .chain(files.yaml_files.iter());
 
     for file in all_files {
-        if let Ok(meta) = std::fs::metadata(file) {
-            if let Ok(mtime) = meta.modified() {
-                if mtime > manifest_mtime {
-                    let rel = file.strip_prefix(project_dir).unwrap_or(file);
-                    stale_files.push(rel.to_string_lossy().into_owned());
-                }
-            }
+        if let Ok(meta) = std::fs::metadata(file)
+            && let Ok(mtime) = meta.modified()
+            && mtime > manifest_mtime
+        {
+            let rel = file.strip_prefix(project_dir).unwrap_or(file);
+            stale_files.push(rel.to_string_lossy().into_owned());
         }
     }
     stale_files.sort();
@@ -581,19 +628,26 @@ fn check_manifest_freshness(
 /// Run the `check-manifest` subcommand
 #[cfg(not(tarpaulin_include))]
 fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
-    let project_dir = args
-        .project_dir
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("cannot resolve project directory '{}': {}", args.project_dir.display(), e))?;
+    let project_dir = args.project_dir.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "cannot resolve project directory '{}': {}",
+            args.project_dir.display(),
+            e
+        )
+    })?;
 
-    let manifest_path = resolve_manifest_path_or_default(
-        args.manifest_path.as_ref(),
-        &project_dir,
-    )?;
+    let manifest_path =
+        resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
 
     let manifest_mtime = std::fs::metadata(&manifest_path)
         .and_then(|m| m.modified())
-        .map_err(|e| anyhow::anyhow!("cannot read manifest.json at {}: {}", manifest_path.display(), e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot read manifest.json at {}: {}",
+                manifest_path.display(),
+                e
+            )
+        })?;
 
     // Discover project files
     let project = parser::project::DbtProject::load(&project_dir)?;
@@ -602,7 +656,9 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
 
     // Collect all SQL/YAML files and compare mtimes
     let mut stale_files: Vec<PathBuf> = Vec::new();
-    let all_files = files.model_sql_files.iter()
+    let all_files = files
+        .model_sql_files
+        .iter()
         .chain(files.macro_sql_files.iter())
         .chain(files.seed_files.iter())
         .chain(files.snapshot_sql_files.iter())
@@ -612,11 +668,11 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     for file in all_files {
         match std::fs::metadata(file) {
             Ok(meta) => {
-                if let Ok(mtime) = meta.modified() {
-                    if mtime > manifest_mtime {
-                        let rel = file.strip_prefix(&project_dir).unwrap_or(file);
-                        stale_files.push(rel.to_path_buf());
-                    }
+                if let Ok(mtime) = meta.modified()
+                    && mtime > manifest_mtime
+                {
+                    let rel = file.strip_prefix(&project_dir).unwrap_or(file);
+                    stale_files.push(rel.to_path_buf());
                 }
             }
             Err(e) => {
@@ -645,15 +701,14 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 if is_stale {
                     let mut parts = Vec::new();
                     if !stale_files.is_empty() {
-                        parts.push(format!("{} file{} newer",
+                        parts.push(format!(
+                            "{} file{} newer",
                             stale_files.len(),
                             if stale_files.len() == 1 { "" } else { "s" }
                         ));
                     }
                     if !deleted_files.is_empty() {
-                        parts.push(format!("{} deleted",
-                            deleted_files.len(),
-                        ));
+                        parts.push(format!("{} deleted", deleted_files.len(),));
                     }
                     println!("manifest.json is stale ({}):", parts.join(", "));
                     if !stale_files.is_empty() {
@@ -694,10 +749,10 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
                     return Err(anyhow::anyhow!(e));
                 }
-            } else if let Err(e) = writeln!(out) {
-                if e.kind() != std::io::ErrorKind::BrokenPipe {
-                    return Err(e.into());
-                }
+            } else if let Err(e) = writeln!(out)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e.into());
             }
         }
     }

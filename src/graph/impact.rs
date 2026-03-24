@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use petgraph::Direction;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 use serde::Serialize;
 
 use super::types::*;
@@ -150,11 +150,8 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
     let mut path_counts: HashMap<NodeIndex, usize> = HashMap::new();
 
     if !exposure_set.is_empty() {
-        let mut stack: Vec<(NodeIndex, Vec<NodeIndex>, HashSet<NodeIndex>)> = vec![(
-            source_idx,
-            vec![source_idx],
-            HashSet::from([source_idx]),
-        )];
+        let mut stack: Vec<(NodeIndex, Vec<NodeIndex>, HashSet<NodeIndex>)> =
+            vec![(source_idx, vec![source_idx], HashSet::from([source_idx]))];
         while let Some((current, path, path_set)) = stack.pop() {
             // Early termination: stop when all exposures have reached the cap
             if path_counts.len() == exposure_set.len()
@@ -467,10 +464,34 @@ mod tests {
             None,
         ));
 
-        g.add_edge(src, a, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(src, b, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(a, exp1, EdgeData { edge_type: EdgeType::Exposure });
-        g.add_edge(b, exp2, EdgeData { edge_type: EdgeType::Exposure });
+        g.add_edge(
+            src,
+            a,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            src,
+            b,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            a,
+            exp1,
+            EdgeData {
+                edge_type: EdgeType::Exposure,
+            },
+        );
+        g.add_edge(
+            b,
+            exp2,
+            EdgeData {
+                edge_type: EdgeType::Exposure,
+            },
+        );
 
         let report = compute_impact(&g, src);
         assert_eq!(report.affected_exposures, 2);
@@ -524,11 +545,41 @@ mod tests {
             None,
         ));
 
-        g.add_edge(src, a, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(src, b, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(a, c, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(b, c, EdgeData { edge_type: EdgeType::Ref });
-        g.add_edge(c, exp, EdgeData { edge_type: EdgeType::Exposure });
+        g.add_edge(
+            src,
+            a,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            src,
+            b,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            a,
+            c,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            b,
+            c,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        g.add_edge(
+            c,
+            exp,
+            EdgeData {
+                edge_type: EdgeType::Exposure,
+            },
+        );
 
         let report = compute_impact(&g, src);
         assert_eq!(report.affected_exposures, 1);

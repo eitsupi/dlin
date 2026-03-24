@@ -108,32 +108,35 @@ fn render_with_incremental(
 
     // ref('name') or ref('package', 'name')
     let ext = extraction.clone();
-    env.add_function("ref", move |args: &[Value]| -> Result<Value, minijinja::Error> {
-        let mut ext = ext.lock().unwrap();
-        match args.len() {
-            1 => {
-                let name = args[0].to_string();
-                ext.refs.push(RefCall {
-                    package: None,
-                    name: name.clone(),
-                });
-                Ok(Value::from(format!("__dbt_ref_{}__", name)))
+    env.add_function(
+        "ref",
+        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+            let mut ext = ext.lock().unwrap();
+            match args.len() {
+                1 => {
+                    let name = args[0].to_string();
+                    ext.refs.push(RefCall {
+                        package: None,
+                        name: name.clone(),
+                    });
+                    Ok(Value::from(format!("__dbt_ref_{}__", name)))
+                }
+                2 => {
+                    let pkg = args[0].to_string();
+                    let name = args[1].to_string();
+                    ext.refs.push(RefCall {
+                        package: Some(pkg),
+                        name: name.clone(),
+                    });
+                    Ok(Value::from(format!("__dbt_ref_{}__", name)))
+                }
+                _ => Err(minijinja::Error::new(
+                    ErrorKind::TooManyArguments,
+                    "ref() takes 1 or 2 arguments",
+                )),
             }
-            2 => {
-                let pkg = args[0].to_string();
-                let name = args[1].to_string();
-                ext.refs.push(RefCall {
-                    package: Some(pkg),
-                    name: name.clone(),
-                });
-                Ok(Value::from(format!("__dbt_ref_{}__", name)))
-            }
-            _ => Err(minijinja::Error::new(
-                ErrorKind::TooManyArguments,
-                "ref() takes 1 or 2 arguments",
-            )),
-        }
-    });
+        },
+    );
 
     // source('source_name', 'table_name')
     let ext = extraction.clone();
@@ -170,10 +173,10 @@ fn render_with_incremental(
             if let Ok(mat) = kwargs.get::<&str>("materialized") {
                 ext.config.materialized = Some(mat.to_string());
             }
-            if let Ok(tags_val) = kwargs.get::<Value>("tags") {
-                if let Ok(iter) = tags_val.try_iter() {
-                    ext.config.tags = iter.map(|v| v.to_string()).collect();
-                }
+            if let Ok(tags_val) = kwargs.get::<Value>("tags")
+                && let Ok(iter) = tags_val.try_iter()
+            {
+                ext.config.tags = iter.map(|v| v.to_string()).collect();
             }
             Ok(Value::from(""))
         },
@@ -196,12 +199,11 @@ fn render_with_incremental(
     env.add_function(
         "var",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
-            if let Some(key) = args.first() {
-                if let Some(key_str) = key.as_str() {
-                    if let Some(val) = vars_map.get(key_str) {
-                        return Ok(val.clone());
-                    }
-                }
+            if let Some(key) = args.first()
+                && let Some(key_str) = key.as_str()
+                && let Some(val) = vars_map.get(key_str)
+            {
+                return Ok(val.clone());
             }
             // Fall back to default argument (2nd arg) or truthy sentinel
             if args.len() >= 2 {

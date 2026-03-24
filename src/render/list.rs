@@ -3,9 +3,9 @@ use std::io::{self, IsTerminal, Write};
 
 use serde_json::Value;
 
+use super::json::build_node_value;
 use crate::cli::ListOutputFormat;
 use crate::graph::types::*;
-use super::json::build_node_value;
 
 /// Resolve which fields to emit for list JSON, and validate field names.
 /// Uses the same field set as graph JSON output.
@@ -87,7 +87,10 @@ mod tests {
     use crate::render::test_helpers::make_node;
 
     fn all_fields() -> HashSet<String> {
-        super::super::json::GRAPH_NODE_FIELDS.iter().map(|s| (*s).to_string()).collect()
+        super::super::json::GRAPH_NODE_FIELDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     }
 
     fn make_test_graph() -> LineageGraph {
@@ -98,11 +101,7 @@ mod tests {
             "raw.orders",
             NodeType::Source,
         ));
-        graph.add_node(make_node(
-            "model.stg_orders",
-            "stg_orders",
-            NodeType::Model,
-        ));
+        graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
         graph
     }
 
@@ -210,7 +209,11 @@ mod tests {
     #[test]
     fn test_json_null_file_path() {
         let mut graph = LineageGraph::new();
-        graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
+        graph.add_node(make_node(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+        ));
         let mut buf = Vec::new();
         render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();

@@ -209,17 +209,31 @@ models:
 
         // Simple + map with config
         assert_eq!(model.columns[0].tests.len(), 2);
-        assert!(matches!(model.columns[0].tests[0], TestDefinition::Simple(ref s) if s == "not_null"));
-        assert!(matches!(model.columns[0].tests[1], TestDefinition::Complex(_)));
+        assert!(
+            matches!(model.columns[0].tests[0], TestDefinition::Simple(ref s) if s == "not_null")
+        );
+        assert!(matches!(
+            model.columns[0].tests[1],
+            TestDefinition::Complex(_)
+        ));
 
         // accepted_values with arguments + config
         assert_eq!(model.columns[1].tests.len(), 1);
-        assert!(matches!(model.columns[1].tests[0], TestDefinition::Complex(_)));
+        assert!(matches!(
+            model.columns[1].tests[0],
+            TestDefinition::Complex(_)
+        ));
 
         // relationships + alternative name/test_name format
         assert_eq!(model.columns[2].tests.len(), 2);
-        assert!(matches!(model.columns[2].tests[0], TestDefinition::Complex(_)));
-        assert!(matches!(model.columns[2].tests[1], TestDefinition::Complex(_)));
+        assert!(matches!(
+            model.columns[2].tests[0],
+            TestDefinition::Complex(_)
+        ));
+        assert!(matches!(
+            model.columns[2].tests[1],
+            TestDefinition::Complex(_)
+        ));
     }
 
     #[test]

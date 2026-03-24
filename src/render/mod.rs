@@ -15,10 +15,10 @@ pub mod svg;
 /// Handle an I/O result from writing to stdout.
 /// Silently ignores `BrokenPipe` errors (e.g. `cmd | head`).
 pub(crate) fn handle_stdout_result(result: io::Result<()>) {
-    if let Err(e) = result {
-        if e.kind() != io::ErrorKind::BrokenPipe {
-            eprintln!("error writing output: {}", e);
-        }
+    if let Err(e) = result
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        eprintln!("error writing output: {}", e);
     }
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn handle_stdout_result(result: io::Result<()>) {
 pub(crate) fn serde_io_error(e: serde_json::Error) -> io::Error {
     match e.io_error_kind() {
         Some(kind) => io::Error::new(kind, e),
-        None => io::Error::new(io::ErrorKind::Other, e),
+        None => io::Error::other(e),
     }
 }
 
@@ -58,11 +58,7 @@ pub(crate) mod test_helpers {
             "raw.orders",
             NodeType::Source,
         ));
-        let stg = graph.add_node(make_node(
-            "model.stg_orders",
-            "stg_orders",
-            NodeType::Model,
-        ));
+        let stg = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
         let mart = graph.add_node(make_node("model.orders", "orders", NodeType::Model));
         let t = graph.add_node(make_node(
             "test.orders_positive",
@@ -75,10 +71,34 @@ pub(crate) mod test_helpers {
             NodeType::Exposure,
         ));
 
-        graph.add_edge(src, stg, EdgeData { edge_type: EdgeType::Source });
-        graph.add_edge(stg, mart, EdgeData { edge_type: EdgeType::Ref });
-        graph.add_edge(mart, t, EdgeData { edge_type: EdgeType::Test });
-        graph.add_edge(mart, exp, EdgeData { edge_type: EdgeType::Exposure });
+        graph.add_edge(
+            src,
+            stg,
+            EdgeData {
+                edge_type: EdgeType::Source,
+            },
+        );
+        graph.add_edge(
+            stg,
+            mart,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        graph.add_edge(
+            mart,
+            t,
+            EdgeData {
+                edge_type: EdgeType::Test,
+            },
+        );
+        graph.add_edge(
+            mart,
+            exp,
+            EdgeData {
+                edge_type: EdgeType::Exposure,
+            },
+        );
 
         graph
     }

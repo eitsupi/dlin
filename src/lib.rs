@@ -133,10 +133,7 @@ mod tests {
     #[test]
     fn test_format_json_diagnostic_backslash() {
         let json = format_json_diagnostic("error", r"path\to\file");
-        assert_eq!(
-            json,
-            r#"{"level":"error","message":"path\\to\\file"}"#
-        );
+        assert_eq!(json, r#"{"level":"error","message":"path\\to\\file"}"#);
     }
 
     #[test]
@@ -163,10 +160,7 @@ mod tests {
     fn test_format_error_json() {
         set_error_format_json(true);
         let msg = format_error(&"something went wrong");
-        assert_eq!(
-            msg,
-            r#"{"level":"error","message":"something went wrong"}"#
-        );
+        assert_eq!(msg, r#"{"level":"error","message":"something went wrong"}"#);
         set_error_format_json(false);
     }
 }

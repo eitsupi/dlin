@@ -3,7 +3,7 @@ use std::io::Write;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
 use crate::graph::types::*;
-use crate::render::layout::{sugiyama_layout, LayoutResult};
+use crate::render::layout::{LayoutResult, sugiyama_layout};
 
 const NODE_WIDTH: f64 = 160.0;
 const NODE_HEIGHT: f64 = 40.0;
@@ -117,7 +117,11 @@ pub fn render_svg_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> std::i
     Ok(())
 }
 
-fn render_svg_edges<W: Write>(w: &mut W, graph: &LineageGraph, layout: &LayoutResult) -> std::io::Result<()> {
+fn render_svg_edges<W: Write>(
+    w: &mut W,
+    graph: &LineageGraph,
+    layout: &LayoutResult,
+) -> std::io::Result<()> {
     for edge in graph.edge_references() {
         let source_pos = layout.positions.get(&edge.source());
         let target_pos = layout.positions.get(&edge.target());
@@ -142,7 +146,15 @@ fn render_svg_edges<W: Write>(w: &mut W, graph: &LineageGraph, layout: &LayoutRe
             writeln!(
                 w,
                 r#"  <path d="M{},{} C{},{} {},{} {},{}" fill="none" style="{}" marker-end="url(#arrowhead)" data-source="{}" data-target="{}" />"#,
-                x1, y1, cx1, y1, cx2, y2, x2, y2, style,
+                x1,
+                y1,
+                cx1,
+                y1,
+                cx2,
+                y2,
+                x2,
+                y2,
+                style,
                 xml_escape(&source_node.unique_id),
                 xml_escape(&target_node.unique_id)
             )?;
@@ -151,7 +163,11 @@ fn render_svg_edges<W: Write>(w: &mut W, graph: &LineageGraph, layout: &LayoutRe
     Ok(())
 }
 
-fn render_svg_nodes<W: Write>(w: &mut W, graph: &LineageGraph, layout: &LayoutResult) -> std::io::Result<()> {
+fn render_svg_nodes<W: Write>(
+    w: &mut W,
+    graph: &LineageGraph,
+    layout: &LayoutResult,
+) -> std::io::Result<()> {
     for idx in graph.node_indices() {
         let Some(&(layer, pos)) = layout.positions.get(&idx) else {
             continue;

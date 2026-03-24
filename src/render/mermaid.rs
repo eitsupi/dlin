@@ -6,7 +6,10 @@ use crate::graph::types::*;
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
 pub fn render_mermaid(graph: &LineageGraph) {
-    super::handle_stdout_result(render_mermaid_to_writer(graph, &mut std::io::stdout().lock()));
+    super::handle_stdout_result(render_mermaid_to_writer(
+        graph,
+        &mut std::io::stdout().lock(),
+    ));
 }
 
 fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
@@ -28,7 +31,7 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Re
             NodeType::Model => format!("{}[\"{}\"]", id, label),
             NodeType::Source => format!("{}([\"{}\"])", id, label),
             NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
-            NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}",  id, label),
+            NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}", id, label),
             NodeType::Test => format!("{}{{\"{}\"}}", id, label),
             NodeType::Exposure => format!("{}>\"{}\"]", id, label),
             NodeType::Phantom => format!("{}(\"{}\")", id, label),
@@ -39,11 +42,18 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Re
     writeln!(w)?;
 
     // Collect and sort edges by (source_id, target_id, edge_type)
-    let mut edges: Vec<_> = graph.edge_references().map(|edge| {
-        let source = &graph[edge.source()];
-        let target = &graph[edge.target()];
-        (mermaid_id(&source.unique_id), mermaid_id(&target.unique_id), edge.weight().edge_type.clone())
-    }).collect();
+    let mut edges: Vec<_> = graph
+        .edge_references()
+        .map(|edge| {
+            let source = &graph[edge.source()];
+            let target = &graph[edge.target()];
+            (
+                mermaid_id(&source.unique_id),
+                mermaid_id(&target.unique_id),
+                edge.weight().edge_type,
+            )
+        })
+        .collect();
     edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     // Render edges

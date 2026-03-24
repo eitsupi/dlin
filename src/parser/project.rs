@@ -69,8 +69,9 @@ impl DbtProject {
                 source: e,
             })?;
 
-        let project: DbtProject = super::yaml_from_str(&content, &project_file.display().to_string())
-            .context(format!("Failed to parse {}", project_file.display()))?;
+        let project: DbtProject =
+            super::yaml_from_str(&content, &project_file.display().to_string())
+                .context(format!("Failed to parse {}", project_file.display()))?;
 
         Ok(project)
     }

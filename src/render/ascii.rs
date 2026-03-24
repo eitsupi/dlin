@@ -5,7 +5,7 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
 use crate::graph::types::*;
 
-use super::layout::{sugiyama_layout, LayoutResult};
+use super::layout::{LayoutResult, sugiyama_layout};
 
 /// Warn if the graph layout is wider than the terminal
 #[cfg(not(tarpaulin_include))]
@@ -21,13 +21,14 @@ fn warn_if_too_wide(graph: &LineageGraph) {
     let col_spacing = 4;
     let total_width: usize =
         col_widths.iter().sum::<usize>() + col_spacing * col_widths.len().saturating_sub(1);
-    if let Some((term_width, _)) = term_size() {
-        if total_width > term_width {
-            crate::warn!(
-                "graph width ({}) exceeds terminal width ({}). Consider using --output dot or filtering with -u/-d.",
-                total_width, term_width
-            );
-        }
+    if let Some((term_width, _)) = term_size()
+        && total_width > term_width
+    {
+        crate::warn!(
+            "graph width ({}) exceeds terminal width ({}). Consider using --output dot or filtering with -u/-d.",
+            total_width,
+            term_width
+        );
     }
 }
 
@@ -227,7 +228,7 @@ const TIOCGWINSZ: u64 = 0x5413;
 #[cfg(not(tarpaulin_include))]
 #[cfg(unix)]
 unsafe fn libc_ioctl(fd: i32, request: u64, arg: *mut libc_winsize) -> i32 {
-    extern "C" {
+    unsafe extern "C" {
         fn ioctl(fd: i32, request: u64, ...) -> i32;
     }
     unsafe { ioctl(fd, request, arg) }

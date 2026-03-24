@@ -440,7 +440,10 @@ mod tests {
     fn test_simplify_unique_id_test() {
         // test.project.test_name.hash -> test.test_name
         assert_eq!(
-            simplify_unique_id("test.jaffle_shop.not_null_orders_order_id.cf6c17daed", "test"),
+            simplify_unique_id(
+                "test.jaffle_shop.not_null_orders_order_id.cf6c17daed",
+                "test"
+            ),
             "test.not_null_orders_order_id"
         );
     }
@@ -635,7 +638,8 @@ mod tests {
 
     #[test]
     fn test_exposure_metadata_from_fixture() {
-        let manifest_path = std::path::Path::new("tests/fixtures/simple_project/target/manifest.json");
+        let manifest_path =
+            std::path::Path::new("tests/fixtures/simple_project/target/manifest.json");
         let graph = build_graph_from_manifest(manifest_path).unwrap();
 
         let exp_idx = graph
@@ -1214,7 +1218,9 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
-                        compiled_code: Some("select count(*) from orders where id is null".to_string()),
+                        compiled_code: Some(
+                            "select count(*) from orders where id is null".to_string(),
+                        ),
                     },
                 ),
                 (
@@ -1245,11 +1251,13 @@ mod tests {
         );
         // test unique_id is simplified (test.proj.name.hash → test.name)
         assert_eq!(
-            sql_contents.get("test.not_null_orders_id").map(|s| s.as_str()),
+            sql_contents
+                .get("test.not_null_orders_id")
+                .map(|s| s.as_str()),
             Some("select count(*) from orders where id is null")
         );
         // compiled_code absent → omitted
-        assert!(sql_contents.get("model.no_compile").is_none());
+        assert!(!sql_contents.contains_key("model.no_compile"));
     }
 
     #[test]
@@ -1262,16 +1270,16 @@ mod tests {
 
         // The fixture has compiled_code for stg_orders and the test node
         assert!(
-            sql_contents.get("model.stg_orders").is_some(),
+            sql_contents.contains_key("model.stg_orders"),
             "stg_orders should have compiled_code"
         );
         assert!(
-            sql_contents.get("test.assert_orders_positive_amount").is_some(),
+            sql_contents.contains_key("test.assert_orders_positive_amount"),
             "test node should have compiled_code"
         );
         // Nodes without compiled_code should not appear
         assert!(
-            sql_contents.get("model.customers").is_none(),
+            !sql_contents.contains_key("model.customers"),
             "customers has no compiled_code in fixture"
         );
     }

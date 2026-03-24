@@ -6,7 +6,10 @@ use crate::graph::impact::{ImpactReport, ImpactSeverity};
 
 /// Render impact report as colored text to stdout
 pub fn render_impact_text(report: &ImpactReport) {
-    super::handle_stdout_result(render_impact_text_to_writer(report, &mut std::io::stdout().lock()));
+    super::handle_stdout_result(render_impact_text_to_writer(
+        report,
+        &mut std::io::stdout().lock(),
+    ));
 }
 
 fn severity_color(severity: ImpactSeverity) -> colored::Color {
@@ -97,7 +100,11 @@ pub fn render_impact_json(reports: &[ImpactReport]) {
     super::handle_stdout_result(render_impact_json_to_writer(reports, &mut stdout, pretty));
 }
 
-pub fn render_impact_json_to_writer<W: Write>(reports: &[ImpactReport], w: &mut W, pretty: bool) -> io::Result<()> {
+pub fn render_impact_json_to_writer<W: Write>(
+    reports: &[ImpactReport],
+    w: &mut W,
+    pretty: bool,
+) -> io::Result<()> {
     if pretty {
         serde_json::to_writer_pretty(&mut *w, reports).map_err(super::serde_io_error)?;
     } else {

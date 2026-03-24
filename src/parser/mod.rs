@@ -17,10 +17,7 @@ use serde::de::DeserializeOwned;
 /// and the content is re-parsed with `DuplicateKeyPolicy::LastWins` to match
 /// PyYAML's behavior. The result is deserialized via `serde_json::Value` as an
 /// intermediate to avoid serde's struct-level duplicate field rejection.
-pub fn yaml_from_str<T: DeserializeOwned>(
-    content: &str,
-    location: &str,
-) -> Result<T> {
+pub fn yaml_from_str<T: DeserializeOwned>(content: &str, location: &str) -> Result<T> {
     let value: serde_json::Value = match serde_saphyr::from_str(content) {
         Ok(v) => v,
         Err(e) => {
@@ -43,7 +40,9 @@ pub fn yaml_from_str<T: DeserializeOwned>(
     };
     if value.is_null() {
         // Empty YAML documents deserialize as null; use Default for the target type.
-        return Ok(serde_json::from_value(serde_json::Value::Object(Default::default()))?);
+        return Ok(serde_json::from_value(serde_json::Value::Object(
+            Default::default(),
+        ))?);
     }
     Ok(serde_json::from_value(value)?)
 }

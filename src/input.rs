@@ -71,7 +71,7 @@ pub fn read_stdin_lines() -> Vec<String> {
     stdin
         .lock()
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(|l| l.ok())
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.trim().to_string())
         .collect()
@@ -104,9 +104,7 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
             // a dbt source name like "raw.orders" (extension = "orders") or a
             // root-level file like "README.md".  We distinguish them by
             // checking against common file extensions.
-            if line.contains('/') || line.contains('\\') {
-                InputLine::Ignore
-            } else if is_common_file_extension(ext) {
+            if line.contains('/') || line.contains('\\') || is_common_file_extension(ext) {
                 InputLine::Ignore
             } else {
                 InputLine::ModelName(line.to_string())
@@ -217,11 +215,7 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     let content = match std::fs::read_to_string(abs_path) {
         Ok(c) => c,
         Err(e) => {
-            crate::warn!(
-                "could not read {}: {}",
-                abs_path.display(),
-                e
-            );
+            crate::warn!("could not read {}: {}", abs_path.display(), e);
             return Vec::new();
         }
     };
@@ -229,11 +223,7 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     let schema = match yaml_schema::parse_schema_file(&content, Some(abs_path)) {
         Ok(s) => s,
         Err(e) => {
-            crate::warn!(
-                "could not parse {}: {}",
-                abs_path.display(),
-                e
-            );
+            crate::warn!("could not parse {}: {}", abs_path.display(), e);
             return Vec::new();
         }
     };
@@ -274,10 +264,7 @@ pub fn resolve_stdin_inputs(
                         names.push(label);
                     }
                 } else {
-                    crate::warn!(
-                        "no node found for file {}, skipping.",
-                        abs_path.display()
-                    );
+                    crate::warn!("no node found for file {}, skipping.", abs_path.display());
                 }
             }
             InputLine::YamlFile(abs_path) => {
@@ -574,14 +561,20 @@ models:
     #[test]
     fn test_has_path_like_input_with_paths() {
         assert!(has_path_like_input(&["models/foo.sql".into()]));
-        assert!(has_path_like_input(&["stg_orders".into(), "models/bar.yml".into()]));
+        assert!(has_path_like_input(&[
+            "stg_orders".into(),
+            "models/bar.yml".into()
+        ]));
         assert!(has_path_like_input(&["schema.yaml".into()]));
     }
 
     #[test]
     fn test_has_path_like_input_model_names_only() {
         assert!(!has_path_like_input(&["stg_orders".into()]));
-        assert!(!has_path_like_input(&["raw.orders".into(), "customers".into()]));
+        assert!(!has_path_like_input(&[
+            "raw.orders".into(),
+            "customers".into()
+        ]));
     }
 
     // --- resolve_stdin_inputs integration tests ---
@@ -604,10 +597,7 @@ models:
         let graph = LineageGraph::new();
 
         // Files with path separators and non-dbt extensions are ignored
-        let lines = vec![
-            "docs/README.md".to_string(),
-            "seeds/data.csv".to_string(),
-        ];
+        let lines = vec!["docs/README.md".to_string(), "seeds/data.csv".to_string()];
         let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
         assert!(result.is_empty());
     }
@@ -689,7 +679,10 @@ models:
                 let names = expand_yaml_names(&abs_path);
                 assert_eq!(names, vec!["raw.orders"]);
             }
-            other => panic!("Expected YamlFile, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "Expected YamlFile, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 

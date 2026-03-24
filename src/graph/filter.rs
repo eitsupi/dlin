@@ -1,7 +1,7 @@
 use anyhow::Result;
+use petgraph::Direction;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
-use petgraph::Direction;
 use std::collections::{HashSet, VecDeque};
 
 use crate::error::DbtLineageError;
@@ -43,7 +43,10 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
         0 => NodeLookupResult::NotFound,
         1 => NodeLookupResult::Found(matches[0]),
         _ => {
-            let ids = matches.iter().map(|&idx| graph[idx].unique_id.clone()).collect();
+            let ids = matches
+                .iter()
+                .map(|&idx| graph[idx].unique_id.clone())
+                .collect();
             NodeLookupResult::Ambiguous(matches[0], ids)
         }
     }
@@ -62,9 +65,7 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
             );
             Ok(idx)
         }
-        NodeLookupResult::NotFound => {
-            Err(DbtLineageError::ModelNotFound(name.to_string()).into())
-        }
+        NodeLookupResult::NotFound => Err(DbtLineageError::ModelNotFound(name.to_string()).into()),
     }
 }
 
@@ -248,7 +249,11 @@ pub fn filter_graph(
 
         // All specified models were not found
         if keep_nodes.is_empty() {
-            let names = focus_models.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            let names = focus_models
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(DbtLineageError::ModelNotFound(names).into());
         }
     } else {
@@ -300,14 +305,18 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
 }
 
 /// Known node type labels for validation.
-pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
+pub const KNOWN_NODE_TYPE_LABELS: &[&str] =
+    &["model", "source", "seed", "snapshot", "test", "exposure"];
 
 /// Resolve the effective node type names from CLI arguments.
 ///
 /// Returns `explicit` if provided, otherwise all known node types.
 pub fn resolve_node_types(explicit: Option<Vec<String>>) -> Vec<String> {
     explicit.unwrap_or_else(|| {
-        KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
+        KNOWN_NODE_TYPE_LABELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     })
 }
 
@@ -315,7 +324,11 @@ pub fn resolve_node_types(explicit: Option<Vec<String>>) -> Vec<String> {
 pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
     type_names
         .iter()
-        .filter(|t| !KNOWN_NODE_TYPE_LABELS.iter().any(|k| k.eq_ignore_ascii_case(t)))
+        .filter(|t| {
+            !KNOWN_NODE_TYPE_LABELS
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(t))
+        })
         .cloned()
         .collect()
 }
@@ -460,10 +473,16 @@ mod tests {
         let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
         // With no focus and no selectors, all nodes pass through unfiltered
         assert_eq!(filtered.node_count(), 4);
-        let types: std::collections::HashSet<&str> = filtered.node_indices().map(|i| filtered[i].node_type.label()).collect();
+        let types: std::collections::HashSet<&str> = filtered
+            .node_indices()
+            .map(|i| filtered[i].node_type.label())
+            .collect();
         assert!(types.contains("source"), "source node should be present");
         assert!(types.contains("model"), "model nodes should be present");
-        assert!(types.contains("exposure"), "exposure node should be present");
+        assert!(
+            types.contains("exposure"),
+            "exposure node should be present"
+        );
     }
 
     #[test]
@@ -488,8 +507,7 @@ mod tests {
     fn test_filter_model_not_found_returns_error() {
         let g = make_test_graph();
         // All specified models not found → error
-        let result =
-            filter_graph(&g, &["nonexistent".into()], None, None, &[]);
+        let result = filter_graph(&g, &["nonexistent".into()], None, None, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("model not found"));
     }
@@ -498,9 +516,7 @@ mod tests {
     fn test_filter_focus_source_by_label() {
         let g = make_test_graph();
         // Focus on source node using its label "raw.orders"
-        let filtered =
-            filter_graph(&g, &["raw.orders".into()], None, Some(1), &[])
-                .unwrap();
+        let filtered = filter_graph(&g, &["raw.orders".into()], None, Some(1), &[]).unwrap();
         // raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -509,14 +525,7 @@ mod tests {
     fn test_filter_focus_source_by_unique_id() {
         let g = make_test_graph();
         // Focus on source node using full unique_id
-        let filtered = filter_graph(
-            &g,
-            &["source.raw.orders".into()],
-            None,
-            Some(1),
-            &[],
-        )
-        .unwrap();
+        let filtered = filter_graph(&g, &["source.raw.orders".into()], None, Some(1), &[]).unwrap();
         // source.raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -524,9 +533,7 @@ mod tests {
     #[test]
     fn test_filter_focus_exposure_by_label() {
         let g = make_test_graph();
-        let filtered =
-            filter_graph(&g, &["dashboard".into()], Some(1), None, &[])
-                .unwrap();
+        let filtered = filter_graph(&g, &["dashboard".into()], Some(1), None, &[]).unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -596,7 +603,10 @@ mod tests {
         .unwrap();
         // Only "orders" should remain
         assert_eq!(filtered.node_count(), 1);
-        assert_eq!(filtered[filtered.node_indices().next().unwrap()].label, "orders");
+        assert_eq!(
+            filtered[filtered.node_indices().next().unwrap()].label,
+            "orders"
+        );
     }
 
     #[test]
@@ -759,8 +769,7 @@ mod tests {
     fn test_selector_by_tag() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nightly");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -773,8 +782,7 @@ mod tests {
     fn test_selector_by_path() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("path:models/staging");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         // Should match: raw.orders (schema.yml in models/staging) and stg_orders
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
@@ -790,8 +798,7 @@ mod tests {
         let g = make_tagged_graph();
         // **&#x2F;staging/** should match the same nodes as prefix "models/staging"
         let selectors = parse_selectors("path:**/staging/**");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -806,8 +813,7 @@ mod tests {
         let g = make_tagged_graph();
         // Match only .sql files under staging
         let selectors = parse_selectors("path:models/staging/*.sql");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -820,8 +826,7 @@ mod tests {
     fn test_selector_by_model_name() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -835,8 +840,7 @@ mod tests {
         let g = make_tagged_graph();
         // tag:nightly matches stg_orders, model name "orders" matches orders
         let selectors = parse_selectors("tag:nightly,orders");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -850,8 +854,7 @@ mod tests {
     fn test_selector_no_matches() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nonexistent");
-        let filtered =
-            filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -864,14 +867,7 @@ mod tests {
         // Selector tag:nightly matches only stg_orders
         // Intersection: stg_orders
         let selectors = parse_selectors("tag:nightly");
-        let filtered = filter_graph(
-            &g,
-            &["orders".into()],
-            None,
-            None,
-            &selectors,
-        )
-        .unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], None, None, &selectors).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -884,8 +880,7 @@ mod tests {
     fn test_selector_empty_does_not_filter() {
         let g = make_tagged_graph();
         let no_selectors: Vec<Selector> = vec![];
-        let filtered =
-            filter_graph(&g, &[], None, None, &no_selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &no_selectors).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -933,7 +928,13 @@ mod tests {
 
     #[test]
     fn test_node_matches_any_selector_model_name_glob() {
-        let node = make_node("model.stg_orders", "stg_orders", NodeType::Model, None, vec![]);
+        let node = make_node(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            None,
+            vec![],
+        );
         assert!(node_matches_any_selector(&node, &sel("stg_*")));
         assert!(node_matches_any_selector(&node, &sel("*orders")));
         assert!(!node_matches_any_selector(&node, &sel("fct_*")));
@@ -948,7 +949,10 @@ mod tests {
             Some(PathBuf::from("models/staging/x.sql")),
             vec![],
         );
-        assert!(node_matches_any_selector(&node, &sel("path:models/staging")));
+        assert!(node_matches_any_selector(
+            &node,
+            &sel("path:models/staging")
+        ));
         assert!(node_matches_any_selector(&node, &sel("path:models")));
         assert!(!node_matches_any_selector(&node, &sel("path:tests")));
     }
@@ -963,7 +967,10 @@ mod tests {
             vec![],
         );
         assert!(node_matches_any_selector(&node, &sel("path:**/staging/**")));
-        assert!(node_matches_any_selector(&node, &sel("path:models/**/stg_orders.sql")));
+        assert!(node_matches_any_selector(
+            &node,
+            &sel("path:models/**/stg_orders.sql")
+        ));
         assert!(!node_matches_any_selector(&node, &sel("path:**/marts/**")));
     }
 
@@ -976,7 +983,10 @@ mod tests {
             Some(PathBuf::from("models/staging/stg_orders.sql")),
             vec![],
         );
-        assert!(node_matches_any_selector(&node, &sel("path:models/staging/*.sql")));
+        assert!(node_matches_any_selector(
+            &node,
+            &sel("path:models/staging/*.sql")
+        ));
         assert!(!node_matches_any_selector(&node, &sel("path:models/*.sql")));
     }
 
@@ -989,8 +999,14 @@ mod tests {
             Some(PathBuf::from("models/staging/stg_orders.sql")),
             vec![],
         );
-        assert!(node_matches_any_selector(&node, &sel("path:models/staging/stg_order?.sql")));
-        assert!(!node_matches_any_selector(&node, &sel("path:models/staging/stg_order??.sql")));
+        assert!(node_matches_any_selector(
+            &node,
+            &sel("path:models/staging/stg_order?.sql")
+        ));
+        assert!(!node_matches_any_selector(
+            &node,
+            &sel("path:models/staging/stg_order??.sql")
+        ));
     }
 
     #[test]

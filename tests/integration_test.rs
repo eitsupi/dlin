@@ -249,8 +249,15 @@ mod freshness {
             .expect("Failed to run binary");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(!output.status.success(), "Should be stale when file is deleted");
-        assert!(stdout.contains("deleted"), "Should mention deleted: {}", stdout);
+        assert!(
+            !output.status.success(),
+            "Should be stale when file is deleted"
+        );
+        assert!(
+            stdout.contains("deleted"),
+            "Should mention deleted: {}",
+            stdout
+        );
         assert!(
             stdout.contains("stg_orders.sql"),
             "Should list the deleted file: {}",
@@ -282,12 +289,15 @@ mod freshness {
             .expect("Failed to run binary");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
         assert_eq!(parsed["is_stale"], true);
         assert!(parsed["deleted_file_count"].as_u64().unwrap() > 0);
         let deleted = parsed["deleted_files"].as_array().unwrap();
         assert!(
-            deleted.iter().any(|f| f.as_str().unwrap().contains("stg_orders.sql")),
+            deleted
+                .iter()
+                .any(|f| f.as_str().unwrap().contains("stg_orders.sql")),
             "deleted_files should contain stg_orders.sql: {:?}",
             deleted
         );
@@ -322,7 +332,8 @@ mod freshness {
             .expect("Failed to run binary");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
         assert_eq!(parsed["is_stale"], true);
         assert!(parsed["stale_file_count"].as_u64().unwrap() > 0);
         assert!(parsed["deleted_file_count"].as_u64().unwrap() > 0);
@@ -349,7 +360,8 @@ mod freshness {
             .expect("Failed to run binary");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
         assert_eq!(parsed["is_stale"], false);
         assert_eq!(parsed["stale_file_count"], 0);
         assert_eq!(parsed["stale_files"].as_array().unwrap().len(), 0);
@@ -878,11 +890,7 @@ mod cli {
             "Should exit 1 when manifest is stale"
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("stale"),
-            "Should report stale: {}",
-            stdout
-        );
+        assert!(stdout.contains("stale"), "Should report stale: {}", stdout);
     }
 
     #[test]
@@ -903,7 +911,7 @@ mod cli {
         let parsed: serde_json::Value =
             serde_json::from_str(&stdout).expect("Should be valid JSON");
         assert_eq!(parsed["is_stale"], true);
-        assert!(parsed["stale_files"].as_array().unwrap().len() > 0);
+        assert!(!parsed["stale_files"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -940,7 +948,14 @@ mod error_format {
     fn test_error_format_json_on_error() {
         // Run impact on a nonexistent project to trigger an error
         let output = std::process::Command::new(binary_path())
-            .args(["--error-format", "json", "impact", "nonexistent", "-p", "/nonexistent_project_dir"])
+            .args([
+                "--error-format",
+                "json",
+                "impact",
+                "nonexistent",
+                "-p",
+                "/nonexistent_project_dir",
+            ])
             .output()
             .expect("Failed to run binary");
 
@@ -950,19 +965,29 @@ mod error_format {
             panic!("stderr is not valid JSON: {e}\nstderr: {stderr}");
         });
         assert_eq!(parsed["level"], "error");
-        assert!(parsed["message"].as_str().unwrap().len() > 0);
+        assert!(!parsed["message"].as_str().unwrap().is_empty());
     }
 
     #[test]
     fn test_error_format_text_on_error() {
         let output = std::process::Command::new(binary_path())
-            .args(["--error-format", "text", "impact", "nonexistent", "-p", "/nonexistent_project_dir"])
+            .args([
+                "--error-format",
+                "text",
+                "impact",
+                "nonexistent",
+                "-p",
+                "/nonexistent_project_dir",
+            ])
             .output()
             .expect("Failed to run binary");
 
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.starts_with("Error: "), "Expected 'Error: ' prefix, got: {stderr}");
+        assert!(
+            stderr.starts_with("Error: "),
+            "Expected 'Error: ' prefix, got: {stderr}"
+        );
     }
 
     #[test]
@@ -970,10 +995,15 @@ mod error_format {
         // Use a valid project with an unknown node type to trigger a warning
         let output = std::process::Command::new(binary_path())
             .args([
-                "--error-format", "json",
-                "graph", "-p", fixture_dir().to_str().unwrap(),
-                "--node-type", "bogus_type",
-                "-o", "plain",
+                "--error-format",
+                "json",
+                "graph",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "--node-type",
+                "bogus_type",
+                "-o",
+                "plain",
             ])
             .output()
             .expect("Failed to run binary");
@@ -1000,6 +1030,9 @@ mod error_format {
 
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.starts_with("Error: "), "Expected text error, got: {stderr}");
+        assert!(
+            stderr.starts_with("Error: "),
+            "Expected text error, got: {stderr}"
+        );
     }
 }

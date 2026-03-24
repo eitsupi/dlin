@@ -186,7 +186,13 @@ pub fn render_json(
 ) {
     let mut stdout = std::io::stdout().lock();
     let pretty = stdout.is_terminal();
-    super::handle_stdout_result(render_json_to_writer(graph, sql_contents, fields, &mut stdout, pretty));
+    super::handle_stdout_result(render_json_to_writer(
+        graph,
+        sql_contents,
+        fields,
+        &mut stdout,
+        pretty,
+    ));
 }
 
 fn render_json_to_writer<W: Write>(
@@ -364,7 +370,12 @@ mod tests {
         // Nodes are sorted by unique_id; verify all expected types are present
         let mut actual: Vec<(&str, &str)> = nodes
             .iter()
-            .map(|n| (n["unique_id"].as_str().unwrap(), n["node_type"].as_str().unwrap()))
+            .map(|n| {
+                (
+                    n["unique_id"].as_str().unwrap(),
+                    n["node_type"].as_str().unwrap(),
+                )
+            })
             .collect();
         actual.sort();
         let mut expected: Vec<(&str, &str)> = types.iter().map(|(id, _, t)| (*id, *t)).collect();
@@ -394,9 +405,27 @@ mod tests {
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
         let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
         // Add edges in reverse order
-        graph.add_edge(c, a, EdgeData { edge_type: EdgeType::Ref });
-        graph.add_edge(a, b, EdgeData { edge_type: EdgeType::Ref });
-        graph.add_edge(a, c, EdgeData { edge_type: EdgeType::Ref });
+        graph.add_edge(
+            c,
+            a,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        graph.add_edge(
+            a,
+            b,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
+        graph.add_edge(
+            a,
+            c,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let edges = parsed["edges"].as_array().unwrap();
@@ -465,10 +494,15 @@ mod tests {
             columns: vec![],
             exposure: None,
         });
-        graph.add_node(make_node("source.raw.orders", "raw.orders", NodeType::Source));
-        let sql_contents = HashMap::from([
-            ("model.orders".to_string(), "SELECT * FROM {{ ref('stg_orders') }}".to_string()),
-        ]);
+        graph.add_node(make_node(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+        ));
+        let sql_contents = HashMap::from([(
+            "model.orders".to_string(),
+            "SELECT * FROM {{ ref('stg_orders') }}".to_string(),
+        )]);
         let mut buf = Vec::new();
         render_json_to_writer(&graph, Some(&sql_contents), &all_fields(), &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -480,7 +514,13 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(a, b, EdgeData { edge_type: EdgeType::Ref });
+        graph.add_edge(
+            a,
+            b,
+            EdgeData {
+                edge_type: EdgeType::Ref,
+            },
+        );
         let mut buf = Vec::new();
         render_json_to_writer(&graph, None, &all_fields(), &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -562,10 +602,8 @@ mod tests {
             columns: vec![],
             exposure: None,
         });
-        let fields = resolve_graph_fields(
-            Some(&["unique_id".into(), "description".into()]),
-            false,
-        ).unwrap();
+        let fields =
+            resolve_graph_fields(Some(&["unique_id".into(), "description".into()]), false).unwrap();
         let mut buf = Vec::new();
         render_json_to_writer(&graph, None, &fields, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -607,10 +645,7 @@ mod tests {
 
     #[test]
     fn test_unknown_field_error() {
-        let result = resolve_graph_fields(
-            Some(&["unique_id".into(), "nonexistent".into()]),
-            false,
-        );
+        let result = resolve_graph_fields(Some(&["unique_id".into(), "nonexistent".into()]), false);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("nonexistent"));

@@ -61,11 +61,7 @@ fn classify_select_item(item: &str) -> Option<String> {
     }
 
     let col = extract_column_name(item);
-    if col.is_empty() {
-        None
-    } else {
-        Some(col)
-    }
+    if col.is_empty() { None } else { Some(col) }
 }
 
 /// Find the byte offset just after the last top-level SELECT keyword (not inside parentheses).
@@ -417,7 +413,10 @@ mod tests {
             GROUP BY 1
         "#;
         let cols = extract_select_columns(sql);
-        assert_eq!(cols, vec!["onramp_name", "total_known_clients", "total_deals"]);
+        assert_eq!(
+            cols,
+            vec!["onramp_name", "total_known_clients", "total_deals"]
+        );
     }
 
     #[test]

@@ -6,15 +6,15 @@ use std::path::Path;
 
 use std::path::PathBuf;
 
+use crate::graph::types::{ExposureInfo, OwnerInfo};
 use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
-    extract_all_with_vars, extract_refs_and_sources_with_vars, RefCall, SourceCall,
+    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
 };
-use crate::parser::yaml_schema::{parse_schema_file, ExposureDefinition};
-use crate::graph::types::{ExposureInfo, OwnerInfo};
+use crate::parser::yaml_schema::{ExposureDefinition, parse_schema_file};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -63,11 +63,7 @@ impl GraphBuilder {
         if let Some(&idx) = self.node_map.get(&dep_id) {
             return idx;
         }
-        crate::warn!(
-            "unresolved ref '{}' in {}",
-            ref_name,
-            sql_path.display()
-        );
+        crate::warn!("unresolved ref '{}' in {}", ref_name, sql_path.display());
         let phantom_id = format!("model.{}", ref_name);
         self.add_node(NodeData {
             unique_id: phantom_id,
@@ -566,7 +562,14 @@ pub fn build_graph(
         "snapshot",
         NodeType::Snapshot,
     );
-    process_sql_edges(&mut gb, files, project_dir, &macro_prefix, &extraction_cache, vars)?;
+    process_sql_edges(
+        &mut gb,
+        files,
+        project_dir,
+        &macro_prefix,
+        &extraction_cache,
+        vars,
+    )?;
     process_exposures(&mut gb, &exposures);
 
     disk_cache.save();
@@ -1173,11 +1176,7 @@ models:
         .unwrap();
 
         // Model that uses the macro
-        fs::write(
-            models_dir.join("base_table.sql"),
-            "SELECT 1 as id",
-        )
-        .unwrap();
+        fs::write(models_dir.join("base_table.sql"), "SELECT 1 as id").unwrap();
         fs::write(
             models_dir.join("derived.sql"),
             "SELECT * FROM ({{ my_cte() }})",
@@ -1219,11 +1218,7 @@ models:
         fs::create_dir_all(&models_dir).unwrap();
 
         // dbt_project.yml with vars
-        fs::write(
-            project_dir.join("dbt_project.yml"),
-            "name: var_test\n",
-        )
-        .unwrap();
+        fs::write(project_dir.join("dbt_project.yml"), "name: var_test\n").unwrap();
 
         // Model that uses var() to iterate over categories and ref dynamically
         fs::write(

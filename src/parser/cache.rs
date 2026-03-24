@@ -176,13 +176,10 @@ impl ExtractionCache {
             }
             // Auto-create .gitignore to prevent accidental commits
             let gitignore = parent.join(".gitignore");
-            if !gitignore.exists() {
-                if let Err(e) = std::fs::write(
-                    &gitignore,
-                    "# Automatically created by dlin\n*\n",
-                ) {
-                    crate::warn!("could not create {}: {}", gitignore.display(), e);
-                }
+            if !gitignore.exists()
+                && let Err(e) = std::fs::write(&gitignore, "# Automatically created by dlin\n*\n")
+            {
+                crate::warn!("could not create {}: {}", gitignore.display(), e);
             }
         }
         match serde_json::to_string(&cf) {
@@ -388,7 +385,8 @@ mod tests {
         let sql_file = project_dir.join("model.sql");
         fs::write(&sql_file, "SELECT 1").unwrap();
 
-        let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), Some(&cache_dir));
+        let mut cache =
+            ExtractionCache::load(project_dir, "prefix", &HashMap::new(), Some(&cache_dir));
         cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
         cache.save();
 
@@ -479,7 +477,10 @@ mod tests {
         // But can still save new entries
         let mut fresh = ExtractionCache::fresh(project_dir, "prefix", &HashMap::new(), None);
         let extraction = JinjaExtraction {
-            refs: vec![RefCall { package: None, name: "fresh_ref".to_string() }],
+            refs: vec![RefCall {
+                package: None,
+                name: "fresh_ref".to_string(),
+            }],
             sources: vec![],
             config: SqlConfig::default(),
         };

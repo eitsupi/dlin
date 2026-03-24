@@ -64,7 +64,16 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
     }
 
     let total = model + source + seed + snapshot + test + exposure + phantom;
-    NodeCounts { model, source, seed, snapshot, test, exposure, phantom, total }
+    NodeCounts {
+        model,
+        source,
+        seed,
+        snapshot,
+        test,
+        exposure,
+        phantom,
+        total,
+    }
 }
 
 /// Render summary as human-readable text to stdout.
@@ -80,7 +89,12 @@ pub fn render_summary_json_stdout(report: &SummaryReport) {
     super::handle_stdout_result(render_summary_json(report, &mut stdout, pretty));
 }
 
-fn render_file_list<W: Write>(w: &mut W, label: &str, files: &[String], max: usize) -> io::Result<()> {
+fn render_file_list<W: Write>(
+    w: &mut W,
+    label: &str,
+    files: &[String],
+    max: usize,
+) -> io::Result<()> {
     if files.is_empty() {
         return Ok(());
     }
@@ -134,15 +148,14 @@ pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::R
         } else if ms.is_stale {
             let mut parts = Vec::new();
             if ms.stale_file_count > 0 {
-                parts.push(format!("{} file{} newer",
+                parts.push(format!(
+                    "{} file{} newer",
                     ms.stale_file_count,
                     if ms.stale_file_count == 1 { "" } else { "s" }
                 ));
             }
             if ms.deleted_file_count > 0 {
-                parts.push(format!("{} deleted",
-                    ms.deleted_file_count,
-                ));
+                parts.push(format!("{} deleted", ms.deleted_file_count,));
             }
             writeln!(w, "Manifest:      stale ({})", parts.join(", "))?;
             render_file_list(w, "newer", &ms.stale_files, MAX_FILES_TEXT)?;
@@ -155,7 +168,11 @@ pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::R
     Ok(())
 }
 
-pub fn render_summary_json<W: Write>(report: &SummaryReport, w: &mut W, pretty: bool) -> io::Result<()> {
+pub fn render_summary_json<W: Write>(
+    report: &SummaryReport,
+    w: &mut W,
+    pretty: bool,
+) -> io::Result<()> {
     if pretty {
         serde_json::to_writer_pretty(&mut *w, report).map_err(super::serde_io_error)?;
     } else {
@@ -309,8 +326,11 @@ mod tests {
             is_stale: true,
             stale_file_count: 5,
             stale_files: vec![
-                "a.sql".to_string(), "b.sql".to_string(), "c.sql".to_string(),
-                "d.sql".to_string(), "e.sql".to_string(),
+                "a.sql".to_string(),
+                "b.sql".to_string(),
+                "c.sql".to_string(),
+                "d.sql".to_string(),
+                "e.sql".to_string(),
             ],
             deleted_file_count: 0,
             deleted_files: vec![],
