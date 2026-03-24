@@ -124,8 +124,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         &selectors,
     )?;
 
-    // Apply node-type filter (default: model,source; --node-type-all for all types)
-    let type_names = graph::filter::resolve_node_types(args.node_types, args.node_type_all);
+    // Apply node-type filter (default: all types; use --node-type to restrict)
+    let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
         dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
     }
@@ -210,8 +210,8 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         &selectors,
     )?;
 
-    // Apply node-type filter (default: model,source; --node-type-all for all types)
-    let type_names = graph::filter::resolve_node_types(args.node_types, args.node_type_all);
+    // Apply node-type filter (default: all types; use --node-type to restrict)
+    let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
         dlin::warn!("unknown node type '{}'. Known types: {}", t, graph::filter::KNOWN_NODE_TYPE_LABELS.join(", "));
     }

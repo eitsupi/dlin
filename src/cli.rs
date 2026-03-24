@@ -22,7 +22,7 @@ Data sources:
                   Use `dlin check-manifest` to verify freshness before querying.
 
   Use sql mode for quick, local exploration without dbt setup. Switch to manifest
-  mode when you need complete test/exposure coverage or exact materialization info.
+  mode when you need complete test coverage or exact materialization info.
 
 Stdin support:
   Accepts model names or file paths from stdin. File paths (detected by extension \
@@ -78,7 +78,8 @@ pub enum ErrorFormat {
 Visualize dbt model lineage graph.
 
 Shows the dependency graph of dbt models, sources, seeds, snapshots, tests, and exposures. \
-By default shows all models and sources. Use positional arguments to focus on specific models.
+By default all node types are included. Use --node-type to restrict output to specific types. \
+Use positional arguments to focus on specific models.
 
 Output formats:
   ascii (default)  Text-based DAG for terminal display
@@ -95,10 +96,10 @@ Depth control (-u/-d):
   BFS traversal follows edges regardless of node type.
 
 Node type filter (--node-type):
+  By default all node types are shown. Use --node-type to restrict output.
   Applied as a post-filter AFTER depth traversal. Only matching node types \
 appear in the output. Edges between excluded nodes are removed.
-  To see connections across types, include all relevant types:
-    --node-type source,model    # sources + models + edges between them
+    --node-type model,source    # only models and sources
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
@@ -194,16 +195,12 @@ pub struct GraphArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated). Default: model,source.
+    /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
     /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
     /// use manifest mode for full test coverage
-    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
+    #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
-
-    /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
-    #[arg(long, conflicts_with = "node_types")]
-    pub node_type_all: bool,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
@@ -483,9 +480,6 @@ Examples:
   # List models tagged 'finance'
   dlin list -s tag:finance
 
-  # List all node types
-  dlin list --node-type-all
-
   # Count models (combine with standard tools)
   dlin list --node-type model | wc -l
 
@@ -527,16 +521,12 @@ pub struct ListArgs {
     #[arg(short = 's', long)]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated). Default: model,source.
+    /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
     /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
     /// use manifest mode for full test coverage
-    #[arg(long = "node-type", value_delimiter = ',', conflicts_with = "node_type_all")]
+    #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
-
-    /// Include all node types in output. Shorthand for --node-type model,source,seed,snapshot,test,exposure. Cannot be combined with --node-type
-    #[arg(long, conflicts_with = "node_types")]
-    pub node_type_all: bool,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
@@ -587,7 +577,7 @@ impl OutputFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum SourceType {
-    /// Parse SQL files directly — no dbt/Python required, but YAML-defined tests and exposures are not detected
+    /// Parse SQL files directly — no dbt/Python required. Exposures are detected from YAML, but YAML-defined generic tests are not
     Sql,
     /// Use dbt manifest.json — full accuracy, requires prior `dbt compile`
     Manifest,

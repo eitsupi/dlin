@@ -302,21 +302,13 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
 /// Known node type labels for validation.
 pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &["model", "source", "seed", "snapshot", "test", "exposure"];
 
-/// Default node types shown when `--node-type` is not specified.
-pub const DEFAULT_NODE_TYPE_LABELS: &[&str] = &["model", "source"];
-
 /// Resolve the effective node type names from CLI arguments.
 ///
-/// - If `all` is true, returns all known node types.
-/// - Otherwise uses `explicit` if provided, falling back to [`DEFAULT_NODE_TYPE_LABELS`].
-pub fn resolve_node_types(explicit: Option<Vec<String>>, all: bool) -> Vec<String> {
-    if all {
+/// Returns `explicit` if provided, otherwise all known node types.
+pub fn resolve_node_types(explicit: Option<Vec<String>>) -> Vec<String> {
+    explicit.unwrap_or_else(|| {
         KNOWN_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-    } else {
-        explicit.unwrap_or_else(|| {
-            DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect()
-        })
-    }
+    })
 }
 
 /// Return unrecognized node type names from the given list.
@@ -1080,10 +1072,10 @@ mod tests {
             },
         );
 
-        // Default filter (model,source only) — excludes test, seed, snapshot
+        // Explicit filter (model,source only) — excludes test, seed, snapshot
         let filtered = filter_output_node_types(
             &filter_graph(&g, &[], None, None, &[]).unwrap(),
-            &DEFAULT_NODE_TYPE_LABELS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &["model".into(), "source".into()],
         );
         assert_eq!(filtered.node_count(), 1); // Only the model remains
         let labels: Vec<String> = filtered

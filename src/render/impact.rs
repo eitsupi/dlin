@@ -50,7 +50,7 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
         if report.exposure_paths_truncated {
             writeln!(
                 w,
-                "  {} Use `dlin graph {} --node-type model,source,exposure` to see the full lineage.",
+                "  {} Use `dlin graph {}` to see the full lineage.",
                 "(truncated)".dimmed(),
                 report.source_model
             )?;
@@ -418,6 +418,6 @@ mod tests {
         render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("(truncated)"));
-        assert!(output.contains("dlin graph stg_orders --node-type model,source,exposure"));
+        assert!(output.contains("dlin graph stg_orders"));
     }
 }
