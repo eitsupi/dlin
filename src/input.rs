@@ -23,11 +23,13 @@ enum InputLine {
 /// directory when `dbt_project.yml` lives in a subdirectory.
 fn to_absolute(path_str: &str, cwd: &Path) -> PathBuf {
     let path = Path::new(path_str);
-    if path.is_absolute() {
+    let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
-    }
+    };
+    // Canonicalize to normalize path prefixes (e.g. \\?\ on Windows)
+    abs.canonicalize().unwrap_or(abs)
 }
 
 /// Read lines from stdin if data is being piped or redirected from a file.
