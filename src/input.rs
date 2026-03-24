@@ -17,10 +17,6 @@ enum InputLine {
     Ignore,
 }
 
-/// Resolve a potentially relative path to absolute using the given base directory.
-/// stdin paths (e.g. from `git diff --name-only`) are relative to the working
-/// directory where the command was invoked, which may differ from the dbt project
-/// directory when `dbt_project.yml` lives in a subdirectory.
 /// Normalize a path by canonicalizing the longest existing ancestor and appending
 /// the remaining components.  This resolves symlinks (macOS `/tmp` → `/private/tmp`)
 /// and platform prefixes (Windows `\\?\`) without requiring the full path to exist.
@@ -50,6 +46,10 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Resolve a potentially relative path to absolute using the given base directory.
+/// stdin paths (e.g. from `git diff --name-only`) are relative to the working
+/// directory where the command was invoked, which may differ from the dbt project
+/// directory when `dbt_project.yml` lives in a subdirectory.
 fn to_absolute(path_str: &str, cwd: &Path) -> PathBuf {
     let path = Path::new(path_str);
     if path.is_absolute() {
@@ -210,6 +210,7 @@ pub fn has_path_like_input(inputs: &[String]) -> bool {
 
 /// Check if an absolute path falls under any of the configured dbt project directories.
 fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
+    let abs_path = normalize_path(abs_path);
     let all_paths = resolved_paths
         .model_paths
         .iter()
@@ -229,6 +230,7 @@ fn resolve_sql_to_label(
     graph: &LineageGraph,
     project_dir: &Path,
 ) -> Option<String> {
+    let abs_path = normalize_path(abs_path);
     let project_dir = normalize_path(project_dir);
     let relative = abs_path.strip_prefix(&project_dir).ok()?;
     // Normalize to forward slashes once (loop-invariant) for Windows compatibility
