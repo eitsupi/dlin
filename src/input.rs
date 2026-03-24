@@ -218,7 +218,9 @@ fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
         .chain(&resolved_paths.test_paths)
         .chain(&resolved_paths.analysis_paths);
 
-    all_paths.into_iter().any(|dir| abs_path.starts_with(dir))
+    all_paths
+        .into_iter()
+        .any(|dir| abs_path.starts_with(normalize_path(dir)))
 }
 
 /// Find a graph node whose `file_path` matches the given absolute path and return its label.
@@ -227,7 +229,8 @@ fn resolve_sql_to_label(
     graph: &LineageGraph,
     project_dir: &Path,
 ) -> Option<String> {
-    let relative = abs_path.strip_prefix(project_dir).ok()?;
+    let project_dir = normalize_path(project_dir);
+    let relative = abs_path.strip_prefix(&project_dir).ok()?;
     // Normalize to forward slashes once (loop-invariant) for Windows compatibility
     let rel_str = relative.to_string_lossy().replace('\\', "/");
 
