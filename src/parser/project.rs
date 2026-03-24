@@ -3,6 +3,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::input::normalize_path;
+
 use crate::error::DbtLineageError;
 
 #[derive(Debug, Deserialize)]
@@ -77,37 +79,19 @@ impl DbtProject {
     }
 
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {
+        let resolve = |paths: &[String]| -> Vec<PathBuf> {
+            paths
+                .iter()
+                .map(|p| normalize_path(&project_dir.join(p)))
+                .collect()
+        };
         ResolvedPaths {
-            model_paths: self
-                .model_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            seed_paths: self
-                .seed_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            snapshot_paths: self
-                .snapshot_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            test_paths: self
-                .test_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            macro_paths: self
-                .macro_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            analysis_paths: self
-                .analysis_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
+            model_paths: resolve(&self.model_paths),
+            seed_paths: resolve(&self.seed_paths),
+            snapshot_paths: resolve(&self.snapshot_paths),
+            test_paths: resolve(&self.test_paths),
+            macro_paths: resolve(&self.macro_paths),
+            analysis_paths: resolve(&self.analysis_paths),
         }
     }
 }
@@ -121,6 +105,7 @@ pub struct ResolvedPaths {
     pub macro_paths: Vec<PathBuf>,
     pub analysis_paths: Vec<PathBuf>,
 }
+
 
 #[cfg(test)]
 mod tests {

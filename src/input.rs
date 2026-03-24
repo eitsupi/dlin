@@ -20,7 +20,7 @@ enum InputLine {
 /// Normalize a path by canonicalizing the longest existing ancestor and appending
 /// the remaining components.  This resolves symlinks (macOS `/tmp` → `/private/tmp`)
 /// and platform prefixes (Windows `\\?\`) without requiring the full path to exist.
-fn normalize_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     // Try canonicalizing the full path first (works when file exists)
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
@@ -219,9 +219,7 @@ fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
         .chain(&resolved_paths.test_paths)
         .chain(&resolved_paths.analysis_paths);
 
-    all_paths
-        .into_iter()
-        .any(|dir| abs_path.starts_with(normalize_path(dir)))
+    all_paths.into_iter().any(|dir| abs_path.starts_with(dir))
 }
 
 /// Find a graph node whose `file_path` matches the given absolute path and return its label.
