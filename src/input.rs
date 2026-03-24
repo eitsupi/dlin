@@ -201,14 +201,14 @@ fn resolve_sql_to_label(
     project_dir: &Path,
 ) -> Option<String> {
     let relative = abs_path.strip_prefix(project_dir).ok()?;
+    // Normalize to forward slashes once (loop-invariant) for Windows compatibility
+    let rel_str = relative.to_string_lossy().replace('\\', "/");
 
     graph.node_indices().find_map(|idx| {
         let node = &graph[idx];
         match &node.file_path {
             Some(node_path) => {
-                // Compare using forward slashes to handle Windows backslash paths
                 let node_str = node_path.to_string_lossy().replace('\\', "/");
-                let rel_str = relative.to_string_lossy().replace('\\', "/");
                 if node_str == rel_str {
                     Some(node.label.clone())
                 } else {
