@@ -106,7 +106,6 @@ pub struct ResolvedPaths {
     pub analysis_paths: Vec<PathBuf>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
