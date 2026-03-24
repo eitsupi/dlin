@@ -21,6 +21,35 @@ enum InputLine {
 /// stdin paths (e.g. from `git diff --name-only`) are relative to the working
 /// directory where the command was invoked, which may differ from the dbt project
 /// directory when `dbt_project.yml` lives in a subdirectory.
+/// Normalize a path by canonicalizing the longest existing ancestor and appending
+/// the remaining components.  This resolves symlinks (macOS `/tmp` → `/private/tmp`)
+/// and platform prefixes (Windows `\\?\`) without requiring the full path to exist.
+fn normalize_path(path: &Path) -> PathBuf {
+    // Try canonicalizing the full path first (works when file exists)
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    // Otherwise, walk up until we find an existing ancestor
+    let mut components_to_append = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            let mut result = canonical;
+            for component in components_to_append.into_iter().rev() {
+                result.push(component);
+            }
+            return result;
+        }
+        if let Some(file_name) = current.file_name() {
+            components_to_append.push(file_name.to_owned());
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    path.to_path_buf()
+}
+
 fn to_absolute(path_str: &str, cwd: &Path) -> PathBuf {
     let path = Path::new(path_str);
     if path.is_absolute() {
@@ -83,7 +112,7 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
     let path = Path::new(line);
     match path.extension().and_then(|e| e.to_str()) {
         Some("sql") => {
-            let abs = to_absolute(line, cwd);
+            let abs = normalize_path(&to_absolute(line, cwd));
             if is_under_dbt_paths(&abs, resolved_paths) {
                 InputLine::SqlFile(abs)
             } else {
@@ -91,7 +120,7 @@ fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> Inpu
             }
         }
         Some("yml" | "yaml") => {
-            let abs = to_absolute(line, cwd);
+            let abs = normalize_path(&to_absolute(line, cwd));
             if is_under_dbt_paths(&abs, resolved_paths) {
                 InputLine::YamlFile(abs)
             } else {
@@ -180,12 +209,7 @@ pub fn has_path_like_input(inputs: &[String]) -> bool {
 }
 
 /// Check if an absolute path falls under any of the configured dbt project directories.
-/// Both paths are canonicalized before comparison to handle platform differences
-/// (e.g. macOS `/tmp` → `/private/tmp`, Windows `\\?\` prefix).
 fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
-    let canonical = abs_path
-        .canonicalize()
-        .unwrap_or_else(|_| abs_path.to_path_buf());
     let all_paths = resolved_paths
         .model_paths
         .iter()
@@ -194,10 +218,7 @@ fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
         .chain(&resolved_paths.test_paths)
         .chain(&resolved_paths.analysis_paths);
 
-    all_paths.into_iter().any(|dir| {
-        let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        canonical.starts_with(&canonical_dir)
-    })
+    all_paths.into_iter().any(|dir| abs_path.starts_with(dir))
 }
 
 /// Find a graph node whose `file_path` matches the given absolute path and return its label.
@@ -206,13 +227,7 @@ fn resolve_sql_to_label(
     graph: &LineageGraph,
     project_dir: &Path,
 ) -> Option<String> {
-    let canonical = abs_path
-        .canonicalize()
-        .unwrap_or_else(|_| abs_path.to_path_buf());
-    let canonical_dir = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
-    let relative = canonical.strip_prefix(&canonical_dir).ok()?;
+    let relative = abs_path.strip_prefix(project_dir).ok()?;
     // Normalize to forward slashes once (loop-invariant) for Windows compatibility
     let rel_str = relative.to_string_lossy().replace('\\', "/");
 
