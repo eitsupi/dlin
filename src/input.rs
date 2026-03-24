@@ -202,10 +202,18 @@ fn resolve_sql_to_label(
 
     graph.node_indices().find_map(|idx| {
         let node = &graph[idx];
-        if node.file_path.as_deref() == Some(relative) {
-            Some(node.label.clone())
-        } else {
-            None
+        match &node.file_path {
+            Some(node_path) => {
+                // Compare using forward slashes to handle Windows backslash paths
+                let node_str = node_path.to_string_lossy().replace('\\', "/");
+                let rel_str = relative.to_string_lossy().replace('\\', "/");
+                if node_str == rel_str {
+                    Some(node.label.clone())
+                } else {
+                    None
+                }
+            }
+            None => None,
         }
     })
 }
