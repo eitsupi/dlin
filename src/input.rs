@@ -23,13 +23,11 @@ enum InputLine {
 /// directory when `dbt_project.yml` lives in a subdirectory.
 fn to_absolute(path_str: &str, cwd: &Path) -> PathBuf {
     let path = Path::new(path_str);
-    let abs = if path.is_absolute() {
+    if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
-    };
-    // Canonicalize to normalize path prefixes (e.g. \\?\ on Windows)
-    abs.canonicalize().unwrap_or(abs)
+    }
 }
 
 /// Read lines from stdin if data is being piped or redirected from a file.
@@ -182,7 +180,12 @@ pub fn has_path_like_input(inputs: &[String]) -> bool {
 }
 
 /// Check if an absolute path falls under any of the configured dbt project directories.
+/// Both paths are canonicalized before comparison to handle platform differences
+/// (e.g. macOS `/tmp` → `/private/tmp`, Windows `\\?\` prefix).
 fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
+    let canonical = abs_path
+        .canonicalize()
+        .unwrap_or_else(|_| abs_path.to_path_buf());
     let all_paths = resolved_paths
         .model_paths
         .iter()
@@ -191,7 +194,10 @@ fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
         .chain(&resolved_paths.test_paths)
         .chain(&resolved_paths.analysis_paths);
 
-    all_paths.into_iter().any(|dir| abs_path.starts_with(dir))
+    all_paths.into_iter().any(|dir| {
+        let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        canonical.starts_with(&canonical_dir)
+    })
 }
 
 /// Find a graph node whose `file_path` matches the given absolute path and return its label.
@@ -200,7 +206,13 @@ fn resolve_sql_to_label(
     graph: &LineageGraph,
     project_dir: &Path,
 ) -> Option<String> {
-    let relative = abs_path.strip_prefix(project_dir).ok()?;
+    let canonical = abs_path
+        .canonicalize()
+        .unwrap_or_else(|_| abs_path.to_path_buf());
+    let canonical_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let relative = canonical.strip_prefix(&canonical_dir).ok()?;
     // Normalize to forward slashes once (loop-invariant) for Windows compatibility
     let rel_str = relative.to_string_lossy().replace('\\', "/");
 
