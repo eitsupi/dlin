@@ -3,6 +3,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::input::normalize_path;
+
 use crate::error::DbtLineageError;
 
 #[derive(Debug, Deserialize)]
@@ -77,37 +79,19 @@ impl DbtProject {
     }
 
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {
+        let resolve = |paths: &[String]| -> Vec<PathBuf> {
+            paths
+                .iter()
+                .map(|p| normalize_path(&project_dir.join(p)))
+                .collect()
+        };
         ResolvedPaths {
-            model_paths: self
-                .model_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            seed_paths: self
-                .seed_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            snapshot_paths: self
-                .snapshot_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            test_paths: self
-                .test_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            macro_paths: self
-                .macro_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
-            analysis_paths: self
-                .analysis_paths
-                .iter()
-                .map(|p| project_dir.join(p))
-                .collect(),
+            model_paths: resolve(&self.model_paths),
+            seed_paths: resolve(&self.seed_paths),
+            snapshot_paths: resolve(&self.snapshot_paths),
+            test_paths: resolve(&self.test_paths),
+            macro_paths: resolve(&self.macro_paths),
+            analysis_paths: resolve(&self.analysis_paths),
         }
     }
 }
@@ -212,12 +196,15 @@ analysis-paths: ["analyses", "custom_analyses"]
     fn test_resolve_paths() {
         let yaml = "name: my_project\n";
         let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
-        let paths = project.resolve_paths(Path::new("/proj"));
-        assert_eq!(paths.model_paths, vec![PathBuf::from("/proj/models")]);
-        assert_eq!(paths.seed_paths, vec![PathBuf::from("/proj/seeds")]);
-        assert_eq!(paths.snapshot_paths, vec![PathBuf::from("/proj/snapshots")]);
-        assert_eq!(paths.test_paths, vec![PathBuf::from("/proj/tests")]);
-        assert_eq!(paths.macro_paths, vec![PathBuf::from("/proj/macros")]);
-        assert_eq!(paths.analysis_paths, vec![PathBuf::from("/proj/analyses")]);
+        let base = Path::new("/proj");
+        let paths = project.resolve_paths(base);
+        // resolve_paths normalizes paths, so expected values must also be normalized
+        let expected = |name: &str| vec![normalize_path(&base.join(name))];
+        assert_eq!(paths.model_paths, expected("models"));
+        assert_eq!(paths.seed_paths, expected("seeds"));
+        assert_eq!(paths.snapshot_paths, expected("snapshots"));
+        assert_eq!(paths.test_paths, expected("tests"));
+        assert_eq!(paths.macro_paths, expected("macros"));
+        assert_eq!(paths.analysis_paths, expected("analyses"));
     }
 }
