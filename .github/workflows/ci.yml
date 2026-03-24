@@ -11,18 +11,17 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }}, ${{ matrix.features }})
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        features: ["--all-features", "--no-default-features"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test ${{ matrix.features }}
+      - run: cargo test
 
   lint:
     name: Lint

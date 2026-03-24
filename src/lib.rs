@@ -4,8 +4,6 @@ pub mod graph;
 pub mod input;
 pub mod parser;
 pub mod render;
-#[cfg(feature = "tui")]
-pub mod tui;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 

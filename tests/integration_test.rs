@@ -373,7 +373,6 @@ mod cli {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("dlin"));
         assert!(stdout.contains("--project-dir"));
-        assert!(stdout.contains("--interactive"));
     }
 
     #[test]

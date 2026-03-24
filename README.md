@@ -2,7 +2,7 @@
 
 A fast CLI tool for [dbt](https://www.getdbt.com/) model lineage analysis, written in Rust.
 
-Parses SQL files directly — no `dbt compile`, no Python runtime needed. Builds a dependency graph from `ref()` and `source()` calls, then outputs it as JSON, ASCII art, DOT, Mermaid, SVG, HTML, or an interactive terminal UI.
+Parses SQL files directly — no `dbt compile`, no Python runtime needed. Builds a dependency graph from `ref()` and `source()` calls, then outputs it as JSON, ASCII art, DOT, Mermaid, SVG, or HTML.
 
 ## Highlights
 
@@ -101,7 +101,6 @@ dlin graph orders -u 1 -d 1                       # 1 hop upstream/downstream
 dlin graph -o json                                # JSON for programmatic use
 dlin graph -o dot | dot -Tsvg > out.svg           # Graphviz rendering
 dlin graph -o json --json-fields unique_id,label  # select specific fields
-dlin graph -i                                     # interactive TUI
 ```
 
 ### List — enumerate nodes
@@ -245,41 +244,6 @@ dlin list --node-type source                # list only sources
 ```
 
 Selectors support `tag:<name>`, `path:<prefix>`, and bare model names (comma-separated, OR logic).
-
-## Interactive TUI
-
-```sh
-dlin graph -i
-```
-
-Features: vim-style navigation, mouse support, search (`/`), path highlighting (`p`), run dbt commands (`x`), node list sidebar (`n`).
-
-<details>
-<summary>TUI keybindings</summary>
-
-| Key | Action |
-|-----|--------|
-| `h` `j` `k` `l` / arrows | Navigate nodes |
-| `H` `J` `K` `L` | Pan viewport |
-| `+` / `-` | Zoom |
-| `/` | Search |
-| `p` | Toggle path highlighting |
-| `n` | Toggle node list |
-| `x` | Run menu (dbt run/test) |
-| `o` | View last run output |
-| `q` | Quit |
-
-Mouse: click to select, drag to pan, scroll to zoom, right-click for context menu.
-
-</details>
-
-The TUI reads `target/run_results.json` when available and color-codes nodes by run status (green = success, red = error, yellow = outdated).
-
-To build without TUI dependencies:
-
-```sh
-cargo install dlin --no-default-features
-```
 
 ## Limitations of SQL parse mode
 

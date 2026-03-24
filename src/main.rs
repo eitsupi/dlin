@@ -144,18 +144,6 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         dlin::warn!("--json-fields/--json-full have no effect with -o {}", args.output.label());
     }
 
-    // Render
-    #[cfg(feature = "tui")]
-    if args.interactive {
-        dlin::tui::run_tui(filtered, project_dir)?;
-        return Ok(());
-    }
-
-    #[cfg(not(feature = "tui"))]
-    if args.interactive {
-        anyhow::bail!("TUI feature not enabled. Rebuild with --features tui");
-    }
-
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents_for_source(

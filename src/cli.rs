@@ -10,7 +10,7 @@ A fast CLI tool for dbt model lineage analysis.
 
 Parses SQL files directly to extract ref() and source() dependencies (no dbt compile needed), \
 or reads manifest.json for full-fidelity graphs. Outputs as ASCII, DOT, JSON, Mermaid, SVG, \
-HTML, or an interactive TUI.
+or HTML.
 
 Data sources:
   sql (default)   Parse SQL files via regex + minijinja. No Python or dbt required.
@@ -181,10 +181,6 @@ pub struct GraphArgs {
     /// Downstream levels to show (default: all)
     #[arg(short = 'd', long)]
     pub downstream: Option<usize>,
-
-    /// Launch interactive TUI mode
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
 
     /// Output format: ascii (default), dot, json, mermaid, plain, svg, html
     #[arg(short = 'o', long, default_value = "ascii")]
@@ -641,7 +637,6 @@ mod tests {
     fn test_graph_default_args() {
         let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
         assert!(args.model.is_empty());
-        assert!(!args.interactive);
         assert!(args.upstream.is_none());
         assert!(args.downstream.is_none());
         assert!(args.select.is_none());
@@ -684,7 +679,6 @@ mod tests {
                 "2",
                 "-d",
                 "3",
-                "-i",
                 "-o",
                 "dot",
                 "--node-type",
@@ -698,7 +692,6 @@ mod tests {
         assert_eq!(args.project_dir, PathBuf::from("/path/to/project"));
         assert_eq!(args.upstream, Some(2));
         assert_eq!(args.downstream, Some(3));
-        assert!(args.interactive);
         assert!(matches!(args.output, OutputFormat::Dot));
         assert_eq!(
             args.node_types,

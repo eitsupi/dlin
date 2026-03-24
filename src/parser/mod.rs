@@ -1,4 +1,3 @@
-pub mod artifacts;
 pub mod cache;
 pub mod columns;
 pub mod discovery;
