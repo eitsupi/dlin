@@ -333,13 +333,14 @@ mod tests {
     use std::fs;
 
     fn make_resolved_paths(project_dir: &Path) -> ResolvedPaths {
+        let norm = |name: &str| vec![normalize_path(&project_dir.join(name))];
         ResolvedPaths {
-            model_paths: vec![project_dir.join("models")],
-            seed_paths: vec![project_dir.join("seeds")],
-            snapshot_paths: vec![project_dir.join("snapshots")],
-            test_paths: vec![project_dir.join("tests")],
-            macro_paths: vec![project_dir.join("macros")],
-            analysis_paths: vec![project_dir.join("analyses")],
+            model_paths: norm("models"),
+            seed_paths: norm("seeds"),
+            snapshot_paths: norm("snapshots"),
+            test_paths: norm("tests"),
+            macro_paths: norm("macros"),
+            analysis_paths: norm("analyses"),
         }
     }
 
