@@ -1,6 +1,6 @@
 [package]
 name = "dlin"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 edition = "2024"
 description = "A fast CLI tool for dbt model lineage analysis"
 license = "MIT"
