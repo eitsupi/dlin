@@ -46,7 +46,7 @@ Built for AI coding agents that discover tools through `--help` and learn from e
 - **Machine-readable JSON**: `--json-fields` to select fields; compact output when piped
 - **Composable**: stdin accepts model names or file paths (`dlin impact` → `dlin list` → `jq`)
 
-## Subcommands
+## Key subcommands
 
 ### `graph`
 
@@ -90,9 +90,8 @@ Impacted Nodes:
 ## Filtering
 
 ```sh
-dlin graph -s tag:finance,path:marts        # selector expressions (union)
-dlin graph --node-type model,source         # filter by node type
-dlin graph --include-tests --include-seeds  # include optional node types
+dlin graph -s tag:finance,path:marts  # selector expressions (union)
+dlin graph --node-type model,source   # filter by node type
 ```
 
 ## Data sources
