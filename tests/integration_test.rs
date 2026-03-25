@@ -965,7 +965,7 @@ mod error_format {
             panic!("stderr is not valid JSON: {e}\nstderr: {stderr}");
         });
         assert_eq!(parsed["level"], "error");
-        assert!(!parsed["message"].as_str().unwrap().is_empty());
+        assert!(!parsed["what"].as_str().unwrap().is_empty());
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod error_format {
         );
         let parsed: serde_json::Value = serde_json::from_str(warning_line.unwrap()).unwrap();
         assert_eq!(parsed["level"], "warning");
-        assert!(parsed["message"].as_str().unwrap().contains("bogus_type"));
+        assert!(parsed["what"].as_str().unwrap().contains("bogus_type"));
     }
 
     #[test]

@@ -87,7 +87,8 @@ fn main() {
     };
 
     if let Err(err) = result {
-        eprintln!("{}", dlin::format_error(&err));
+        let diag = dlin::Diagnostic::from_error(&err);
+        eprintln!("{}", dlin::format_diagnostic(&diag));
         std::process::exit(1);
     }
 }

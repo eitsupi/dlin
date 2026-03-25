@@ -33,10 +33,13 @@ Exit codes:
   1   Error (project not found, all specified models not found, etc.)
 
 Error format (--error-format):
-  text (default)  Human-readable: 'Error: ...' and 'Warning: ...'
-  json            Machine-readable JSON on stderr:
-                  {\"level\":\"error\",\"message\":\"...\"}
-                  {\"level\":\"warning\",\"message\":\"...\"}
+  text (default)  Human-readable with What/Why/Hint structure:
+                  Error: <what>
+                    Why: <why>     (when available)
+                    Hint: <hint>   (when available)
+  json            Structured JSON on stderr (fixed schema):
+                  {\"level\":\"error\",\"what\":\"...\",\"why\":...,\"hint\":...}
+                  why and hint are strings or null.
                   Also settable via DLIN_ERROR_FORMAT=json",
     after_long_help = "\
 Examples:
@@ -55,8 +58,9 @@ Examples:
 )]
 pub struct Cli {
     /// Error/warning output format on stderr: text (default) or json.
-    /// When json, errors and warnings are emitted as JSON objects
-    /// ({"level":"error","message":"..."}) for programmatic parsing
+    /// When json, diagnostics are emitted as structured JSON objects with a
+    /// fixed schema: {"level":"error"|"warning","what":"...","why":...,"hint":...}
+    /// where why and hint are either strings or null
     #[arg(long, global = true, default_value = "text", env = "DLIN_ERROR_FORMAT")]
     pub error_format: ErrorFormat,
 
@@ -68,7 +72,7 @@ pub struct Cli {
 pub enum ErrorFormat {
     /// Human-readable error messages (default)
     Text,
-    /// JSON objects on stderr: {"level":"error"|"warning","message":"..."}
+    /// Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
     Json,
 }
 
