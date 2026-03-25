@@ -83,7 +83,6 @@ pub fn format_json_diagnostic_structured(
     format!(r#"{{"level":"{level}","what":"{what}","why":{why},"hint":{hint}}}"#)
 }
 
-
 /// Structured error with optional Why and Hint fields.
 ///
 /// Agents and humans can both recover faster when an error says *what* went
@@ -159,9 +158,7 @@ fn diagnose(what: String) -> Diagnostic {
         return Diagnostic {
             what,
             why: None,
-            hint: Some(
-                "Check the spelling. Run `dlin list` to see available models".to_string(),
-            ),
+            hint: Some("Check the spelling. Run `dlin list` to see available models".to_string()),
         };
     }
 
@@ -179,9 +176,7 @@ fn diagnose(what: String) -> Diagnostic {
         return Diagnostic {
             what,
             why: None,
-            hint: Some(
-                "Check the spelling. Run `dlin list` to see available models".to_string(),
-            ),
+            hint: Some("Check the spelling. Run `dlin list` to see available models".to_string()),
         };
     }
 
@@ -228,7 +223,12 @@ fn diagnose(what: String) -> Diagnostic {
 /// Format a [`Diagnostic`] for stderr output, respecting the current error format.
 pub fn format_diagnostic(diag: &Diagnostic) -> String {
     if is_error_format_json() {
-        format_json_diagnostic_structured("error", &diag.what, diag.why.as_deref(), diag.hint.as_deref())
+        format_json_diagnostic_structured(
+            "error",
+            &diag.what,
+            diag.why.as_deref(),
+            diag.hint.as_deref(),
+        )
     } else {
         let mut out = format!("Error: {}", diag.what);
         if let Some(ref why) = diag.why {
@@ -258,8 +258,10 @@ pub fn is_quiet() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_quiet_flag() {
         // Default is not quiet
         set_quiet(false);
@@ -276,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_error_format_flag() {
         set_error_format_json(false);
         assert!(!is_error_format_json());
@@ -332,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_error_text() {
         set_error_format_json(false);
         let msg = format_error(&"something went wrong");
@@ -339,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_error_json() {
         set_error_format_json(true);
         let msg = format_error(&"something went wrong");
@@ -392,8 +397,7 @@ mod tests {
 
     #[test]
     fn test_diagnose_unknown_json_fields() {
-        let diag =
-            diagnose("unknown JSON field(s): foo, bar. Available fields: a, b".to_string());
+        let diag = diagnose("unknown JSON field(s): foo, bar. Available fields: a, b".to_string());
         assert!(diag.hint.as_ref().unwrap().contains("--json-full"));
     }
 
@@ -412,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_text() {
         set_error_format_json(false);
         let diag = Diagnostic {
@@ -424,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_text_with_why() {
         set_error_format_json(false);
         let diag = Diagnostic {
@@ -439,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_with_hint() {
         set_error_format_json(true);
         let diag = Diagnostic {
@@ -456,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_full() {
         set_error_format_json(true);
         let diag = Diagnostic {
@@ -472,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_no_hint() {
         set_error_format_json(true);
         let diag = Diagnostic {
