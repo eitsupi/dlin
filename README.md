@@ -1,18 +1,8 @@
 # dlin
 
-A fast CLI tool for [dbt](https://www.getdbt.com/) model lineage analysis, written in Rust.
+dbt lineage analysis CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
 
-Parses SQL files directly — no `dbt compile`, no Python runtime needed. Builds a dependency graph from `ref()` and `source()` calls, then outputs it as JSON, ASCII art, DOT, Mermaid, SVG, or HTML.
-
-## Highlights
-
-- **Fast** — parallel SQL extraction with [rayon](https://github.com/rayon-rs/rayon); disk cache for instant subsequent runs
-- **Zero Python dependency** — works from a single binary; no virtualenv, no dbt installation required
-- **Machine-readable output** — deterministic JSON with `--json-fields` for field selection, designed for CI and AI agent pipelines
-- **Two data sources** — parse SQL directly (default) or read `manifest.json` for full-fidelity graphs
-- **Composable** — stdin/stdout piping across subcommands (`impact` → `list` → `jq`)
-
-## Installation
+Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
 
 ```sh
 cargo install --git https://github.com/eitsupi/dlin.git
@@ -21,114 +11,64 @@ cargo install --git https://github.com/eitsupi/dlin.git
 ## Quick start
 
 ```sh
-$ dlin graph -p path/to/dbt/project
- [ src:raw.orders ]      [ stg_retail_orders ]        [ orders ]         [ customers ]
-[ src:raw.payments ]        [ stg_orders ]        [ combined_orders ]
-[ src:raw.customers ]    [ stg_online_orders ]     [ order_summary ]
-                           [ stg_payments ]
-                           [ stg_customers ]
+# Full lineage graph
+dlin graph -p path/to/dbt/project
 
-Edges:
-  stg_orders ──ref──> order_summary
-  stg_payments ──ref──> order_summary
-  stg_customers ──ref──> customers
-  orders ──ref──> customers
-  stg_online_orders ──ref──> combined_orders
-  stg_retail_orders ──ref──> combined_orders
-  stg_orders ──ref──> orders
-  stg_payments ──ref──> orders
-  src:raw.orders ──src──> stg_retail_orders
-  src:raw.orders ──src──> stg_online_orders
-  src:raw.orders ──src──> stg_orders
-  src:raw.payments ──src──> stg_payments
-  src:raw.customers ──src──> stg_customers
+# Downstream impact analysis
+dlin impact orders
+
+# List models as JSON
+dlin list -o json --json-fields unique_id,file_path
+
+# Pipe changed files into lineage
+git diff --name-only main | dlin graph -o json
 ```
 
-Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML. For example, `dlin graph -o mermaid` produces:
+## Why dlin?
 
-```mermaid
-flowchart LR
-    model_combined_orders["combined_orders"]
-    model_customers["customers"]
-    model_order_summary["order_summary"]
-    model_orders["orders"]
-    model_stg_customers["stg_customers"]
-    model_stg_online_orders["stg_online_orders"]
-    model_stg_orders["stg_orders"]
-    model_stg_payments["stg_payments"]
-    model_stg_retail_orders["stg_retail_orders"]
-    source_raw_customers(["raw.customers"])
-    source_raw_orders(["raw.orders"])
-    source_raw_payments(["raw.payments"])
+| Capability | `grep` | `dbt ls` | manifest-based tools | **dlin** |
+| --- | --- | --- | --- | --- |
+| Recursive upstream / downstream | no | yes (`+`) | varies | yes (`-u N` / `-d N`) |
+| Impact analysis with severity | no | no | some | **yes** (`impact`) |
+| Exposure reachability | no | no | rare | **yes** (in `impact`) |
+| Works without `manifest.json` | yes | no | no | **yes** |
+| Works without Python / dbt | yes | no | no | **yes** |
+| Structured errors for agents | no | no | no | **yes** (`--error-format json`) |
 
-    model_orders -->|ref| model_customers
-    model_stg_customers -->|ref| model_customers
-    model_stg_online_orders -->|ref| model_combined_orders
-    model_stg_orders -->|ref| model_order_summary
-    model_stg_orders -->|ref| model_orders
-    model_stg_payments -->|ref| model_order_summary
-    model_stg_payments -->|ref| model_orders
-    model_stg_retail_orders -->|ref| model_combined_orders
-    source_raw_customers -.->|source| model_stg_customers
-    source_raw_orders -.->|source| model_stg_online_orders
-    source_raw_orders -.->|source| model_stg_orders
-    source_raw_orders -.->|source| model_stg_retail_orders
-    source_raw_payments -.->|source| model_stg_payments
+`grep` can't follow the dependency graph. `dbt ls` and manifest-based tools (dbt-meshify, elementary, fal, etc.) require `dbt compile` first. dlin parses SQL directly.
 
-    classDef model fill:#4A90D9,stroke:#333,color:#fff
-    classDef source fill:#27AE60,stroke:#333,color:#fff
-    class model_combined_orders model
-    class model_customers model
-    class model_order_summary model
-    class model_orders model
-    class model_stg_customers model
-    class model_stg_online_orders model
-    class model_stg_orders model
-    class model_stg_payments model
-    class model_stg_retail_orders model
-    class source_raw_customers source
-    class source_raw_orders source
-    class source_raw_payments source
-```
+## Agent-friendly design
 
-## Usage examples
+Built for AI coding agents that discover tools through `--help` and learn from errors.
 
-### Graph — visualize lineage
+- **Structured errors**: `--error-format json` emits `{"level","what","why","hint"}` on stderr
+- **Actionable hints**: error messages tell the agent what to try next
+- **Machine-readable JSON**: `--json-fields` to select fields; compact output when piped
+- **Composable**: stdin accepts model names or file paths (`dlin impact` → `dlin list` → `jq`)
+
+## Subcommands
+
+### `graph`
 
 ```sh
 dlin graph                                        # full lineage (ASCII)
 dlin graph orders -u 1 -d 1                       # 1 hop upstream/downstream
-dlin graph -o json                                # JSON for programmatic use
+dlin graph -o json --json-fields unique_id,label  # select JSON fields
 dlin graph -o dot | dot -Tsvg > out.svg           # Graphviz rendering
-dlin graph -o json --json-fields unique_id,label  # select specific fields
+dlin graph -o mermaid                             # Mermaid diagram
 ```
 
-### List — enumerate nodes
+Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
+
+### `list`
 
 ```sh
-$ dlin list
-model   combined_orders
-model   customers
-model   order_summary
-model   orders
-model   stg_customers
-model   stg_online_orders
-model   stg_orders
-model   stg_payments
-model   stg_retail_orders
-source  raw.customers
-source  raw.orders
-source  raw.payments
+dlin list                                                   # all models and sources
+dlin list orders -o json --json-fields unique_id,file_path  # specific model as JSON
+dlin list --node-type source                                # sources only
 ```
 
-Filter to specific models and output as JSON:
-
-```sh
-$ dlin list orders -o json --json-fields unique_id,file_path
-[{"file_path":"models/marts/orders.sql","unique_id":"model.orders"}]
-```
-
-### Impact — downstream impact analysis
+### `impact`
 
 ```sh
 $ dlin impact orders
@@ -147,116 +87,31 @@ Impacted Nodes:
   [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
 
-### Check-manifest — manifest.json helper
-
-dlin works standalone without dbt, but `--source manifest` mode provides higher accuracy by reading a pre-compiled `manifest.json`. Since `dbt compile` can be slow (seconds to tens of seconds depending on project size and warehouse connection), you want to avoid running it unnecessarily. The `check-manifest` command detects when `dbt compile` needs to be re-run by comparing file timestamps of all project SQL and YAML files against `manifest.json`.
-
-```sh
-$ dlin check-manifest
-manifest.json is stale (3 files newer):
-  models/staging/stg_orders.sql
-  models/marts/orders.sql
-  macros/order_totals.sql
-
-# Conditionally recompile
-$ dlin check-manifest || dbt compile
-
-# JSON output for CI pipelines
-$ dlin check-manifest -o json
-{"is_stale":true,"manifest_path":"target/manifest.json","stale_file_count":3,"stale_files":["macros/order_totals.sql","models/marts/orders.sql","models/staging/stg_orders.sql"]}
-
-# Quiet mode (exit code only)
-$ dlin check-manifest -q && echo "up-to-date" || echo "stale"
-```
-
-### Pipelines — compose subcommands
-
-```sh
-# Get impacted model names, then fetch their SQL
-dlin impact orders -o json |
-  jq -r '.[].impacted_nodes[].unique_id' |
-  dlin list -o json --json-fields unique_id,sql_content
-
-# Lineage of changed files
-git diff --name-only main | dlin graph -o json
-
-# List changed models with metadata
-git diff --name-only main |
-  dlin list -o json --json-fields unique_id,label,description
-```
-
-Stdin accepts model names or file paths. File paths (detected by extension or path separators) are automatically resolved to model names using `dbt_project.yml`.
-
-## Performance
-
-dlin is designed for fast feedback loops:
-
-- **Parallel extraction** — SQL files are parsed concurrently using rayon
-- **Disk cache** — extraction results are cached to `.dlin_cache/extraction_cache.json` (auto-created, gitignored); invalidated per-file by mtime and size
-- **In-memory dedup** — minijinja template rendering is performed once per file and reused across phases
-- **No runtime dependency** — single static binary, no Python interpreter startup
-
-Use `--no-cache` to force a fresh parse. Use `--cache-dir` to customize the cache location.
-
-## Data sources
-
-### SQL parsing (default)
-
-Extracts `ref()` and `source()` calls from SQL via regex + [minijinja](https://github.com/mitsuhiko/minijinja) template evaluation. Handles Jinja blocks, macros, and config expressions. No Python or dbt installation required.
-
-### Manifest (`--source manifest`)
-
-Reads a pre-compiled `manifest.json` for full accuracy including column metadata, materializations, and complex Jinja logic that cannot be statically analyzed.
-
-```sh
-dlin graph --source manifest --manifest-path target/manifest.json
-dlin graph --source manifest --manifest-path path/to/project  # auto-finds target/manifest.json
-```
-
-## JSON output
-
-### Field selection
-
-Control which fields appear in JSON node output:
-
-```sh
-dlin graph -o json --json-fields unique_id,label       # only these fields
-dlin graph -o json --json-full                         # all available fields
-dlin list -o json --json-fields unique_id,sql_content  # works on list too
-```
-
-Available fields: `unique_id`, `label`, `node_type`, `file_path`, `description`, `materialization`, `tags`, `columns`, `sql_content`
-
-Default (when neither flag is given): `unique_id`, `label`, `node_type`, `file_path`
-
-### Output format
-
-- TTY → pretty-printed JSON
-- Pipe/redirect → compact single-line JSON (for `jq`, scripts, etc.)
-
 ## Filtering
 
 ```sh
 dlin graph -s tag:finance,path:marts        # selector expressions (union)
-dlin graph --node-type model,source         # post-filter by node type
+dlin graph --node-type model,source         # filter by node type
 dlin graph --include-tests --include-seeds  # include optional node types
-dlin list --node-type source                # list only sources
 ```
 
-Selectors support `tag:<name>`, `path:<prefix>`, and bare model names (comma-separated, OR logic).
+## Data sources
 
-## Limitations of SQL parse mode
+**SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed.
 
-- **`var()` with CLI overrides** — `var()` resolves values from `dbt_project.yml` `vars`, but `--vars` CLI overrides are not supported
-- **Runtime context** — `target.type`, `env_var()`, etc. are not evaluated
-- **Conditional Jinja** — branches are evaluated with default values; non-default paths may be missed
-- **Column extraction** — falls back to regex on final SELECT when YAML schema is absent; cannot resolve `SELECT *` or CTE columns
+**Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
+
+### Limitations of SQL parse mode
+
+- `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
+- Runtime context (`target.type`, `env_var()`) is not evaluated
+- Conditional Jinja branches use default values; non-default paths may be missed
 
 For full accuracy, use `--source manifest`.
 
 ## Credits
 
-This project is a hard fork of [dbt-lineage-viewer](https://github.com/sipemu/dbt-lineage-viewer) by Simon Muller, originally released under the MIT license.
+Hard fork of [dbt-lineage-viewer](https://github.com/sipemu/dbt-lineage-viewer) by Simon Muller (MIT license). The original focused on TUI-based exploration; dlin removes the TUI and targets non-interactive use: scripting, CI, and AI agents.
 
 ## License
 
