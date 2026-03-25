@@ -258,8 +258,10 @@ pub fn is_quiet() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_quiet_flag() {
         // Default is not quiet
         set_quiet(false);
@@ -276,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_error_format_flag() {
         set_error_format_json(false);
         assert!(!is_error_format_json());
@@ -332,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_error_text() {
         set_error_format_json(false);
         let msg = format_error(&"something went wrong");
@@ -339,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_error_json() {
         set_error_format_json(true);
         let msg = format_error(&"something went wrong");
@@ -411,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_text() {
         set_error_format_json(false);
         let diag = Diagnostic {
@@ -423,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_text_with_why() {
         set_error_format_json(false);
         let diag = Diagnostic {
@@ -438,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_with_hint() {
         set_error_format_json(true);
         let diag = Diagnostic {
@@ -455,6 +463,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_full() {
         set_error_format_json(true);
         let diag = Diagnostic {
@@ -471,6 +480,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_format_diagnostic_json_no_hint() {
         set_error_format_json(true);
         let diag = Diagnostic {
