@@ -1146,5 +1146,4 @@ mod error_format {
             "Expected text error, got: {stderr}"
         );
     }
-
 }
