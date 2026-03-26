@@ -147,6 +147,15 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
+    if matches!(args.source, SourceType::Sql)
+        && type_names.iter().any(|t| t.eq_ignore_ascii_case("test"))
+    {
+        dlin::warn!(
+            "sql mode detects only singular tests (SQL files in tests/); \
+             YAML-defined generic tests (not_null, unique, etc.) are not included. \
+             Use --source manifest for full test coverage"
+        );
+    }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
 
     // Resolve JSON fields
@@ -235,6 +244,15 @@ fn run_list_command(args: ListArgs) -> Result<()> {
             "unknown node type '{}'. Known types: {}",
             t,
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
+        );
+    }
+    if matches!(args.source, SourceType::Sql)
+        && type_names.iter().any(|t| t.eq_ignore_ascii_case("test"))
+    {
+        dlin::warn!(
+            "sql mode detects only singular tests (SQL files in tests/); \
+             YAML-defined generic tests (not_null, unique, etc.) are not included. \
+             Use --source manifest for full test coverage"
         );
     }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);

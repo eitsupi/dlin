@@ -939,6 +939,117 @@ mod cli {
             "Quiet mode should produce no stdout"
         );
     }
+
+    #[test]
+    fn test_sql_mode_test_warning_with_explicit_node_type() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--node-type",
+                "model,test",
+                "-o",
+                "plain",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("sql mode detects only singular tests"),
+            "Expected sql-mode test warning in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_sql_mode_test_warning_default_node_types() {
+        // Warning should also appear when --node-type is not specified (default includes test)
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args(["list", "--project-dir", fixture.to_str().unwrap()])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("sql mode detects only singular tests"),
+            "Expected sql-mode test warning even without explicit --node-type, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_sql_mode_test_warning_suppressed_by_quiet() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "list",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--quiet",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sql mode detects only singular tests"),
+            "Warning should be suppressed by --quiet, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_sql_mode_test_warning_absent_without_test_type() {
+        // When --node-type excludes test, no warning should appear
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--node-type",
+                "model,source",
+                "-o",
+                "plain",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sql mode detects only singular tests"),
+            "Warning should not appear when test type is excluded, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_sql_mode_test_warning_absent_in_manifest_mode() {
+        let fixture = super::fixture_dir();
+        let output = Command::new(binary_path())
+            .args([
+                "list",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--source",
+                "manifest",
+                "--node-type",
+                "test",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sql mode detects only singular tests"),
+            "Warning should not appear in manifest mode, got: {stderr}"
+        );
+    }
 }
 
 mod error_format {
@@ -1035,4 +1146,5 @@ mod error_format {
             "Expected text error, got: {stderr}"
         );
     }
+
 }
