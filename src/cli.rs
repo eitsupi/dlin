@@ -201,8 +201,10 @@ pub struct GraphArgs {
 
     /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
-    /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
-    /// use manifest mode for full test coverage
+    ///
+    /// WARNING: In sql mode, only singular tests (SQL files in tests/) are detected.
+    /// YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected.
+    /// Use --source manifest for full test coverage.
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
@@ -526,8 +528,10 @@ pub struct ListArgs {
 
     /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
-    /// In sql mode, YAML-defined generic tests (not_null, unique, etc.) are not detected;
-    /// use manifest mode for full test coverage
+    ///
+    /// WARNING: In sql mode, only singular tests (SQL files in tests/) are detected.
+    /// YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected.
+    /// Use --source manifest for full test coverage.
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
@@ -580,7 +584,7 @@ impl OutputFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum SourceType {
-    /// Parse SQL files directly — no dbt/Python required. Exposures are detected from YAML, but YAML-defined generic tests are not
+    /// Parse SQL files directly — no dbt/Python required. Exposures are detected from YAML, but YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected — only singular test SQL files are found
     Sql,
     /// Use dbt manifest.json — full accuracy, requires prior `dbt compile`
     Manifest,
