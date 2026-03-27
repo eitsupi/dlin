@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub type LineageGraph = StableDiGraph<NodeData, EdgeData>;
 
 /// Types of nodes in the dbt lineage
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeType {
     Model,
     Source,

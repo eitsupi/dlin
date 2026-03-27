@@ -68,6 +68,12 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GroupBy {
+    /// Group nodes by node type (source, model, test, etc.)
+    NodeType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ErrorFormat {
     /// Human-readable error messages (default)
@@ -216,6 +222,11 @@ pub struct GraphArgs {
     /// edges through removed nodes are preserved as transitive edges with "(via N)" labels.
     #[arg(long)]
     pub no_transitive: bool,
+
+    /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
+    /// Currently supported: node-type (group by source, model, test, etc.)
+    #[arg(long = "group-by")]
+    pub group_by: Option<GroupBy>,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
