@@ -110,6 +110,14 @@ Shows the dependency graph of dbt models, sources, seeds, snapshots, tests, and 
 By default all node types are included. Use --node-type to restrict output to specific types. \
 Use positional arguments to focus on specific models.
 
+Focusing vs filtering:
+  Positional arguments (MODEL) set the focus: BFS traversal from those models \
+discovers upstream/downstream neighbors. -u/-d control how many levels to traverse. \
+Without positional arguments, all nodes are included.
+  --select (-s) filters the result set by condition (label glob, tag, path). \
+When combined with positional arguments, the BFS result is intersected with the \
+selector matches.
+
 Output formats:
   ascii (default)  Text-based DAG for terminal display
   json             Machine-readable {\"nodes\":[...], \"edges\":[...]} structure
@@ -127,65 +135,61 @@ Depth control (-u/-d):
 Node type filter (--node-type):
   By default all node types are shown. Use --node-type to restrict output.
   Applied as a post-filter AFTER depth traversal. Only matching node types \
-appear in the output. Edges between excluded nodes are removed.
+appear in the output. By default, edges through excluded nodes are preserved \
+as transitive edges (see --no-transitive).
     --node-type model,source    # only models and sources
+
+Transitive edge completion:
+  When filters (--node-type, --select, or focus models) remove intermediate nodes, \
+edges through those nodes are preserved as transitive edges with \"(via N)\" labels. \
+Use --no-transitive to disable this and drop such edges instead.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
 File paths are resolved to model names using dbt project configuration.",
     after_long_help = "\
 Examples:
-  # Full lineage of the project
+  # === Full project lineage ===
   dlin graph
   dlin graph -o json
 
-  # Focus on a model with depth control
-  dlin graph orders -u 2 -d 1
+  # === Focus on specific models (positional args = BFS from those nodes) ===
+  dlin graph orders -u 2 -d 1           # 2 upstream, 1 downstream of orders
   dlin graph stg_orders -d 0            # just the node, no downstream
+  dlin graph stg_orders orders customers # multiple focus models
 
-  # Multiple models
-  dlin graph stg_orders orders customers
-
-  # Find upstream sources of a model
-  dlin graph orders -u 3 --node-type source,model -o json
-
-  # Find downstream models of a source
-  dlin graph raw.orders -d 2 --node-type source,model -o json
-
-  # See which sources feed into each exposure (transitive edges through models)
-  dlin graph --node-type source,exposure -o mermaid
-
-  # List only source nodes (no edges)
-  dlin graph --node-type source -o json
-
-  # Filter by path prefix or glob
+  # === Filter by selector (--select/-s = keep only matching nodes) ===
   dlin graph -s path:models/marts -o json
   dlin graph -s 'path:**/staging/**' -o json
+  dlin graph -s 'tag:finance,path:**/staging/**' -o json   # OR logic
+  dlin graph -s 'stg_*' -o json                            # label glob
+  dlin graph -s 'tag:night*' -o json                       # tag glob
 
-  # Filter by tag and path (OR logic)
-  dlin graph -s 'tag:finance,path:**/staging/**' -o json
+  # === Combine focus + selector (intersect: BFS result AND selector match) ===
+  dlin graph orders -d 3 -s 'path:**/staging/**'  # downstream of orders, in staging/
 
-  # Glob in model name or tag
-  dlin graph -s 'stg_*' -o json
-  dlin graph -s 'tag:night*' -o json
+  # === Node type filter (post-filter, transitive edges preserved by default) ===
+  dlin graph orders -u 3 --node-type source,model -o json
+  dlin graph raw.orders -d 2 --node-type source,model -o json
+  dlin graph --node-type source,exposure -o mermaid  # sources feeding exposures
+  dlin graph --node-type source -o json              # list sources only
 
-  # From git diff (pipe changed files)
+  # Disable transitive edge completion
+  dlin graph --node-type model --no-transitive -o json
+
+  # === Stdin / git integration ===
   git diff --name-only main | dlin graph -o json
 
-  # Use manifest.json instead of SQL parsing
+  # === Data source ===
   dlin graph --source manifest --manifest-path target/manifest.json
 
-  # JSON with specific fields
+  # === JSON field control ===
   dlin graph -o json --json-fields unique_id,label,description
-
-  # JSON with all fields
   dlin graph -o json --json-full
 
-  # Graphviz rendering
+  # === Graphviz / visual output ===
   dlin graph -o dot | dot -Tsvg > lineage.svg
-
-  # Interactive TUI
-  dlin graph -i"
+  dlin graph -o mermaid --direction tb   # top-to-bottom layout"
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
