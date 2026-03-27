@@ -26,39 +26,105 @@ git diff --name-only main | dlin graph -o json
 
 ## Why dlin?
 
-| Capability | `grep` | `dbt ls` | manifest-based tools | **dlin** |
-| --- | --- | --- | --- | --- |
-| Recursive upstream / downstream | no | yes (`+`) | varies | yes (`-u N` / `-d N`) |
-| Impact analysis with severity | no | no | some | **yes** (`impact`) |
-| Exposure reachability | no | no | rare | **yes** (in `impact`) |
-| Works without `manifest.json` | yes | no | no | **yes** |
-| Works without Python / dbt | yes | no | no | **yes** |
-| Structured errors for agents | no | no | no | **yes** (`--error-format json`) |
+dbt's built-in `dbt ls` and manifest-based tools require `dbt compile` (and therefore Python) before you can query the graph. dlin parses SQL directly, so it works anywhere Rust runs — in CI, in AI agents, or on a machine without Python installed.
 
-`grep` can't follow the dependency graph. `dbt ls` and manifest-based tools (dbt-meshify, elementary, fal, etc.) require `dbt compile` first. dlin parses SQL directly.
+- **No dependencies**: single binary, no Python, no `manifest.json`
+- **Recursive upstream / downstream**: `-u N` / `-d N` to control traversal depth
+- **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
+- **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
+- **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
 
-## Agent-friendly design
+## Mermaid diagrams
 
-Built for AI coding agents that discover tools through `--help` and learn from errors.
+dlin outputs Mermaid flowcharts that render natively on GitHub, GitLab, Notion, and other Markdown environments.
 
-- **Structured errors**: `--error-format json` emits `{"level","what","why","hint"}` on stderr
-- **Actionable hints**: error messages tell the agent what to try next
-- **Machine-readable JSON**: `--json-fields` to select fields; compact output when piped
-- **Composable**: stdin accepts model names or file paths (`dlin impact` → `dlin list` → `jq`)
+### Simplified graphs with `--node-type`
 
-## Key subcommands
-
-### `graph`
+Skip intermediate models to see the big picture. When `--node-type` removes nodes, transitive edges are preserved automatically:
 
 ```sh
-dlin graph                                        # full lineage (ASCII)
-dlin graph orders -u 1 -d 1                       # 1 hop upstream/downstream
-dlin graph -o json --json-fields unique_id,label  # select JSON fields
-dlin graph -o dot | dot -Tsvg > out.svg           # Graphviz rendering
-dlin graph -o mermaid                             # Mermaid diagram
+# Which sources feed into which exposures? (all intermediate models removed)
+dlin graph --node-type source,exposure -o mermaid
+```
+
+```mermaid
+flowchart LR
+    exposure_weekly_report>"weekly_report"]
+    source_raw_customers(["raw.customers"])
+    source_raw_orders(["raw.orders"])
+    source_raw_payments(["raw.payments"])
+
+    source_raw_customers ==>|"exposure (via 2)"| exposure_weekly_report
+    source_raw_orders ==>|"exposure (via 2)"| exposure_weekly_report
+    source_raw_payments ==>|"exposure (via 2)"| exposure_weekly_report
+
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    classDef exposure fill:#E74C3C,stroke:#333,color:#fff
+    class exposure_weekly_report exposure
+    class source_raw_customers source
+    class source_raw_orders source
+    class source_raw_payments source
+```
+
+### Pipe to build focused diagrams
+
+Combine `dlin list`, `jq`, and `dlin graph` to extract exactly the nodes you want:
+
+```sh
+# Staging models → 1 hop downstream, models only, grouped by directory
+dlin list -s 'path:models/staging' -o json | jq -r '.[].label' |
+  dlin graph -d 1 --node-type model --group-by directory -o mermaid
+```
+
+```mermaid
+flowchart LR
+    subgraph models_marts["models/marts"]
+        model_combined_orders["combined_orders"]
+        model_customers["customers"]
+        model_order_summary["order_summary"]
+        model_orders["orders"]
+    end
+    subgraph models_staging["models/staging"]
+        model_stg_customers["stg_customers"]
+        model_stg_online_orders["stg_online_orders"]
+        model_stg_orders["stg_orders"]
+        model_stg_payments["stg_payments"]
+        model_stg_retail_orders["stg_retail_orders"]
+    end
+
+    model_orders -->|ref| model_customers
+    model_stg_customers -->|ref| model_customers
+    model_stg_online_orders -->|ref| model_combined_orders
+    model_stg_orders -->|ref| model_order_summary
+    model_stg_orders -->|ref| model_orders
+    model_stg_payments -->|ref| model_order_summary
+    model_stg_payments -->|ref| model_orders
+    model_stg_retail_orders -->|ref| model_combined_orders
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_combined_orders model
+    class model_customers model
+    class model_order_summary model
+    class model_orders model
+    class model_stg_customers model
+    class model_stg_online_orders model
+    class model_stg_orders model
+    class model_stg_payments model
+    class model_stg_retail_orders model
+```
+
+### Other graph options
+
+```sh
+dlin graph orders -u 2 -d 1                    # focus on specific model
+dlin graph -o mermaid --group-by node-type     # group by source/model/test/...
+dlin graph -o mermaid --direction tb           # top-to-bottom layout
+dlin graph -o dot | dot -Tsvg > out.svg        # Graphviz rendering
 ```
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
+
+## Key subcommands
 
 ### `list`
 
