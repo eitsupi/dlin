@@ -1,33 +1,36 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
+use crate::cli::GroupBy;
 use crate::graph::types::*;
 
 /// Render the lineage graph as Graphviz DOT format to stdout
-pub fn render_dot(graph: &LineageGraph) {
-    super::handle_stdout_result(render_dot_to_writer(graph, &mut std::io::stdout().lock()));
+pub fn render_dot(graph: &LineageGraph, group_by: Option<GroupBy>) {
+    super::handle_stdout_result(render_dot_to_writer(
+        graph,
+        &mut std::io::stdout().lock(),
+        group_by,
+    ));
 }
 
-fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
+fn render_dot_to_writer<W: Write>(
+    graph: &LineageGraph,
+    w: &mut W,
+    group_by: Option<GroupBy>,
+) -> io::Result<()> {
     writeln!(w, "digraph dbt_lineage {{")?;
     writeln!(w, "  rankdir=LR;")?;
     writeln!(
         w,
-        "  node [shape=box, style=filled, fontname=\"Helvetica\"];"
+        r#"  node [shape=box, style=filled, fontname="Helvetica"];"#
     )?;
     writeln!(w)?;
 
-    // Render nodes
-    for idx in graph.node_indices() {
-        let node = &graph[idx];
-        let (color, fontcolor) = node_colors(node.node_type);
-        let label = node.display_name();
-        writeln!(
-            w,
-            "  \"{}\" [label=\"{}\", fillcolor=\"{}\", fontcolor=\"{}\"];",
-            node.unique_id, label, color, fontcolor
-        )?;
+    match group_by {
+        Some(GroupBy::NodeType) => write_nodes_grouped(w, graph)?,
+        None => write_nodes_flat(w, graph)?,
     }
 
     writeln!(w)?;
@@ -53,13 +56,58 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result
         };
         writeln!(
             w,
-            "  \"{}\" -> \"{}\" [label=\"{}\"{style}];",
-            source.unique_id, target.unique_id, label,
+            r#"  "{}" -> "{}" [label="{label}"{style}];"#,
+            source.unique_id, target.unique_id,
         )?;
     }
 
     writeln!(w, "}}")?;
     Ok(())
+}
+
+/// Write nodes without grouping (flat list)
+fn write_nodes_flat<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
+    for idx in graph.node_indices() {
+        let node = &graph[idx];
+        write_node(w, node, "  ")?;
+    }
+    Ok(())
+}
+
+/// Write nodes grouped by node type using DOT subgraph clusters
+fn write_nodes_grouped<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
+    // Group nodes by node type
+    let mut groups: BTreeMap<&str, Vec<&NodeData>> = BTreeMap::new();
+    for idx in graph.node_indices() {
+        let node = &graph[idx];
+        groups.entry(node.node_type.label()).or_default().push(node);
+    }
+
+    for (type_label, group_nodes) in &groups {
+        let (bg_color, _) = node_colors_for_label(type_label);
+        let title = capitalize(type_label);
+        writeln!(w, r#"  subgraph cluster_{type_label} {{"#)?;
+        writeln!(w, r#"    label="{title}";"#)?;
+        writeln!(w, "    style=rounded;")?;
+        writeln!(w, r#"    color="{bg_color}";"#)?;
+        writeln!(w)?;
+        for node in group_nodes {
+            write_node(w, node, "    ")?;
+        }
+        writeln!(w, "  }}")?;
+    }
+    Ok(())
+}
+
+/// Write a single node definition
+fn write_node<W: Write>(w: &mut W, node: &NodeData, indent: &str) -> io::Result<()> {
+    let (color, fontcolor) = node_colors(node.node_type);
+    let label = node.display_name();
+    writeln!(
+        w,
+        r#"{indent}"{}" [label="{label}", fillcolor="{color}", fontcolor="{fontcolor}"];"#,
+        node.unique_id,
+    )
 }
 
 fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
@@ -74,6 +122,29 @@ fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
     }
 }
 
+/// Look up node colors by type label string (for cluster border color)
+fn node_colors_for_label(label: &str) -> (&'static str, &'static str) {
+    match label {
+        "model" => node_colors(NodeType::Model),
+        "source" => node_colors(NodeType::Source),
+        "seed" => node_colors(NodeType::Seed),
+        "snapshot" => node_colors(NodeType::Snapshot),
+        "test" => node_colors(NodeType::Test),
+        "exposure" => node_colors(NodeType::Exposure),
+        "phantom" => node_colors(NodeType::Phantom),
+        _ => ("#999999", "black"),
+    }
+}
+
+/// Capitalize the first letter of a string
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,7 +152,13 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_dot_to_writer(graph, &mut buf).unwrap();
+        render_dot_to_writer(graph, &mut buf, None).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn render_to_string_grouped(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        render_dot_to_writer(graph, &mut buf, Some(GroupBy::NodeType)).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -262,5 +339,26 @@ mod tests {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_group_by_node_type() {
+        let graph = crate::render::test_helpers::make_sample_lineage_graph();
+        let output = render_to_string_grouped(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_group_by_node_type_cluster_structure() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        graph.add_node(make_node("source.raw.b", "raw.b", NodeType::Source));
+
+        let output = render_to_string_grouped(&graph);
+        assert!(output.contains("subgraph cluster_model {"));
+        assert!(output.contains("subgraph cluster_source {"));
+        assert!(output.contains("label=\"Model\""));
+        assert!(output.contains("label=\"Source\""));
+        assert!(output.contains("style=rounded;"));
     }
 }

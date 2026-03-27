@@ -6,7 +6,7 @@ use clap::Parser;
 
 use dlin::cli::{
     self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs,
-    ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+    GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin::graph;
 use dlin::input;
@@ -184,7 +184,26 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         None
     };
 
-    render_output(&args.output, &filtered, sql_contents.as_ref(), &json_fields);
+    // Warn if --group-by used with unsupported output format
+    if args.group_by.is_some()
+        && !matches!(
+            args.output,
+            cli::OutputFormat::Dot | cli::OutputFormat::Mermaid
+        )
+    {
+        dlin::warn!(
+            "--group-by has no effect with -o {} (supported: dot, mermaid)",
+            args.output.label()
+        );
+    }
+
+    render_output(
+        &args.output,
+        &filtered,
+        sql_contents.as_ref(),
+        &json_fields,
+        args.group_by,
+    );
 
     Ok(())
 }
@@ -326,12 +345,13 @@ fn render_output(
     graph: &graph::types::LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
     json_fields: &std::collections::HashSet<String>,
+    group_by: Option<GroupBy>,
 ) {
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
-        cli::OutputFormat::Dot => render::dot::render_dot(graph),
+        cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by),
         cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
-        cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph),
+        cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph, group_by),
         cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),

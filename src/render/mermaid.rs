@@ -1,20 +1,24 @@
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
+use crate::cli::GroupBy;
 use crate::graph::types::*;
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
-pub fn render_mermaid(graph: &LineageGraph) {
+pub fn render_mermaid(graph: &LineageGraph, group_by: Option<GroupBy>) {
     super::handle_stdout_result(render_mermaid_to_writer(
         graph,
         &mut std::io::stdout().lock(),
+        group_by,
     ));
 }
 
 pub(crate) fn render_mermaid_to_writer<W: Write>(
     graph: &LineageGraph,
     w: &mut W,
+    group_by: Option<GroupBy>,
 ) -> io::Result<()> {
     writeln!(w, "flowchart LR")?;
 
@@ -26,20 +30,9 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     let mut nodes: Vec<_> = graph.node_indices().map(|idx| &graph[idx]).collect();
     nodes.sort_by_key(|n| &n.unique_id);
 
-    // Render nodes with type-specific shapes
-    for node in &nodes {
-        let id = mermaid_id(&node.unique_id);
-        let label = &node.label;
-        let shape = match node.node_type {
-            NodeType::Model => format!("{}[\"{}\"]", id, label),
-            NodeType::Source => format!("{}([\"{}\"])", id, label),
-            NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
-            NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}", id, label),
-            NodeType::Test => format!("{}{{\"{}\"}}", id, label),
-            NodeType::Exposure => format!("{}>\"{}\"]", id, label),
-            NodeType::Phantom => format!("{}(\"{}\")", id, label),
-        };
-        writeln!(w, "    {}", shape)?;
+    match group_by {
+        Some(GroupBy::NodeType) => write_nodes_grouped(w, &nodes)?,
+        None => write_nodes_flat(w, &nodes)?,
     }
 
     writeln!(w)?;
@@ -116,9 +109,61 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     Ok(())
 }
 
+/// Write nodes without grouping (flat list)
+fn write_nodes_flat<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+    for node in nodes {
+        writeln!(w, "    {}", node_shape(node))?;
+    }
+    Ok(())
+}
+
+/// Write nodes grouped by node type using Mermaid subgraph blocks
+fn write_nodes_grouped<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+    // Group nodes by node type, preserving sorted order within each group
+    let mut groups: BTreeMap<&str, Vec<&NodeData>> = BTreeMap::new();
+    for node in nodes {
+        groups.entry(node.node_type.label()).or_default().push(node);
+    }
+
+    // Render each group as a subgraph with a capitalized title
+    for (type_label, group_nodes) in &groups {
+        let title = capitalize(type_label);
+        writeln!(w, r#"    subgraph {type_label}["{title}"]"#)?;
+        for node in group_nodes {
+            writeln!(w, "        {}", node_shape(node))?;
+        }
+        writeln!(w, "    end")?;
+    }
+    Ok(())
+}
+
+/// Generate the Mermaid shape string for a node
+fn node_shape(node: &NodeData) -> String {
+    let id = mermaid_id(&node.unique_id);
+    let label = &node.label;
+    match node.node_type {
+        NodeType::Model => format!("{}[\"{}\"]", id, label),
+        NodeType::Source => format!("{}([\"{}\"])", id, label),
+        NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
+        NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}", id, label),
+        NodeType::Test => format!("{}{{\"{}\"}}", id, label),
+        NodeType::Exposure => format!("{}>\"{}\"]", id, label),
+        NodeType::Phantom => format!("{}(\"{}\")", id, label),
+    }
+}
+
 /// Convert a unique_id to a valid Mermaid node ID (replace dots with underscores)
 fn mermaid_id(unique_id: &str) -> String {
     unique_id.replace('.', "_")
+}
+
+/// Capitalize the first letter of a string
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 #[cfg(test)]
@@ -128,7 +173,13 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf).unwrap();
+        render_mermaid_to_writer(graph, &mut buf, None).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn render_to_string_grouped(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::NodeType)).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -300,5 +351,27 @@ mod tests {
 
         let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_group_by_node_type() {
+        let graph = crate::render::test_helpers::make_sample_lineage_graph();
+        let output = render_to_string_grouped(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_group_by_node_type_subgraph_structure() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        graph.add_node(make_node("source.raw.b", "raw.b", NodeType::Source));
+
+        let output = render_to_string_grouped(&graph);
+        assert!(output.contains("subgraph model[\"Model\"]"));
+        assert!(output.contains("subgraph source[\"Source\"]"));
+        assert!(output.contains("end"));
+        // Nodes should be indented inside subgraph
+        assert!(output.contains("        model_a[\"a\"]"));
+        assert!(output.contains("        source_raw_b([\"raw.b\"])"));
     }
 }
