@@ -1,0 +1,19 @@
+---
+source: src/render/dot.rs
+expression: output
+---
+digraph dbt_lineage {
+  rankdir=LR;
+  node [shape=box, style=filled, fontname="Helvetica"];
+
+  "exposure.e" [label="exp:e", fillcolor="#E74C3C", fontcolor="white"];
+  "model.a" [label="a", fillcolor="#4A90D9", fontcolor="white"];
+  "model.b" [label="b", fillcolor="#4A90D9", fontcolor="white"];
+  "source.raw.o" [label="src:raw.o", fillcolor="#27AE60", fontcolor="white"];
+  "test.t" [label="test:t", fillcolor="#1ABC9C", fontcolor="white"];
+
+  "model.a" -> "model.b" [label="ref"];
+  "model.b" -> "exposure.e" [label="exposure", style=bold];
+  "model.b" -> "test.t" [label="test", style=dotted];
+  "source.raw.o" -> "model.a" [label="source", style=dashed];
+}

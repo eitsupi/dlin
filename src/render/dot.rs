@@ -35,12 +35,30 @@ fn render_dot_to_writer<W: Write>(
 
     writeln!(w)?;
 
-    // Render edges
-    for edge in graph.edge_references() {
-        let source = &graph[edge.source()];
-        let target = &graph[edge.target()];
-        let ed = edge.weight();
-        let style = match (&ed.edge_type, ed.collapsed_through.is_some()) {
+    // Collect and sort edges for deterministic output
+    let mut edges: Vec<_> = graph
+        .edge_references()
+        .map(|edge| {
+            let source = &graph[edge.source()];
+            let target = &graph[edge.target()];
+            let ed = edge.weight();
+            (
+                &source.unique_id,
+                &target.unique_id,
+                ed.edge_type,
+                ed.collapsed_through,
+            )
+        })
+        .collect();
+    edges.sort_by(|a, b| {
+        a.0.cmp(b.0)
+            .then(a.1.cmp(b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+
+    for (src_id, tgt_id, edge_type, collapsed) in &edges {
+        let style = match (edge_type, collapsed.is_some()) {
             (EdgeType::Ref, false) => "",
             (EdgeType::Ref, true) => ", style=dashed",
             (EdgeType::Source, false) => ", style=dashed",
@@ -50,25 +68,22 @@ fn render_dot_to_writer<W: Write>(
             (EdgeType::Exposure, false) => ", style=bold",
             (EdgeType::Exposure, true) => r#", style="bold,dashed""#,
         };
-        let label = match ed.collapsed_through {
-            Some(n) => format!("{} (via {})", ed.edge_type.label(), n),
-            None => ed.edge_type.label().to_string(),
+        let label = match collapsed {
+            Some(n) => format!("{} (via {})", edge_type.label(), n),
+            None => edge_type.label().to_string(),
         };
-        writeln!(
-            w,
-            r#"  "{}" -> "{}" [label="{label}"{style}];"#,
-            source.unique_id, target.unique_id,
-        )?;
+        writeln!(w, r#"  "{src_id}" -> "{tgt_id}" [label="{label}"{style}];"#,)?;
     }
 
     writeln!(w, "}}")?;
     Ok(())
 }
 
-/// Write nodes without grouping (flat list)
+/// Write nodes without grouping (flat list, sorted by unique_id)
 fn write_nodes_flat<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
-    for idx in graph.node_indices() {
-        let node = &graph[idx];
+    let mut nodes: Vec<_> = graph.node_indices().map(|idx| &graph[idx]).collect();
+    nodes.sort_by_key(|n| &n.unique_id);
+    for node in &nodes {
         write_node(w, node, "  ")?;
     }
     Ok(())
@@ -83,16 +98,17 @@ fn write_nodes_grouped<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<
         groups.entry(node.node_type).or_default().push(node);
     }
 
-    for (node_type, group_nodes) in &groups {
+    for (node_type, mut group_nodes) in groups {
+        group_nodes.sort_by_key(|n| &n.unique_id);
         let type_label = node_type.label();
-        let (bg_color, _) = node_colors(*node_type);
+        let (bg_color, _) = node_colors(node_type);
         let title = super::capitalize(type_label);
         writeln!(w, r#"  subgraph cluster_{type_label} {{"#)?;
         writeln!(w, r#"    label="{title}";"#)?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w, r#"    color="{bg_color}";"#)?;
         writeln!(w)?;
-        for node in group_nodes {
+        for node in &group_nodes {
             write_node(w, node, "    ")?;
         }
         writeln!(w, "  }}")?;
@@ -323,6 +339,38 @@ mod tests {
     fn test_group_by_node_type() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let output = render_to_string_grouped(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_all_edge_types() {
+        let mut graph = LineageGraph::new();
+        let s = graph.add_node(make_node("source.raw.o", "raw.o", NodeType::Source));
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        let t = graph.add_node(make_node("test.t", "t", NodeType::Test));
+        let e = graph.add_node(make_node("exposure.e", "e", NodeType::Exposure));
+
+        graph.add_edge(s, a, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(b, t, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(b, e, EdgeData::direct(EdgeType::Exposure));
+
+        let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_transitive_edges() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("source.raw.a", "a", NodeType::Source));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(a, c, EdgeData::transitive(EdgeType::Source, 3));
+        graph.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
     }
 

@@ -11,8 +11,8 @@ digraph dbt_lineage {
     style=rounded;
     color="#4A90D9";
 
-    "model.stg_orders" [label="stg_orders", fillcolor="#4A90D9", fontcolor="white"];
     "model.orders" [label="orders", fillcolor="#4A90D9", fontcolor="white"];
+    "model.stg_orders" [label="stg_orders", fillcolor="#4A90D9", fontcolor="white"];
   }
   subgraph cluster_source {
     label="Source";
@@ -36,8 +36,8 @@ digraph dbt_lineage {
     "exposure.dashboard" [label="exp:dashboard", fillcolor="#E74C3C", fontcolor="white"];
   }
 
-  "source.raw.orders" -> "model.stg_orders" [label="source", style=dashed];
-  "model.stg_orders" -> "model.orders" [label="ref"];
-  "model.orders" -> "test.orders_positive" [label="test", style=dotted];
   "model.orders" -> "exposure.dashboard" [label="exposure", style=bold];
+  "model.orders" -> "test.orders_positive" [label="test", style=dotted];
+  "model.stg_orders" -> "model.orders" [label="ref"];
+  "source.raw.orders" -> "model.stg_orders" [label="source", style=dashed];
 }
