@@ -339,8 +339,13 @@ fn build_subgraph_with_transitive(
 
     // Add transitive edges through removed nodes
     for &start in keep_nodes {
-        // Track (start, target) pairs to avoid duplicate transitive edges
+        // Pre-fill with directly connected kept nodes to avoid redundant transitive edges
         let mut connected: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edges_directed(start, Direction::Outgoing) {
+            if keep_nodes.contains(&edge.target()) {
+                connected.insert(edge.target());
+            }
+        }
 
         let mut queue: VecDeque<(NodeIndex, usize, EdgeType)> = VecDeque::new();
         let mut visited: HashSet<NodeIndex> = HashSet::new();
@@ -1317,6 +1322,26 @@ mod tests {
         let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
         assert_eq!(filtered.node_count(), 2);
         assert_eq!(filtered.edge_count(), 1); // deduplicated
+    }
+
+    #[test]
+    fn test_transitive_skips_when_direct_edge_exists() {
+        // A -> C (direct) and A -> B -> C (B removed)
+        // Should only have the direct edge, no redundant transitive edge
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        g.add_edge(a, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["model".into()], true);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 1); // only the direct edge, no transitive duplicate
+        // Verify it's the direct edge (no collapsed_through)
+        let edge = filtered.edge_references().next().unwrap();
+        assert!(edge.weight().collapsed_through.is_none());
     }
 
     #[test]
