@@ -119,15 +119,16 @@ fn write_nodes_flat<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> 
 
 /// Write nodes grouped by node type using Mermaid subgraph blocks
 fn write_nodes_grouped<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
-    // Group nodes by node type, preserving sorted order within each group
-    let mut groups: BTreeMap<&str, Vec<&NodeData>> = BTreeMap::new();
+    // Group nodes by NodeType, preserving sorted order within each group
+    let mut groups: BTreeMap<NodeType, Vec<&NodeData>> = BTreeMap::new();
     for node in nodes {
-        groups.entry(node.node_type.label()).or_default().push(node);
+        groups.entry(node.node_type).or_default().push(node);
     }
 
     // Render each group as a subgraph with a capitalized title
-    for (type_label, group_nodes) in &groups {
-        let title = capitalize(type_label);
+    for (node_type, group_nodes) in &groups {
+        let type_label = node_type.label();
+        let title = super::capitalize(type_label);
         writeln!(w, r#"    subgraph {type_label}["{title}"]"#)?;
         for node in group_nodes {
             writeln!(w, "        {}", node_shape(node))?;
@@ -155,15 +156,6 @@ fn node_shape(node: &NodeData) -> String {
 /// Convert a unique_id to a valid Mermaid node ID (replace dots with underscores)
 fn mermaid_id(unique_id: &str) -> String {
     unique_id.replace('.', "_")
-}
-
-/// Capitalize the first letter of a string
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-    }
 }
 
 #[cfg(test)]

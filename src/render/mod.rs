@@ -22,6 +22,15 @@ pub(crate) fn handle_stdout_result(result: io::Result<()>) {
     }
 }
 
+/// Capitalize the first letter of a string (e.g. "model" -> "Model")
+pub(crate) fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 /// Convert a `serde_json::Error` into an `io::Error`, preserving the
 /// underlying I/O error kind (e.g. `BrokenPipe`) when present.
 pub(crate) fn serde_io_error(e: serde_json::Error) -> io::Error {

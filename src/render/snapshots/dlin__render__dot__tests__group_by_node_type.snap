@@ -6,13 +6,6 @@ digraph dbt_lineage {
   rankdir=LR;
   node [shape=box, style=filled, fontname="Helvetica"];
 
-  subgraph cluster_exposure {
-    label="Exposure";
-    style=rounded;
-    color="#E74C3C";
-
-    "exposure.dashboard" [label="exp:dashboard", fillcolor="#E74C3C", fontcolor="white"];
-  }
   subgraph cluster_model {
     label="Model";
     style=rounded;
@@ -34,6 +27,13 @@ digraph dbt_lineage {
     color="#1ABC9C";
 
     "test.orders_positive" [label="test:orders_positive", fillcolor="#1ABC9C", fontcolor="white"];
+  }
+  subgraph cluster_exposure {
+    label="Exposure";
+    style=rounded;
+    color="#E74C3C";
+
+    "exposure.dashboard" [label="exp:dashboard", fillcolor="#E74C3C", fontcolor="white"];
   }
 
   "source.raw.orders" -> "model.stg_orders" [label="source", style=dashed];

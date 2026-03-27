@@ -3,9 +3,6 @@ source: src/render/mermaid.rs
 expression: output
 ---
 flowchart LR
-    subgraph exposure["Exposure"]
-        exposure_dashboard>"dashboard"]
-    end
     subgraph model["Model"]
         model_orders["orders"]
         model_stg_orders["stg_orders"]
@@ -15,6 +12,9 @@ flowchart LR
     end
     subgraph test["Test"]
         test_orders_positive{"orders_positive"}
+    end
+    subgraph exposure["Exposure"]
+        exposure_dashboard>"dashboard"]
     end
 
     model_orders ==>|exposure| exposure_dashboard

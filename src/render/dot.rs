@@ -76,16 +76,17 @@ fn write_nodes_flat<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()>
 
 /// Write nodes grouped by node type using DOT subgraph clusters
 fn write_nodes_grouped<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
-    // Group nodes by node type
-    let mut groups: BTreeMap<&str, Vec<&NodeData>> = BTreeMap::new();
+    // Group nodes by NodeType directly (exhaustive match ensures compile error on new variants)
+    let mut groups: BTreeMap<NodeType, Vec<&NodeData>> = BTreeMap::new();
     for idx in graph.node_indices() {
         let node = &graph[idx];
-        groups.entry(node.node_type.label()).or_default().push(node);
+        groups.entry(node.node_type).or_default().push(node);
     }
 
-    for (type_label, group_nodes) in &groups {
-        let (bg_color, _) = node_colors_for_label(type_label);
-        let title = capitalize(type_label);
+    for (node_type, group_nodes) in &groups {
+        let type_label = node_type.label();
+        let (bg_color, _) = node_colors(*node_type);
+        let title = super::capitalize(type_label);
         writeln!(w, r#"  subgraph cluster_{type_label} {{"#)?;
         writeln!(w, r#"    label="{title}";"#)?;
         writeln!(w, "    style=rounded;")?;
@@ -119,29 +120,6 @@ fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
         NodeType::Test => ("#1ABC9C", "white"),
         NodeType::Exposure => ("#E74C3C", "white"),
         NodeType::Phantom => ("#BDC3C7", "black"),
-    }
-}
-
-/// Look up node colors by type label string (for cluster border color)
-fn node_colors_for_label(label: &str) -> (&'static str, &'static str) {
-    match label {
-        "model" => node_colors(NodeType::Model),
-        "source" => node_colors(NodeType::Source),
-        "seed" => node_colors(NodeType::Seed),
-        "snapshot" => node_colors(NodeType::Snapshot),
-        "test" => node_colors(NodeType::Test),
-        "exposure" => node_colors(NodeType::Exposure),
-        "phantom" => node_colors(NodeType::Phantom),
-        _ => ("#999999", "black"),
-    }
-}
-
-/// Capitalize the first letter of a string
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
     }
 }
 
