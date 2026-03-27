@@ -31,6 +31,42 @@ pub(crate) fn capitalize(s: &str) -> String {
     }
 }
 
+/// Label used for nodes that have no file_path when grouping by directory.
+pub(crate) const NO_DIRECTORY_LABEL: &str = "(other)";
+
+/// Extract the directory portion from a node's file_path for directory grouping.
+/// Returns the parent directory as a string (e.g. "models/staging"), or
+/// `NO_DIRECTORY_LABEL` if the node has no file_path.
+pub(crate) fn directory_label(node: &crate::graph::types::NodeData) -> String {
+    match &node.file_path {
+        Some(path) => path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| {
+                // Normalize separators to '/' for consistent output across platforms
+                p.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<String>>()
+                    .join("/")
+            })
+            .unwrap_or_else(|| NO_DIRECTORY_LABEL.to_string()),
+        None => NO_DIRECTORY_LABEL.to_string(),
+    }
+}
+
+/// Sanitize a string into a valid identifier for DOT/Mermaid (only `[A-Za-z0-9_]`).
+pub(crate) fn sanitize_id(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert a `serde_json::Error` into an `io::Error`, preserving the
 /// underlying I/O error kind (e.g. `BrokenPipe`) when present.
 pub(crate) fn serde_io_error(e: serde_json::Error) -> io::Error {
@@ -50,6 +86,25 @@ pub(crate) mod test_helpers {
             label: label.into(),
             node_type,
             file_path: None,
+            description: None,
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+        }
+    }
+
+    pub fn make_node_with_path(
+        unique_id: &str,
+        label: &str,
+        node_type: NodeType,
+        path: &str,
+    ) -> NodeData {
+        NodeData {
+            unique_id: unique_id.into(),
+            label: label.into(),
+            node_type,
+            file_path: Some(path.into()),
             description: None,
             materialization: None,
             tags: vec![],
@@ -86,5 +141,70 @@ pub(crate) mod test_helpers {
         graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
 
         graph
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_id_directory_with_hyphens() {
+        assert_eq!(sanitize_id("models/my-project"), "models_my_project");
+    }
+
+    #[test]
+    fn test_sanitize_id_parentheses() {
+        assert_eq!(sanitize_id("(other)"), "_other_");
+    }
+
+    #[test]
+    fn test_sanitize_id_empty() {
+        assert_eq!(sanitize_id(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_id_already_valid() {
+        assert_eq!(sanitize_id("models_staging"), "models_staging");
+    }
+
+    #[test]
+    fn test_sanitize_id_non_ascii() {
+        assert_eq!(sanitize_id("モデル/日本語"), "_______");
+    }
+
+    #[test]
+    fn test_capitalize() {
+        assert_eq!(capitalize("model"), "Model");
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn test_directory_label_with_path() {
+        let node = test_helpers::make_node_with_path(
+            "model.a",
+            "a",
+            crate::graph::types::NodeType::Model,
+            "models/staging/a.sql",
+        );
+        assert_eq!(directory_label(&node), "models/staging");
+    }
+
+    #[test]
+    fn test_directory_label_without_path() {
+        let node =
+            test_helpers::make_node("exposure.e", "e", crate::graph::types::NodeType::Exposure);
+        assert_eq!(directory_label(&node), NO_DIRECTORY_LABEL);
+    }
+
+    #[test]
+    fn test_directory_label_file_at_root() {
+        let node = test_helpers::make_node_with_path(
+            "model.a",
+            "a",
+            crate::graph::types::NodeType::Model,
+            "a.sql",
+        );
+        assert_eq!(directory_label(&node), NO_DIRECTORY_LABEL);
     }
 }

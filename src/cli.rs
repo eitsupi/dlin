@@ -72,6 +72,8 @@ pub struct Cli {
 pub enum GroupBy {
     /// Group nodes by node type (source, model, test, etc.)
     NodeType,
+    /// Group nodes by their file directory (e.g. models/staging, models/marts)
+    Directory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -224,7 +226,8 @@ pub struct GraphArgs {
     pub no_transitive: bool,
 
     /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
-    /// Currently supported: node-type (group by source, model, test, etc.)
+    /// Supported values: node-type (group by source, model, test, etc.),
+    /// directory (group by file directory path)
     #[arg(long = "group-by")]
     pub group_by: Option<GroupBy>,
 
