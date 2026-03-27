@@ -143,3 +143,68 @@ pub(crate) mod test_helpers {
         graph
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_id_directory_with_hyphens() {
+        assert_eq!(sanitize_id("models/my-project"), "models_my_project");
+    }
+
+    #[test]
+    fn test_sanitize_id_parentheses() {
+        assert_eq!(sanitize_id("(other)"), "_other_");
+    }
+
+    #[test]
+    fn test_sanitize_id_empty() {
+        assert_eq!(sanitize_id(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_id_already_valid() {
+        assert_eq!(sanitize_id("models_staging"), "models_staging");
+    }
+
+    #[test]
+    fn test_sanitize_id_non_ascii() {
+        assert_eq!(sanitize_id("モデル/日本語"), "_______");
+    }
+
+    #[test]
+    fn test_capitalize() {
+        assert_eq!(capitalize("model"), "Model");
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn test_directory_label_with_path() {
+        let node = test_helpers::make_node_with_path(
+            "model.a",
+            "a",
+            crate::graph::types::NodeType::Model,
+            "models/staging/a.sql",
+        );
+        assert_eq!(directory_label(&node), "models/staging");
+    }
+
+    #[test]
+    fn test_directory_label_without_path() {
+        let node =
+            test_helpers::make_node("exposure.e", "e", crate::graph::types::NodeType::Exposure);
+        assert_eq!(directory_label(&node), NO_DIRECTORY_LABEL);
+    }
+
+    #[test]
+    fn test_directory_label_file_at_root() {
+        let node = test_helpers::make_node_with_path(
+            "model.a",
+            "a",
+            crate::graph::types::NodeType::Model,
+            "a.sql",
+        );
+        assert_eq!(directory_label(&node), NO_DIRECTORY_LABEL);
+    }
+}
