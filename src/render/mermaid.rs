@@ -12,7 +12,10 @@ pub fn render_mermaid(graph: &LineageGraph) {
     ));
 }
 
-pub fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
+pub(crate) fn render_mermaid_to_writer<W: Write>(
+    graph: &LineageGraph,
+    w: &mut W,
+) -> io::Result<()> {
     writeln!(w, "flowchart LR")?;
 
     if graph.node_count() == 0 {
@@ -56,7 +59,12 @@ pub fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io
             )
         })
         .collect();
-    edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    edges.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
 
     // Render edges
     for (src_id, tgt_id, edge_type, collapsed) in &edges {
