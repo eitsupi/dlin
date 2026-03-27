@@ -31,7 +31,8 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     nodes.sort_by_key(|n| &n.unique_id);
 
     match group_by {
-        Some(GroupBy::NodeType) => write_nodes_grouped(w, &nodes)?,
+        Some(GroupBy::NodeType) => write_nodes_grouped_by_type(w, &nodes)?,
+        Some(GroupBy::Directory) => write_nodes_grouped_by_directory(w, &nodes)?,
         None => write_nodes_flat(w, &nodes)?,
     }
 
@@ -118,7 +119,7 @@ fn write_nodes_flat<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> 
 }
 
 /// Write nodes grouped by node type using Mermaid subgraph blocks
-fn write_nodes_grouped<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+fn write_nodes_grouped_by_type<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
     // Group nodes by NodeType, preserving sorted order within each group
     let mut groups: BTreeMap<NodeType, Vec<&NodeData>> = BTreeMap::new();
     for node in nodes {
@@ -130,6 +131,26 @@ fn write_nodes_grouped<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<(
         let type_label = node_type.label();
         let title = super::capitalize(type_label);
         writeln!(w, r#"    subgraph {type_label}["{title}"]"#)?;
+        for node in group_nodes {
+            writeln!(w, "        {}", node_shape(node))?;
+        }
+        writeln!(w, "    end")?;
+    }
+    Ok(())
+}
+
+/// Write nodes grouped by file directory using Mermaid subgraph blocks
+fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+    let mut groups: BTreeMap<String, Vec<&NodeData>> = BTreeMap::new();
+    for node in nodes {
+        let dir = super::directory_label(node);
+        groups.entry(dir).or_default().push(node);
+    }
+
+    for (dir, group_nodes) in &groups {
+        // Use a sanitized version as the subgraph ID
+        let subgraph_id = dir.replace(['/', '\\', '.', ' ', '(', ')'], "_");
+        writeln!(w, r#"    subgraph {subgraph_id}["{dir}"]"#)?;
         for node in group_nodes {
             writeln!(w, "        {}", node_shape(node))?;
         }
@@ -161,7 +182,7 @@ fn mermaid_id(unique_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::test_helpers::make_node;
+    use crate::render::test_helpers::{make_node, make_node_with_path};
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
@@ -365,5 +386,74 @@ mod tests {
         // Nodes should be indented inside subgraph
         assert!(output.contains("        model_a[\"a\"]"));
         assert!(output.contains("        source_raw_b([\"raw.b\"])"));
+    }
+
+    fn render_to_string_directory(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::Directory)).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_group_by_directory_subgraph_structure() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_path(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            "models/staging/stg_orders.sql",
+        ));
+        graph.add_node(make_node_with_path(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            "models/marts/orders.sql",
+        ));
+        graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        let output = render_to_string_directory(&graph);
+        assert!(output.contains(r#"subgraph models_marts["models/marts"]"#));
+        assert!(output.contains(r#"subgraph models_staging["models/staging"]"#));
+        assert!(output.contains(r#"subgraph _other_["(other)"]"#) || output.contains("(other)"));
+        assert!(output.contains("end"));
+    }
+
+    #[test]
+    fn test_snapshot_group_by_directory() {
+        let mut graph = LineageGraph::new();
+        let src = graph.add_node(make_node_with_path(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+            "models/staging/schema.yml",
+        ));
+        let stg = graph.add_node(make_node_with_path(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            "models/staging/stg_orders.sql",
+        ));
+        let mart = graph.add_node(make_node_with_path(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            "models/marts/orders.sql",
+        ));
+        let exp = graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        graph.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let output = render_to_string_directory(&graph);
+        insta::assert_snapshot!(output);
     }
 }

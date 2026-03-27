@@ -31,6 +31,23 @@ pub(crate) fn capitalize(s: &str) -> String {
     }
 }
 
+/// Label used for nodes that have no file_path when grouping by directory.
+pub(crate) const NO_DIRECTORY_LABEL: &str = "(other)";
+
+/// Extract the directory portion from a node's file_path for directory grouping.
+/// Returns the parent directory as a string (e.g. "models/staging"), or
+/// `NO_DIRECTORY_LABEL` if the node has no file_path.
+pub(crate) fn directory_label(node: &crate::graph::types::NodeData) -> String {
+    match &node.file_path {
+        Some(path) => path
+            .parent()
+            .filter(|p| p.as_os_str() != "")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| NO_DIRECTORY_LABEL.to_string()),
+        None => NO_DIRECTORY_LABEL.to_string(),
+    }
+}
+
 /// Convert a `serde_json::Error` into an `io::Error`, preserving the
 /// underlying I/O error kind (e.g. `BrokenPipe`) when present.
 pub(crate) fn serde_io_error(e: serde_json::Error) -> io::Error {
@@ -50,6 +67,25 @@ pub(crate) mod test_helpers {
             label: label.into(),
             node_type,
             file_path: None,
+            description: None,
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+        }
+    }
+
+    pub fn make_node_with_path(
+        unique_id: &str,
+        label: &str,
+        node_type: NodeType,
+        path: &str,
+    ) -> NodeData {
+        NodeData {
+            unique_id: unique_id.into(),
+            label: label.into(),
+            node_type,
+            file_path: Some(path.into()),
             description: None,
             materialization: None,
             tags: vec![],

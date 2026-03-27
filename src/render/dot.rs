@@ -29,7 +29,8 @@ fn render_dot_to_writer<W: Write>(
     writeln!(w)?;
 
     match group_by {
-        Some(GroupBy::NodeType) => write_nodes_grouped(w, graph)?,
+        Some(GroupBy::NodeType) => write_nodes_grouped_by_type(w, graph)?,
+        Some(GroupBy::Directory) => write_nodes_grouped_by_directory(w, graph)?,
         None => write_nodes_flat(w, graph)?,
     }
 
@@ -90,7 +91,7 @@ fn write_nodes_flat<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()>
 }
 
 /// Write nodes grouped by node type using DOT subgraph clusters
-fn write_nodes_grouped<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
+fn write_nodes_grouped_by_type<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
     // Group nodes by NodeType directly (exhaustive match ensures compile error on new variants)
     let mut groups: BTreeMap<NodeType, Vec<&NodeData>> = BTreeMap::new();
     for idx in graph.node_indices() {
@@ -107,6 +108,31 @@ fn write_nodes_grouped<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<
         writeln!(w, r#"    label="{title}";"#)?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w, r#"    color="{bg_color}";"#)?;
+        writeln!(w)?;
+        for node in &group_nodes {
+            write_node(w, node, "    ")?;
+        }
+        writeln!(w, "  }}")?;
+    }
+    Ok(())
+}
+
+/// Write nodes grouped by file directory using DOT subgraph clusters
+fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -> io::Result<()> {
+    let mut groups: BTreeMap<String, Vec<&NodeData>> = BTreeMap::new();
+    for idx in graph.node_indices() {
+        let node = &graph[idx];
+        let dir = super::directory_label(node);
+        groups.entry(dir).or_default().push(node);
+    }
+
+    for (dir, mut group_nodes) in groups {
+        group_nodes.sort_by_key(|n| &n.unique_id);
+        // Use a sanitized version of the directory path as the cluster ID
+        let cluster_id = dir.replace(['/', '\\', '.', ' ', '(', ')'], "_");
+        writeln!(w, r#"  subgraph cluster_{cluster_id} {{"#)?;
+        writeln!(w, r#"    label="{dir}";"#)?;
+        writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for node in &group_nodes {
             write_node(w, node, "    ")?;
@@ -142,7 +168,7 @@ fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::test_helpers::make_node;
+    use crate::render::test_helpers::{make_node, make_node_with_path};
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
@@ -386,5 +412,76 @@ mod tests {
         assert!(output.contains("label=\"Model\""));
         assert!(output.contains("label=\"Source\""));
         assert!(output.contains("style=rounded;"));
+    }
+
+    fn render_to_string_directory(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        render_dot_to_writer(graph, &mut buf, Some(GroupBy::Directory)).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_group_by_directory_cluster_structure() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_path(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            "models/staging/stg_orders.sql",
+        ));
+        graph.add_node(make_node_with_path(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            "models/marts/orders.sql",
+        ));
+        graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        let output = render_to_string_directory(&graph);
+        assert!(output.contains("subgraph cluster_models_staging {"));
+        assert!(output.contains(r#"label="models/staging";"#));
+        assert!(output.contains("subgraph cluster_models_marts {"));
+        assert!(output.contains(r#"label="models/marts";"#));
+        assert!(output.contains("subgraph cluster__other_ {"));
+        assert!(output.contains(r#"label="(other)";"#));
+    }
+
+    #[test]
+    fn test_snapshot_group_by_directory() {
+        let mut graph = LineageGraph::new();
+        let src = graph.add_node(make_node_with_path(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+            "models/staging/schema.yml",
+        ));
+        let stg = graph.add_node(make_node_with_path(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            "models/staging/stg_orders.sql",
+        ));
+        let mart = graph.add_node(make_node_with_path(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            "models/marts/orders.sql",
+        ));
+        let exp = graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        graph.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let output = render_to_string_directory(&graph);
+        insta::assert_snapshot!(output);
     }
 }
