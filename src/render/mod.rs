@@ -41,11 +41,30 @@ pub(crate) fn directory_label(node: &crate::graph::types::NodeData) -> String {
     match &node.file_path {
         Some(path) => path
             .parent()
-            .filter(|p| p.as_os_str() != "")
-            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| {
+                // Normalize separators to '/' for consistent output across platforms
+                p.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<String>>()
+                    .join("/")
+            })
             .unwrap_or_else(|| NO_DIRECTORY_LABEL.to_string()),
         None => NO_DIRECTORY_LABEL.to_string(),
     }
+}
+
+/// Sanitize a string into a valid identifier for DOT/Mermaid (only `[A-Za-z0-9_]`).
+pub(crate) fn sanitize_id(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Convert a `serde_json::Error` into an `io::Error`, preserving the

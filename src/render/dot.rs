@@ -128,8 +128,7 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -
 
     for (dir, mut group_nodes) in groups {
         group_nodes.sort_by_key(|n| &n.unique_id);
-        // Use a sanitized version of the directory path as the cluster ID
-        let cluster_id = dir.replace(['/', '\\', '.', ' ', '(', ')'], "_");
+        let cluster_id = super::sanitize_id(&dir);
         writeln!(w, r#"  subgraph cluster_{cluster_id} {{"#)?;
         writeln!(w, r#"    label="{dir}";"#)?;
         writeln!(w, "    style=rounded;")?;

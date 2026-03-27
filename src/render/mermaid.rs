@@ -148,8 +148,7 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, nodes: &[&NodeData]) ->
     }
 
     for (dir, group_nodes) in &groups {
-        // Use a sanitized version as the subgraph ID
-        let subgraph_id = dir.replace(['/', '\\', '.', ' ', '(', ')'], "_");
+        let subgraph_id = super::sanitize_id(dir);
         writeln!(w, r#"    subgraph {subgraph_id}["{dir}"]"#)?;
         for node in group_nodes {
             writeln!(w, "        {}", node_shape(node))?;
