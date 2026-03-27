@@ -5,8 +5,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use dlin::cli::{
-    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, ErrorFormat, GraphArgs,
-    GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat,
+    GraphArgs, GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin::graph;
 use dlin::input;
@@ -197,12 +197,26 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
 
+    // Warn if --direction used with unsupported output format
+    if args.direction != Direction::LR
+        && !matches!(
+            args.output,
+            cli::OutputFormat::Dot | cli::OutputFormat::Mermaid
+        )
+    {
+        dlin::warn!(
+            "--direction has no effect with -o {} (supported: dot, mermaid)",
+            args.output.label()
+        );
+    }
+
     render_output(
         &args.output,
         &filtered,
         sql_contents.as_ref(),
         &json_fields,
         args.group_by,
+        args.direction,
     );
 
     Ok(())
@@ -346,12 +360,13 @@ fn render_output(
     sql_contents: Option<&HashMap<String, String>>,
     json_fields: &std::collections::HashSet<String>,
     group_by: Option<GroupBy>,
+    direction: Direction,
 ) {
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
-        cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by),
+        cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by, direction),
         cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
-        cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph, group_by),
+        cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph, group_by, direction),
         cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),

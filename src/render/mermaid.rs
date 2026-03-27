@@ -3,15 +3,16 @@ use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
-use crate::cli::GroupBy;
+use crate::cli::{Direction, GroupBy};
 use crate::graph::types::*;
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
-pub fn render_mermaid(graph: &LineageGraph, group_by: Option<GroupBy>) {
+pub fn render_mermaid(graph: &LineageGraph, group_by: Option<GroupBy>, direction: Direction) {
     super::handle_stdout_result(render_mermaid_to_writer(
         graph,
         &mut std::io::stdout().lock(),
         group_by,
+        direction,
     ));
 }
 
@@ -19,8 +20,9 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     graph: &LineageGraph,
     w: &mut W,
     group_by: Option<GroupBy>,
+    direction: Direction,
 ) -> io::Result<()> {
-    writeln!(w, "flowchart LR")?;
+    writeln!(w, "flowchart {direction}")?;
 
     if graph.node_count() == 0 {
         return Ok(());
@@ -185,13 +187,13 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, None).unwrap();
+        render_mermaid_to_writer(graph, &mut buf, None, Direction::LR).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
     fn render_to_string_grouped(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::NodeType)).unwrap();
+        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::NodeType), Direction::LR).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -389,7 +391,7 @@ mod tests {
 
     fn render_to_string_directory(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::Directory)).unwrap();
+        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::Directory), Direction::LR).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -453,6 +455,24 @@ mod tests {
         graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string_directory(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_direction_tb() {
+        let graph = crate::render::test_helpers::make_sample_lineage_graph();
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(&graph, &mut buf, None, Direction::TB).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_snapshot_direction_tb_grouped() {
+        let graph = crate::render::test_helpers::make_sample_lineage_graph();
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(&graph, &mut buf, Some(GroupBy::NodeType), Direction::TB).unwrap();
+        let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
 }

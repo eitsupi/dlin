@@ -76,6 +76,23 @@ pub enum GroupBy {
     Directory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Direction {
+    /// Left to right (default)
+    LR,
+    /// Top to bottom
+    TB,
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::LR => write!(f, "LR"),
+            Direction::TB => write!(f, "TB"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ErrorFormat {
     /// Human-readable error messages (default)
@@ -230,6 +247,11 @@ pub struct GraphArgs {
     /// directory (group by file directory path)
     #[arg(long = "group-by")]
     pub group_by: Option<GroupBy>,
+
+    /// Graph direction for dot and mermaid output.
+    /// LR = left to right (default), TB = top to bottom
+    #[arg(long, default_value = "lr")]
+    pub direction: Direction,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
