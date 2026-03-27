@@ -69,7 +69,7 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     // Render edges
     for (src_id, tgt_id, edge_type, collapsed) in &edges {
         // Quote labels containing special characters (parentheses etc.)
-        // to prevent Mermaid from misinterpreting them as node shapes.
+        // to prevent Mermaid from misparsing the edge label text.
         let label = match collapsed {
             Some(n) => format!(r#""{} (via {})""#, edge_type.label(), n),
             None => edge_type.label().to_string(),
