@@ -108,7 +108,6 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Re
     Ok(())
 }
 
-
 /// Convert a unique_id to a valid Mermaid node ID (replace dots with underscores)
 fn mermaid_id(unique_id: &str) -> String {
     unique_id.replace('.', "_")
@@ -164,11 +163,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("-.->|source|"));
@@ -179,11 +174,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         let output = render_to_string(&graph);
         assert!(output.contains("-->|ref|"));
@@ -194,11 +185,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("exposure.dash", "dash", NodeType::Exposure));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string(&graph);
         assert!(output.contains("==>|exposure|"));
@@ -215,11 +202,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let t = graph.add_node(make_node("test.t", "t", NodeType::Test));
-        graph.add_edge(
-            a,
-            t,
-            EdgeData::direct(EdgeType::Test),
-        );
+        graph.add_edge(a, t, EdgeData::direct(EdgeType::Test));
 
         let output = render_to_string(&graph);
         assert!(output.contains("-.->|test|"));

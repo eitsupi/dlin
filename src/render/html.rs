@@ -271,11 +271,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("source.raw.orders"));
@@ -334,26 +330,10 @@ mod tests {
         let test = graph.add_node(make_node("test.t", "t", NodeType::Test));
         let exp = graph.add_node(make_node("exposure.dash", "dash", NodeType::Exposure));
 
-        graph.add_edge(
-            src,
-            model,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            model,
-            model,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            model,
-            test,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            model,
-            exp,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(src, model, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(model, model, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(model, test, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(model, exp, EdgeData::direct(EdgeType::Exposure));
 
         let json = build_html_json(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -384,11 +364,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         let output = render_to_string(&graph);
         assert!(output.contains("search-bar"));

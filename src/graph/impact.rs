@@ -276,26 +276,10 @@ mod tests {
             None,
         ));
 
-        g.add_edge(
-            src,
-            stg,
-            EdgeData::direct(EdgeType::Source),
-        );
-        g.add_edge(
-            stg,
-            mart,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            mart,
-            test,
-            EdgeData::direct(EdgeType::Test),
-        );
-        g.add_edge(
-            mart,
-            exp,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        g.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        g.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mart, test, EdgeData::direct(EdgeType::Test));
+        g.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
 
         (g, stg)
     }
@@ -456,26 +440,10 @@ mod tests {
             None,
         ));
 
-        g.add_edge(
-            src,
-            a,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            src,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            a,
-            exp1,
-            EdgeData::direct(EdgeType::Exposure),
-        );
-        g.add_edge(
-            b,
-            exp2,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        g.add_edge(src, a, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(src, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(a, exp1, EdgeData::direct(EdgeType::Exposure));
+        g.add_edge(b, exp2, EdgeData::direct(EdgeType::Exposure));
 
         let report = compute_impact(&g, src);
         assert_eq!(report.affected_exposures, 2);
@@ -529,31 +497,11 @@ mod tests {
             None,
         ));
 
-        g.add_edge(
-            src,
-            a,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            src,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            a,
-            c,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            b,
-            c,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        g.add_edge(
-            c,
-            exp,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        g.add_edge(src, a, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(src, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(a, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, exp, EdgeData::direct(EdgeType::Exposure));
 
         let report = compute_impact(&g, src);
         assert_eq!(report.affected_exposures, 1);

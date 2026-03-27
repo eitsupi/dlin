@@ -62,7 +62,6 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result
     Ok(())
 }
 
-
 fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
     match node_type {
         NodeType::Model => ("#4A90D9", "white"),
@@ -113,11 +112,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("style=dashed"));
@@ -168,21 +163,9 @@ mod tests {
         let c = graph.add_node(make_node("test.t", "t", NodeType::Test));
         let d = graph.add_node(make_node("exposure.e", "e", NodeType::Exposure));
 
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            b,
-            c,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            b,
-            d,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(b, c, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(b, d, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string(&graph);
         // Ref edges have no extra style
@@ -223,26 +206,10 @@ mod tests {
         let t = graph.add_node(make_node("test.t", "t", NodeType::Test));
         let e = graph.add_node(make_node("exposure.e", "e", NodeType::Exposure));
 
-        graph.add_edge(
-            s,
-            a,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            b,
-            t,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            b,
-            e,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(s, a, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(b, t, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(b, e, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string(&graph);
         assert!(output.contains("label=\"source\""));

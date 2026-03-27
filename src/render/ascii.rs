@@ -270,11 +270,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("Edges:"));
@@ -321,11 +317,7 @@ mod tests {
             "very_long_name",
             NodeType::Model,
         ));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         let layout = sugiyama_layout(&graph);
         let widths = calculate_column_widths(&graph, &layout);
@@ -339,11 +331,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         let output = render_to_string(&graph);
         assert!(output.contains("[ a ]"), "Output:\n{}", output);
@@ -367,16 +355,8 @@ mod tests {
         let src1 = graph.add_node(make_node("source.raw.a", "raw.a", NodeType::Source));
         let src2 = graph.add_node(make_node("source.raw.b", "raw.b", NodeType::Source));
         let model = graph.add_node(make_node("model.combined", "combined", NodeType::Model));
-        graph.add_edge(
-            src1,
-            model,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            src2,
-            model,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(src1, model, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(src2, model, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         // First layer has 2 nodes, second has 1 — should render without panic
@@ -402,26 +382,10 @@ mod tests {
         let e = graph.add_node(make_node("exposure.e", "e", NodeType::Exposure));
         let s = graph.add_node(make_node("source.raw.s", "raw.s", NodeType::Source));
 
-        graph.add_edge(
-            s,
-            a,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            b,
-            t,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            b,
-            e,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(s, a, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(b, t, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(b, e, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string(&graph);
         assert!(output.contains("──src──>"));

@@ -270,11 +270,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("<path"));
@@ -344,26 +340,10 @@ mod tests {
             NodeType::Exposure,
         ));
 
-        graph.add_edge(
-            src,
-            model,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            src,
-            model,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            model,
-            test,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            model,
-            exp,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(src, model, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(src, model, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(model, test, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(model, exp, EdgeData::direct(EdgeType::Exposure));
 
         let output = render_to_string(&graph);
         // Source edge style: dashed

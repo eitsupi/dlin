@@ -71,26 +71,10 @@ pub(crate) mod test_helpers {
             NodeType::Exposure,
         ));
 
-        graph.add_edge(
-            src,
-            stg,
-            EdgeData::direct(EdgeType::Source),
-        );
-        graph.add_edge(
-            stg,
-            mart,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            mart,
-            t,
-            EdgeData::direct(EdgeType::Test),
-        );
-        graph.add_edge(
-            mart,
-            exp,
-            EdgeData::direct(EdgeType::Exposure),
-        );
+        graph.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(mart, t, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
 
         graph
     }

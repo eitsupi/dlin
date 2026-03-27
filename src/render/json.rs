@@ -246,7 +246,6 @@ fn render_json_to_writer<W: Write>(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,11 +317,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Source),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -397,21 +392,9 @@ mod tests {
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
         let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
         // Add edges in reverse order
-        graph.add_edge(
-            c,
-            a,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
-        graph.add_edge(
-            a,
-            c,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(c, a, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(a, c, EdgeData::direct(EdgeType::Ref));
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let edges = parsed["edges"].as_array().unwrap();
@@ -429,11 +412,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         let output = render_to_string(&graph);
         // Should parse as valid JSON
         let _: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -498,11 +477,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData::direct(EdgeType::Ref),
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         let mut buf = Vec::new();
         render_json_to_writer(&graph, None, &all_fields(), &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
