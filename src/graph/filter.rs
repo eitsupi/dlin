@@ -1435,7 +1435,13 @@ mod tests {
 
     fn render_mermaid(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        crate::render::mermaid::render_mermaid_to_writer(graph, &mut buf, None).unwrap();
+        crate::render::mermaid::render_mermaid_to_writer(
+            graph,
+            &mut buf,
+            None,
+            crate::cli::Direction::LR,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
