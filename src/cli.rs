@@ -113,9 +113,11 @@ Use positional arguments to focus on specific models.
 Focusing vs filtering:
   Positional arguments (MODEL) set the focus: BFS traversal from those models \
 discovers upstream/downstream neighbors. -u/-d control how many levels to traverse. \
-Without positional arguments, all nodes are included.
-  --select (-s) filters the result set by condition (label glob, tag, path). \
-When combined with positional arguments, the BFS result is intersected with the \
+If no positional arguments are provided, the initial focus is the full graph \
+before any additional filtering is applied.
+  --select (-s) filters the focused set by condition (label glob, tag, path). \
+With positional arguments, the BFS result is intersected with the selector \
+matches; without positional arguments, the focus is narrowed to only the \
 selector matches.
 
 Output formats:
@@ -141,7 +143,9 @@ as transitive edges (see --no-transitive).
 
 Transitive edge completion:
   When filters (--node-type, --select, or focus models) remove intermediate nodes, \
-edges through those nodes are preserved as transitive edges with \"(via N)\" labels. \
+edges through those nodes are preserved as transitive edges. Many outputs annotate \
+these with how many intermediate nodes were collapsed (for example, DOT/Mermaid \
+label edges as \"type (via N)\", and JSON/HTML expose a collapsed_through field). \
 Use --no-transitive to disable this and drop such edges instead.
 
 Stdin/pipe support:
