@@ -12,7 +12,7 @@ pub fn render_mermaid(graph: &LineageGraph) {
     ));
 }
 
-fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
+pub fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result<()> {
     writeln!(w, "flowchart LR")?;
 
     if graph.node_count() == 0 {

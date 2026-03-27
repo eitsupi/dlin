@@ -212,6 +212,7 @@ pub fn filter_graph(
     upstream: Option<usize>,
     downstream: Option<usize>,
     selectors: &[Selector],
+    transitive: bool,
 ) -> Result<LineageGraph> {
     // Check for cycles
     if petgraph::algo::is_cyclic_directed(graph) {
@@ -276,7 +277,11 @@ pub fn filter_graph(
         }
     }
 
-    Ok(build_subgraph(graph, &keep_nodes))
+    if transitive {
+        Ok(build_subgraph_with_transitive(graph, &keep_nodes))
+    } else {
+        Ok(build_subgraph(graph, &keep_nodes))
+    }
 }
 
 /// Build a new graph containing only the specified nodes and their interconnecting edges.
@@ -541,7 +546,7 @@ mod tests {
     #[test]
     fn test_filter_no_focus_returns_all_nodes() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &[], false).unwrap();
         // With no focus and no selectors, all nodes pass through unfiltered
         assert_eq!(filtered.node_count(), 4);
         let types: std::collections::HashSet<&str> = filtered
@@ -560,7 +565,7 @@ mod tests {
     fn test_filter_focus_upstream_1() {
         let g = make_test_graph();
         // Focus on "orders" with 1 upstream, 0 downstream
-        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &[]).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &[], false).unwrap();
         // Should have: orders + stg_orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -568,7 +573,7 @@ mod tests {
     #[test]
     fn test_filter_excludes_exposures_via_output_filter() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &[], false).unwrap();
         // Apply output filter to exclude exposures
         let filtered =
             filter_output_node_types(&filtered, &["model".into(), "source".into()], false);
@@ -579,7 +584,7 @@ mod tests {
     fn test_filter_model_not_found_returns_error() {
         let g = make_test_graph();
         // All specified models not found → error
-        let result = filter_graph(&g, &["nonexistent".into()], None, None, &[]);
+        let result = filter_graph(&g, &["nonexistent".into()], None, None, &[], false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("model not found"));
     }
@@ -588,7 +593,7 @@ mod tests {
     fn test_filter_focus_source_by_label() {
         let g = make_test_graph();
         // Focus on source node using its label "raw.orders"
-        let filtered = filter_graph(&g, &["raw.orders".into()], None, Some(1), &[]).unwrap();
+        let filtered = filter_graph(&g, &["raw.orders".into()], None, Some(1), &[], false).unwrap();
         // raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -597,7 +602,8 @@ mod tests {
     fn test_filter_focus_source_by_unique_id() {
         let g = make_test_graph();
         // Focus on source node using full unique_id
-        let filtered = filter_graph(&g, &["source.raw.orders".into()], None, Some(1), &[]).unwrap();
+        let filtered =
+            filter_graph(&g, &["source.raw.orders".into()], None, Some(1), &[], false).unwrap();
         // source.raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -605,7 +611,7 @@ mod tests {
     #[test]
     fn test_filter_focus_exposure_by_label() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &["dashboard".into()], Some(1), None, &[]).unwrap();
+        let filtered = filter_graph(&g, &["dashboard".into()], Some(1), None, &[], false).unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -632,6 +638,7 @@ mod tests {
             Some(0),
             Some(0),
             &[],
+            false,
         )
         .unwrap();
         // Should have exactly the two focus nodes
@@ -655,6 +662,7 @@ mod tests {
             Some(1),
             Some(1),
             &[],
+            false,
         )
         .unwrap();
         // All 4 nodes should be included
@@ -671,6 +679,7 @@ mod tests {
             Some(0),
             Some(0),
             &[],
+            false,
         )
         .unwrap();
         // Only "orders" should remain
@@ -690,6 +699,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -708,6 +718,7 @@ mod tests {
             Some(1),
             Some(1),
             &[],
+            false,
         )
         .unwrap();
         let labels: HashSet<String> = filtered
@@ -823,7 +834,7 @@ mod tests {
     fn test_selector_by_tag() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nightly");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -836,7 +847,7 @@ mod tests {
     fn test_selector_by_path() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("path:models/staging");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         // Should match: raw.orders (schema.yml in models/staging) and stg_orders
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
@@ -852,7 +863,7 @@ mod tests {
         let g = make_tagged_graph();
         // **&#x2F;staging/** should match the same nodes as prefix "models/staging"
         let selectors = parse_selectors("path:**/staging/**");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -867,7 +878,7 @@ mod tests {
         let g = make_tagged_graph();
         // Match only .sql files under staging
         let selectors = parse_selectors("path:models/staging/*.sql");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -880,7 +891,7 @@ mod tests {
     fn test_selector_by_model_name() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -894,7 +905,7 @@ mod tests {
         let g = make_tagged_graph();
         // tag:nightly matches stg_orders, model name "orders" matches orders
         let selectors = parse_selectors("tag:nightly,orders");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -908,7 +919,7 @@ mod tests {
     fn test_selector_no_matches() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nonexistent");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -921,7 +932,7 @@ mod tests {
         // Selector tag:nightly matches only stg_orders
         // Intersection: stg_orders
         let selectors = parse_selectors("tag:nightly");
-        let filtered = filter_graph(&g, &["orders".into()], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -934,7 +945,7 @@ mod tests {
     fn test_selector_empty_does_not_filter() {
         let g = make_tagged_graph();
         let no_selectors: Vec<Selector> = vec![];
-        let filtered = filter_graph(&g, &[], None, None, &no_selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &no_selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -1126,7 +1137,7 @@ mod tests {
 
         // Explicit filter (model,source only) — excludes test, seed, snapshot
         let filtered = filter_output_node_types(
-            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &filter_graph(&g, &[], None, None, &[], false).unwrap(),
             &["model".into(), "source".into()],
             false,
         );
@@ -1139,7 +1150,7 @@ mod tests {
 
         // Include model + test
         let filtered2 = filter_output_node_types(
-            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &filter_graph(&g, &[], None, None, &[], false).unwrap(),
             &["model".into(), "test".into()],
             false,
         );
@@ -1242,7 +1253,7 @@ mod tests {
         g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         g.add_edge(b, a, EdgeData::direct(EdgeType::Ref));
 
-        let result = filter_graph(&g, &[], None, None, &[]);
+        let result = filter_graph(&g, &[], None, None, &[], false);
         assert!(result.is_err());
     }
 
@@ -1420,5 +1431,120 @@ mod tests {
         }
         assert!(has_direct);
         assert!(has_transitive);
+    }
+
+    fn render_mermaid(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        crate::render::mermaid::render_mermaid_to_writer(graph, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_snapshot_transitive_node_type_filter() {
+        // source -> seed -> seed -> model: filter to source,model
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.events",
+            "events",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node(
+            "seed.raw_events",
+            "raw_events",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let c = g.add_node(make_node(
+            "seed.cleaned_events",
+            "cleaned_events",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let d = g.add_node(make_node(
+            "model.mart_events",
+            "mart_events",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        insta::assert_snapshot!(render_mermaid(&filtered));
+    }
+
+    #[test]
+    fn test_snapshot_transitive_select_filter() {
+        // A -> B -> C -> D -> E: focus on C with upstream=1, downstream=1 + transitive
+        // keeps B, C, D — but A and E are removed, so no transitive edges expected
+        // since A and E are not in the subgraph
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        let e = g.add_node(make_node("model.e", "e", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(d, e, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_graph(&g, &["c".into()], Some(1), Some(1), &[], true).unwrap();
+        insta::assert_snapshot!(render_mermaid(&filtered));
+    }
+
+    #[test]
+    fn test_snapshot_transitive_select_with_node_type() {
+        // source -> seed -> model -> seed -> model: focus on all, node-type=source,model
+        // Both filter_graph (transitive) and filter_output_node_types (transitive)
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node(
+            "seed.staging",
+            "staging",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let c = g.add_node(make_node(
+            "model.intermediate",
+            "intermediate",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let d = g.add_node(make_node(
+            "seed.lookup",
+            "lookup",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let e = g.add_node(make_node(
+            "model.final",
+            "final",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(d, e, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        insta::assert_snapshot!(render_mermaid(&filtered));
     }
 }

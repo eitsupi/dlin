@@ -1,0 +1,16 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&filtered)
+---
+flowchart LR
+    model_b["b"]
+    model_c["c"]
+    model_d["d"]
+
+    model_b -->|ref| model_c
+    model_c -->|ref| model_d
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_b model
+    class model_c model
+    class model_d model
