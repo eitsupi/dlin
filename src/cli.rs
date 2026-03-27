@@ -127,6 +127,9 @@ Examples:
   # Find downstream models of a source
   dlin graph raw.orders -d 2 --node-type source,model -o json
 
+  # See which sources feed into each exposure (transitive edges through models)
+  dlin graph --node-type source,exposure -o mermaid
+
   # List only source nodes (no edges)
   dlin graph --node-type source -o json
 
@@ -207,6 +210,12 @@ pub struct GraphArgs {
     /// Use --source manifest for full test coverage.
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
+
+    /// Disable transitive edge completion when filters remove intermediate nodes.
+    /// By default, when --node-type, --select, or focus models exclude nodes,
+    /// edges through removed nodes are preserved as transitive edges with "(via N)" labels.
+    #[arg(long)]
+    pub no_transitive: bool,
 
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]

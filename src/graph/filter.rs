@@ -2,7 +2,7 @@ use anyhow::Result;
 use petgraph::Direction;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::DbtLineageError;
 
@@ -212,6 +212,7 @@ pub fn filter_graph(
     upstream: Option<usize>,
     downstream: Option<usize>,
     selectors: &[Selector],
+    transitive: bool,
 ) -> Result<LineageGraph> {
     // Check for cycles
     if petgraph::algo::is_cyclic_directed(graph) {
@@ -276,14 +277,19 @@ pub fn filter_graph(
         }
     }
 
-    Ok(build_subgraph(graph, &keep_nodes))
+    if transitive {
+        Ok(build_subgraph_with_transitive(graph, &keep_nodes))
+    } else {
+        Ok(build_subgraph(graph, &keep_nodes))
+    }
 }
 
-/// Build a new graph containing only the specified nodes and their interconnecting edges
+/// Build a new graph containing only the specified nodes and their interconnecting edges.
+///
+/// Edges between kept nodes that pass through filtered-out intermediaries are dropped.
 fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> LineageGraph {
     let mut new_graph = LineageGraph::new();
-    let mut index_map: std::collections::HashMap<NodeIndex, NodeIndex> =
-        std::collections::HashMap::new();
+    let mut index_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
 
     for &old_idx in keep_nodes {
         let node = graph[old_idx].clone();
@@ -298,6 +304,86 @@ fn build_subgraph(graph: &LineageGraph, keep_nodes: &HashSet<NodeIndex>) -> Line
             (index_map.get(&source), index_map.get(&target))
         {
             new_graph.add_edge(new_source, new_target, edge.weight().clone());
+        }
+    }
+
+    new_graph
+}
+
+/// Build a subgraph with transitive edges: when intermediate nodes are removed,
+/// edges are added to preserve reachability between kept nodes.
+///
+/// For each kept node, BFS traverses forward through removed nodes. When another
+/// kept node is reached, a transitive edge is added with `collapsed_through` set
+/// to the number of intermediate nodes traversed. The `edge_type` is the maximum
+/// (most specialized) type along the path.
+fn build_subgraph_with_transitive(
+    graph: &LineageGraph,
+    keep_nodes: &HashSet<NodeIndex>,
+) -> LineageGraph {
+    let mut new_graph = LineageGraph::new();
+    let mut index_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+
+    // Add kept nodes
+    for &old_idx in keep_nodes {
+        let node = graph[old_idx].clone();
+        let new_idx = new_graph.add_node(node);
+        index_map.insert(old_idx, new_idx);
+    }
+
+    // Add direct edges between kept nodes
+    for edge in graph.edge_references() {
+        let source = edge.source();
+        let target = edge.target();
+        if let (Some(&new_source), Some(&new_target)) =
+            (index_map.get(&source), index_map.get(&target))
+        {
+            new_graph.add_edge(new_source, new_target, edge.weight().clone());
+        }
+    }
+
+    // Add transitive edges through removed nodes
+    for &start in keep_nodes {
+        // Pre-fill with directly connected kept nodes to avoid redundant transitive edges
+        let mut connected: HashSet<NodeIndex> = HashSet::new();
+        for edge in graph.edges_directed(start, Direction::Outgoing) {
+            if keep_nodes.contains(&edge.target()) {
+                connected.insert(edge.target());
+            }
+        }
+
+        let mut queue: VecDeque<(NodeIndex, usize, EdgeType)> = VecDeque::new();
+        let mut visited: HashSet<NodeIndex> = HashSet::new();
+
+        // Seed: outgoing edges from start to removed nodes
+        for edge in graph.edges_directed(start, Direction::Outgoing) {
+            let neighbor = edge.target();
+            if !keep_nodes.contains(&neighbor) && visited.insert(neighbor) {
+                queue.push_back((neighbor, 1, edge.weight().edge_type));
+            }
+        }
+
+        // BFS through removed nodes
+        while let Some((current, depth, max_edge_type)) = queue.pop_front() {
+            for edge in graph.edges_directed(current, Direction::Outgoing) {
+                let neighbor = edge.target();
+                let new_max = max_edge_type.max(edge.weight().edge_type);
+
+                if keep_nodes.contains(&neighbor) {
+                    // Found a kept node — add transitive edge if not already connected
+                    if connected.insert(neighbor) {
+                        let new_source = index_map[&start];
+                        let new_target = index_map[&neighbor];
+                        new_graph.add_edge(
+                            new_source,
+                            new_target,
+                            EdgeData::transitive(new_max, depth),
+                        );
+                    }
+                } else if visited.insert(neighbor) {
+                    queue.push_back((neighbor, depth + 1, new_max));
+                }
+            }
         }
     }
 
@@ -337,10 +423,14 @@ pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
 /// If `type_names` is empty, the graph is returned unchanged.
 /// Comparison is case-insensitive.
 ///
-/// Note: edges between kept nodes that pass through filtered-out intermediaries
-/// are dropped. For example, `A → B → C` filtered to only A and C will show them
-/// as disconnected nodes.
-pub fn filter_output_node_types(graph: &LineageGraph, type_names: &[String]) -> LineageGraph {
+/// When `transitive` is true, edges through filtered-out intermediate nodes are
+/// preserved as transitive edges with `collapsed_through` metadata.
+/// When false, such edges are dropped (legacy behavior).
+pub fn filter_output_node_types(
+    graph: &LineageGraph,
+    type_names: &[String],
+    transitive: bool,
+) -> LineageGraph {
     if type_names.is_empty() {
         return graph.clone();
     }
@@ -351,7 +441,11 @@ pub fn filter_output_node_types(graph: &LineageGraph, type_names: &[String]) -> 
             type_names.iter().any(|t| t.eq_ignore_ascii_case(label))
         })
         .collect();
-    build_subgraph(graph, &keep)
+    if transitive {
+        build_subgraph_with_transitive(graph, &keep)
+    } else {
+        build_subgraph(graph, &keep)
+    }
 }
 
 /// BFS traversal collecting nodes up to max_depth levels away
@@ -443,34 +537,16 @@ mod tests {
             vec![],
         ));
 
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
-        g.add_edge(
-            b,
-            c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        g.add_edge(
-            c,
-            d,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Exposure));
         g
     }
 
     #[test]
     fn test_filter_no_focus_returns_all_nodes() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &[], false).unwrap();
         // With no focus and no selectors, all nodes pass through unfiltered
         assert_eq!(filtered.node_count(), 4);
         let types: std::collections::HashSet<&str> = filtered
@@ -489,7 +565,7 @@ mod tests {
     fn test_filter_focus_upstream_1() {
         let g = make_test_graph();
         // Focus on "orders" with 1 upstream, 0 downstream
-        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &[]).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], Some(1), Some(0), &[], false).unwrap();
         // Should have: orders + stg_orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -497,9 +573,10 @@ mod tests {
     #[test]
     fn test_filter_excludes_exposures_via_output_filter() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &[], None, None, &[]).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &[], false).unwrap();
         // Apply output filter to exclude exposures
-        let filtered = filter_output_node_types(&filtered, &["model".into(), "source".into()]);
+        let filtered =
+            filter_output_node_types(&filtered, &["model".into(), "source".into()], false);
         assert_eq!(filtered.node_count(), 3);
     }
 
@@ -507,7 +584,7 @@ mod tests {
     fn test_filter_model_not_found_returns_error() {
         let g = make_test_graph();
         // All specified models not found → error
-        let result = filter_graph(&g, &["nonexistent".into()], None, None, &[]);
+        let result = filter_graph(&g, &["nonexistent".into()], None, None, &[], false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("model not found"));
     }
@@ -516,7 +593,7 @@ mod tests {
     fn test_filter_focus_source_by_label() {
         let g = make_test_graph();
         // Focus on source node using its label "raw.orders"
-        let filtered = filter_graph(&g, &["raw.orders".into()], None, Some(1), &[]).unwrap();
+        let filtered = filter_graph(&g, &["raw.orders".into()], None, Some(1), &[], false).unwrap();
         // raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -525,7 +602,8 @@ mod tests {
     fn test_filter_focus_source_by_unique_id() {
         let g = make_test_graph();
         // Focus on source node using full unique_id
-        let filtered = filter_graph(&g, &["source.raw.orders".into()], None, Some(1), &[]).unwrap();
+        let filtered =
+            filter_graph(&g, &["source.raw.orders".into()], None, Some(1), &[], false).unwrap();
         // source.raw.orders + stg_orders (1 downstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -533,7 +611,7 @@ mod tests {
     #[test]
     fn test_filter_focus_exposure_by_label() {
         let g = make_test_graph();
-        let filtered = filter_graph(&g, &["dashboard".into()], Some(1), None, &[]).unwrap();
+        let filtered = filter_graph(&g, &["dashboard".into()], Some(1), None, &[], false).unwrap();
         // dashboard + orders (1 upstream)
         assert_eq!(filtered.node_count(), 2);
     }
@@ -560,6 +638,7 @@ mod tests {
             Some(0),
             Some(0),
             &[],
+            false,
         )
         .unwrap();
         // Should have exactly the two focus nodes
@@ -583,6 +662,7 @@ mod tests {
             Some(1),
             Some(1),
             &[],
+            false,
         )
         .unwrap();
         // All 4 nodes should be included
@@ -599,6 +679,7 @@ mod tests {
             Some(0),
             Some(0),
             &[],
+            false,
         )
         .unwrap();
         // Only "orders" should remain
@@ -618,6 +699,7 @@ mod tests {
             None,
             None,
             &[],
+            false,
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -636,6 +718,7 @@ mod tests {
             Some(1),
             Some(1),
             &[],
+            false,
         )
         .unwrap();
         let labels: HashSet<String> = filtered
@@ -741,27 +824,9 @@ mod tests {
             vec![],
         ));
 
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
-        g.add_edge(
-            b,
-            c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        g.add_edge(
-            c,
-            d,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Exposure));
         g
     }
 
@@ -769,7 +834,7 @@ mod tests {
     fn test_selector_by_tag() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nightly");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -782,7 +847,7 @@ mod tests {
     fn test_selector_by_path() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("path:models/staging");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         // Should match: raw.orders (schema.yml in models/staging) and stg_orders
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
@@ -798,7 +863,7 @@ mod tests {
         let g = make_tagged_graph();
         // **&#x2F;staging/** should match the same nodes as prefix "models/staging"
         let selectors = parse_selectors("path:**/staging/**");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -813,7 +878,7 @@ mod tests {
         let g = make_tagged_graph();
         // Match only .sql files under staging
         let selectors = parse_selectors("path:models/staging/*.sql");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -826,7 +891,7 @@ mod tests {
     fn test_selector_by_model_name() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("orders");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -840,7 +905,7 @@ mod tests {
         let g = make_tagged_graph();
         // tag:nightly matches stg_orders, model name "orders" matches orders
         let selectors = parse_selectors("tag:nightly,orders");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 2);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -854,7 +919,7 @@ mod tests {
     fn test_selector_no_matches() {
         let g = make_tagged_graph();
         let selectors = parse_selectors("tag:nonexistent");
-        let filtered = filter_graph(&g, &[], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -867,7 +932,7 @@ mod tests {
         // Selector tag:nightly matches only stg_orders
         // Intersection: stg_orders
         let selectors = parse_selectors("tag:nightly");
-        let filtered = filter_graph(&g, &["orders".into()], None, None, &selectors).unwrap();
+        let filtered = filter_graph(&g, &["orders".into()], None, None, &selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 1);
         let labels: Vec<String> = filtered
             .node_indices()
@@ -880,7 +945,7 @@ mod tests {
     fn test_selector_empty_does_not_filter() {
         let g = make_tagged_graph();
         let no_selectors: Vec<Selector> = vec![];
-        let filtered = filter_graph(&g, &[], None, None, &no_selectors).unwrap();
+        let filtered = filter_graph(&g, &[], None, None, &no_selectors, false).unwrap();
         assert_eq!(filtered.node_count(), 4);
     }
 
@@ -1066,32 +1131,15 @@ mod tests {
             None,
             vec![],
         ));
-        g.add_edge(
-            model,
-            test,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
-        );
-        g.add_edge(
-            seed,
-            model,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        g.add_edge(
-            model,
-            snap,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        g.add_edge(model, test, EdgeData::direct(EdgeType::Test));
+        g.add_edge(seed, model, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(model, snap, EdgeData::direct(EdgeType::Ref));
 
         // Explicit filter (model,source only) — excludes test, seed, snapshot
         let filtered = filter_output_node_types(
-            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &filter_graph(&g, &[], None, None, &[], false).unwrap(),
             &["model".into(), "source".into()],
+            false,
         );
         assert_eq!(filtered.node_count(), 1); // Only the model remains
         let labels: Vec<String> = filtered
@@ -1102,8 +1150,9 @@ mod tests {
 
         // Include model + test
         let filtered2 = filter_output_node_types(
-            &filter_graph(&g, &[], None, None, &[]).unwrap(),
+            &filter_graph(&g, &[], None, None, &[], false).unwrap(),
             &["model".into(), "test".into()],
+            false,
         );
         assert_eq!(filtered2.node_count(), 2); // model + test
     }
@@ -1113,14 +1162,14 @@ mod tests {
     #[test]
     fn test_filter_output_node_types_empty_returns_all() {
         let g = make_test_graph();
-        let filtered = filter_output_node_types(&g, &[]);
+        let filtered = filter_output_node_types(&g, &[], false);
         assert_eq!(filtered.node_count(), g.node_count());
     }
 
     #[test]
     fn test_filter_output_node_types_model_only() {
         let g = make_test_graph();
-        let filtered = filter_output_node_types(&g, &["model".into()]);
+        let filtered = filter_output_node_types(&g, &["model".into()], false);
         assert_eq!(filtered.node_count(), 2);
         for idx in filtered.node_indices() {
             assert_eq!(filtered[idx].node_type, NodeType::Model);
@@ -1130,14 +1179,14 @@ mod tests {
     #[test]
     fn test_filter_output_node_types_multiple() {
         let g = make_test_graph();
-        let filtered = filter_output_node_types(&g, &["model".into(), "source".into()]);
+        let filtered = filter_output_node_types(&g, &["model".into(), "source".into()], false);
         assert_eq!(filtered.node_count(), 3);
     }
 
     #[test]
     fn test_filter_output_node_types_no_match() {
         let g = make_test_graph();
-        let filtered = filter_output_node_types(&g, &["test".into()]);
+        let filtered = filter_output_node_types(&g, &["test".into()], false);
         assert_eq!(filtered.node_count(), 0);
     }
 
@@ -1188,7 +1237,7 @@ mod tests {
     #[test]
     fn test_filter_output_node_types_case_insensitive() {
         let g = make_test_graph();
-        let filtered = filter_output_node_types(&g, &["Model".into()]);
+        let filtered = filter_output_node_types(&g, &["Model".into()], false);
         assert_eq!(filtered.node_count(), 2);
         for idx in filtered.node_indices() {
             assert_eq!(filtered[idx].node_type, NodeType::Model);
@@ -1201,22 +1250,320 @@ mod tests {
         let mut g = LineageGraph::new();
         let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
         let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        g.add_edge(
-            b,
-            a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, a, EdgeData::direct(EdgeType::Ref));
 
-        let result = filter_graph(&g, &[], None, None, &[]);
+        let result = filter_graph(&g, &[], None, None, &[], false);
         assert!(result.is_err());
+    }
+
+    // -- Transitive edge tests -------------------------------------------------
+
+    #[test]
+    fn test_transitive_basic() {
+        // A(source) -> B(seed) -> C(model): filter to source,model
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 1);
+
+        let edge = filtered.edge_references().next().unwrap();
+        assert_eq!(edge.weight().collapsed_through, Some(1));
+        // max(Source, Ref) = Source
+        assert_eq!(edge.weight().edge_type, EdgeType::Source);
+    }
+
+    #[test]
+    fn test_transitive_chain() {
+        // A(source) -> B(seed) -> C(seed) -> D(model)
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("seed.c", "c", NodeType::Seed, None, vec![]));
+        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 1);
+
+        let edge = filtered.edge_references().next().unwrap();
+        assert_eq!(edge.weight().collapsed_through, Some(2));
+    }
+
+    #[test]
+    fn test_transitive_diamond_dedup() {
+        // A -> B -> D, A -> C -> D (B,C removed) => single A->D edge
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("seed.c", "c", NodeType::Seed, None, vec![]));
+        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(a, c, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, d, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 1); // deduplicated
+    }
+
+    #[test]
+    fn test_transitive_skips_when_direct_edge_exists() {
+        // A -> C (direct) and A -> B -> C (B removed)
+        // Should only have the direct edge, no redundant transitive edge
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        g.add_edge(a, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["model".into()], true);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 1); // only the direct edge, no transitive duplicate
+        // Verify it's the direct edge (no collapsed_through)
+        let edge = filtered.edge_references().next().unwrap();
+        assert!(edge.weight().collapsed_through.is_none());
+    }
+
+    #[test]
+    fn test_transitive_edge_type_max() {
+        // A(source) -> B(test) -> C(model): Source->Test path, max=Test
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("test.b", "b", NodeType::Test, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Test));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        let edge = filtered.edge_references().next().unwrap();
+        // max(Source, Test) = Test
+        assert_eq!(edge.weight().edge_type, EdgeType::Test);
+    }
+
+    #[test]
+    fn test_transitive_disabled() {
+        // Same graph as test_transitive_basic, but transitive=false
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("seed.b", "b", NodeType::Seed, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], false);
+        assert_eq!(filtered.node_count(), 2);
+        assert_eq!(filtered.edge_count(), 0); // no transitive edges
+    }
+
+    #[test]
+    fn test_transitive_preserves_direct_edges() {
+        // A(source) -> B(model) -> C(seed) -> D(model)
+        // Direct edge A->B should be preserved, transitive B->D added
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let c = g.add_node(make_node("seed.c", "c", NodeType::Seed, None, vec![]));
+        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        assert_eq!(filtered.node_count(), 3); // source + 2 models
+        assert_eq!(filtered.edge_count(), 2); // direct A->B + transitive B->D
+
+        let mut has_direct = false;
+        let mut has_transitive = false;
+        for edge in filtered.edge_references() {
+            match edge.weight().collapsed_through {
+                None => has_direct = true,
+                Some(_) => has_transitive = true,
+            }
+        }
+        assert!(has_direct);
+        assert!(has_transitive);
+    }
+
+    fn render_mermaid(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        crate::render::mermaid::render_mermaid_to_writer(graph, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_snapshot_transitive_node_type_filter() {
+        // source -> seed -> seed -> model: filter to source,model
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.events",
+            "events",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node(
+            "seed.raw_events",
+            "raw_events",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let c = g.add_node(make_node(
+            "seed.cleaned_events",
+            "cleaned_events",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let d = g.add_node(make_node(
+            "model.mart_events",
+            "mart_events",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        insta::assert_snapshot!(render_mermaid(&filtered));
+    }
+
+    #[test]
+    fn test_snapshot_transitive_select_filter() {
+        // A -> B -> C -> D -> E: selector keeps A, C, E (tag:keep)
+        // B and D are excluded => transitive edges A->C (via 1) and C->E (via 1)
+        let mut g = LineageGraph::new();
+        g.add_node(make_node(
+            "model.a",
+            "a",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_node(make_node(
+            "model.c",
+            "c",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_node(make_node(
+            "model.e",
+            "e",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        let idx: Vec<_> = g.node_indices().collect();
+        g.add_edge(idx[0], idx[1], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[1], idx[2], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[2], idx[3], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[3], idx[4], EdgeData::direct(EdgeType::Ref));
+
+        let selectors = parse_selectors("tag:keep");
+        let filtered = filter_graph(&g, &[], None, None, &selectors, true).unwrap();
+        insta::assert_snapshot!(render_mermaid(&filtered));
+    }
+
+    #[test]
+    fn test_snapshot_transitive_select_with_node_type() {
+        // source -> seed -> model -> seed -> model: focus on all, node-type=source,model
+        // Both filter_graph (transitive) and filter_output_node_types (transitive)
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node(
+            "seed.staging",
+            "staging",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let c = g.add_node(make_node(
+            "model.intermediate",
+            "intermediate",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let d = g.add_node(make_node(
+            "seed.lookup",
+            "lookup",
+            NodeType::Seed,
+            None,
+            vec![],
+        ));
+        let e = g.add_node(make_node(
+            "model.final",
+            "final",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(d, e, EdgeData::direct(EdgeType::Ref));
+
+        let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
+        insta::assert_snapshot!(render_mermaid(&filtered));
     }
 }

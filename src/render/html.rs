@@ -27,6 +27,8 @@ struct HtmlJsonEdge {
     source: String,
     target: String,
     edge_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapsed_through: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -64,13 +66,8 @@ fn build_html_json(graph: &LineageGraph) -> String {
             HtmlJsonEdge {
                 source: source.unique_id.clone(),
                 target: target.unique_id.clone(),
-                edge_type: match edge.weight().edge_type {
-                    EdgeType::Ref => "ref",
-                    EdgeType::Source => "source",
-                    EdgeType::Test => "test",
-                    EdgeType::Exposure => "exposure",
-                }
-                .to_string(),
+                edge_type: edge.weight().edge_type.label().to_string(),
+                collapsed_through: edge.weight().collapsed_through,
             }
         })
         .collect();
@@ -274,13 +271,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         assert!(output.contains("source.raw.orders"));
@@ -339,34 +330,10 @@ mod tests {
         let test = graph.add_node(make_node("test.t", "t", NodeType::Test));
         let exp = graph.add_node(make_node("exposure.dash", "dash", NodeType::Exposure));
 
-        graph.add_edge(
-            src,
-            model,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
-        graph.add_edge(
-            model,
-            model,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        graph.add_edge(
-            model,
-            test,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
-        );
-        graph.add_edge(
-            model,
-            exp,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
-        );
+        graph.add_edge(src, model, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(model, model, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(model, test, EdgeData::direct(EdgeType::Test));
+        graph.add_edge(model, exp, EdgeData::direct(EdgeType::Exposure));
 
         let json = build_html_json(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -397,13 +364,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         let output = render_to_string(&graph);
         assert!(output.contains("search-bar"));

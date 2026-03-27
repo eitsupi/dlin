@@ -135,8 +135,15 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         .unwrap_or_default();
 
     // Filter graph
-    let filtered =
-        graph::filter::filter_graph(&dag, &models, args.upstream, args.downstream, &selectors)?;
+    let transitive = !args.no_transitive;
+    let filtered = graph::filter::filter_graph(
+        &dag,
+        &models,
+        args.upstream,
+        args.downstream,
+        &selectors,
+        transitive,
+    )?;
 
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
@@ -148,7 +155,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
     warn_sql_mode_test_limitation(&args.source, &type_names);
-    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
+    let filtered =
+        graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
 
     // Resolve JSON fields
     let json_fields =
@@ -227,7 +235,9 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     } else {
         (Some(0), Some(0))
     };
-    let filtered = graph::filter::filter_graph(&dag, &models, upstream, downstream, &selectors)?;
+    // List output doesn't render edges, so transitive edge completion is unnecessary.
+    let filtered =
+        graph::filter::filter_graph(&dag, &models, upstream, downstream, &selectors, false)?;
 
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
@@ -239,7 +249,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         );
     }
     warn_sql_mode_test_limitation(&args.source, &type_names);
-    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
+    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
     // Resolve JSON fields for list
     let json_fields =

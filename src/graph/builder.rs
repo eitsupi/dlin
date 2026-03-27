@@ -444,13 +444,8 @@ fn process_sql_edges(
 
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
-            gb.graph.add_edge(
-                dep_idx,
-                current_idx,
-                EdgeData {
-                    edge_type: EdgeType::Ref,
-                },
-            );
+            gb.graph
+                .add_edge(dep_idx, current_idx, EdgeData::direct(EdgeType::Ref));
         }
 
         for source_call in sources {
@@ -459,13 +454,8 @@ fn process_sql_edges(
                 &source_call.table_name,
                 sql_path,
             );
-            gb.graph.add_edge(
-                source_idx,
-                current_idx,
-                EdgeData {
-                    edge_type: EdgeType::Source,
-                },
-            );
+            gb.graph
+                .add_edge(source_idx, current_idx, EdgeData::direct(EdgeType::Source));
         }
     }
 
@@ -501,13 +491,8 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
             if let Some(model_name) = parse_exposure_ref(dep) {
                 let dep_id = resolve_ref(&model_name, &gb.node_map);
                 if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                    gb.graph.add_edge(
-                        dep_idx,
-                        idx,
-                        EdgeData {
-                            edge_type: EdgeType::Exposure,
-                        },
-                    );
+                    gb.graph
+                        .add_edge(dep_idx, idx, EdgeData::direct(EdgeType::Exposure));
                 }
             }
         }

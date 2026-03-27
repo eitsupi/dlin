@@ -179,13 +179,7 @@ mod tests {
         let a = g.add_node(make_node("a", "a", NodeType::Source));
         let b = g.add_node(make_node("b", "b", NodeType::Model));
         let c = g.add_node(make_node("c", "c", NodeType::Model)); // disconnected
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
         // c has no edges — it's a disconnected node
         let _ = c; // used for graph construction
 
@@ -203,20 +197,8 @@ mod tests {
         let a = g.add_node(make_node("a", "a", NodeType::Source));
         let b = g.add_node(make_node("b", "b", NodeType::Model));
         let c = g.add_node(make_node("c", "c", NodeType::Model));
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
-        g.add_edge(
-            b,
-            c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
 
         let layout = sugiyama_layout(&g);
         assert_eq!(layout.num_layers, 3);
@@ -235,20 +217,8 @@ mod tests {
         let a = g.add_node(make_node("a", "a", NodeType::Model));
         let b = g.add_node(make_node("b", "b", NodeType::Model));
         // Create a cycle: a -> b -> a
-        g.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        g.add_edge(
-            b,
-            a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, a, EdgeData::direct(EdgeType::Ref));
 
         let layout = sugiyama_layout(&g);
         // Should not panic; each node gets its own layer in fallback

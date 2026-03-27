@@ -69,6 +69,8 @@ struct JsonEdge {
     source: String,
     target: String,
     edge_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapsed_through: Option<usize>,
 }
 
 /// Build a JSON object containing only the requested fields for a node.
@@ -222,7 +224,8 @@ fn render_json_to_writer<W: Write>(
             JsonEdge {
                 source: source.unique_id.clone(),
                 target: target.unique_id.clone(),
-                edge_type: edge_type_label(edge.weight().edge_type),
+                edge_type: edge.weight().edge_type.label().to_string(),
+                collapsed_through: edge.weight().collapsed_through,
             }
         })
         .collect();
@@ -241,16 +244,6 @@ fn render_json_to_writer<W: Write>(
     }
     writeln!(w)?;
     Ok(())
-}
-
-fn edge_type_label(edge_type: EdgeType) -> String {
-    match edge_type {
-        EdgeType::Ref => "ref",
-        EdgeType::Source => "source",
-        EdgeType::Test => "test",
-        EdgeType::Exposure => "exposure",
-    }
-    .to_string()
 }
 
 #[cfg(test)]
@@ -324,13 +317,7 @@ mod tests {
             NodeType::Source,
         ));
         let b = graph.add_node(make_node("model.stg_orders", "stg_orders", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
 
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -343,10 +330,10 @@ mod tests {
 
     #[test]
     fn test_all_edge_types() {
-        assert_eq!(edge_type_label(EdgeType::Ref), "ref");
-        assert_eq!(edge_type_label(EdgeType::Source), "source");
-        assert_eq!(edge_type_label(EdgeType::Test), "test");
-        assert_eq!(edge_type_label(EdgeType::Exposure), "exposure");
+        assert_eq!(EdgeType::Ref.label(), "ref");
+        assert_eq!(EdgeType::Source.label(), "source");
+        assert_eq!(EdgeType::Test.label(), "test");
+        assert_eq!(EdgeType::Exposure.label(), "exposure");
     }
 
     #[test]
@@ -405,27 +392,9 @@ mod tests {
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
         let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
         // Add edges in reverse order
-        graph.add_edge(
-            c,
-            a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
-        graph.add_edge(
-            a,
-            c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        graph.add_edge(c, a, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(a, c, EdgeData::direct(EdgeType::Ref));
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let edges = parsed["edges"].as_array().unwrap();
@@ -443,13 +412,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         let output = render_to_string(&graph);
         // Should parse as valid JSON
         let _: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -514,13 +477,7 @@ mod tests {
         let mut graph = LineageGraph::new();
         let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
-        graph.add_edge(
-            a,
-            b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
-        );
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         let mut buf = Vec::new();
         render_json_to_writer(&graph, None, &all_fields(), &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -551,6 +508,34 @@ mod tests {
         assert_eq!(node["tags"][1], "core");
         assert_eq!(node["columns"][0], "order_id");
         assert_eq!(node["columns"][1], "customer_id");
+    }
+
+    #[test]
+    fn test_transitive_edge_has_collapsed_through() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("source.raw.a", "a", NodeType::Source));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::transitive(EdgeType::Source, 2));
+
+        let output = render_to_string(&graph);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let edges = parsed["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["edge_type"], "source");
+        assert_eq!(edges[0]["collapsed_through"], 2);
+    }
+
+    #[test]
+    fn test_direct_edge_omits_collapsed_through() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+
+        let output = render_to_string(&graph);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let edges = parsed["edges"].as_array().unwrap();
+        assert!(edges[0].get("collapsed_through").is_none());
     }
 
     // -- Field filtering tests ------------------------------------------------

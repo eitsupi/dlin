@@ -1,0 +1,14 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&filtered)
+---
+flowchart LR
+    model_mart_events["mart_events"]
+    source_raw_events(["events"])
+
+    source_raw_events -.->|"source (via 2)"| model_mart_events
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    class model_mart_events model
+    class source_raw_events source
