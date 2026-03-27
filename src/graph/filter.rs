@@ -1481,21 +1481,40 @@ mod tests {
 
     #[test]
     fn test_snapshot_transitive_select_filter() {
-        // A -> B -> C -> D -> E: focus on C with upstream=1, downstream=1 + transitive
-        // keeps B, C, D — but A and E are removed, so no transitive edges expected
-        // since A and E are not in the subgraph
+        // A -> B -> C -> D -> E: selector keeps A, C, E (tag:keep)
+        // B and D are excluded => transitive edges A->C (via 1) and C->E (via 1)
         let mut g = LineageGraph::new();
-        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
-        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
-        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
-        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
-        let e = g.add_node(make_node("model.e", "e", NodeType::Model, None, vec![]));
-        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
-        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
-        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
-        g.add_edge(d, e, EdgeData::direct(EdgeType::Ref));
+        g.add_node(make_node(
+            "model.a",
+            "a",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_node(make_node(
+            "model.c",
+            "c",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_node(make_node(
+            "model.e",
+            "e",
+            NodeType::Model,
+            None,
+            vec!["keep".into()],
+        ));
+        let idx: Vec<_> = g.node_indices().collect();
+        g.add_edge(idx[0], idx[1], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[1], idx[2], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[2], idx[3], EdgeData::direct(EdgeType::Ref));
+        g.add_edge(idx[3], idx[4], EdgeData::direct(EdgeType::Ref));
 
-        let filtered = filter_graph(&g, &["c".into()], Some(1), Some(1), &[], true).unwrap();
+        let selectors = parse_selectors("tag:keep");
+        let filtered = filter_graph(&g, &[], None, None, &selectors, true).unwrap();
         insta::assert_snapshot!(render_mermaid(&filtered));
     }
 

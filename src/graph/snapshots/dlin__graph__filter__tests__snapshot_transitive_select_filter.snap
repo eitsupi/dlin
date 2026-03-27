@@ -3,14 +3,14 @@ source: src/graph/filter.rs
 expression: render_mermaid(&filtered)
 ---
 flowchart LR
-    model_b["b"]
+    model_a["a"]
     model_c["c"]
-    model_d["d"]
+    model_e["e"]
 
-    model_b -->|ref| model_c
-    model_c -->|ref| model_d
+    model_a -->|"ref (via 1)"| model_c
+    model_c -->|"ref (via 1)"| model_e
 
     classDef model fill:#4A90D9,stroke:#333,color:#fff
-    class model_b model
+    class model_a model
     class model_c model
-    class model_d model
+    class model_e model
