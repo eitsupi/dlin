@@ -240,6 +240,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         );
     }
     warn_sql_mode_test_limitation(&args.source, &type_names);
+    // List output doesn't render edges, so transitive edge completion is unnecessary.
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
     // Resolve JSON fields for list

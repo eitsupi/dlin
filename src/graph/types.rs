@@ -100,7 +100,11 @@ impl NodeData {
     }
 }
 
-/// Edge types
+/// Edge types.
+///
+/// Variant order is semantically meaningful: derived `Ord` is used to select
+/// the "most specialized" edge type along a transitive path (via `.max()`).
+/// Ref < Source < Test < Exposure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[allow(dead_code)]
 pub enum EdgeType {
