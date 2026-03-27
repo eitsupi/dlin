@@ -36,18 +36,25 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result
     for edge in graph.edge_references() {
         let source = &graph[edge.source()];
         let target = &graph[edge.target()];
-        let style = match edge.weight().edge_type {
-            EdgeType::Ref => "",
-            EdgeType::Source => ", style=dashed",
-            EdgeType::Test => ", style=dotted",
-            EdgeType::Exposure => ", style=bold",
+        let ed = edge.weight();
+        let style = match (&ed.edge_type, ed.collapsed_through.is_some()) {
+            (EdgeType::Ref, false) => "",
+            (EdgeType::Ref, true) => ", style=dashed",
+            (EdgeType::Source, false) => ", style=dashed",
+            (EdgeType::Source, true) => r#", style="dashed,bold""#,
+            (EdgeType::Test, false) => ", style=dotted",
+            (EdgeType::Test, true) => r#", style="dotted,dashed""#,
+            (EdgeType::Exposure, false) => ", style=bold",
+            (EdgeType::Exposure, true) => r#", style="bold,dashed""#,
+        };
+        let label = match ed.collapsed_through {
+            Some(n) => format!("{} (via {})", ed.edge_type.label(), n),
+            None => ed.edge_type.label().to_string(),
         };
         writeln!(
             w,
             "  \"{}\" -> \"{}\" [label=\"{}\"{style}];",
-            source.unique_id,
-            target.unique_id,
-            edge.weight().edge_type_label(),
+            source.unique_id, target.unique_id, label,
         )?;
     }
 
@@ -55,16 +62,6 @@ fn render_dot_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Result
     Ok(())
 }
 
-impl EdgeData {
-    fn edge_type_label(&self) -> &'static str {
-        match self.edge_type {
-            EdgeType::Ref => "ref",
-            EdgeType::Source => "source",
-            EdgeType::Test => "test",
-            EdgeType::Exposure => "exposure",
-        }
-    }
-}
 
 fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
     match node_type {
@@ -119,9 +116,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -138,8 +133,8 @@ mod tests {
             (EdgeType::Exposure, "exposure"),
         ];
         for (et, expected) in types {
-            let ed = EdgeData { edge_type: et };
-            assert_eq!(ed.edge_type_label(), expected);
+            let ed = EdgeData::direct(et);
+            assert_eq!(ed.edge_type.label(), expected);
         }
     }
 
@@ -176,23 +171,17 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         graph.add_edge(
             b,
             c,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         graph.add_edge(
             b,
             d,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let output = render_to_string(&graph);
@@ -237,30 +226,22 @@ mod tests {
         graph.add_edge(
             s,
             a,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         graph.add_edge(
             b,
             t,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         graph.add_edge(
             b,
             e,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let output = render_to_string(&graph);
@@ -271,6 +252,42 @@ mod tests {
         assert!(output.contains("style=dashed"));
         assert!(output.contains("style=dotted"));
         assert!(output.contains("style=bold"));
+    }
+
+    #[test]
+    fn test_transitive_ref_edge_style() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::transitive(EdgeType::Ref, 2));
+
+        let output = render_to_string(&graph);
+        assert!(output.contains(r#"label="ref (via 2)""#));
+        assert!(output.contains("style=dashed"));
+    }
+
+    #[test]
+    fn test_transitive_source_edge_preserves_dashed() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("source.raw.a", "a", NodeType::Source));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::transitive(EdgeType::Source, 3));
+
+        let output = render_to_string(&graph);
+        assert!(output.contains(r#"label="source (via 3)""#));
+        assert!(output.contains(r#"style="dashed,bold""#));
+    }
+
+    #[test]
+    fn test_transitive_exposure_edge_preserves_bold() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let b = graph.add_node(make_node("exposure.e", "e", NodeType::Exposure));
+        graph.add_edge(a, b, EdgeData::transitive(EdgeType::Exposure, 1));
+
+        let output = render_to_string(&graph);
+        assert!(output.contains(r#"label="exposure (via 1)""#));
+        assert!(output.contains(r#"style="bold,dashed""#));
     }
 
     #[test]

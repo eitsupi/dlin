@@ -114,10 +114,42 @@ pub enum EdgeType {
     Exposure,
 }
 
+impl EdgeType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            EdgeType::Ref => "ref",
+            EdgeType::Source => "source",
+            EdgeType::Test => "test",
+            EdgeType::Exposure => "exposure",
+        }
+    }
+}
+
 /// Data associated with each edge
 #[derive(Debug, Clone)]
 pub struct EdgeData {
     pub edge_type: EdgeType,
+    /// Number of intermediate nodes collapsed in a transitive edge.
+    /// `None` for direct edges, `Some(n)` for transitive edges.
+    pub collapsed_through: Option<usize>,
+}
+
+impl EdgeData {
+    /// Create a direct (non-transitive) edge.
+    pub fn direct(edge_type: EdgeType) -> Self {
+        Self {
+            edge_type,
+            collapsed_through: None,
+        }
+    }
+
+    /// Create a transitive edge that collapses `via` intermediate nodes.
+    pub fn transitive(edge_type: EdgeType, via: usize) -> Self {
+        Self {
+            edge_type,
+            collapsed_through: Some(via),
+        }
+    }
 }
 
 #[cfg(test)]

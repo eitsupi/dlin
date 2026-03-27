@@ -279,30 +279,22 @@ mod tests {
         g.add_edge(
             src,
             stg,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         g.add_edge(
             stg,
             mart,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             mart,
             test,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         g.add_edge(
             mart,
             exp,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         (g, stg)
@@ -467,30 +459,22 @@ mod tests {
         g.add_edge(
             src,
             a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             src,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             a,
             exp1,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
         g.add_edge(
             b,
             exp2,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let report = compute_impact(&g, src);
@@ -548,37 +532,27 @@ mod tests {
         g.add_edge(
             src,
             a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             src,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             a,
             c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             b,
             c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             c,
             exp,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let report = compute_impact(&g, src);

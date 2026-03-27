@@ -208,6 +208,11 @@ pub struct GraphArgs {
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
+    /// Disable transitive edge completion when --node-type filters out intermediate nodes.
+    /// By default, edges through removed nodes are preserved as transitive edges.
+    #[arg(long)]
+    pub no_transitive: bool,
+
     /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
     #[arg(long, default_value = "sql")]
     pub source: SourceType,

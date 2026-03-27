@@ -273,9 +273,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -326,9 +324,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let layout = sugiyama_layout(&graph);
@@ -346,9 +342,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let output = render_to_string(&graph);
@@ -376,16 +370,12 @@ mod tests {
         graph.add_edge(
             src1,
             model,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         graph.add_edge(
             src2,
             model,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -415,30 +405,22 @@ mod tests {
         graph.add_edge(
             s,
             a,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         graph.add_edge(
             b,
             t,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         graph.add_edge(
             b,
             e,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let output = render_to_string(&graph);

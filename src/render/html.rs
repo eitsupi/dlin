@@ -27,6 +27,8 @@ struct HtmlJsonEdge {
     source: String,
     target: String,
     edge_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapsed_through: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -64,13 +66,8 @@ fn build_html_json(graph: &LineageGraph) -> String {
             HtmlJsonEdge {
                 source: source.unique_id.clone(),
                 target: target.unique_id.clone(),
-                edge_type: match edge.weight().edge_type {
-                    EdgeType::Ref => "ref",
-                    EdgeType::Source => "source",
-                    EdgeType::Test => "test",
-                    EdgeType::Exposure => "exposure",
-                }
-                .to_string(),
+                edge_type: edge.weight().edge_type.label().to_string(),
+                collapsed_through: edge.weight().collapsed_through,
             }
         })
         .collect();
@@ -277,9 +274,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -342,30 +337,22 @@ mod tests {
         graph.add_edge(
             src,
             model,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         graph.add_edge(
             model,
             model,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         graph.add_edge(
             model,
             test,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         graph.add_edge(
             model,
             exp,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let json = build_html_json(&graph);
@@ -400,9 +387,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let output = render_to_string(&graph);

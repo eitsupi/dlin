@@ -182,9 +182,7 @@ mod tests {
         g.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         // c has no edges — it's a disconnected node
         let _ = c; // used for graph construction
@@ -206,16 +204,12 @@ mod tests {
         g.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         g.add_edge(
             b,
             c,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let layout = sugiyama_layout(&g);
@@ -238,16 +232,12 @@ mod tests {
         g.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         g.add_edge(
             b,
             a,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let layout = sugiyama_layout(&g);

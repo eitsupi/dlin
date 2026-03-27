@@ -340,7 +340,7 @@ fn add_node_edges(
         for dep_id in &node.depends_on.nodes {
             if let Some(&dep_idx) = node_map.get(dep_id) {
                 let edge_type = infer_edge_type(dep_id);
-                graph.add_edge(dep_idx, current_idx, EdgeData { edge_type });
+                graph.add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
             }
         }
     }
@@ -362,9 +362,7 @@ fn add_exposure_edges(
                 graph.add_edge(
                     dep_idx,
                     current_idx,
-                    EdgeData {
-                        edge_type: EdgeType::Exposure,
-                    },
+                    EdgeData::direct(EdgeType::Exposure),
                 );
             }
         }

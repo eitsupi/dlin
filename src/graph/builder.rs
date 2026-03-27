@@ -447,9 +447,7 @@ fn process_sql_edges(
             gb.graph.add_edge(
                 dep_idx,
                 current_idx,
-                EdgeData {
-                    edge_type: EdgeType::Ref,
-                },
+                EdgeData::direct(EdgeType::Ref),
             );
         }
 
@@ -462,9 +460,7 @@ fn process_sql_edges(
             gb.graph.add_edge(
                 source_idx,
                 current_idx,
-                EdgeData {
-                    edge_type: EdgeType::Source,
-                },
+                EdgeData::direct(EdgeType::Source),
             );
         }
     }
@@ -504,9 +500,7 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
                     gb.graph.add_edge(
                         dep_idx,
                         idx,
-                        EdgeData {
-                            edge_type: EdgeType::Exposure,
-                        },
+                        EdgeData::direct(EdgeType::Exposure),
                     );
                 }
             }

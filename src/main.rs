@@ -148,7 +148,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
     warn_sql_mode_test_limitation(&args.source, &type_names);
-    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
+    let filtered =
+        graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
 
     // Resolve JSON fields
     let json_fields =
@@ -239,7 +240,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         );
     }
     warn_sql_mode_test_limitation(&args.source, &type_names);
-    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names);
+    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
     // Resolve JSON fields for list
     let json_fields =

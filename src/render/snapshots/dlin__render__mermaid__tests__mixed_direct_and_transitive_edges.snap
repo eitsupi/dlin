@@ -1,0 +1,18 @@
+---
+source: src/render/mermaid.rs
+expression: output
+---
+flowchart LR
+    model_b["b"]
+    model_c["c"]
+    source_raw_a(["a"])
+
+    model_b -->|ref| model_c
+    source_raw_a -.->|source| model_b
+    source_raw_a -.->|"source (via 3)"| model_c
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    class model_b model
+    class model_c model
+    class source_raw_a source

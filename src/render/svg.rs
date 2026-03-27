@@ -273,9 +273,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -349,30 +347,22 @@ mod tests {
         graph.add_edge(
             src,
             model,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
         graph.add_edge(
             src,
             model,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
         graph.add_edge(
             model,
             test,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
         graph.add_edge(
             model,
             exp,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let output = render_to_string(&graph);

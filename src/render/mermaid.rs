@@ -47,22 +47,30 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Re
         .map(|edge| {
             let source = &graph[edge.source()];
             let target = &graph[edge.target()];
+            let w = edge.weight();
             (
                 mermaid_id(&source.unique_id),
                 mermaid_id(&target.unique_id),
-                edge.weight().edge_type,
+                w.edge_type,
+                w.collapsed_through,
             )
         })
         .collect();
     edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
 
     // Render edges
-    for (src_id, tgt_id, edge_type) in &edges {
+    for (src_id, tgt_id, edge_type, collapsed) in &edges {
+        // Quote labels containing special characters (parentheses etc.)
+        // to prevent Mermaid from misinterpreting them as node shapes.
+        let label = match collapsed {
+            Some(n) => format!(r#""{} (via {})""#, edge_type.label(), n),
+            None => edge_type.label().to_string(),
+        };
         let arrow = match edge_type {
-            EdgeType::Ref => format!("    {} -->|ref| {}", src_id, tgt_id),
-            EdgeType::Source => format!("    {} -.->|source| {}", src_id, tgt_id),
-            EdgeType::Test => format!("    {} -.->|test| {}", src_id, tgt_id),
-            EdgeType::Exposure => format!("    {} ==>|exposure| {}", src_id, tgt_id),
+            EdgeType::Ref => format!("    {} -->|{}| {}", src_id, label, tgt_id),
+            EdgeType::Source => format!("    {} -.->|{}| {}", src_id, label, tgt_id),
+            EdgeType::Test => format!("    {} -.->|{}| {}", src_id, label, tgt_id),
+            EdgeType::Exposure => format!("    {} ==>|{}| {}", src_id, label, tgt_id),
         };
         writeln!(w, "{}", arrow)?;
     }
@@ -99,6 +107,7 @@ fn render_mermaid_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> io::Re
     }
     Ok(())
 }
+
 
 /// Convert a unique_id to a valid Mermaid node ID (replace dots with underscores)
 fn mermaid_id(unique_id: &str) -> String {
@@ -158,9 +167,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Source,
-            },
+            EdgeData::direct(EdgeType::Source),
         );
 
         let output = render_to_string(&graph);
@@ -175,9 +182,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Ref,
-            },
+            EdgeData::direct(EdgeType::Ref),
         );
 
         let output = render_to_string(&graph);
@@ -192,9 +197,7 @@ mod tests {
         graph.add_edge(
             a,
             b,
-            EdgeData {
-                edge_type: EdgeType::Exposure,
-            },
+            EdgeData::direct(EdgeType::Exposure),
         );
 
         let output = render_to_string(&graph);
@@ -215,9 +218,7 @@ mod tests {
         graph.add_edge(
             a,
             t,
-            EdgeData {
-                edge_type: EdgeType::Test,
-            },
+            EdgeData::direct(EdgeType::Test),
         );
 
         let output = render_to_string(&graph);
@@ -283,5 +284,30 @@ mod tests {
         assert!(output.contains("exposure_a>\"a\"]"));
         // Phantom: ("")
         assert!(output.contains("model_unknown(\"unknown\")"));
+    }
+
+    #[test]
+    fn test_transitive_edge_rendering() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("source.raw.a", "a", NodeType::Source));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::transitive(EdgeType::Source, 2));
+
+        let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_mixed_direct_and_transitive_edges() {
+        let mut graph = LineageGraph::new();
+        let a = graph.add_node(make_node("source.raw.a", "a", NodeType::Source));
+        let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
+        let c = graph.add_node(make_node("model.c", "c", NodeType::Model));
+        graph.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(a, c, EdgeData::transitive(EdgeType::Source, 3));
+        graph.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+
+        let output = render_to_string(&graph);
+        insta::assert_snapshot!(output);
     }
 }
