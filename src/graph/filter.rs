@@ -512,6 +512,10 @@ pub fn collapse_intermediate(
     group_by: Option<crate::cli::GroupBy>,
     preserve: &HashSet<NodeIndex>,
 ) -> LineageGraph {
+    debug_assert!(
+        preserve.iter().all(|i| graph.node_weight(*i).is_some()),
+        "preserve contains NodeIndex not present in graph"
+    );
     let mut keep = match group_by {
         None => {
             // Global endpoints: in-degree=0 or out-degree=0

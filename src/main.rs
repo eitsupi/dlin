@@ -166,10 +166,19 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             );
             filtered
         } else {
-            // Resolve focus models in the filtered graph so collapse preserves them
-            let preserve: std::collections::HashSet<_> = models
+            // Resolve focus models deterministically: look up unique_ids in the
+            // original DAG first, then find those exact ids in the filtered graph.
+            // This avoids re-resolving suffix-ambiguous names nondeterministically.
+            let focus_unique_ids: Vec<String> = models
                 .iter()
-                .filter_map(|name| graph::filter::try_resolve_node_quiet(&filtered, name))
+                .filter_map(|name| {
+                    graph::filter::try_resolve_node_quiet(&dag, name)
+                        .map(|idx| dag[idx].unique_id.clone())
+                })
+                .collect();
+            let preserve: std::collections::HashSet<_> = filtered
+                .node_indices()
+                .filter(|&idx| focus_unique_ids.contains(&filtered[idx].unique_id))
                 .collect();
             graph::filter::collapse_intermediate(&filtered, args.group_by, &preserve)
         }
