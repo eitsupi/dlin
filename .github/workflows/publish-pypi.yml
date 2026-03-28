@@ -57,7 +57,9 @@ jobs:
           path: dist
 
   publish:
-    needs: [build, sdist]
+    needs:
+      - build
+      - sdist
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
