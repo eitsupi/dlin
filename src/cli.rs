@@ -259,6 +259,7 @@ pub struct GraphArgs {
     /// Without --group-by, global graph endpoints are kept.
     /// Tip: with --source manifest, tests may appear as downstream endpoints;
     /// combine with --node-type to exclude them if needed.
+    /// Ignored when --no-transitive is set.
     #[arg(long)]
     pub collapse: bool,
 

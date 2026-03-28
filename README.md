@@ -127,7 +127,7 @@ flowchart LR
 
 ```sh
 dlin graph orders -u 2 -d 1                    # focus on specific model
-dlin graph --collapse --group-by node-type     # collapse per node type layer
+dlin graph -o mermaid --collapse --group-by node-type  # collapse per node type layer
 dlin graph -o mermaid --group-by directory     # group by directory
 dlin graph -o mermaid --direction tb           # top-to-bottom layout
 dlin graph --node-type source,exposure         # filter by node type

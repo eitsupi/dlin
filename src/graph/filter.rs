@@ -448,6 +448,42 @@ pub fn filter_output_node_types(
     }
 }
 
+/// Compute group-boundary endpoints: keep nodes that are entry/exit points
+/// within their group or connect to nodes outside their group.
+fn group_endpoints<G: Eq>(
+    graph: &LineageGraph,
+    group_of: &HashMap<NodeIndex, G>,
+) -> HashSet<NodeIndex> {
+    graph
+        .node_indices()
+        .filter(|&idx| {
+            let my_group = &group_of[&idx];
+
+            let (has_external_pred, has_group_pred) = graph
+                .neighbors_directed(idx, Direction::Incoming)
+                .fold((false, false), |(ext, grp), n| {
+                    if group_of.get(&n) != Some(my_group) {
+                        (true, grp)
+                    } else {
+                        (ext, true)
+                    }
+                });
+
+            let (has_external_succ, has_group_succ) = graph
+                .neighbors_directed(idx, Direction::Outgoing)
+                .fold((false, false), |(ext, grp), n| {
+                    if group_of.get(&n) != Some(my_group) {
+                        (true, grp)
+                    } else {
+                        (ext, true)
+                    }
+                });
+
+            !has_group_pred || !has_group_succ || has_external_pred || has_external_succ
+        })
+        .collect()
+}
+
 /// Collapse intermediate nodes, keeping only endpoints.
 ///
 /// An "endpoint" is a node that has no predecessors or no successors in the graph.
@@ -477,51 +513,19 @@ pub fn collapse_intermediate(
                 })
                 .collect::<HashSet<_>>()
         }
-        Some(group_by) => {
-            // Compute group key for each node
+        Some(crate::cli::GroupBy::NodeType) => {
+            let group_of: HashMap<NodeIndex, NodeType> = graph
+                .node_indices()
+                .map(|idx| (idx, graph[idx].node_type))
+                .collect();
+            group_endpoints(graph, &group_of)
+        }
+        Some(crate::cli::GroupBy::Directory) => {
             let group_of: HashMap<NodeIndex, String> = graph
                 .node_indices()
-                .map(|idx| {
-                    let node = &graph[idx];
-                    let key = match group_by {
-                        crate::cli::GroupBy::NodeType => node.node_type.label().to_string(),
-                        crate::cli::GroupBy::Directory => crate::render::directory_label(node),
-                    };
-                    (idx, key)
-                })
+                .map(|idx| (idx, crate::render::directory_label(&graph[idx])))
                 .collect();
-
-            graph
-                .node_indices()
-                .filter(|&idx| {
-                    let my_group = &group_of[&idx];
-
-                    // Single pass over incoming neighbors
-                    let (has_external_pred, has_group_pred) = graph
-                        .neighbors_directed(idx, Direction::Incoming)
-                        .fold((false, false), |(ext, grp), n| {
-                            if group_of.get(&n) != Some(my_group) {
-                                (true, grp)
-                            } else {
-                                (ext, true)
-                            }
-                        });
-
-                    // Single pass over outgoing neighbors
-                    let (has_external_succ, has_group_succ) = graph
-                        .neighbors_directed(idx, Direction::Outgoing)
-                        .fold((false, false), |(ext, grp), n| {
-                            if group_of.get(&n) != Some(my_group) {
-                                (true, grp)
-                            } else {
-                                (ext, true)
-                            }
-                        });
-
-                    // Keep if: endpoint within group, or connects to outside
-                    !has_group_pred || !has_group_succ || has_external_pred || has_external_succ
-                })
-                .collect::<HashSet<_>>()
+            group_endpoints(graph, &group_of)
         }
     };
 
