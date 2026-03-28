@@ -684,7 +684,6 @@ mod tests {
 
         let collapsed = crate::graph::filter::collapse_intermediate(
             &graph,
-            None,
             &std::collections::HashSet::new(),
         );
         let output = render_to_string_with_columns(&collapsed);

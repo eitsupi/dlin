@@ -202,9 +202,9 @@ Examples:
   dlin graph -o dot | dot -Tsvg > lineage.svg
   dlin graph -o mermaid --direction tb   # top-to-bottom layout
 
-  # === Collapse (simplify by removing intermediate nodes) ===
-  dlin graph --collapse                              # keep only endpoints
-  dlin graph orders --collapse                       # endpoints + orders preserved
+  # === Collapse (keep only sources, exposures, and focus models) ===
+  dlin graph --collapse                              # sources + exposures only
+  dlin graph orders --collapse                       # sources + exposures + orders
   dlin graph orders stg_x --collapse                 # multiple focus models preserved
 
   # === Column display (mermaid only) ===
@@ -266,18 +266,20 @@ pub struct GraphArgs {
     #[arg(long)]
     pub no_transitive: bool,
 
-    /// Collapse intermediate nodes, keeping only endpoints (nodes with no
-    /// predecessors or no successors). Removed nodes are replaced by transitive
-    /// edges with collapsed_through metadata (shown as "(via N)" in DOT/Mermaid).
-    /// Positional focus models are preserved by collapse even if intermediate,
+    /// Collapse intermediate nodes, keeping only sources, exposures, and
+    /// positional focus models. All other nodes (models, seeds, tests, etc.)
+    /// are removed and replaced by transitive edges shown as "(via N)" in
+    /// DOT/Mermaid output.
+    ///
+    /// This produces a compact 3-layer view: sources → focus models → exposures.
+    /// Nodes at BFS window boundaries (-u/-d) are NOT treated as endpoints;
+    /// only node type (source/exposure) and explicit focus model selection
+    /// determine what is kept.
+    ///
+    /// Focus models are preserved even if they would otherwise be intermediate,
     /// as long as they are not removed earlier by filters like --select or
     /// --node-type.
-    /// When combined with --group-by, endpoints are determined per group: a node
-    /// is kept if it connects to a node outside its group, or has no
-    /// predecessors/successors within its group.
-    /// Without --group-by, global graph endpoints are kept.
-    /// Tip: with --source manifest, tests may appear as downstream endpoints;
-    /// combine with --node-type to exclude them if needed.
+    ///
     /// Ignored when --no-transitive is set.
     #[arg(long)]
     pub collapse: bool,

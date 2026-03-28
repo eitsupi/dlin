@@ -180,7 +180,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
                 .node_indices()
                 .filter(|&idx| focus_unique_ids.contains(&filtered[idx].unique_id))
                 .collect();
-            graph::filter::collapse_intermediate(&filtered, args.group_by, &preserve)
+            graph::filter::collapse_intermediate(&filtered, &preserve)
         }
     } else {
         filtered
