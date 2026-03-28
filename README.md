@@ -125,7 +125,7 @@ flowchart LR
 
 ### Column names in nodes with `--show-columns`
 
-Add `--show-columns` to include column names inside node labels — useful for understanding what each model produces at a glance:
+Add `--show-columns` to include column names inside Mermaid node labels — useful for understanding what each model produces at a glance:
 
 ```sh
 dlin graph orders -u 1 -d 0 --show-columns --node-type model,source -o mermaid

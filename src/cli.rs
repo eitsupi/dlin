@@ -202,7 +202,7 @@ Examples:
   dlin graph -o dot | dot -Tsvg > lineage.svg
   dlin graph -o mermaid --direction tb   # top-to-bottom layout
 
-  # === Column display in visual formats ===
+  # === Column display (mermaid only) ===
   dlin graph -o mermaid --show-columns              # show columns in node labels
   dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes"
 )]
