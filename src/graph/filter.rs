@@ -1635,7 +1635,8 @@ mod tests {
         g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
         g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
         assert_eq!(collapsed.node_count(), 4); // src, a, c, exp
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1688,7 +1689,8 @@ mod tests {
         g.add_edge(int_a, int_b, EdgeData::direct(EdgeType::Ref));
         g.add_edge(int_b, final_a, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory), &HashSet::new());
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory), &HashSet::new());
         assert_eq!(collapsed.node_count(), 3); // stg_a, int_a, final_a
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1735,7 +1737,8 @@ mod tests {
         g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
         g.add_edge(ma, md, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
         let labels: HashSet<String> = collapsed
             .node_indices()
             .map(|i| collapsed[i].label.clone())
@@ -1851,7 +1854,8 @@ mod tests {
         g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
         g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
         insta::assert_snapshot!(render_mermaid(&collapsed));
     }
 
