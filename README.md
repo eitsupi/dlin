@@ -27,6 +27,8 @@ cargo install dlin
 
 ### pip / uv (Python)
 
+For convenience, dlin is also available as a Python package. The installed binary is native and does not require Python at runtime.
+
 ```sh
 pip install dlin-cli   # or: uv tool install dlin-cli
 ```
