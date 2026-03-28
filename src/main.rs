@@ -225,6 +225,14 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
 
+    // Warn if --show-columns used with unsupported output format
+    if args.show_columns && !matches!(args.output, cli::OutputFormat::Mermaid) {
+        dlin::warn!(
+            "--show-columns has no effect with -o {} (supported: mermaid)",
+            args.output.label()
+        );
+    }
+
     render_output(
         &args.output,
         &filtered,
@@ -232,6 +240,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         &json_fields,
         args.group_by,
         args.direction,
+        args.show_columns,
     );
 
     Ok(())
@@ -376,12 +385,15 @@ fn render_output(
     json_fields: &std::collections::HashSet<String>,
     group_by: Option<GroupBy>,
     direction: Direction,
+    show_columns: bool,
 ) {
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
         cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by, direction),
         cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
-        cli::OutputFormat::Mermaid => render::mermaid::render_mermaid(graph, group_by, direction),
+        cli::OutputFormat::Mermaid => {
+            render::mermaid::render_mermaid(graph, group_by, direction, show_columns)
+        }
         cli::OutputFormat::Plain => render::plain::render_plain(graph),
         cli::OutputFormat::Svg => render::svg::render_svg(graph),
         cli::OutputFormat::Html => render::html::render_html(graph),

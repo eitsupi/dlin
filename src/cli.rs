@@ -148,6 +148,13 @@ these with how many intermediate nodes were collapsed (for example, DOT/Mermaid 
 label edges as \"type (via N)\", and JSON/HTML expose a collapsed_through field). \
 Use --no-transitive to disable this and drop such edges instead.
 
+Column display (--show-columns):
+  Include column names inside node labels (currently mermaid only). \
+In sql mode, columns are taken from YAML properties files when available, \
+falling back to parsing SELECT clauses. In manifest mode, columns come \
+from manifest metadata. Combines well with --collapse to show rich \
+detail on fewer endpoint nodes.
+
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
 File paths are resolved to model names using dbt project configuration.",
@@ -193,7 +200,11 @@ Examples:
 
   # === Graphviz / visual output ===
   dlin graph -o dot | dot -Tsvg > lineage.svg
-  dlin graph -o mermaid --direction tb   # top-to-bottom layout"
+  dlin graph -o mermaid --direction tb   # top-to-bottom layout
+
+  # === Column display (mermaid only) ===
+  dlin graph -o mermaid --show-columns              # show columns in node labels
+  dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes"
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
@@ -268,6 +279,14 @@ pub struct GraphArgs {
     /// directory (group by file directory path)
     #[arg(long = "group-by")]
     pub group_by: Option<GroupBy>,
+
+    /// Show column names inside node labels (currently mermaid only).
+    /// In sql mode, columns are taken from YAML properties files when
+    /// available, falling back to parsing SELECT clauses.
+    /// In manifest mode, columns come from manifest metadata.
+    /// Combines well with --collapse to show rich detail on fewer nodes.
+    #[arg(long)]
+    pub show_columns: bool,
 
     /// Graph direction for dot and mermaid output.
     /// LR = left to right (default), TB = top to bottom

@@ -123,11 +123,37 @@ flowchart LR
     class model_stg_retail_orders model
 ```
 
+### Column names in nodes with `--show-columns`
+
+Add `--show-columns` to include column names inside Mermaid node labels — useful for understanding what each model produces at a glance:
+
+```sh
+dlin graph orders -u 1 -d 0 --show-columns --node-type model,source -o mermaid
+```
+
+```mermaid
+flowchart LR
+    model_orders["orders<br/>---<br/>order_id, customer_id, order_date, status, total_amount, payment_method"]
+    model_stg_orders["stg_orders<br/>---<br/>order_id, customer_id, order_date, status"]
+    model_stg_payments["stg_payments<br/>---<br/>payment_id, order_id, amount, payment_method"]
+
+    model_stg_orders -->|ref| model_orders
+    model_stg_payments -->|ref| model_orders
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_orders model
+    class model_stg_orders model
+    class model_stg_payments model
+```
+
+Combines well with `--collapse` to show rich detail on fewer endpoint nodes.
+
 ### Other graph options
 
 ```sh
 dlin graph orders -u 2 -d 1                            # focus on specific model
 dlin graph -o mermaid --collapse --group-by node-type  # collapse per node type layer
+dlin graph -o mermaid --collapse --show-columns        # columns in collapsed nodes
 dlin graph -o mermaid --group-by directory             # group by directory
 dlin graph -o mermaid --direction tb                   # top-to-bottom layout
 dlin graph --node-type source,exposure                 # filter by node type

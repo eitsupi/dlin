@@ -7,12 +7,18 @@ use crate::cli::{Direction, GroupBy};
 use crate::graph::types::*;
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
-pub fn render_mermaid(graph: &LineageGraph, group_by: Option<GroupBy>, direction: Direction) {
+pub fn render_mermaid(
+    graph: &LineageGraph,
+    group_by: Option<GroupBy>,
+    direction: Direction,
+    show_columns: bool,
+) {
     super::handle_stdout_result(render_mermaid_to_writer(
         graph,
         &mut std::io::stdout().lock(),
         group_by,
         direction,
+        show_columns,
     ));
 }
 
@@ -21,6 +27,7 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     w: &mut W,
     group_by: Option<GroupBy>,
     direction: Direction,
+    show_columns: bool,
 ) -> io::Result<()> {
     writeln!(w, "flowchart {direction}")?;
 
@@ -33,9 +40,9 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
     nodes.sort_by_key(|n| &n.unique_id);
 
     match group_by {
-        Some(GroupBy::NodeType) => write_nodes_grouped_by_type(w, &nodes)?,
-        Some(GroupBy::Directory) => write_nodes_grouped_by_directory(w, &nodes)?,
-        None => write_nodes_flat(w, &nodes)?,
+        Some(GroupBy::NodeType) => write_nodes_grouped_by_type(w, &nodes, show_columns)?,
+        Some(GroupBy::Directory) => write_nodes_grouped_by_directory(w, &nodes, show_columns)?,
+        None => write_nodes_flat(w, &nodes, show_columns)?,
     }
 
     writeln!(w)?;
@@ -113,15 +120,23 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
 }
 
 /// Write nodes without grouping (flat list)
-fn write_nodes_flat<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+fn write_nodes_flat<W: Write>(
+    w: &mut W,
+    nodes: &[&NodeData],
+    show_columns: bool,
+) -> io::Result<()> {
     for node in nodes {
-        writeln!(w, "    {}", node_shape(node))?;
+        writeln!(w, "    {}", node_shape(node, show_columns))?;
     }
     Ok(())
 }
 
 /// Write nodes grouped by node type using Mermaid subgraph blocks
-fn write_nodes_grouped_by_type<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+fn write_nodes_grouped_by_type<W: Write>(
+    w: &mut W,
+    nodes: &[&NodeData],
+    show_columns: bool,
+) -> io::Result<()> {
     // Group nodes by NodeType, preserving sorted order within each group
     let mut groups: BTreeMap<NodeType, Vec<&NodeData>> = BTreeMap::new();
     for node in nodes {
@@ -134,7 +149,7 @@ fn write_nodes_grouped_by_type<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::
         let title = super::capitalize(type_label);
         writeln!(w, r#"    subgraph {type_label}["{title}"]"#)?;
         for node in group_nodes {
-            writeln!(w, "        {}", node_shape(node))?;
+            writeln!(w, "        {}", node_shape(node, show_columns))?;
         }
         writeln!(w, "    end")?;
     }
@@ -142,7 +157,11 @@ fn write_nodes_grouped_by_type<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::
 }
 
 /// Write nodes grouped by file directory using Mermaid subgraph blocks
-fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, nodes: &[&NodeData]) -> io::Result<()> {
+fn write_nodes_grouped_by_directory<W: Write>(
+    w: &mut W,
+    nodes: &[&NodeData],
+    show_columns: bool,
+) -> io::Result<()> {
     let mut groups: BTreeMap<String, Vec<&NodeData>> = BTreeMap::new();
     for node in nodes {
         let dir = super::directory_label(node);
@@ -153,25 +172,64 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, nodes: &[&NodeData]) ->
         let subgraph_id = super::sanitize_id(dir);
         writeln!(w, r#"    subgraph {subgraph_id}["{dir}"]"#)?;
         for node in group_nodes {
-            writeln!(w, "        {}", node_shape(node))?;
+            writeln!(w, "        {}", node_shape(node, show_columns))?;
         }
         writeln!(w, "    end")?;
     }
     Ok(())
 }
 
+/// Build the label string for a node, optionally including column names.
+///
+/// When `show_columns` is true and the node has columns, the label includes
+/// a `---` text separator followed by the comma-separated column list.
+fn node_label(node: &NodeData, show_columns: bool) -> String {
+    if show_columns && !node.columns.is_empty() {
+        // `---` is rendered as literal text in flowchart labels (not a graphical
+        // rule), but serves as a clear visual separator between the node name
+        // and its columns.
+        let cols = node.columns.join(", ");
+        format!(
+            "{}<br/>---<br/>{}",
+            mermaid_escape(&node.label),
+            mermaid_escape(&cols)
+        )
+    } else {
+        mermaid_escape(&node.label)
+    }
+}
+
+/// Escape characters that are special inside Mermaid double-quoted labels.
+///
+/// Mermaid uses `#entity;` syntax (not HTML `&entity;`).
+/// We escape `"`, `<`, `>`, and `#` so user-provided text cannot break
+/// the label syntax or interfere with `<br/>` separators we insert.
+fn mermaid_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '#' => out.push_str("#num;"),
+            '"' => out.push_str("#quot;"),
+            '<' => out.push_str("#lt;"),
+            '>' => out.push_str("#gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Generate the Mermaid shape string for a node
-fn node_shape(node: &NodeData) -> String {
+fn node_shape(node: &NodeData, show_columns: bool) -> String {
     let id = mermaid_id(&node.unique_id);
-    let label = &node.label;
+    let label = node_label(node, show_columns);
     match node.node_type {
-        NodeType::Model => format!("{}[\"{}\"]", id, label),
-        NodeType::Source => format!("{}([\"{}\"])", id, label),
-        NodeType::Seed => format!("{}[/\"{}\"\\]", id, label),
-        NodeType::Snapshot => format!("{}{{{{\"{}\"}}}}", id, label),
-        NodeType::Test => format!("{}{{\"{}\"}}", id, label),
-        NodeType::Exposure => format!("{}>\"{}\"]", id, label),
-        NodeType::Phantom => format!("{}(\"{}\")", id, label),
+        NodeType::Model => format!(r#"{id}["{label}"]"#),
+        NodeType::Source => format!(r#"{id}(["{label}"])"#),
+        NodeType::Seed => format!(r#"{id}[/"{label}"\]"#),
+        NodeType::Snapshot => format!(r#"{id}{{{{"{label}"}}}}"#),
+        NodeType::Test => format!(r#"{id}{{"{label}"}}"#),
+        NodeType::Exposure => format!(r#"{id}>"{label}"]"#),
+        NodeType::Phantom => format!(r#"{id}("{label}")"#),
     }
 }
 
@@ -183,17 +241,24 @@ fn mermaid_id(unique_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::test_helpers::{make_node, make_node_with_path};
+    use crate::render::test_helpers::{make_node, make_node_with_columns, make_node_with_path};
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, None, Direction::LR).unwrap();
+        render_mermaid_to_writer(graph, &mut buf, None, Direction::LR, false).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
     fn render_to_string_grouped(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::NodeType), Direction::LR).unwrap();
+        render_mermaid_to_writer(
+            graph,
+            &mut buf,
+            Some(GroupBy::NodeType),
+            Direction::LR,
+            false,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -391,7 +456,14 @@ mod tests {
 
     fn render_to_string_directory(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::Directory), Direction::LR).unwrap();
+        render_mermaid_to_writer(
+            graph,
+            &mut buf,
+            Some(GroupBy::Directory),
+            Direction::LR,
+            false,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -462,7 +534,7 @@ mod tests {
     fn test_snapshot_direction_tb() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_mermaid_to_writer(&graph, &mut buf, None, Direction::TB).unwrap();
+        render_mermaid_to_writer(&graph, &mut buf, None, Direction::TB, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -471,8 +543,188 @@ mod tests {
     fn test_snapshot_direction_tb_grouped() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_mermaid_to_writer(&graph, &mut buf, Some(GroupBy::NodeType), Direction::TB).unwrap();
+        render_mermaid_to_writer(
+            &graph,
+            &mut buf,
+            Some(GroupBy::NodeType),
+            Direction::TB,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
+    }
+
+    fn render_to_string_with_columns(graph: &LineageGraph) -> String {
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(graph, &mut buf, None, Direction::LR, true).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn test_show_columns_single_model() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["order_id", "customer_id", "status"],
+        ));
+        let output = render_to_string_with_columns(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_show_columns_lineage() {
+        let mut graph = LineageGraph::new();
+        let src = graph.add_node(make_node_with_columns(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+            &["id", "customer_id", "amount", "created_at"],
+        ));
+        let stg = graph.add_node(make_node_with_columns(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            &["order_id", "customer_id", "amount"],
+        ));
+        let mart = graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["order_id", "customer_id", "status", "total_amount"],
+        ));
+        let exp = graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        graph.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let output = render_to_string_with_columns(&graph);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_show_columns_empty_columns_unchanged() {
+        // Nodes without columns should render identically with show_columns=true
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.orders", "orders", NodeType::Model));
+
+        let without = render_to_string(&graph);
+        let with = render_to_string_with_columns(&graph);
+        assert_eq!(without, with);
+    }
+
+    #[test]
+    fn test_show_columns_with_grouping() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["order_id", "status"],
+        ));
+        graph.add_node(make_node_with_columns(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+            &["id", "amount"],
+        ));
+
+        let mut buf = Vec::new();
+        render_mermaid_to_writer(
+            &graph,
+            &mut buf,
+            Some(GroupBy::NodeType),
+            Direction::LR,
+            true,
+        )
+        .unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_show_columns_with_collapse() {
+        // Build a chain: source -> stg -> mart -> exposure
+        // After collapse, only source and exposure remain (endpoints)
+        let mut graph = LineageGraph::new();
+        let src = graph.add_node(make_node_with_columns(
+            "source.raw.orders",
+            "raw.orders",
+            NodeType::Source,
+            &["id", "customer_id", "amount"],
+        ));
+        let stg = graph.add_node(make_node_with_columns(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            &["order_id", "customer_id", "amount"],
+        ));
+        let mart = graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["order_id", "customer_id", "status", "total_amount"],
+        ));
+        let exp = graph.add_node(make_node(
+            "exposure.dashboard",
+            "dashboard",
+            NodeType::Exposure,
+        ));
+
+        graph.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
+        graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let collapsed = crate::graph::filter::collapse_intermediate(&graph, None);
+        let output = render_to_string_with_columns(&collapsed);
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_show_columns_disabled_ignores_columns() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["order_id", "status"],
+        ));
+
+        // show_columns=false should NOT include columns even if present
+        let output = render_to_string(&graph);
+        assert!(!output.contains("order_id"));
+        assert!(!output.contains("status"));
+        assert!(output.contains("model_orders[\"orders\"]"));
+    }
+
+    #[test]
+    fn test_show_columns_escapes_quotes() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["Total Amount", r#"col "quoted""#],
+        ));
+        let output = render_to_string_with_columns(&graph);
+        // Double quotes in column names must be escaped to #quot;
+        assert!(output.contains("#quot;"));
+        assert!(!output.contains(r#"col "quoted""#));
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_mermaid_escape() {
+        assert_eq!(mermaid_escape("hello"), "hello");
+        assert_eq!(mermaid_escape(r#"a "b" c"#), "a #quot;b#quot; c");
+        assert_eq!(mermaid_escape("a<b>c"), "a#lt;b#gt;c");
+        assert_eq!(mermaid_escape("col#1"), "col#num;1");
     }
 }

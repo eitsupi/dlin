@@ -1,0 +1,17 @@
+---
+source: src/render/mermaid.rs
+expression: output
+---
+flowchart LR
+    subgraph model["Model"]
+        model_orders["orders<br/>---<br/>order_id, status"]
+    end
+    subgraph source["Source"]
+        source_raw_orders(["raw.orders<br/>---<br/>id, amount"])
+    end
+
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    class model_orders model
+    class source_raw_orders source

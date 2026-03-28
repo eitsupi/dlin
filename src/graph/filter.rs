@@ -1858,6 +1858,7 @@ mod tests {
             &mut buf,
             None,
             crate::cli::Direction::LR,
+            false,
         )
         .unwrap();
         String::from_utf8(buf).unwrap()
