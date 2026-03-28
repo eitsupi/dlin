@@ -212,9 +212,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         None
     };
 
-    // Warn if --group-by used with unsupported output format (unless --collapse uses it)
+    // Warn if --group-by used with unsupported output format
     if args.group_by.is_some()
-        && !args.collapse
         && !matches!(
             args.output,
             cli::OutputFormat::Dot | cli::OutputFormat::Mermaid

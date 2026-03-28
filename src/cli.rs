@@ -271,10 +271,11 @@ pub struct GraphArgs {
     /// are removed and replaced by transitive edges shown as "(via N)" in
     /// DOT/Mermaid output.
     ///
-    /// This produces a compact 3-layer view: sources → focus models → exposures.
-    /// Nodes at BFS window boundaries (-u/-d) are NOT treated as endpoints;
-    /// only node type (source/exposure) and explicit focus model selection
-    /// determine what is kept.
+    /// Typically produces a compact layered view: sources → focus models →
+    /// exposures. The result may have fewer layers depending on filters and
+    /// the project graph. Nodes at BFS window boundaries (-u/-d) are NOT
+    /// treated specially; only node type and focus model selection determine
+    /// what is kept.
     ///
     /// Focus models are preserved even if they would otherwise be intermediate,
     /// as long as they are not removed earlier by filters like --select or
