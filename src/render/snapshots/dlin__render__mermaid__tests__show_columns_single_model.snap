@@ -1,0 +1,10 @@
+---
+source: src/render/mermaid.rs
+expression: output
+---
+flowchart LR
+    model_orders["orders<br/>---<br/>order_id, customer_id, status"]
+
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_orders model

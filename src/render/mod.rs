@@ -94,6 +94,25 @@ pub(crate) mod test_helpers {
         }
     }
 
+    pub fn make_node_with_columns(
+        unique_id: &str,
+        label: &str,
+        node_type: NodeType,
+        columns: &[&str],
+    ) -> NodeData {
+        NodeData {
+            unique_id: unique_id.into(),
+            label: label.into(),
+            node_type,
+            file_path: None,
+            description: None,
+            materialization: None,
+            tags: vec![],
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            exposure: None,
+        }
+    }
+
     pub fn make_node_with_path(
         unique_id: &str,
         label: &str,
