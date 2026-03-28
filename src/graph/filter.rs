@@ -484,12 +484,16 @@ fn group_endpoints<G: Eq>(
         .collect()
 }
 
-/// Collapse intermediate nodes, keeping only endpoints.
+/// Collapse intermediate nodes, keeping only endpoints and explicitly preserved nodes.
 ///
 /// An "endpoint" is a node that has no predecessors or no successors in the graph.
 /// When `group_by` is provided, endpoints are determined per group: a node is an
 /// endpoint if it has no same-group predecessors, no same-group successors, or
 /// connects to at least one node outside its group.
+///
+/// Nodes in `preserve` are always kept regardless of their topology (e.g. focus
+/// models specified as positional CLI arguments). Pass an empty set to keep only
+/// endpoints.
 ///
 /// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
 pub fn collapse_intermediate(
