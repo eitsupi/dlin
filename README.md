@@ -1,11 +1,52 @@
 # dlin
 
+[![Crates.io](https://img.shields.io/crates/v/dlin)](https://crates.io/crates/dlin)
+[![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
+
 dbt lineage analysis CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
 
 Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
 
+## Motivation
+
+When I edited dbt models in VS Code, [dbt Power User](https://marketplace.visualstudio.com/items?itemName=innoverio.vscode-dbt-power-user) was my go-to companion for navigating lineage. AI agents have no such companion. I watched them `grep` through dbt projects to find model dependencies. It works, but they end up calling `grep` repeatedly and relying on fragile string matching to piece together `ref()` and `source()` relationships.
+
+dlin is designed to fill that gap: a CLI tool that lets AI agents understand a dbt project's structure without falling back to `grep`. It is equally useful for humans, and its stdin/stdout interface makes it easy to combine with `jq`, `git diff`, and other CLI tools.
+
+To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates common Jinja patterns without Python, parallelizes file I/O, and caches aggressively.
+
+The key idea behind dlin is that finding the right models fast is what matters most. AI agents can read SQL and trace column-level relationships on their own; the hard part is knowing which models to look at in the first place. So dlin focuses on model-level lineage and makes that as fast as possible.
+
+## Install
+
+### Cargo (Rust)
+
 ```sh
-cargo install --git https://github.com/eitsupi/dlin.git
+cargo install dlin
+```
+
+### pip / uv (Python)
+
+For convenience, dlin is also available as a Python package. The installed binary is native and does not require Python at runtime.
+
+```sh
+pip install dlin-cli   # or: uv tool install dlin-cli
+```
+
+### GitHub Releases
+
+Pre-built binaries for Linux, macOS, and Windows are available on the [Releases](https://github.com/eitsupi/dlin/releases) page. You can also use the installer scripts:
+
+macOS / Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/eitsupi/dlin/releases/latest/download/dlin-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/eitsupi/dlin/releases/latest/download/dlin-installer.ps1 | iex"
 ```
 
 ## Quick start
@@ -24,9 +65,7 @@ dlin list -o json --json-fields unique_id,file_path
 git diff --name-only main | dlin graph -o json
 ```
 
-## Why dlin?
-
-dbt's built-in `dbt ls` and manifest-based tools require `dbt compile` (and therefore Python) before you can query the graph. dlin parses SQL directly, so it works anywhere Rust runs — in CI, in AI agents, or on a machine without Python installed.
+## Features
 
 - **No dependencies**: single binary, no Python, no `manifest.json`
 - **Recursive upstream / downstream**: `-u N` / `-d N` to control traversal depth
@@ -200,6 +239,8 @@ dlin graph --node-type model,source   # filter by node type
 
 ## Data sources
 
+dlin aims to work without `dbt compile`. By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
+
 **SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed.
 
 **Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
@@ -210,7 +251,7 @@ dlin graph --node-type model,source   # filter by node type
 - Runtime context (`target.type`, `env_var()`) is not evaluated
 - Conditional Jinja branches use default values; non-default paths may be missed
 
-For full accuracy, use `--source manifest`.
+When these limitations matter, use `--source manifest`.
 
 ## Credits
 
