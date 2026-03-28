@@ -182,17 +182,26 @@ fn write_nodes_grouped_by_directory<W: Write>(
 /// Build the label string for a node, optionally including column names.
 ///
 /// When `show_columns` is true and the node has columns, the label includes
-/// a Mermaid horizontal rule (`---`) followed by the comma-separated column list.
+/// a `---` text separator followed by the comma-separated column list.
 fn node_label(node: &NodeData, show_columns: bool) -> String {
     if show_columns && !node.columns.is_empty() {
-        // Mermaid renders `---` inside a quoted label as a horizontal divider
-        // when the node uses a shape that supports it (rectangle, etc.).
-        // Use `<br/>` for line breaks within Mermaid labels.
+        // `---` is rendered as literal text in flowchart labels (not a graphical
+        // rule), but serves as a clear visual separator between the node name
+        // and its columns.
         let cols = node.columns.join(", ");
-        format!("{}<br/>---<br/>{}", node.label, cols)
+        format!(
+            "{}<br/>---<br/>{}",
+            mermaid_escape(&node.label),
+            mermaid_escape(&cols)
+        )
     } else {
-        node.label.clone()
+        mermaid_escape(&node.label)
     }
+}
+
+/// Escape characters that are special inside Mermaid double-quoted labels.
+fn mermaid_escape(s: &str) -> String {
+    s.replace('"', "#quot;")
 }
 
 /// Generate the Mermaid shape string for a node
@@ -661,5 +670,27 @@ mod tests {
         assert!(!output.contains("order_id"));
         assert!(!output.contains("status"));
         assert!(output.contains("model_orders[\"orders\"]"));
+    }
+
+    #[test]
+    fn test_show_columns_escapes_quotes() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_columns(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            &["Total Amount", r#"col "quoted""#],
+        ));
+        let output = render_to_string_with_columns(&graph);
+        // Double quotes in column names must be escaped to #quot;
+        assert!(output.contains("#quot;"));
+        assert!(!output.contains(r#"col "quoted""#));
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_mermaid_escape() {
+        assert_eq!(mermaid_escape("hello"), "hello");
+        assert_eq!(mermaid_escape(r#"a "b" c"#), "a #quot;b#quot; c");
     }
 }
