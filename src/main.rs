@@ -169,7 +169,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             // Resolve focus models deterministically: look up unique_ids in the
             // original DAG first, then find those exact ids in the filtered graph.
             // This avoids re-resolving suffix-ambiguous names nondeterministically.
-            let focus_unique_ids: Vec<String> = models
+            let focus_unique_ids: std::collections::HashSet<String> = models
                 .iter()
                 .filter_map(|name| {
                     graph::filter::try_resolve_node_quiet(&dag, name)

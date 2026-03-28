@@ -512,7 +512,7 @@ pub fn collapse_intermediate(
     group_by: Option<crate::cli::GroupBy>,
     preserve: &HashSet<NodeIndex>,
 ) -> LineageGraph {
-    debug_assert!(
+    assert!(
         preserve.iter().all(|i| graph.node_weight(*i).is_some()),
         "preserve contains NodeIndex not present in graph"
     );
