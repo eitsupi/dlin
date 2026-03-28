@@ -15,7 +15,7 @@ dlin is designed to fill that gap: a CLI tool that lets AI agents understand a d
 
 To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates Jinja macros without Python, parallelizes file I/O, and caches aggressively.
 
-dlin focuses on model-level lineage, prioritizing speed and simplicity. AI agents can read SQL and trace column-level relationships themselves; what they need is a fast way to discover which models connect to which.
+The key idea behind dlin is that finding the right models fast is what matters most. AI agents can read SQL and trace column-level relationships on their own; the hard part is knowing which models to look at in the first place. So dlin focuses on model-level lineage and makes that as fast as possible.
 
 ## Install
 
