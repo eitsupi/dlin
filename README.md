@@ -1,12 +1,39 @@
 # dlin
 
+[![Crates.io](https://img.shields.io/crates/v/dlin)](https://crates.io/crates/dlin)
+[![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
+
 dbt lineage analysis CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
 
 Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
 
+## Motivation
+
+When I edited dbt models in VS Code, [dbt Power User](https://marketplace.visualstudio.com/items?itemName=innoverio.vscode-dbt-power-user) was my go-to companion for navigating lineage. AI agents have no such companion. I watched them `grep` through dbt projects to find model dependencies. It works, but they end up calling `grep` repeatedly and relying on fragile string matching to piece together `ref()` and `source()` relationships.
+
+dlin is designed to fill that gap: a CLI tool that lets AI agents understand a dbt project's structure without falling back to `grep`. It is equally useful for humans, and its stdin/stdout interface makes it easy to combine with `jq`, `git diff`, and other CLI tools.
+
+To replace `grep`, speed matters. Running `dbt compile` every time is out of the question. dlin parses SQL directly, evaluates Jinja macros without Python, parallelizes file I/O, and caches aggressively.
+
+dlin also deliberately limits scope to model-level lineage. AI agents are already good at SQL itself; what they struggle with is finding which models connect to which. Column-level tracing would add complexity and slow things down for a problem that doesn't need it.
+
+## Install
+
+### Cargo (Rust)
+
 ```sh
-cargo install --git https://github.com/eitsupi/dlin.git
+cargo install dlin
 ```
+
+### pip / uv (Python)
+
+```sh
+pip install dlin-cli   # or: uv tool install dlin-cli
+```
+
+### GitHub Releases
+
+Pre-built binaries for Linux, macOS, and Windows are available on the [Releases](https://github.com/eitsupi/dlin/releases) page.
 
 ## Quick start
 
@@ -24,9 +51,7 @@ dlin list -o json --json-fields unique_id,file_path
 git diff --name-only main | dlin graph -o json
 ```
 
-## Why dlin?
-
-dbt's built-in `dbt ls` and manifest-based tools require `dbt compile` (and therefore Python) before you can query the graph. dlin parses SQL directly, so it works anywhere Rust runs — in CI, in AI agents, or on a machine without Python installed.
+## Features
 
 - **No dependencies**: single binary, no Python, no `manifest.json`
 - **Recursive upstream / downstream**: `-u N` / `-d N` to control traversal depth
