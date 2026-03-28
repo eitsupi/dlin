@@ -470,18 +470,10 @@ pub fn filter_output_node_types(
 /// Indices in `preserve` that are out of bounds for `graph` are ignored
 /// and cause a warning to be logged; callers must ensure that all indices
 /// originate from the same graph.
-pub fn collapse_intermediate(
-    graph: &LineageGraph,
-    preserve: &HashSet<NodeIndex>,
-) -> LineageGraph {
+pub fn collapse_intermediate(graph: &LineageGraph, preserve: &HashSet<NodeIndex>) -> LineageGraph {
     let mut keep: HashSet<_> = graph
         .node_indices()
-        .filter(|&idx| {
-            matches!(
-                graph[idx].node_type,
-                NodeType::Source | NodeType::Exposure
-            )
-        })
+        .filter(|&idx| matches!(graph[idx].node_type, NodeType::Source | NodeType::Exposure))
         .collect();
 
     // Always keep explicitly specified focus models (warn and skip invalid indices)
@@ -1596,7 +1588,10 @@ mod tests {
         let preserve = HashSet::from([a]);
         let collapsed = collapse_intermediate(&g, &preserve);
         assert_eq!(collapsed.node_count(), 1);
-        assert_eq!(collapsed[collapsed.node_indices().next().unwrap()].label, "a");
+        assert_eq!(
+            collapsed[collapsed.node_indices().next().unwrap()].label,
+            "a"
+        );
     }
 
     #[test]
@@ -1612,14 +1607,23 @@ mod tests {
             vec![],
         ));
         let stg = g.add_node(make_node("model.stg", "stg", NodeType::Model, None, vec![]));
-        let mart = g.add_node(make_node("model.mart", "mart", NodeType::Model, None, vec![]));
+        let mart = g.add_node(make_node(
+            "model.mart",
+            "mart",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
         g.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
         g.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
 
         let collapsed = collapse_intermediate(&g, &HashSet::new());
         // Only source kept; stg and mart are models → collapsed
         assert_eq!(collapsed.node_count(), 1);
-        assert_eq!(collapsed[collapsed.node_indices().next().unwrap()].label, "x");
+        assert_eq!(
+            collapsed[collapsed.node_indices().next().unwrap()].label,
+            "x"
+        );
     }
 
     #[test]
