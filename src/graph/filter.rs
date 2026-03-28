@@ -504,7 +504,8 @@ fn group_endpoints<G: Eq>(
 ///
 /// Nodes in `preserve` are always kept regardless of their topology (e.g. focus
 /// models specified as positional CLI arguments). Pass an empty set to keep only
-/// endpoints. All indices in `preserve` must belong to `graph`.
+/// endpoints. Indices in `preserve` that do not belong to `graph` are ignored and
+/// cause a warning to be logged.
 ///
 /// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
 pub fn collapse_intermediate(
@@ -592,6 +593,7 @@ fn bfs_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petgraph::visit::NodeIndexable;
     use std::path::PathBuf;
 
     fn make_node(
@@ -1888,13 +1890,9 @@ mod tests {
         let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
         g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
-        // Create an index from a different graph
-        let mut other = LineageGraph::new();
-        let foreign = other.add_node(make_node("model.x", "x", NodeType::Model, None, vec![]));
-        // Remove it so the index is definitely invalid for g
-        let _ = other;
-
-        let preserve = HashSet::from([foreign, NodeIndex::new(999)]);
+        // Create indexes that are definitely invalid for g (out of range)
+        let invalid_from_bound = NodeIndex::new(g.node_bound());
+        let preserve = HashSet::from([invalid_from_bound, NodeIndex::new(999)]);
         let collapsed = collapse_intermediate(&g, None, &preserve);
         // Should still produce a valid result with only endpoints
         assert_eq!(collapsed.node_count(), 2);
