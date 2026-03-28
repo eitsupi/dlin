@@ -237,8 +237,14 @@ mod tests {
 
     fn render_to_string_grouped(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::NodeType), Direction::LR, false)
-            .unwrap();
+        render_mermaid_to_writer(
+            graph,
+            &mut buf,
+            Some(GroupBy::NodeType),
+            Direction::LR,
+            false,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -436,8 +442,14 @@ mod tests {
 
     fn render_to_string_directory(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_mermaid_to_writer(graph, &mut buf, Some(GroupBy::Directory), Direction::LR, false)
-            .unwrap();
+        render_mermaid_to_writer(
+            graph,
+            &mut buf,
+            Some(GroupBy::Directory),
+            Direction::LR,
+            false,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -517,8 +529,14 @@ mod tests {
     fn test_snapshot_direction_tb_grouped() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
-        render_mermaid_to_writer(&graph, &mut buf, Some(GroupBy::NodeType), Direction::TB, false)
-            .unwrap();
+        render_mermaid_to_writer(
+            &graph,
+            &mut buf,
+            Some(GroupBy::NodeType),
+            Direction::TB,
+            false,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
