@@ -4,18 +4,11 @@ expression: render_mermaid(&collapsed)
 ---
 flowchart LR
     exposure_dash>"dash"]
-    model_final_x["final_x"]
-    model_stg_x["stg_x"]
     source_raw_x(["raw_x"])
 
-    model_final_x ==>|exposure| exposure_dash
-    model_stg_x -->|"ref (via 1)"| model_final_x
-    source_raw_x -.->|source| model_stg_x
+    source_raw_x ==>|"exposure (via 3)"| exposure_dash
 
-    classDef model fill:#4A90D9,stroke:#333,color:#fff
     classDef source fill:#27AE60,stroke:#333,color:#fff
     classDef exposure fill:#E74C3C,stroke:#333,color:#fff
     class exposure_dash exposure
-    class model_final_x model
-    class model_stg_x model
     class source_raw_x source

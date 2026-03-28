@@ -159,7 +159,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
 
     // Collapse intermediate nodes if requested
-    let filtered = if args.collapse {
+    let filtered = if let Some(collapse_mode) = args.collapse {
         if args.no_transitive {
             dlin::warn!(
                 "--collapse has no effect with --no-transitive (transitive edges are required to preserve connectivity)"
@@ -180,7 +180,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
                 .node_indices()
                 .filter(|&idx| focus_unique_ids.contains(&filtered[idx].unique_id))
                 .collect();
-            graph::filter::collapse_intermediate(&filtered, args.group_by, &preserve)
+            graph::filter::collapse_intermediate(&filtered, collapse_mode, &preserve)
         }
     } else {
         filtered
@@ -212,9 +212,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         None
     };
 
-    // Warn if --group-by used with unsupported output format (unless --collapse uses it)
+    // Warn if --group-by used with unsupported output format
     if args.group_by.is_some()
-        && !args.collapse
         && !matches!(
             args.output,
             cli::OutputFormat::Dot | cli::OutputFormat::Mermaid

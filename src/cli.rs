@@ -69,6 +69,14 @@ pub struct Cli {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CollapseMode {
+    /// Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
+    Endpoints,
+    /// Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
+    Focal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum GroupBy {
     /// Group nodes by node type (source, model, test, etc.)
     NodeType,
@@ -203,9 +211,9 @@ Examples:
   dlin graph -o mermaid --direction tb   # top-to-bottom layout
 
   # === Collapse (simplify by removing intermediate nodes) ===
-  dlin graph --collapse                              # keep only endpoints
+  dlin graph --collapse                              # keep only graph endpoints
   dlin graph orders --collapse                       # endpoints + orders preserved
-  dlin graph orders stg_x --collapse                 # multiple focus models preserved
+  dlin graph orders --collapse=focal -u 3            # sources + exposures + orders only
 
   # === Column display (mermaid only) ===
   dlin graph -o mermaid --show-columns              # show columns in node labels
@@ -266,21 +274,24 @@ pub struct GraphArgs {
     #[arg(long)]
     pub no_transitive: bool,
 
-    /// Collapse intermediate nodes, keeping only endpoints (nodes with no
-    /// predecessors or no successors). Removed nodes are replaced by transitive
-    /// edges with collapsed_through metadata (shown as "(via N)" in DOT/Mermaid).
-    /// Positional focus models are preserved by collapse even if intermediate,
+    /// Collapse intermediate nodes, replacing them with transitive edges
+    /// shown as "(via N)" in DOT/Mermaid output.
+    ///
+    /// Without a value (--collapse), defaults to "endpoints" mode: keeps
+    /// nodes with no predecessors or no successors, plus focus models.
+    ///
+    /// With --collapse=focal: keeps only source/exposure nodes and focus
+    /// models as endpoints. Endpoint selection ignores BFS window boundaries
+    /// (-u/-d), so window-edge nodes are not treated as pseudo-endpoints,
+    /// but traversal still respects the -u/-d limits.
+    ///
+    /// Focus models are preserved even if they would otherwise be intermediate,
     /// as long as they are not removed earlier by filters like --select or
     /// --node-type.
-    /// When combined with --group-by, endpoints are determined per group: a node
-    /// is kept if it connects to a node outside its group, or has no
-    /// predecessors/successors within its group.
-    /// Without --group-by, global graph endpoints are kept.
-    /// Tip: with --source manifest, tests may appear as downstream endpoints;
-    /// combine with --node-type to exclude them if needed.
+    ///
     /// Ignored when --no-transitive is set.
-    #[arg(long)]
-    pub collapse: bool,
+    #[arg(long, value_name = "MODE", default_missing_value = "endpoints", num_args = 0..=1, require_equals = true)]
+    pub collapse: Option<CollapseMode>,
 
     /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
     /// Supported values: node-type (group by source, model, test, etc.),
@@ -1189,5 +1200,48 @@ mod tests {
         let cli =
             Cli::try_parse_from(["dlin", "--error-format", "json", "impact", "orders"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormat::Json);
+    }
+
+    // -- Collapse CLI parsing tests -------------------------------------------
+
+    #[test]
+    fn test_collapse_none_by_default() {
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph"]).unwrap());
+        assert_eq!(args.collapse, None);
+    }
+
+    #[test]
+    fn test_collapse_bare_defaults_to_endpoints() {
+        let args = unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--collapse"]).unwrap());
+        assert_eq!(args.collapse, Some(CollapseMode::Endpoints));
+    }
+
+    #[test]
+    fn test_collapse_explicit_endpoints() {
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--collapse=endpoints"]).unwrap());
+        assert_eq!(args.collapse, Some(CollapseMode::Endpoints));
+    }
+
+    #[test]
+    fn test_collapse_focal() {
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--collapse=focal"]).unwrap());
+        assert_eq!(args.collapse, Some(CollapseMode::Focal));
+    }
+
+    #[test]
+    fn test_collapse_invalid_mode_rejected() {
+        let result = Cli::try_parse_from(["dlin", "graph", "--collapse=invalid"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_collapse_bare_does_not_consume_model() {
+        // --collapse without = must not swallow the next positional as MODE
+        let args =
+            unwrap_graph(Cli::try_parse_from(["dlin", "graph", "--collapse", "orders"]).unwrap());
+        assert_eq!(args.collapse, Some(CollapseMode::Endpoints));
+        assert_eq!(args.model, vec!["orders".to_string()]);
     }
 }

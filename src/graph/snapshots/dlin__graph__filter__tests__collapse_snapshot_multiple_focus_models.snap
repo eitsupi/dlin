@@ -1,0 +1,26 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&collapsed)
+---
+flowchart LR
+    exposure_dash>"dash"]
+    model_mart_a["mart_a"]
+    model_mart_b["mart_b"]
+    source_raw_a(["raw_a"])
+    source_raw_b(["raw_b"])
+
+    model_mart_a ==>|exposure| exposure_dash
+    model_mart_b ==>|exposure| exposure_dash
+    source_raw_a -.->|"source (via 1)"| model_mart_a
+    source_raw_a -.->|"source (via 1)"| model_mart_b
+    source_raw_b -.->|"source (via 1)"| model_mart_a
+    source_raw_b -.->|"source (via 1)"| model_mart_b
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    classDef exposure fill:#E74C3C,stroke:#333,color:#fff
+    class exposure_dash exposure
+    class model_mart_a model
+    class model_mart_b model
+    class source_raw_a source
+    class source_raw_b source

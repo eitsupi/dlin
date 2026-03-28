@@ -1,0 +1,10 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&collapsed)
+---
+flowchart LR
+    model_b["b"]
+
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_b model
