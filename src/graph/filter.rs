@@ -485,9 +485,7 @@ pub fn collapse_intermediate(
                     let node = &graph[idx];
                     let key = match group_by {
                         crate::cli::GroupBy::NodeType => node.node_type.label().to_string(),
-                        crate::cli::GroupBy::Directory => {
-                            crate::render::directory_label(node)
-                        }
+                        crate::cli::GroupBy::Directory => crate::render::directory_label(node),
                     };
                     (idx, key)
                 })
@@ -502,7 +500,7 @@ pub fn collapse_intermediate(
                     let (has_external_pred, has_group_pred) = graph
                         .neighbors_directed(idx, Direction::Incoming)
                         .fold((false, false), |(ext, grp), n| {
-                            if group_of.get(&n).map_or(true, |g| g != my_group) {
+                            if group_of.get(&n) != Some(my_group) {
                                 (true, grp)
                             } else {
                                 (ext, true)
@@ -513,7 +511,7 @@ pub fn collapse_intermediate(
                     let (has_external_succ, has_group_succ) = graph
                         .neighbors_directed(idx, Direction::Outgoing)
                         .fold((false, false), |(ext, grp), n| {
-                            if group_of.get(&n).map_or(true, |g| g != my_group) {
+                            if group_of.get(&n) != Some(my_group) {
                                 (true, grp)
                             } else {
                                 (ext, true)
@@ -521,10 +519,7 @@ pub fn collapse_intermediate(
                         });
 
                     // Keep if: endpoint within group, or connects to outside
-                    !has_group_pred
-                        || !has_group_succ
-                        || has_external_pred
-                        || has_external_succ
+                    !has_group_pred || !has_group_succ || has_external_pred || has_external_succ
                 })
                 .collect::<HashSet<_>>()
         }
@@ -1617,27 +1612,9 @@ mod tests {
             None,
             vec![],
         ));
-        let ma = g.add_node(make_node(
-            "model.a",
-            "a",
-            NodeType::Model,
-            None,
-            vec![],
-        ));
-        let mb = g.add_node(make_node(
-            "model.b",
-            "b",
-            NodeType::Model,
-            None,
-            vec![],
-        ));
-        let mc = g.add_node(make_node(
-            "model.c",
-            "c",
-            NodeType::Model,
-            None,
-            vec![],
-        ));
+        let ma = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let mb = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let mc = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
         let exp = g.add_node(make_node(
             "exposure.dash",
             "dash",
@@ -1650,8 +1627,7 @@ mod tests {
         g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
         g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed =
-            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
         assert_eq!(collapsed.node_count(), 4); // src, a, c, exp
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1704,8 +1680,7 @@ mod tests {
         g.add_edge(int_a, int_b, EdgeData::direct(EdgeType::Ref));
         g.add_edge(int_b, final_a, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed =
-            collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory));
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory));
         assert_eq!(collapsed.node_count(), 3); // stg_a, int_a, final_a
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1758,13 +1733,25 @@ mod tests {
             .map(|i| collapsed[i].label.clone())
             .collect();
         // model_a: external predecessor (source) → kept
-        assert!(labels.contains("a"), "model_a has external pred, should be kept");
+        assert!(
+            labels.contains("a"),
+            "model_a has external pred, should be kept"
+        );
         // model_b: purely internal (only model neighbors, both in and out) → collapsed
-        assert!(!labels.contains("b"), "model_b is purely internal, should be collapsed");
+        assert!(
+            !labels.contains("b"),
+            "model_b is purely internal, should be collapsed"
+        );
         // model_c: external successor (exposure) → kept
-        assert!(labels.contains("c"), "model_c has external succ, should be kept");
+        assert!(
+            labels.contains("c"),
+            "model_c has external succ, should be kept"
+        );
         // model_d: no same-group successor → kept (group endpoint)
-        assert!(labels.contains("d"), "model_d is a group endpoint, should be kept");
+        assert!(
+            labels.contains("d"),
+            "model_d is a group endpoint, should be kept"
+        );
         // source and exposure always kept
         assert!(labels.contains("x"));
         assert!(labels.contains("dash"));
@@ -1856,8 +1843,7 @@ mod tests {
         g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
         g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed =
-            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
         insta::assert_snapshot!(render_mermaid(&collapsed));
     }
 
