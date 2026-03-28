@@ -126,12 +126,12 @@ flowchart LR
 ### Other graph options
 
 ```sh
-dlin graph orders -u 2 -d 1                    # focus on specific model
+dlin graph orders -u 2 -d 1                            # focus on specific model
 dlin graph -o mermaid --collapse --group-by node-type  # collapse per node type layer
-dlin graph -o mermaid --group-by directory     # group by directory
-dlin graph -o mermaid --direction tb           # top-to-bottom layout
-dlin graph --node-type source,exposure         # filter by node type
-dlin graph -o dot | dot -Tsvg > out.svg        # Graphviz rendering
+dlin graph -o mermaid --group-by directory             # group by directory
+dlin graph -o mermaid --direction tb                   # top-to-bottom layout
+dlin graph --node-type source,exposure                 # filter by node type
+dlin graph -o dot | dot -Tsvg > out.svg                # Graphviz rendering
 ```
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
