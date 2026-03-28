@@ -69,6 +69,14 @@ pub struct Cli {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CollapseMode {
+    /// Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
+    Endpoints,
+    /// Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
+    Focal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum GroupBy {
     /// Group nodes by node type (source, model, test, etc.)
     NodeType,
@@ -202,10 +210,10 @@ Examples:
   dlin graph -o dot | dot -Tsvg > lineage.svg
   dlin graph -o mermaid --direction tb   # top-to-bottom layout
 
-  # === Collapse (keep only sources, exposures, and focus models) ===
-  dlin graph --collapse                              # sources + exposures only
-  dlin graph orders --collapse                       # sources + exposures + orders
-  dlin graph orders stg_x --collapse                 # multiple focus models preserved
+  # === Collapse (simplify by removing intermediate nodes) ===
+  dlin graph --collapse                              # keep only graph endpoints
+  dlin graph orders --collapse                       # endpoints + orders preserved
+  dlin graph orders --collapse=focal -u 3            # sources + exposures + orders only
 
   # === Column display (mermaid only) ===
   dlin graph -o mermaid --show-columns              # show columns in node labels
@@ -266,24 +274,23 @@ pub struct GraphArgs {
     #[arg(long)]
     pub no_transitive: bool,
 
-    /// Collapse intermediate nodes, keeping only sources, exposures, and
-    /// positional focus models. All other nodes (models, seeds, tests, etc.)
-    /// are removed and replaced by transitive edges shown as "(via N)" in
-    /// DOT/Mermaid output.
+    /// Collapse intermediate nodes, replacing them with transitive edges
+    /// shown as "(via N)" in DOT/Mermaid output.
     ///
-    /// Typically produces a compact layered view: sources → focus models →
-    /// exposures. The result may have fewer layers depending on filters and
-    /// the project graph. Nodes at BFS window boundaries (-u/-d) are NOT
-    /// treated specially; only node type and focus model selection determine
-    /// what is kept.
+    /// Without a value (--collapse), defaults to "endpoints" mode: keeps
+    /// nodes with no predecessors or no successors, plus focus models.
+    ///
+    /// With --collapse=focal: keeps only source/exposure nodes and focus
+    /// models. This ignores BFS window boundaries (-u/-d), producing a
+    /// compact layered view without pseudo-endpoints at window edges.
     ///
     /// Focus models are preserved even if they would otherwise be intermediate,
     /// as long as they are not removed earlier by filters like --select or
     /// --node-type.
     ///
     /// Ignored when --no-transitive is set.
-    #[arg(long)]
-    pub collapse: bool,
+    #[arg(long, value_name = "MODE", default_missing_value = "endpoints", num_args = 0..=1)]
+    pub collapse: Option<CollapseMode>,
 
     /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
     /// Supported values: node-type (group by source, model, test, etc.),
