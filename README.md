@@ -199,6 +199,8 @@ dlin graph --node-type model,source   # filter by node type
 
 ## Data sources
 
+dlin aims to work without `dbt compile`. By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
+
 **SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed.
 
 **Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
@@ -209,7 +211,7 @@ dlin graph --node-type model,source   # filter by node type
 - Runtime context (`target.type`, `env_var()`) is not evaluated
 - Conditional Jinja branches use default values; non-default paths may be missed
 
-For full accuracy, use `--source manifest`.
+When these limitations matter, use `--source manifest`.
 
 ## Credits
 
