@@ -13,9 +13,9 @@ When I edited dbt models in VS Code, [dbt Power User](https://marketplace.visual
 
 dlin is designed to fill that gap: a CLI tool that lets AI agents understand a dbt project's structure without falling back to `grep`. It is equally useful for humans, and its stdin/stdout interface makes it easy to combine with `jq`, `git diff`, and other CLI tools.
 
-To replace `grep`, speed matters. Running `dbt compile` every time is out of the question. dlin parses SQL directly, evaluates Jinja macros without Python, parallelizes file I/O, and caches aggressively.
+To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates Jinja macros without Python, parallelizes file I/O, and caches aggressively.
 
-dlin also deliberately limits scope to model-level lineage. AI agents are already good at SQL itself; what they struggle with is finding which models connect to which. Column-level tracing would add complexity and slow things down for a problem that doesn't need it.
+dlin focuses on model-level lineage, prioritizing speed and simplicity. AI agents can read SQL and trace column-level relationships themselves; what they need is a fast way to discover which models connect to which.
 
 ## Install
 
