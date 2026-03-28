@@ -79,11 +79,15 @@ dlin outputs Mermaid flowcharts that render natively on GitHub, GitLab, Notion, 
 
 ### Simplified graphs with `--collapse`
 
-Automatically remove intermediate nodes to see just the endpoints — sources, leaf models, and exposures are kept; everything in between becomes transitive "(via N)" edges:
+Automatically remove intermediate nodes to see just the endpoints (nodes with no predecessors or no successors); everything in between becomes transitive "(via N)" edges:
 
 ```sh
 # Collapse intermediate models — only endpoints remain
 dlin graph --collapse -o mermaid
+
+# Focal mode: keep only sources, exposures, and specified focus models
+# (ignores BFS window pseudo-endpoints — ideal with -u/-d limits)
+dlin graph orders --collapse=focal -u 3 -o mermaid
 ```
 
 ```mermaid
@@ -113,7 +117,7 @@ flowchart LR
     class source_raw_payments source
 ```
 
-Combine with `--group-by` to collapse per group instead of globally — for example, `--collapse --group-by directory` keeps the entry/exit models of each directory.
+Positional focus models are always preserved during collapse, so `dlin graph orders --collapse` keeps `orders` even if it would otherwise be intermediate.
 
 ### Pipe to build focused diagrams
 
@@ -191,8 +195,8 @@ Combines well with `--collapse` to show rich detail on fewer endpoint nodes.
 
 ```sh
 dlin graph orders -u 2 -d 1                            # focus on specific model
-dlin graph -o mermaid --collapse --group-by node-type  # collapse per node type layer
 dlin graph -o mermaid --collapse --show-columns        # columns in collapsed nodes
+dlin graph orders --collapse=focal -u 3 -o mermaid    # focal: sources + exposures + orders
 dlin graph -o mermaid --group-by directory             # group by directory
 dlin graph -o mermaid --direction tb                   # top-to-bottom layout
 dlin graph --node-type source,exposure                 # filter by node type
