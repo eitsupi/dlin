@@ -1720,8 +1720,8 @@ mod tests {
         // Invalid NodeIndex in preserve should be skipped without panic
         let mut g = LineageGraph::new();
         let a = g.add_node(make_node("source.a", "a", NodeType::Source, None, vec![]));
-        let _b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
-        g.add_edge(a, _b, EdgeData::direct(EdgeType::Ref));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
         // Create indexes that are definitely invalid for g (out of range)
         let invalid_from_bound = NodeIndex::new(g.node_bound());
