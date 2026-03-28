@@ -498,31 +498,33 @@ pub fn collapse_intermediate(
                 .filter(|&idx| {
                     let my_group = &group_of[&idx];
 
-                    // Has any predecessor outside this group?
-                    let has_external_predecessor = graph
+                    // Single pass over incoming neighbors
+                    let (has_external_pred, has_group_pred) = graph
                         .neighbors_directed(idx, Direction::Incoming)
-                        .any(|n| group_of.get(&n).map_or(true, |g| g != my_group));
+                        .fold((false, false), |(ext, grp), n| {
+                            if group_of.get(&n).map_or(true, |g| g != my_group) {
+                                (true, grp)
+                            } else {
+                                (ext, true)
+                            }
+                        });
 
-                    // Has any successor outside this group?
-                    let has_external_successor = graph
+                    // Single pass over outgoing neighbors
+                    let (has_external_succ, has_group_succ) = graph
                         .neighbors_directed(idx, Direction::Outgoing)
-                        .any(|n| group_of.get(&n).map_or(true, |g| g != my_group));
-
-                    // Has no same-group predecessor?
-                    let no_group_predecessor = !graph
-                        .neighbors_directed(idx, Direction::Incoming)
-                        .any(|n| group_of.get(&n).map_or(false, |g| g == my_group));
-
-                    // Has no same-group successor?
-                    let no_group_successor = !graph
-                        .neighbors_directed(idx, Direction::Outgoing)
-                        .any(|n| group_of.get(&n).map_or(false, |g| g == my_group));
+                        .fold((false, false), |(ext, grp), n| {
+                            if group_of.get(&n).map_or(true, |g| g != my_group) {
+                                (true, grp)
+                            } else {
+                                (ext, true)
+                            }
+                        });
 
                     // Keep if: endpoint within group, or connects to outside
-                    no_group_predecessor
-                        || no_group_successor
-                        || has_external_predecessor
-                        || has_external_successor
+                    !has_group_pred
+                        || !has_group_succ
+                        || has_external_pred
+                        || has_external_succ
                 })
                 .collect::<HashSet<_>>()
         }
@@ -1713,6 +1715,60 @@ mod tests {
         assert!(labels.contains("int_a"));
         assert!(!labels.contains("int_b")); // collapsed
         assert!(labels.contains("final_a"));
+    }
+
+    #[test]
+    fn test_collapse_by_node_type_mixed_edges_retained() {
+        // Node with both same-group and cross-group neighbors should be retained.
+        // source -> model_a -> model_b -> model_c -> exposure
+        //                  \-> model_d (leaf)
+        // model_b has: same-group pred (model_a), same-group succ (model_c),
+        //              no external edges → purely internal → collapsed
+        // model_a has: external pred (source) → retained
+        // model_c has: external succ (exposure) → retained
+        // model_d has: no same-group succ → retained (group endpoint)
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let ma = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let mb = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let mc = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let md = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, ma, EdgeData::direct(EdgeType::Source));
+        g.add_edge(ma, mb, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
+        g.add_edge(ma, md, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        // model_a: external predecessor (source) → kept
+        assert!(labels.contains("a"), "model_a has external pred, should be kept");
+        // model_b: purely internal (only model neighbors, both in and out) → collapsed
+        assert!(!labels.contains("b"), "model_b is purely internal, should be collapsed");
+        // model_c: external successor (exposure) → kept
+        assert!(labels.contains("c"), "model_c has external succ, should be kept");
+        // model_d: no same-group successor → kept (group endpoint)
+        assert!(labels.contains("d"), "model_d is a group endpoint, should be kept");
+        // source and exposure always kept
+        assert!(labels.contains("x"));
+        assert!(labels.contains("dash"));
+        assert_eq!(collapsed.node_count(), 5);
     }
 
     #[test]
