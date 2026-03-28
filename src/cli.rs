@@ -150,8 +150,9 @@ Use --no-transitive to disable this and drop such edges instead.
 
 Column display (--show-columns):
   Include column names inside node labels (currently mermaid only). \
-Columns are extracted from SELECT clauses in sql mode, or from manifest \
-metadata in manifest mode. Combines well with --collapse to show rich \
+In sql mode, columns are taken from YAML properties files when available, \
+falling back to parsing SELECT clauses. In manifest mode, columns come \
+from manifest metadata. Combines well with --collapse to show rich \
 detail on fewer endpoint nodes.
 
 Stdin/pipe support:
@@ -280,8 +281,9 @@ pub struct GraphArgs {
     pub group_by: Option<GroupBy>,
 
     /// Show column names inside node labels (currently mermaid only).
-    /// Columns are extracted from SELECT clauses (sql mode)
-    /// or from manifest metadata (manifest mode).
+    /// In sql mode, columns are taken from YAML properties files when
+    /// available, falling back to parsing SELECT clauses.
+    /// In manifest mode, columns come from manifest metadata.
     /// Combines well with --collapse to show rich detail on fewer nodes.
     #[arg(long)]
     pub show_columns: bool,
