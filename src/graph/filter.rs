@@ -448,6 +448,90 @@ pub fn filter_output_node_types(
     }
 }
 
+/// Compute group-boundary endpoints: keep nodes that are entry/exit points
+/// within their group or connect to nodes outside their group.
+fn group_endpoints<G: Eq>(
+    graph: &LineageGraph,
+    group_of: &HashMap<NodeIndex, G>,
+) -> HashSet<NodeIndex> {
+    graph
+        .node_indices()
+        .filter(|&idx| {
+            let my_group = &group_of[&idx];
+
+            let (has_external_pred, has_group_pred) = graph
+                .neighbors_directed(idx, Direction::Incoming)
+                .fold((false, false), |(ext, grp), n| {
+                    if group_of.get(&n) != Some(my_group) {
+                        (true, grp)
+                    } else {
+                        (ext, true)
+                    }
+                });
+
+            let (has_external_succ, has_group_succ) = graph
+                .neighbors_directed(idx, Direction::Outgoing)
+                .fold((false, false), |(ext, grp), n| {
+                    if group_of.get(&n) != Some(my_group) {
+                        (true, grp)
+                    } else {
+                        (ext, true)
+                    }
+                });
+
+            !has_group_pred || !has_group_succ || has_external_pred || has_external_succ
+        })
+        .collect()
+}
+
+/// Collapse intermediate nodes, keeping only endpoints.
+///
+/// An "endpoint" is a node that has no predecessors or no successors in the graph.
+/// When `group_by` is provided, endpoints are determined per group: a node is an
+/// endpoint if it has no same-group predecessors, no same-group successors, or
+/// connects to at least one node outside its group.
+///
+/// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
+pub fn collapse_intermediate(
+    graph: &LineageGraph,
+    group_by: Option<crate::cli::GroupBy>,
+) -> LineageGraph {
+    let keep = match group_by {
+        None => {
+            // Global endpoints: in-degree=0 or out-degree=0
+            graph
+                .node_indices()
+                .filter(|&idx| {
+                    graph
+                        .neighbors_directed(idx, Direction::Incoming)
+                        .next()
+                        .is_none()
+                        || graph
+                            .neighbors_directed(idx, Direction::Outgoing)
+                            .next()
+                            .is_none()
+                })
+                .collect::<HashSet<_>>()
+        }
+        Some(crate::cli::GroupBy::NodeType) => {
+            let group_of: HashMap<NodeIndex, NodeType> = graph
+                .node_indices()
+                .map(|idx| (idx, graph[idx].node_type))
+                .collect();
+            group_endpoints(graph, &group_of)
+        }
+        Some(crate::cli::GroupBy::Directory) => {
+            let group_of: HashMap<NodeIndex, String> = graph
+                .node_indices()
+                .map(|idx| (idx, crate::render::directory_label(&graph[idx])))
+                .collect();
+            group_endpoints(graph, &group_of)
+        }
+    };
+
+    build_subgraph_with_transitive(graph, &keep)
+}
+
 /// BFS traversal collecting nodes up to max_depth levels away
 fn bfs_collect(
     graph: &LineageGraph,
@@ -1431,6 +1515,340 @@ mod tests {
         }
         assert!(has_direct);
         assert!(has_transitive);
+    }
+
+    // -- Collapse intermediate tests -------------------------------------------
+
+    #[test]
+    fn test_collapse_global_endpoints() {
+        // A(source) -> B(model) -> C(model) -> D(exposure)
+        // Global endpoints: A (in-degree=0), D (out-degree=0)
+        // B and C are intermediate
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.a",
+            "a",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let d = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Exposure));
+
+        let collapsed = collapse_intermediate(&g, None);
+        assert_eq!(collapsed.node_count(), 2);
+        assert_eq!(collapsed.edge_count(), 1);
+
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        assert!(labels.contains("a"));
+        assert!(labels.contains("dash"));
+
+        let edge = collapsed.edge_references().next().unwrap();
+        assert_eq!(edge.weight().collapsed_through, Some(2));
+    }
+
+    #[test]
+    fn test_collapse_global_fan_out() {
+        // A -> B -> C, A -> B -> D
+        // A: in-degree=0 (endpoint), B: intermediate, C,D: out-degree=0 (endpoints)
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let d = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(b, d, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, None);
+        assert_eq!(collapsed.node_count(), 3); // a, c, d
+        assert_eq!(collapsed.edge_count(), 2); // a->c, a->d (via 1)
+
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        assert!(labels.contains("a"));
+        assert!(labels.contains("c"));
+        assert!(labels.contains("d"));
+        assert!(!labels.contains("b"));
+    }
+
+    #[test]
+    fn test_collapse_all_endpoints_keeps_all() {
+        // A -> B (both are endpoints: A has in-degree=0, B has out-degree=0)
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, None);
+        assert_eq!(collapsed.node_count(), 2);
+        assert_eq!(collapsed.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_collapse_by_node_type() {
+        // source -> model_a -> model_b -> model_c -> exposure
+        // With group-by=node-type:
+        //   source group: source (no same-type neighbors) -> keep
+        //   model group: model_a (entry, external predecessor), model_b (internal), model_c (exit, external successor)
+        //   exposure group: exposure (no same-type neighbors) -> keep
+        // model_b is the only one collapsed
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let ma = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let mb = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let mc = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, ma, EdgeData::direct(EdgeType::Source));
+        g.add_edge(ma, mb, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        assert_eq!(collapsed.node_count(), 4); // src, a, c, exp
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        assert!(labels.contains("x"));
+        assert!(labels.contains("a"));
+        assert!(!labels.contains("b")); // intermediate model collapsed
+        assert!(labels.contains("c"));
+        assert!(labels.contains("dash"));
+    }
+
+    #[test]
+    fn test_collapse_by_directory() {
+        // staging/stg_a -> marts/int_a -> marts/int_b -> marts/final_a
+        // With group-by=directory:
+        //   staging group: stg_a (has external successor) -> keep
+        //   marts group: int_a (entry from external), int_b (internal), final_a (exit, no outgoing)
+        // int_b is collapsed
+        let mut g = LineageGraph::new();
+        let stg = g.add_node(make_node(
+            "model.stg_a",
+            "stg_a",
+            NodeType::Model,
+            Some(std::path::PathBuf::from("models/staging/stg_a.sql")),
+            vec![],
+        ));
+        let int_a = g.add_node(make_node(
+            "model.int_a",
+            "int_a",
+            NodeType::Model,
+            Some(std::path::PathBuf::from("models/marts/int_a.sql")),
+            vec![],
+        ));
+        let int_b = g.add_node(make_node(
+            "model.int_b",
+            "int_b",
+            NodeType::Model,
+            Some(std::path::PathBuf::from("models/marts/int_b.sql")),
+            vec![],
+        ));
+        let final_a = g.add_node(make_node(
+            "model.final_a",
+            "final_a",
+            NodeType::Model,
+            Some(std::path::PathBuf::from("models/marts/final_a.sql")),
+            vec![],
+        ));
+        g.add_edge(stg, int_a, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(int_a, int_b, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(int_b, final_a, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory));
+        assert_eq!(collapsed.node_count(), 3); // stg_a, int_a, final_a
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        assert!(labels.contains("stg_a"));
+        assert!(labels.contains("int_a"));
+        assert!(!labels.contains("int_b")); // collapsed
+        assert!(labels.contains("final_a"));
+    }
+
+    #[test]
+    fn test_collapse_by_node_type_mixed_edges_retained() {
+        // Node with both same-group and cross-group neighbors should be retained.
+        // source -> model_a -> model_b -> model_c -> exposure
+        //                  \-> model_d (leaf)
+        // model_b has: same-group pred (model_a), same-group succ (model_c),
+        //              no external edges → purely internal → collapsed
+        // model_a has: external pred (source) → retained
+        // model_c has: external succ (exposure) → retained
+        // model_d has: no same-group succ → retained (group endpoint)
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let ma = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+        let mb = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let mc = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let md = g.add_node(make_node("model.d", "d", NodeType::Model, None, vec![]));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, ma, EdgeData::direct(EdgeType::Source));
+        g.add_edge(ma, mb, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
+        g.add_edge(ma, md, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        // model_a: external predecessor (source) → kept
+        assert!(
+            labels.contains("a"),
+            "model_a has external pred, should be kept"
+        );
+        // model_b: purely internal (only model neighbors, both in and out) → collapsed
+        assert!(
+            !labels.contains("b"),
+            "model_b is purely internal, should be collapsed"
+        );
+        // model_c: external successor (exposure) → kept
+        assert!(
+            labels.contains("c"),
+            "model_c has external succ, should be kept"
+        );
+        // model_d: no same-group successor → kept (group endpoint)
+        assert!(
+            labels.contains("d"),
+            "model_d is a group endpoint, should be kept"
+        );
+        // source and exposure always kept
+        assert!(labels.contains("x"));
+        assert!(labels.contains("dash"));
+        assert_eq!(collapsed.node_count(), 5);
+    }
+
+    #[test]
+    fn test_collapse_snapshot_global() {
+        // Snapshot test for mermaid rendering of global collapse
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node(
+            "source.raw.orders",
+            "orders",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let b = g.add_node(make_node(
+            "model.stg_orders",
+            "stg_orders",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let c = g.add_node(make_node(
+            "model.int_orders",
+            "int_orders",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let d = g.add_node(make_node(
+            "model.orders",
+            "orders",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
+
+        let collapsed = collapse_intermediate(&g, None);
+        insta::assert_snapshot!(render_mermaid(&collapsed));
+    }
+
+    #[test]
+    fn test_collapse_snapshot_by_node_type() {
+        // Snapshot test: source -> stg -> int -> final -> exposure
+        // With node-type grouping: stg and final are boundary, int is collapsed
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "raw_x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let stg = g.add_node(make_node(
+            "model.stg_x",
+            "stg_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let int = g.add_node(make_node(
+            "model.int_x",
+            "int_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let fin = g.add_node(make_node(
+            "model.final_x",
+            "final_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        g.add_edge(stg, int, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        insta::assert_snapshot!(render_mermaid(&collapsed));
     }
 
     fn render_mermaid(graph: &LineageGraph) -> String {

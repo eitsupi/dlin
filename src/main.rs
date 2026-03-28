@@ -158,6 +158,20 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     let filtered =
         graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
 
+    // Collapse intermediate nodes if requested
+    let filtered = if args.collapse {
+        if args.no_transitive {
+            dlin::warn!(
+                "--collapse has no effect with --no-transitive (transitive edges are required to preserve connectivity)"
+            );
+            filtered
+        } else {
+            graph::filter::collapse_intermediate(&filtered, args.group_by)
+        }
+    } else {
+        filtered
+    };
+
     // Resolve JSON fields
     let json_fields =
         render::json::resolve_graph_fields(args.json_fields.as_deref(), args.json_full)
@@ -184,8 +198,9 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         None
     };
 
-    // Warn if --group-by used with unsupported output format
+    // Warn if --group-by used with unsupported output format (unless --collapse uses it)
     if args.group_by.is_some()
+        && !args.collapse
         && !matches!(
             args.output,
             cli::OutputFormat::Dot | cli::OutputFormat::Mermaid

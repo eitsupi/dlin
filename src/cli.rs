@@ -250,6 +250,19 @@ pub struct GraphArgs {
     #[arg(long)]
     pub no_transitive: bool,
 
+    /// Collapse intermediate nodes, keeping only endpoints (nodes with no
+    /// predecessors or no successors). Removed nodes are replaced by transitive
+    /// edges with collapsed_through metadata (shown as "(via N)" in DOT/Mermaid).
+    /// When combined with --group-by, endpoints are determined per group: a node
+    /// is kept if it connects to a node outside its group, or has no
+    /// predecessors/successors within its group.
+    /// Without --group-by, global graph endpoints are kept.
+    /// Tip: with --source manifest, tests may appear as downstream endpoints;
+    /// combine with --node-type to exclude them if needed.
+    /// Ignored when --no-transitive is set.
+    #[arg(long)]
+    pub collapse: bool,
+
     /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
     /// Supported values: node-type (group by source, model, test, etc.),
     /// directory (group by file directory path)

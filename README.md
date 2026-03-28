@@ -38,33 +38,43 @@ dbt's built-in `dbt ls` and manifest-based tools require `dbt compile` (and ther
 
 dlin outputs Mermaid flowcharts that render natively on GitHub, GitLab, Notion, and other Markdown environments.
 
-### Simplified graphs with `--node-type`
+### Simplified graphs with `--collapse`
 
-Skip intermediate models to see the big picture. When `--node-type` removes nodes, transitive edges are preserved automatically:
+Automatically remove intermediate nodes to see just the endpoints — sources, leaf models, and exposures are kept; everything in between becomes transitive "(via N)" edges:
 
 ```sh
-# Which sources feed into which exposures? (all intermediate models removed)
-dlin graph --node-type source,exposure -o mermaid
+# Collapse intermediate models — only endpoints remain
+dlin graph --collapse -o mermaid
 ```
 
 ```mermaid
 flowchart LR
     exposure_weekly_report>"weekly_report"]
+    model_combined_orders["combined_orders"]
+    model_order_summary["order_summary"]
     source_raw_customers(["raw.customers"])
     source_raw_orders(["raw.orders"])
     source_raw_payments(["raw.payments"])
 
     source_raw_customers ==>|"exposure (via 2)"| exposure_weekly_report
-    source_raw_orders ==>|"exposure (via 2)"| exposure_weekly_report
-    source_raw_payments ==>|"exposure (via 2)"| exposure_weekly_report
+    source_raw_orders ==>|"exposure (via 3)"| exposure_weekly_report
+    source_raw_orders -.->|"source (via 1)"| model_combined_orders
+    source_raw_orders -.->|"source (via 1)"| model_order_summary
+    source_raw_payments ==>|"exposure (via 3)"| exposure_weekly_report
+    source_raw_payments -.->|"source (via 1)"| model_order_summary
 
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
     classDef source fill:#27AE60,stroke:#333,color:#fff
     classDef exposure fill:#E74C3C,stroke:#333,color:#fff
     class exposure_weekly_report exposure
+    class model_combined_orders model
+    class model_order_summary model
     class source_raw_customers source
     class source_raw_orders source
     class source_raw_payments source
 ```
+
+Combine with `--group-by` to collapse per group instead of globally — for example, `--collapse --group-by directory` keeps the entry/exit models of each directory.
 
 ### Pipe to build focused diagrams
 
@@ -116,10 +126,12 @@ flowchart LR
 ### Other graph options
 
 ```sh
-dlin graph orders -u 2 -d 1                    # focus on specific model
-dlin graph -o mermaid --group-by node-type     # group by source/model/test/...
-dlin graph -o mermaid --direction tb           # top-to-bottom layout
-dlin graph -o dot | dot -Tsvg > out.svg        # Graphviz rendering
+dlin graph orders -u 2 -d 1                            # focus on specific model
+dlin graph -o mermaid --collapse --group-by node-type  # collapse per node type layer
+dlin graph -o mermaid --group-by directory             # group by directory
+dlin graph -o mermaid --direction tb                   # top-to-bottom layout
+dlin graph --node-type source,exposure                 # filter by node type
+dlin graph -o dot | dot -Tsvg > out.svg                # Graphviz rendering
 ```
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
