@@ -169,7 +169,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             // Resolve focus models in the filtered graph so collapse preserves them
             let preserve: std::collections::HashSet<_> = models
                 .iter()
-                .filter_map(|name| graph::filter::try_resolve_node(&filtered, name))
+                .filter_map(|name| graph::filter::try_resolve_node_quiet(&filtered, name))
                 .collect();
             graph::filter::collapse_intermediate(&filtered, args.group_by, &preserve)
         }

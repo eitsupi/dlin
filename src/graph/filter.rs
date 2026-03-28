@@ -69,6 +69,17 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
     }
 }
 
+/// Silently resolve a node by name, returning `Some(index)` or `None`.
+///
+/// Unlike [`try_resolve_node`], this does not emit any warnings, making it
+/// suitable for best-effort lookups where warnings have already been issued.
+pub fn try_resolve_node_quiet(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
+    match find_node_by_name(graph, name) {
+        NodeLookupResult::Found(idx) | NodeLookupResult::Ambiguous(idx, _) => Some(idx),
+        NodeLookupResult::NotFound => None,
+    }
+}
+
 /// Resolve a node by name, returning `Some(index)` or `None` with a warning.
 /// Unlike [`resolve_node_by_name`], this does not return an error for missing
 /// nodes, making it suitable for batch lookups where skipping is preferred.
@@ -493,7 +504,7 @@ fn group_endpoints<G: Eq>(
 ///
 /// Nodes in `preserve` are always kept regardless of their topology (e.g. focus
 /// models specified as positional CLI arguments). Pass an empty set to keep only
-/// endpoints.
+/// endpoints. All indices in `preserve` must belong to `graph`.
 ///
 /// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
 pub fn collapse_intermediate(
