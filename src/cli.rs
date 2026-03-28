@@ -202,6 +202,11 @@ Examples:
   dlin graph -o dot | dot -Tsvg > lineage.svg
   dlin graph -o mermaid --direction tb   # top-to-bottom layout
 
+  # === Collapse (simplify by removing intermediate nodes) ===
+  dlin graph --collapse                              # keep only endpoints
+  dlin graph orders --collapse                       # endpoints + orders preserved
+  dlin graph orders stg_x --collapse                 # multiple focus models preserved
+
   # === Column display (mermaid only) ===
   dlin graph -o mermaid --show-columns              # show columns in node labels
   dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes"
@@ -264,6 +269,7 @@ pub struct GraphArgs {
     /// Collapse intermediate nodes, keeping only endpoints (nodes with no
     /// predecessors or no successors). Removed nodes are replaced by transitive
     /// edges with collapsed_through metadata (shown as "(via N)" in DOT/Mermaid).
+    /// Positional focus models are always preserved even if they are intermediate.
     /// When combined with --group-by, endpoints are determined per group: a node
     /// is kept if it connects to a node outside its group, or has no
     /// predecessors/successors within its group.
