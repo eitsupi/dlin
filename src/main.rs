@@ -166,7 +166,12 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             );
             filtered
         } else {
-            graph::filter::collapse_intermediate(&filtered, args.group_by)
+            // Resolve focus models in the filtered graph so collapse preserves them
+            let preserve: std::collections::HashSet<_> = models
+                .iter()
+                .filter_map(|name| graph::filter::try_resolve_node(&filtered, name))
+                .collect();
+            graph::filter::collapse_intermediate(&filtered, args.group_by, &preserve)
         }
     } else {
         filtered
