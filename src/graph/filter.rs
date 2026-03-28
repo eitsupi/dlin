@@ -512,10 +512,6 @@ pub fn collapse_intermediate(
     group_by: Option<crate::cli::GroupBy>,
     preserve: &HashSet<NodeIndex>,
 ) -> LineageGraph {
-    assert!(
-        preserve.iter().all(|i| graph.node_weight(*i).is_some()),
-        "preserve contains NodeIndex not present in graph"
-    );
     let mut keep = match group_by {
         None => {
             // Global endpoints: in-degree=0 or out-degree=0
@@ -549,8 +545,14 @@ pub fn collapse_intermediate(
         }
     };
 
-    // Always keep explicitly specified focus models
-    keep.extend(preserve);
+    // Always keep explicitly specified focus models (warn and skip invalid indices)
+    for &idx in preserve {
+        if graph.node_weight(idx).is_some() {
+            keep.insert(idx);
+        } else {
+            crate::warn!("preserve index {:?} not found in graph, skipping", idx);
+        }
+    }
 
     build_subgraph_with_transitive(graph, &keep)
 }
