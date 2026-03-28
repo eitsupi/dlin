@@ -69,6 +69,17 @@ pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeInde
     }
 }
 
+/// Silently resolve a node by name, returning `Some(index)` or `None`.
+///
+/// Unlike [`try_resolve_node`], this does not emit any warnings, making it
+/// suitable for best-effort lookups where warnings have already been issued.
+pub fn try_resolve_node_quiet(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
+    match find_node_by_name(graph, name) {
+        NodeLookupResult::Found(idx) | NodeLookupResult::Ambiguous(idx, _) => Some(idx),
+        NodeLookupResult::NotFound => None,
+    }
+}
+
 /// Resolve a node by name, returning `Some(index)` or `None` with a warning.
 /// Unlike [`resolve_node_by_name`], this does not return an error for missing
 /// nodes, making it suitable for batch lookups where skipping is preferred.
@@ -484,19 +495,26 @@ fn group_endpoints<G: Eq>(
         .collect()
 }
 
-/// Collapse intermediate nodes, keeping only endpoints.
+/// Collapse intermediate nodes, keeping only endpoints and explicitly preserved nodes.
 ///
 /// An "endpoint" is a node that has no predecessors or no successors in the graph.
 /// When `group_by` is provided, endpoints are determined per group: a node is an
 /// endpoint if it has no same-group predecessors, no same-group successors, or
 /// connects to at least one node outside its group.
 ///
+/// Nodes in `preserve` are always kept regardless of their topology (e.g. focus
+/// models specified as positional CLI arguments). Pass an empty set to keep only
+/// endpoints. Indices in `preserve` that are out of bounds for `graph` are ignored
+/// and cause a warning to be logged; callers must ensure that all indices originate
+/// from the same graph.
+///
 /// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
 pub fn collapse_intermediate(
     graph: &LineageGraph,
     group_by: Option<crate::cli::GroupBy>,
+    preserve: &HashSet<NodeIndex>,
 ) -> LineageGraph {
-    let keep = match group_by {
+    let mut keep = match group_by {
         None => {
             // Global endpoints: in-degree=0 or out-degree=0
             graph
@@ -528,6 +546,15 @@ pub fn collapse_intermediate(
             group_endpoints(graph, &group_of)
         }
     };
+
+    // Always keep explicitly specified focus models (warn and skip invalid indices)
+    for &idx in preserve {
+        if graph.node_weight(idx).is_some() {
+            keep.insert(idx);
+        } else {
+            crate::warn!("preserve index {:?} not found in graph, skipping", idx);
+        }
+    }
 
     build_subgraph_with_transitive(graph, &keep)
 }
@@ -567,6 +594,7 @@ fn bfs_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petgraph::visit::NodeIndexable;
     use std::path::PathBuf;
 
     fn make_node(
@@ -1545,7 +1573,7 @@ mod tests {
         g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
         g.add_edge(c, d, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = collapse_intermediate(&g, None);
+        let collapsed = collapse_intermediate(&g, None, &HashSet::new());
         assert_eq!(collapsed.node_count(), 2);
         assert_eq!(collapsed.edge_count(), 1);
 
@@ -1573,7 +1601,7 @@ mod tests {
         g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
         g.add_edge(b, d, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, None);
+        let collapsed = collapse_intermediate(&g, None, &HashSet::new());
         assert_eq!(collapsed.node_count(), 3); // a, c, d
         assert_eq!(collapsed.edge_count(), 2); // a->c, a->d (via 1)
 
@@ -1595,7 +1623,7 @@ mod tests {
         let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
         g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, None);
+        let collapsed = collapse_intermediate(&g, None, &HashSet::new());
         assert_eq!(collapsed.node_count(), 2);
         assert_eq!(collapsed.edge_count(), 1);
     }
@@ -1631,7 +1659,8 @@ mod tests {
         g.add_edge(mb, mc, EdgeData::direct(EdgeType::Ref));
         g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
         assert_eq!(collapsed.node_count(), 4); // src, a, c, exp
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1684,7 +1713,8 @@ mod tests {
         g.add_edge(int_a, int_b, EdgeData::direct(EdgeType::Ref));
         g.add_edge(int_b, final_a, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory));
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::Directory), &HashSet::new());
         assert_eq!(collapsed.node_count(), 3); // stg_a, int_a, final_a
         let labels: HashSet<String> = collapsed
             .node_indices()
@@ -1731,7 +1761,8 @@ mod tests {
         g.add_edge(mc, exp, EdgeData::direct(EdgeType::Exposure));
         g.add_edge(ma, md, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
         let labels: HashSet<String> = collapsed
             .node_indices()
             .map(|i| collapsed[i].label.clone())
@@ -1798,7 +1829,7 @@ mod tests {
         g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
         g.add_edge(c, d, EdgeData::direct(EdgeType::Ref));
 
-        let collapsed = collapse_intermediate(&g, None);
+        let collapsed = collapse_intermediate(&g, None, &HashSet::new());
         insta::assert_snapshot!(render_mermaid(&collapsed));
     }
 
@@ -1847,7 +1878,153 @@ mod tests {
         g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
         g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType));
+        let collapsed =
+            collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &HashSet::new());
+        insta::assert_snapshot!(render_mermaid(&collapsed));
+    }
+
+    #[test]
+    fn test_collapse_skips_invalid_preserve_index() {
+        // Invalid NodeIndex in preserve should be skipped without panic
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("source.a", "a", NodeType::Source, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+
+        // Create indexes that are definitely invalid for g (out of range)
+        let invalid_from_bound = NodeIndex::new(g.node_bound());
+        let preserve = HashSet::from([invalid_from_bound, NodeIndex::new(999)]);
+        let collapsed = collapse_intermediate(&g, None, &preserve);
+        // Should still produce a valid result with only endpoints
+        assert_eq!(collapsed.node_count(), 2);
+    }
+
+    #[test]
+    fn test_collapse_preserves_focus_models() {
+        // A -> B -> C -> D: collapse with B preserved should keep A, B, D
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("source.a", "a", NodeType::Source, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+        let d = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Source));
+        g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(c, d, EdgeData::direct(EdgeType::Exposure));
+
+        let preserve = HashSet::from([b]);
+        let collapsed = collapse_intermediate(&g, None, &preserve);
+        assert_eq!(collapsed.node_count(), 3);
+
+        let labels: HashSet<String> = collapsed
+            .node_indices()
+            .map(|i| collapsed[i].label.clone())
+            .collect();
+        assert!(labels.contains("a"), "endpoint a should be kept");
+        assert!(labels.contains("b"), "focus model b should be preserved");
+        assert!(labels.contains("dash"), "endpoint dash should be kept");
+    }
+
+    #[test]
+    fn test_collapse_snapshot_preserve_focus() {
+        // Snapshot: source -> stg -> int -> final -> exposure, with int preserved
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "raw_x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let stg = g.add_node(make_node(
+            "model.stg_x",
+            "stg_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let int = g.add_node(make_node(
+            "model.int_x",
+            "int_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let fin = g.add_node(make_node(
+            "model.final_x",
+            "final_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        g.add_edge(stg, int, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let preserve = HashSet::from([int]);
+        let collapsed = collapse_intermediate(&g, None, &preserve);
+        insta::assert_snapshot!(render_mermaid(&collapsed));
+    }
+
+    #[test]
+    fn test_collapse_snapshot_preserve_focus_by_node_type() {
+        // Snapshot: same graph with node-type grouping and int preserved
+        let mut g = LineageGraph::new();
+        let src = g.add_node(make_node(
+            "source.raw.x",
+            "raw_x",
+            NodeType::Source,
+            None,
+            vec![],
+        ));
+        let stg = g.add_node(make_node(
+            "model.stg_x",
+            "stg_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let int = g.add_node(make_node(
+            "model.int_x",
+            "int_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let fin = g.add_node(make_node(
+            "model.final_x",
+            "final_x",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let exp = g.add_node(make_node(
+            "exposure.dash",
+            "dash",
+            NodeType::Exposure,
+            None,
+            vec![],
+        ));
+        g.add_edge(src, stg, EdgeData::direct(EdgeType::Source));
+        g.add_edge(stg, int, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(int, fin, EdgeData::direct(EdgeType::Ref));
+        g.add_edge(fin, exp, EdgeData::direct(EdgeType::Exposure));
+
+        let preserve = HashSet::from([int]);
+        let collapsed = collapse_intermediate(&g, Some(crate::cli::GroupBy::NodeType), &preserve);
         insta::assert_snapshot!(render_mermaid(&collapsed));
     }
 

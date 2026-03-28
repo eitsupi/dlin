@@ -1,0 +1,18 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&collapsed)
+---
+flowchart LR
+    exposure_dash>"dash"]
+    model_int_x["int_x"]
+    source_raw_x(["raw_x"])
+
+    model_int_x ==>|"exposure (via 1)"| exposure_dash
+    source_raw_x -.->|"source (via 1)"| model_int_x
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    classDef exposure fill:#E74C3C,stroke:#333,color:#fff
+    class exposure_dash exposure
+    class model_int_x model
+    class source_raw_x source

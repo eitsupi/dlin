@@ -682,7 +682,11 @@ mod tests {
         graph.add_edge(stg, mart, EdgeData::direct(EdgeType::Ref));
         graph.add_edge(mart, exp, EdgeData::direct(EdgeType::Exposure));
 
-        let collapsed = crate::graph::filter::collapse_intermediate(&graph, None);
+        let collapsed = crate::graph::filter::collapse_intermediate(
+            &graph,
+            None,
+            &std::collections::HashSet::new(),
+        );
         let output = render_to_string_with_columns(&collapsed);
         insta::assert_snapshot!(output);
     }
