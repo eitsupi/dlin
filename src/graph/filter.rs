@@ -504,8 +504,9 @@ fn group_endpoints<G: Eq>(
 ///
 /// Nodes in `preserve` are always kept regardless of their topology (e.g. focus
 /// models specified as positional CLI arguments). Pass an empty set to keep only
-/// endpoints. Indices in `preserve` that do not belong to `graph` are ignored and
-/// cause a warning to be logged.
+/// endpoints. Indices in `preserve` that are out of bounds for `graph` are ignored
+/// and cause a warning to be logged; callers must ensure that all indices originate
+/// from the same graph.
 ///
 /// Removed intermediate nodes become transitive edges via [`build_subgraph_with_transitive`].
 pub fn collapse_intermediate(

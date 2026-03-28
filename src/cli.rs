@@ -269,7 +269,9 @@ pub struct GraphArgs {
     /// Collapse intermediate nodes, keeping only endpoints (nodes with no
     /// predecessors or no successors). Removed nodes are replaced by transitive
     /// edges with collapsed_through metadata (shown as "(via N)" in DOT/Mermaid).
-    /// Positional focus models are always preserved even if they are intermediate.
+    /// Positional focus models are preserved by collapse even if intermediate,
+    /// as long as they are not removed earlier by filters like --select or
+    /// --node-type.
     /// When combined with --group-by, endpoints are determined per group: a node
     /// is kept if it connects to a node outside its group, or has no
     /// predecessors/successors within its group.
