@@ -225,6 +225,14 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
 
+    // Warn if --show-columns used with unsupported output format
+    if args.show_columns && !matches!(args.output, cli::OutputFormat::Mermaid) {
+        dlin::warn!(
+            "--show-columns has no effect with -o {} (supported: mermaid)",
+            args.output.label()
+        );
+    }
+
     render_output(
         &args.output,
         &filtered,

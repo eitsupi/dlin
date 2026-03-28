@@ -200,8 +200,22 @@ fn node_label(node: &NodeData, show_columns: bool) -> String {
 }
 
 /// Escape characters that are special inside Mermaid double-quoted labels.
+///
+/// Mermaid uses `#entity;` syntax (not HTML `&entity;`).
+/// We escape `"`, `<`, `>`, and `#` so user-provided text cannot break
+/// the label syntax or interfere with `<br/>` separators we insert.
 fn mermaid_escape(s: &str) -> String {
-    s.replace('"', "#quot;")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '#' => out.push_str("#num;"),
+            '"' => out.push_str("#quot;"),
+            '<' => out.push_str("#lt;"),
+            '>' => out.push_str("#gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Generate the Mermaid shape string for a node
@@ -710,5 +724,7 @@ mod tests {
     fn test_mermaid_escape() {
         assert_eq!(mermaid_escape("hello"), "hello");
         assert_eq!(mermaid_escape(r#"a "b" c"#), "a #quot;b#quot; c");
+        assert_eq!(mermaid_escape("a<b>c"), "a#lt;b#gt;c");
+        assert_eq!(mermaid_escape("col#1"), "col#num;1");
     }
 }
