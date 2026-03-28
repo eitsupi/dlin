@@ -1881,6 +1881,26 @@ mod tests {
     }
 
     #[test]
+    fn test_collapse_skips_invalid_preserve_index() {
+        // Invalid NodeIndex in preserve should be skipped without panic
+        let mut g = LineageGraph::new();
+        let a = g.add_node(make_node("source.a", "a", NodeType::Source, None, vec![]));
+        let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+        g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+
+        // Create an index from a different graph
+        let mut other = LineageGraph::new();
+        let foreign = other.add_node(make_node("model.x", "x", NodeType::Model, None, vec![]));
+        // Remove it so the index is definitely invalid for g
+        let _ = other;
+
+        let preserve = HashSet::from([foreign, NodeIndex::new(999)]);
+        let collapsed = collapse_intermediate(&g, None, &preserve);
+        // Should still produce a valid result with only endpoints
+        assert_eq!(collapsed.node_count(), 2);
+    }
+
+    #[test]
     fn test_collapse_preserves_focus_models() {
         // A -> B -> C -> D: collapse with B preserved should keep A, B, D
         let mut g = LineageGraph::new();
