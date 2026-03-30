@@ -67,7 +67,8 @@ git diff --name-only main | dlin graph -o json
 
 ## AI agent integration
 
-Add the following to your `AGENTS.md`, `CLAUDE.md`, or system prompt:
+No MCP server or tool configuration needed.
+Just install dlin and add the following to your `AGENTS.md`, `CLAUDE.md`, or system prompt:
 
 ````md
 ## dbt project structure analysis
