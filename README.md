@@ -65,6 +65,30 @@ dlin list -o json --json-fields unique_id,file_path
 git diff --name-only main | dlin graph -o json
 ```
 
+## AI agent integration
+
+No MCP server or tool configuration needed.
+Just install dlin and add the following to your `AGENTS.md`, `CLAUDE.md`, or system prompt:
+
+````md
+## dbt project structure analysis
+
+Use `dlin` to explore dbt model dependencies.
+Do NOT grep/cat/find through SQL files.
+
+```bash
+dlin summary                                           # Project overview (start here)
+dlin graph <model> -u 2 -d 1 -q                        # Upstream/downstream lineage
+dlin impact <model>                                    # Downstream impact with severity
+dlin list -o json --json-fields unique_id,sql_content  # Read SQL content
+git diff --name-only main | dlin graph -q              # Lineage of changed files
+```
+
+For full option reference: `dlin --help`, `dlin graph --help`, etc.
+````
+
+The key line is **"Do NOT grep/cat/find through SQL files"** — without it, agents default to familiar tools. `dlin --help` is designed for tool discovery, so the prompt can stay minimal.
+
 ## Features
 
 - **No dependencies**: single binary, no Python, no `manifest.json`
