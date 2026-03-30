@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dlin)](https://crates.io/crates/dlin)
 [![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eitsupi/dlin)
 
 dbt lineage analysis CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
 
