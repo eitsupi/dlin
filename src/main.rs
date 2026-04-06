@@ -517,16 +517,15 @@ fn run_impact_command(
 }
 
 /// Warn when sql mode is used with test node types, since YAML-defined generic
-/// tests are not detected in that mode.
+/// tests are inferred from declarations only.
 #[cfg(not(tarpaulin_include))]
 fn warn_sql_mode_test_limitation(source: &SourceType, type_names: &[String]) {
     if matches!(source, SourceType::Sql)
         && type_names.iter().any(|t| t.eq_ignore_ascii_case("test"))
     {
         dlin::warn!(
-            "sql mode detects only singular tests (SQL files in tests/); \
-             YAML-defined generic tests (not_null, unique, etc.) are not included. \
-             Use --source manifest for full test coverage"
+            "sql mode infers generic tests from YAML declarations; \
+             use --source manifest for exact dependency resolution"
         );
     }
 }

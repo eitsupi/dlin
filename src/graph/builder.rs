@@ -14,7 +14,7 @@ use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
 };
-use crate::parser::yaml_schema::{ExposureDefinition, parse_schema_file};
+use crate::parser::yaml_schema::{ExposureDefinition, SchemaFile, parse_schema_file};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -171,14 +171,19 @@ struct YamlModelMeta {
     columns: Vec<String>,
 }
 
-/// Parse YAML schema files: create source nodes, collect model metadata and exposures
+/// Result of parsing YAML schema files
+type YamlResult = (HashMap<String, YamlModelMeta>, Vec<ExposureDefinition>, Vec<SchemaFile>);
+
+/// Parse YAML schema files: create source nodes, collect model metadata, exposures,
+/// and parsed schemas (for generic test extraction).
 fn process_yaml_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-) -> Result<(HashMap<String, YamlModelMeta>, Vec<ExposureDefinition>)> {
+) -> Result<YamlResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
+    let mut schemas: Vec<SchemaFile> = Vec::new();
 
     for yaml_path in &files.yaml_files {
         let content = read_file(yaml_path)?;
@@ -207,10 +212,11 @@ fn process_yaml_files(
             model_meta.insert(model_def.name.clone(), meta);
         }
 
-        exposures.extend(schema.exposures.into_iter());
+        exposures.extend(schema.exposures.clone());
+        schemas.push(schema);
     }
 
-    Ok((model_meta, exposures))
+    Ok((model_meta, exposures, schemas))
 }
 
 /// Cached extraction result for a model SQL file (refs and sources).
@@ -499,6 +505,90 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
     }
 }
 
+/// Create test nodes for YAML-declared generic tests (not_null, unique, etc.)
+/// and connect them to their parent model/source nodes.
+fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
+    for schema in schemas {
+        // Model-level generic tests
+        for model_def in &schema.models {
+            let parent_id = format!("model.{}", model_def.name);
+            let parent_idx = match gb.node_map.get(&parent_id) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+            for col in &model_def.columns {
+                for test_def in &col.tests {
+                    let test_name = match test_def.test_name() {
+                        Some(name) => name,
+                        None => continue,
+                    };
+                    let unique_id = format!(
+                        "test.{}_{}_{}", test_name, model_def.name, col.name
+                    );
+                    // Skip if already exists (e.g. duplicate YAML entries)
+                    if gb.node_map.contains_key(&unique_id) {
+                        continue;
+                    }
+                    let label = format!("{}_{}", test_name, col.name);
+                    let idx = gb.add_node(NodeData {
+                        unique_id,
+                        label,
+                        node_type: NodeType::Test,
+                        file_path: None,
+                        description: None,
+                        materialization: None,
+                        tags: vec![],
+                        columns: vec![],
+                        exposure: None,
+                    });
+                    gb.graph
+                        .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+                }
+            }
+        }
+
+        // Source-level generic tests
+        for source_def in &schema.sources {
+            for table in &source_def.tables {
+                let parent_id = format!("source.{}.{}", source_def.name, table.name);
+                let parent_idx = match gb.node_map.get(&parent_id) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+                for col in &table.columns {
+                    for test_def in &col.tests {
+                        let test_name = match test_def.test_name() {
+                            Some(name) => name,
+                            None => continue,
+                        };
+                        let unique_id = format!(
+                            "test.{}_{}_{}_{}",
+                            test_name, source_def.name, table.name, col.name
+                        );
+                        if gb.node_map.contains_key(&unique_id) {
+                            continue;
+                        }
+                        let label = format!("{}_{}", test_name, col.name);
+                        let idx = gb.add_node(NodeData {
+                            unique_id,
+                            label,
+                            node_type: NodeType::Test,
+                            file_path: None,
+                            description: None,
+                            materialization: None,
+                            tags: vec![],
+                            columns: vec![],
+                            exposure: None,
+                        });
+                        gb.graph
+                            .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
@@ -523,7 +613,7 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
+    let (model_meta, exposures, schemas) = process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
         &mut gb,
         files,
@@ -556,6 +646,7 @@ pub fn build_graph(
         vars,
     )?;
     process_exposures(&mut gb, &exposures);
+    process_generic_tests(&mut gb, &schemas);
 
     disk_cache.save();
 
@@ -1260,5 +1351,87 @@ models:
             .unwrap();
         assert!(graph.contains_edge(electronics, combined));
         assert!(graph.contains_edge(clothing, combined));
+    }
+
+    #[test]
+    fn test_generic_tests_from_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        fs::write(project_dir.join("dbt_project.yml"), "name: test_proj\n").unwrap();
+        fs::write(models_dir.join("orders.sql"), "SELECT 1 AS order_id").unwrap();
+
+        // Schema with generic tests on columns
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+sources:
+  - name: raw
+    tables:
+      - name: events
+        columns:
+          - name: event_id
+            data_tests:
+              - not_null
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // 1 model + 1 source + 2 model tests + 1 source test = 5 nodes
+        assert_eq!(graph.node_count(), 5);
+
+        let test_nodes: Vec<_> = graph
+            .node_indices()
+            .filter(|&i| graph[i].node_type == NodeType::Test)
+            .collect();
+        assert_eq!(test_nodes.len(), 3);
+
+        // Verify test unique_ids
+        let test_ids: Vec<&str> = test_nodes
+            .iter()
+            .map(|&i| graph[i].unique_id.as_str())
+            .collect();
+        assert!(test_ids.contains(&"test.not_null_orders_order_id"));
+        assert!(test_ids.contains(&"test.unique_orders_order_id"));
+        assert!(test_ids.contains(&"test.not_null_raw_events_event_id"));
+
+        // Verify test edges (model→test and source→test)
+        let model_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.orders")
+            .unwrap();
+        let source_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "source.raw.events")
+            .unwrap();
+
+        let model_test_edges = graph
+            .edges_directed(model_idx, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().edge_type == EdgeType::Test)
+            .count();
+        assert_eq!(model_test_edges, 2);
+
+        let source_test_edges = graph
+            .edges_directed(source_idx, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().edge_type == EdgeType::Test)
+            .count();
+        assert_eq!(source_test_edges, 1);
     }
 }

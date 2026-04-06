@@ -959,7 +959,7 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("sql mode detects only singular tests"),
+            stderr.contains("sql mode infers generic tests from YAML declarations"),
             "Expected sql-mode test warning in stderr, got: {stderr}"
         );
     }
@@ -976,7 +976,7 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("sql mode detects only singular tests"),
+            stderr.contains("sql mode infers generic tests from YAML declarations"),
             "Expected sql-mode test warning even without explicit --node-type, got: {stderr}"
         );
     }
@@ -997,7 +997,7 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains("sql mode infers generic tests from YAML declarations"),
             "Warning should be suppressed by --quiet, got: {stderr}"
         );
     }
@@ -1022,7 +1022,7 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains("sql mode infers generic tests from YAML declarations"),
             "Warning should not appear when test type is excluded, got: {stderr}"
         );
     }
@@ -1046,7 +1046,7 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains("sql mode infers generic tests from YAML declarations"),
             "Warning should not appear in manifest mode, got: {stderr}"
         );
     }

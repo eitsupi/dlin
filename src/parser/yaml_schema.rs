@@ -51,6 +51,36 @@ pub enum TestDefinition {
     Complex(serde_json::Value),
 }
 
+impl TestDefinition {
+    /// Extract the test name from either variant.
+    ///
+    /// - `Simple("not_null")` → `"not_null"`
+    /// - `Complex({"unique": {...}})` → `"unique"`
+    /// - `Complex({"name": "custom", "test_name": "accepted_values", ...})` → `"accepted_values"`
+    pub fn test_name(&self) -> Option<&str> {
+        match self {
+            TestDefinition::Simple(s) => Some(s.as_str()),
+            TestDefinition::Complex(v) => {
+                let obj = v.as_object()?;
+                // Alternative format: {"name": "...", "test_name": "accepted_values", ...}
+                if let Some(tn) = obj.get("test_name").and_then(|v| v.as_str()) {
+                    return Some(tn);
+                }
+                // Standard format: single-key map like {"unique": {...}}
+                if obj.len() == 1 || (obj.len() > 1 && !obj.contains_key("name")) {
+                    // Return the first key that isn't a known meta-key
+                    for key in obj.keys() {
+                        if key != "config" && key != "arguments" {
+                            return Some(key.as_str());
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelDefinition {
     pub name: String,
@@ -283,5 +313,32 @@ sources:
         assert!(schema.sources.is_empty());
         assert!(schema.models.is_empty());
         assert!(schema.exposures.is_empty());
+    }
+
+    #[test]
+    fn test_test_name_extraction() {
+        // Simple string test
+        let simple = TestDefinition::Simple("not_null".to_string());
+        assert_eq!(simple.test_name(), Some("not_null"));
+
+        // Complex single-key map: {"unique": {"config": ...}}
+        let complex_single = TestDefinition::Complex(serde_json::json!({
+            "unique": {"config": {"where": "id > 0"}}
+        }));
+        assert_eq!(complex_single.test_name(), Some("unique"));
+
+        // Complex with test_name field: {"name": "custom", "test_name": "accepted_values", ...}
+        let complex_named = TestDefinition::Complex(serde_json::json!({
+            "name": "custom_test_name",
+            "test_name": "accepted_values",
+            "arguments": {"values": [1, 2]}
+        }));
+        assert_eq!(complex_named.test_name(), Some("accepted_values"));
+
+        // Complex relationships test
+        let relationships = TestDefinition::Complex(serde_json::json!({
+            "relationships": {"arguments": {"to": "ref('customers')", "field": "id"}}
+        }));
+        assert_eq!(relationships.test_name(), Some("relationships"));
     }
 }
