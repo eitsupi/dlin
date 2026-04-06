@@ -216,7 +216,7 @@ fn process_yaml_files(
             model_meta.insert(model_def.name.clone(), meta);
         }
 
-        exposures.extend(schema.exposures.clone());
+        exposures.extend(schema.exposures.iter().cloned());
         schemas.push(schema);
     }
 
@@ -580,7 +580,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                     };
                     let candidate = format!("test.{}.{}.{}", test_name, model_def.name, col.name);
                     let unique_id = dedup_unique_id(&candidate, &gb.node_map);
-                    let label = format!("{}_{}", test_name, col.name);
+                    let label = format!("{}_{}_{}", test_name, model_def.name, col.name);
                     add_generic_test_node(gb, parent_idx, unique_id, label);
                 }
             }
@@ -605,7 +605,10 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                             test_name, source_def.name, table.name, col.name
                         );
                         let unique_id = dedup_unique_id(&candidate, &gb.node_map);
-                        let label = format!("{}_{}", test_name, col.name);
+                        let label = format!(
+                            "{}_{}_{}_{}",
+                            test_name, source_def.name, table.name, col.name
+                        );
                         add_generic_test_node(gb, parent_idx, unique_id, label);
                     }
                 }
