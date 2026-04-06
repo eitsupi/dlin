@@ -523,7 +523,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                         None => continue,
                     };
                     let unique_id = format!(
-                        "test.{}_{}_{}", test_name, model_def.name, col.name
+                        "test.{}.{}.{}", test_name, model_def.name, col.name
                     );
                     // Skip if already exists (e.g. duplicate YAML entries)
                     if gb.node_map.contains_key(&unique_id) {
@@ -562,7 +562,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                             None => continue,
                         };
                         let unique_id = format!(
-                            "test.{}_{}.{}_{}",
+                            "test.{}.{}.{}.{}",
                             test_name, source_def.name, table.name, col.name
                         );
                         if gb.node_map.contains_key(&unique_id) {
@@ -1408,9 +1408,9 @@ models:
             .iter()
             .map(|&i| graph[i].unique_id.as_str())
             .collect();
-        assert!(test_ids.contains(&"test.not_null_orders_order_id"));
-        assert!(test_ids.contains(&"test.unique_orders_order_id"));
-        assert!(test_ids.contains(&"test.not_null_raw.events_event_id"));
+        assert!(test_ids.contains(&"test.not_null.orders.order_id"));
+        assert!(test_ids.contains(&"test.unique.orders.order_id"));
+        assert!(test_ids.contains(&"test.not_null.raw.events.event_id"));
 
         // Verify test edges (model→test and source→test)
         let model_idx = graph

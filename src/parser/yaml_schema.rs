@@ -68,11 +68,10 @@ impl TestDefinition {
                 }
                 // Standard format: single-key map like {"unique": {...}}
                 // Note: serde_json::Map uses BTreeMap, so keys() is alphabetically ordered.
-                if obj.len() == 1 || (obj.len() > 1 && !obj.contains_key("name")) {
-                    for key in obj.keys() {
-                        if !matches!(key.as_str(), "config" | "arguments" | "name") {
-                            return Some(key.as_str());
-                        }
+                // Skip objects that only have meta-keys (name/config/arguments).
+                for key in obj.keys() {
+                    if !matches!(key.as_str(), "config" | "arguments" | "name") {
+                        return Some(key.as_str());
                     }
                 }
                 None
