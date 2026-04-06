@@ -525,7 +525,8 @@ fn warn_sql_mode_test_limitation(source: &SourceType, type_names: &[String]) {
     {
         dlin::warn!(
             "sql mode infers generic tests from YAML declarations; \
-             use --source manifest for exact dependency resolution"
+             test IDs are dlin-specific and do not match dbt's naming. \
+             Use --source manifest for exact dependency resolution"
         );
     }
 }
