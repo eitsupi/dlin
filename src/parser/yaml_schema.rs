@@ -67,10 +67,10 @@ impl TestDefinition {
                     return Some(tn);
                 }
                 // Standard format: single-key map like {"unique": {...}}
+                // Note: serde_json::Map uses BTreeMap, so keys() is alphabetically ordered.
                 if obj.len() == 1 || (obj.len() > 1 && !obj.contains_key("name")) {
-                    // Return the first key that isn't a known meta-key
                     for key in obj.keys() {
-                        if key != "config" && key != "arguments" {
+                        if !matches!(key.as_str(), "config" | "arguments" | "name") {
                             return Some(key.as_str());
                         }
                     }
@@ -340,5 +340,9 @@ sources:
             "relationships": {"arguments": {"to": "ref('customers')", "field": "id"}}
         }));
         assert_eq!(relationships.test_name(), Some("relationships"));
+
+        // Edge case: {"name": "something"} without test_name should return None
+        let name_only = TestDefinition::Complex(serde_json::json!({"name": "something"}));
+        assert_eq!(name_only.test_name(), None);
     }
 }

@@ -562,7 +562,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                             None => continue,
                         };
                         let unique_id = format!(
-                            "test.{}_{}_{}_{}",
+                            "test.{}_{}.{}_{}",
                             test_name, source_def.name, table.name, col.name
                         );
                         if gb.node_map.contains_key(&unique_id) {
@@ -1410,7 +1410,7 @@ models:
             .collect();
         assert!(test_ids.contains(&"test.not_null_orders_order_id"));
         assert!(test_ids.contains(&"test.unique_orders_order_id"));
-        assert!(test_ids.contains(&"test.not_null_raw_events_event_id"));
+        assert!(test_ids.contains(&"test.not_null_raw.events_event_id"));
 
         // Verify test edges (model→test and source→test)
         let model_idx = graph
