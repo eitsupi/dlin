@@ -172,7 +172,11 @@ struct YamlModelMeta {
 }
 
 /// Result of parsing YAML schema files
-type YamlResult = (HashMap<String, YamlModelMeta>, Vec<ExposureDefinition>, Vec<SchemaFile>);
+type YamlResult = (
+    HashMap<String, YamlModelMeta>,
+    Vec<ExposureDefinition>,
+    Vec<SchemaFile>,
+);
 
 /// Parse YAML schema files: create source nodes, collect model metadata, exposures,
 /// and parsed schemas (for generic test extraction).
@@ -574,8 +578,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                         Some(name) => name,
                         None => continue,
                     };
-                    let candidate =
-                        format!("test.{}.{}.{}", test_name, model_def.name, col.name);
+                    let candidate = format!("test.{}.{}.{}", test_name, model_def.name, col.name);
                     let unique_id = dedup_unique_id(&candidate, &gb.node_map);
                     let label = format!("{}_{}", test_name, col.name);
                     add_generic_test_node(gb, parent_idx, unique_id, label);
