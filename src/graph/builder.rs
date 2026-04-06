@@ -505,6 +505,44 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
     }
 }
 
+/// Deduplicate a candidate unique_id by appending `_2`, `_3`, … if it already
+/// exists in the node map.
+fn dedup_unique_id(candidate: &str, node_map: &HashMap<String, NodeIndex>) -> String {
+    if !node_map.contains_key(candidate) {
+        return candidate.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let suffixed = format!("{}_{}", candidate, n);
+        if !node_map.contains_key(&suffixed) {
+            return suffixed;
+        }
+        n += 1;
+    }
+}
+
+/// Add a generic test node to the graph and connect it to the parent.
+fn add_generic_test_node(
+    gb: &mut GraphBuilder,
+    parent_idx: NodeIndex,
+    unique_id: String,
+    label: String,
+) {
+    let idx = gb.add_node(NodeData {
+        unique_id,
+        label,
+        node_type: NodeType::Test,
+        file_path: None,
+        description: None,
+        materialization: None,
+        tags: vec![],
+        columns: vec![],
+        exposure: None,
+    });
+    gb.graph
+        .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+}
+
 /// Create test nodes for YAML-declared generic tests (not_null, unique, etc.)
 /// and connect them to their parent model/source nodes.
 fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
@@ -516,38 +554,36 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                 Some(&idx) => idx,
                 None => continue,
             };
+
+            // Model-level tests (not attached to a column)
+            for test_def in &model_def.tests {
+                let test_name = match test_def.test_name() {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let candidate = format!("test.{}.{}", test_name, model_def.name);
+                let unique_id = dedup_unique_id(&candidate, &gb.node_map);
+                let label = format!("{}_{}", test_name, model_def.name);
+                add_generic_test_node(gb, parent_idx, unique_id, label);
+            }
+
+            // Column-level tests
             for col in &model_def.columns {
                 for test_def in &col.tests {
                     let test_name = match test_def.test_name() {
                         Some(name) => name,
                         None => continue,
                     };
-                    let unique_id = format!(
-                        "test.{}.{}.{}", test_name, model_def.name, col.name
-                    );
-                    // Skip if already exists (e.g. duplicate YAML entries)
-                    if gb.node_map.contains_key(&unique_id) {
-                        continue;
-                    }
+                    let candidate =
+                        format!("test.{}.{}.{}", test_name, model_def.name, col.name);
+                    let unique_id = dedup_unique_id(&candidate, &gb.node_map);
                     let label = format!("{}_{}", test_name, col.name);
-                    let idx = gb.add_node(NodeData {
-                        unique_id,
-                        label,
-                        node_type: NodeType::Test,
-                        file_path: None,
-                        description: None,
-                        materialization: None,
-                        tags: vec![],
-                        columns: vec![],
-                        exposure: None,
-                    });
-                    gb.graph
-                        .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+                    add_generic_test_node(gb, parent_idx, unique_id, label);
                 }
             }
         }
 
-        // Source-level generic tests
+        // Source-level generic tests (column-level only)
         for source_def in &schema.sources {
             for table in &source_def.tables {
                 let parent_id = format!("source.{}.{}", source_def.name, table.name);
@@ -561,27 +597,13 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                             Some(name) => name,
                             None => continue,
                         };
-                        let unique_id = format!(
+                        let candidate = format!(
                             "test.{}.{}.{}.{}",
                             test_name, source_def.name, table.name, col.name
                         );
-                        if gb.node_map.contains_key(&unique_id) {
-                            continue;
-                        }
+                        let unique_id = dedup_unique_id(&candidate, &gb.node_map);
                         let label = format!("{}_{}", test_name, col.name);
-                        let idx = gb.add_node(NodeData {
-                            unique_id,
-                            label,
-                            node_type: NodeType::Test,
-                            file_path: None,
-                            description: None,
-                            materialization: None,
-                            tags: vec![],
-                            columns: vec![],
-                            exposure: None,
-                        });
-                        gb.graph
-                            .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+                        add_generic_test_node(gb, parent_idx, unique_id, label);
                     }
                 }
             }
@@ -1377,6 +1399,11 @@ sources:
               - not_null
 models:
   - name: orders
+    data_tests:
+      - dbt_utils.expression_is_true:
+          expression: "a = b"
+      - dbt_utils.expression_is_true:
+          expression: "c = d"
     columns:
       - name: order_id
         data_tests:
@@ -1394,25 +1421,29 @@ models:
 
         let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
 
-        // 1 model + 1 source + 2 model tests + 1 source test = 5 nodes
-        assert_eq!(graph.node_count(), 5);
+        // 1 model + 1 source + 2 column tests + 1 source test + 2 model-level tests = 7
+        assert_eq!(graph.node_count(), 7);
 
         let test_nodes: Vec<_> = graph
             .node_indices()
             .filter(|&i| graph[i].node_type == NodeType::Test)
             .collect();
-        assert_eq!(test_nodes.len(), 3);
+        assert_eq!(test_nodes.len(), 5);
 
         // Verify test unique_ids
-        let test_ids: Vec<&str> = test_nodes
+        let mut test_ids: Vec<&str> = test_nodes
             .iter()
             .map(|&i| graph[i].unique_id.as_str())
             .collect();
+        test_ids.sort();
         assert!(test_ids.contains(&"test.not_null.orders.order_id"));
         assert!(test_ids.contains(&"test.unique.orders.order_id"));
         assert!(test_ids.contains(&"test.not_null.raw.events.event_id"));
+        // Model-level tests: first gets base ID, second gets _2 suffix
+        assert!(test_ids.contains(&"test.dbt_utils.expression_is_true.orders"));
+        assert!(test_ids.contains(&"test.dbt_utils.expression_is_true.orders_2"));
 
-        // Verify test edges (model→test and source→test)
+        // All test edges from model (2 column + 2 model-level = 4)
         let model_idx = graph
             .node_indices()
             .find(|&i| graph[i].unique_id == "model.orders")
@@ -1426,7 +1457,7 @@ models:
             .edges_directed(model_idx, petgraph::Direction::Outgoing)
             .filter(|e| e.weight().edge_type == EdgeType::Test)
             .count();
-        assert_eq!(model_test_edges, 2);
+        assert_eq!(model_test_edges, 4);
 
         let source_test_edges = graph
             .edges_directed(source_idx, petgraph::Direction::Outgoing)

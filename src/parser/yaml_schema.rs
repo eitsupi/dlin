@@ -91,6 +91,9 @@ pub struct ModelDefinition {
     pub config: Option<ModelConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Model-level tests (not attached to a specific column)
+    #[serde(default, alias = "data_tests")]
+    pub tests: Vec<TestDefinition>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
