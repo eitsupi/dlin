@@ -440,7 +440,9 @@ fn collect_sql_contents_for_source(
     }
 }
 
-/// Collect SQL file contents for all nodes that have a file_path.
+/// Collect SQL file contents for all nodes that have a `.sql` file_path.
+/// Nodes whose file_path points to a non-SQL file (e.g. YAML schema files
+/// for generic tests) are skipped.
 #[cfg(not(tarpaulin_include))]
 fn collect_sql_contents(
     graph: &graph::types::LineageGraph,
@@ -450,6 +452,12 @@ fn collect_sql_contents(
     for idx in graph.node_indices() {
         let node = &graph[idx];
         if let Some(ref rel_path) = node.file_path {
+            let is_sql = rel_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"));
+            if !is_sql {
+                continue;
+            }
             let full_path = project_dir.join(rel_path);
             match std::fs::read_to_string(&full_path) {
                 Ok(content) => {

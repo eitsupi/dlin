@@ -1281,3 +1281,96 @@ mod sql_mode_test_warning {
         );
     }
 }
+
+mod generic_test_metadata {
+    use super::*;
+
+    /// Create a temp project with a model and generic YAML tests.
+    fn setup_generic_test_project() -> tempfile::TempDir {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        fs::create_dir_all(dir.join("models")).unwrap();
+        fs::write(dir.join("dbt_project.yml"), "name: test_proj\n").unwrap();
+        fs::write(dir.join("models/orders.sql"), "SELECT 1 AS order_id").unwrap();
+        fs::write(
+            dir.join("models/schema.yml"),
+            r#"
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+"#,
+        )
+        .unwrap();
+
+        tmp
+    }
+
+    #[test]
+    fn test_generic_test_has_yaml_file_path() {
+        let tmp = setup_generic_test_project();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+                "--node-type",
+                "test",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let nodes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        for node in &nodes {
+            assert_eq!(
+                node["file_path"].as_str(),
+                Some("models/schema.yml"),
+                "Generic test should have YAML file_path, got: {}",
+                node
+            );
+        }
+    }
+
+    #[test]
+    fn test_generic_test_sql_content_is_null() {
+        let tmp = setup_generic_test_project();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+                "--json-full",
+                "--node-type",
+                "test",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let nodes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        for node in &nodes {
+            assert!(
+                node["sql_content"].is_null(),
+                "Generic test sql_content should be null (not YAML), got: {}",
+                node["sql_content"]
+            );
+        }
+    }
+}
