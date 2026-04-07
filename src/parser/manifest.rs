@@ -337,9 +337,17 @@ fn add_node_edges(
             None => continue,
         };
 
+        // Use EdgeType::Test when the target node is a test, regardless of
+        // the dependency's type prefix, so all test relationships are consistent.
+        let current_is_test = graph[current_idx].node_type == NodeType::Test;
+
         for dep_id in &node.depends_on.nodes {
             if let Some(&dep_idx) = node_map.get(dep_id) {
-                let edge_type = infer_edge_type(dep_id);
+                let edge_type = if current_is_test {
+                    EdgeType::Test
+                } else {
+                    infer_edge_type(dep_id)
+                };
                 graph.add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
             }
         }
@@ -758,6 +766,11 @@ mod tests {
             .find(|&i| graph[i].node_type == NodeType::Test)
             .expect("Should have a test node");
         assert_eq!(graph[test_node].label, "assert_positive");
+
+        // Edge to test node should use EdgeType::Test, not EdgeType::Ref
+        use petgraph::visit::IntoEdgeReferences;
+        let edge = graph.edge_references().next().unwrap();
+        assert_eq!(edge.weight().edge_type, EdgeType::Test);
     }
 
     #[test]

@@ -452,10 +452,19 @@ fn process_sql_edges(
             (&owned.0, &owned.1)
         };
 
+        // Use EdgeType::Test when the target node is a test, so all test
+        // relationships render with consistent edge labels/styles.
+        let is_test = *file_type == "test";
+
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
+            let edge_type = if is_test {
+                EdgeType::Test
+            } else {
+                EdgeType::Ref
+            };
             gb.graph
-                .add_edge(dep_idx, current_idx, EdgeData::direct(EdgeType::Ref));
+                .add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
         }
 
         for source_call in sources {
@@ -464,8 +473,13 @@ fn process_sql_edges(
                 &source_call.table_name,
                 sql_path,
             );
+            let edge_type = if is_test {
+                EdgeType::Test
+            } else {
+                EdgeType::Source
+            };
             gb.graph
-                .add_edge(source_idx, current_idx, EdgeData::direct(EdgeType::Source));
+                .add_edge(source_idx, current_idx, EdgeData::direct(edge_type));
         }
     }
 
@@ -946,8 +960,13 @@ models:
         let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
         // model + test = 2 nodes
         assert_eq!(graph.node_count(), 2);
-        // ref edge: stg_orders → assert_positive
+        // test edge: stg_orders → assert_positive
         assert_eq!(graph.edge_count(), 1);
+
+        // Singular SQL tests should use EdgeType::Test
+        use petgraph::visit::IntoEdgeReferences;
+        let edge = graph.edge_references().next().unwrap();
+        assert_eq!(edge.weight().edge_type, EdgeType::Test);
     }
 
     #[test]
