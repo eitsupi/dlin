@@ -1334,11 +1334,9 @@ models:
         assert_eq!(nodes.len(), 2);
 
         for node in &nodes {
-            let fp = node["file_path"].as_str().expect("file_path should be set");
-            // Normalize Windows backslashes for cross-platform comparison
-            let normalized = fp.replace('\\', "/");
             assert_eq!(
-                normalized, "models/schema.yml",
+                node["file_path"].as_str(),
+                Some("models/schema.yml"),
                 "Generic test should have YAML file_path, got: {}",
                 node
             );

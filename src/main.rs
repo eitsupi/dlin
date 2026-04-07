@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
+use path_slash::PathExt as _;
 
 use dlin::cli::{
     self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat,
@@ -721,7 +722,7 @@ fn check_manifest_freshness(
             && mtime > manifest_mtime
         {
             let rel = file.strip_prefix(project_dir).unwrap_or(file);
-            stale_files.push(rel.to_string_lossy().into_owned());
+            stale_files.push(rel.to_slash_lossy().into_owned());
         }
     }
     stale_files.sort();
@@ -855,9 +856,9 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 "manifest_path": manifest_path.to_string_lossy(),
                 "is_stale": is_stale,
                 "stale_file_count": stale_files.len(),
-                "stale_files": stale_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "stale_files": stale_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
                 "deleted_file_count": deleted_files.len(),
-                "deleted_files": deleted_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "deleted_files": deleted_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
             });
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
