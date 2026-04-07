@@ -46,7 +46,7 @@ Examples:
   dlin graph                              # Full lineage (ASCII art)
   dlin graph -o json                      # Full lineage as JSON
   dlin graph orders -u 2 -d 1             # orders with 2 upstream, 1 downstream
-  dlin graph -o json --json-full           # JSON with all fields
+  dlin graph -o json --json-full          # JSON with all fields
   dlin list -o json                       # List all node names as JSON
   dlin list orders stg_orders -o json     # List specific models as JSON
   dlin impact orders -o json              # Downstream impact analysis
@@ -57,11 +57,13 @@ Examples:
     version
 )]
 pub struct Cli {
-    /// Error/warning output format on stderr: text (default) or json.
-    /// When json, diagnostics are emitted as structured JSON objects with a
-    /// fixed schema: {"level":"error"|"warning","what":"...","why":...,"hint":...}
-    /// where why and hint are either strings or null
-    #[arg(long, global = true, default_value = "text", env = "DLIN_ERROR_FORMAT")]
+    /// Error/warning output format on stderr
+    #[arg(long, global = true, default_value = "text", env = "DLIN_ERROR_FORMAT", long_help = "\
+Error/warning output format on stderr: text (default) or json.
+
+When json, diagnostics are emitted as structured JSON objects with a
+fixed schema: {\"level\":\"error\"|\"warning\",\"what\":\"...\",\"why\":...,\"hint\":...}
+where why and hint are either strings or null.")]
     pub error_format: ErrorFormat,
 
     #[command(subcommand)]
@@ -173,8 +175,8 @@ Examples:
   dlin graph -o json
 
   # === Focus on specific models (positional args = BFS from those nodes) ===
-  dlin graph orders -u 2 -d 1           # 2 upstream, 1 downstream of orders
-  dlin graph stg_orders -d 0            # just the node, no downstream
+  dlin graph orders -u 2 -d 1            # 2 upstream, 1 downstream of orders
+  dlin graph stg_orders -d 0             # just the node, no downstream
   dlin graph stg_orders orders customers # multiple focus models
 
   # === Filter by selector (--select/-s = keep only matching nodes) ===
@@ -216,7 +218,7 @@ Examples:
   dlin graph orders --collapse=focal -u 3            # sources + exposures + orders only
 
   # === Column display (mermaid only) ===
-  dlin graph -o mermaid --show-columns              # show columns in node labels
+  dlin graph -o mermaid --show-columns               # show columns in node labels
   dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes"
 )]
 pub struct GraphArgs {
@@ -251,59 +253,68 @@ pub struct GraphArgs {
     #[arg(short = 'o', long, default_value = "ascii")]
     pub output: OutputFormat,
 
-    /// Selector expression (comma-separated, OR logic).
-    /// All selectors support glob patterns (*, **, ?, []):
-    ///   tag:<pattern>     match nodes by tag
-    ///   path:<pattern>    match by file path (prefix or glob)
-    ///   <pattern>         match by model label
-    #[arg(short = 's', long)]
+    /// Selector expression (comma-separated, OR logic)
+    #[arg(short = 's', long, long_help = "\
+Selector expression (comma-separated, OR logic).
+All selectors support glob patterns (*, **, ?, []):
+
+  tag:<pattern>     match nodes by tag
+  path:<pattern>    match by file path (prefix or glob)
+  <pattern>         match by model label")]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated). Default: all types.
-    /// Available types: model, source, seed, snapshot, test, exposure.
-    ///
-    /// NOTE: In sql mode, generic tests are inferred from YAML declarations
-    /// with dlin-specific IDs. Use --source manifest for exact dependency resolution.
-    #[arg(long = "node-type", value_delimiter = ',')]
+    /// Filter output by node type (comma-separated)
+    #[arg(long = "node-type", value_delimiter = ',', long_help = "\
+Filter output by node type (comma-separated). Default: all types.
+Available types: model, source, seed, snapshot, test, exposure.
+
+NOTE: In sql mode, generic tests are inferred from YAML declarations
+with dlin-specific IDs. Use --source manifest for exact dependency resolution.")]
     pub node_types: Option<Vec<String>>,
 
-    /// Disable transitive edge completion when filters remove intermediate nodes.
-    /// By default, when --node-type, --select, or focus models exclude nodes,
-    /// edges through removed nodes are preserved as transitive edges with "(via N)" labels.
-    #[arg(long)]
+    /// Disable transitive edge completion when filters remove intermediate nodes
+    #[arg(long, long_help = "\
+Disable transitive edge completion when filters remove intermediate nodes.
+By default, when --node-type, --select, or focus models exclude nodes,
+edges through removed nodes are preserved as transitive edges with \"(via N)\" labels.")]
     pub no_transitive: bool,
 
     /// Collapse intermediate nodes, replacing them with transitive edges
-    /// shown as "(via N)" in DOT/Mermaid output.
-    ///
-    /// Without a value (--collapse), defaults to "endpoints" mode: keeps
-    /// nodes with no predecessors or no successors, plus focus models.
-    ///
-    /// With --collapse=focal: keeps only source/exposure nodes and focus
-    /// models as endpoints. Endpoint selection ignores BFS window boundaries
-    /// (-u/-d), so window-edge nodes are not treated as pseudo-endpoints,
-    /// but traversal still respects the -u/-d limits.
-    ///
-    /// Focus models are preserved even if they would otherwise be intermediate,
-    /// as long as they are not removed earlier by filters like --select or
-    /// --node-type.
-    ///
-    /// Ignored when --no-transitive is set.
-    #[arg(long, value_name = "MODE", default_missing_value = "endpoints", num_args = 0..=1, require_equals = true)]
+    #[arg(long, value_name = "MODE", default_missing_value = "endpoints", num_args = 0..=1, require_equals = true, long_help = "\
+Collapse intermediate nodes, replacing them with transitive edges
+shown as \"(via N)\" in DOT/Mermaid output.
+
+Without a value (--collapse), defaults to \"endpoints\" mode: keeps
+nodes with no predecessors or no successors, plus focus models.
+
+With --collapse=focal: keeps only source/exposure nodes and focus
+models as endpoints. Endpoint selection ignores BFS window boundaries
+(-u/-d), so window-edge nodes are not treated as pseudo-endpoints,
+but traversal still respects the -u/-d limits.
+
+Focus models are preserved even if they would otherwise be intermediate,
+as long as they are not removed earlier by filters like --select or
+--node-type.
+
+Ignored when --no-transitive is set.")]
     pub collapse: Option<CollapseMode>,
 
-    /// Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
-    /// Supported values: node-type (group by source, model, test, etc.),
-    /// directory (group by file directory path)
-    #[arg(long = "group-by")]
+    /// Group nodes in supported formats (dot, mermaid)
+    #[arg(long = "group-by", long_help = "\
+Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
+
+Supported values:
+  node-type    group by source, model, test, etc.
+  directory    group by file directory path")]
     pub group_by: Option<GroupBy>,
 
-    /// Show column names inside node labels (currently mermaid only).
-    /// In sql mode, columns are taken from YAML properties files when
-    /// available, falling back to parsing SELECT clauses.
-    /// In manifest mode, columns come from manifest metadata.
-    /// Combines well with --collapse to show rich detail on fewer nodes.
-    #[arg(long)]
+    /// Show column names inside node labels (currently mermaid only)
+    #[arg(long, long_help = "\
+Show column names inside node labels (currently mermaid only).
+In sql mode, columns are taken from YAML properties files when
+available, falling back to parsing SELECT clauses.
+In manifest mode, columns come from manifest metadata.
+Combines well with --collapse to show rich detail on fewer nodes.")]
     pub show_columns: bool,
 
     /// Graph direction for dot and mermaid output.
@@ -311,20 +322,39 @@ pub struct GraphArgs {
     #[arg(long, default_value = "lr")]
     pub direction: Direction,
 
-    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
+    /// Data source: sql (default) or manifest
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    /// Path to manifest.json file or directory containing target/manifest.json
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes and must be explicitly requested via --json-fields or --json-full. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
-    #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
+    /// Select which fields to include in JSON node output (comma-separated)
+    #[arg(long, value_delimiter = ',', conflicts_with = "json_full", long_help = "\
+Select which fields to include in JSON node output (comma-separated).
+Only the specified fields are emitted; unspecified fields are omitted.
+
+Available fields:
+  unique_id, label, node_type, file_path, description,
+  materialization, tags, columns, sql_content, exposure
+
+Default (when neither --json-fields nor --json-full is given):
+  unique_id, label, node_type, file_path
+
+The exposure field is an object containing label, type, url, maturity,
+and owner; it is non-null only for exposure nodes and must be explicitly
+requested via --json-fields or --json-full.
+
+Note: sql_content reads raw SQL files on disk in sql mode, or
+compiled_code from manifest.json in manifest mode (requires prior
+`dbt compile`).")]
     pub json_fields: Option<Vec<String>>,
 
-    /// Shorthand for specifying all available fields in --json-fields. Cannot be combined with --json-fields
-    #[arg(long, conflicts_with = "json_fields")]
+    /// Include all available fields in JSON output
+    #[arg(long, conflicts_with = "json_fields", long_help = "\
+Shorthand for specifying all available fields in --json-fields.
+Cannot be combined with --json-fields.")]
     pub json_full: bool,
 
     /// Suppress warning messages
@@ -403,11 +433,11 @@ Examples:
         #[arg(short = 'o', long, default_value = "text")]
         output: ImpactOutputFormat,
 
-        /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
+        /// Data source: sql (default) or manifest
         #[arg(long, default_value = "sql")]
         source: SourceType,
 
-        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+        /// Path to manifest.json file or directory containing target/manifest.json
         #[arg(long)]
         manifest_path: Option<PathBuf>,
 
@@ -493,7 +523,7 @@ pub struct CheckManifestArgs {
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    /// Path to manifest.json file or directory containing target/manifest.json
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
@@ -528,11 +558,11 @@ pub struct SummaryArgs {
     #[arg(short = 'o', long, default_value = "text")]
     pub output: SummaryOutputFormat,
 
-    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
+    /// Data source: sql (default) or manifest
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    /// Path to manifest.json file or directory containing target/manifest.json
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
@@ -621,36 +651,58 @@ pub struct ListArgs {
     #[arg(short = 'o', long, default_value = "plain")]
     pub output: ListOutputFormat,
 
-    /// Selector expression (comma-separated, OR logic).
-    /// All selectors support glob patterns (*, **, ?, []):
-    ///   tag:<pattern>     match nodes by tag
-    ///   path:<pattern>    match by file path (prefix or glob)
-    ///   <pattern>         match by model label
-    #[arg(short = 's', long)]
+    /// Selector expression (comma-separated, OR logic)
+    #[arg(short = 's', long, long_help = "\
+Selector expression (comma-separated, OR logic).
+All selectors support glob patterns (*, **, ?, []):
+
+  tag:<pattern>     match nodes by tag
+  path:<pattern>    match by file path (prefix or glob)
+  <pattern>         match by model label")]
     pub select: Option<String>,
 
-    /// Filter output by node type (comma-separated). Default: all types.
-    /// Available types: model, source, seed, snapshot, test, exposure.
-    ///
-    /// NOTE: In sql mode, generic tests are inferred from YAML declarations
-    /// with dlin-specific IDs. Use --source manifest for exact dependency resolution.
-    #[arg(long = "node-type", value_delimiter = ',')]
+    /// Filter output by node type (comma-separated)
+    #[arg(long = "node-type", value_delimiter = ',', long_help = "\
+Filter output by node type (comma-separated). Default: all types.
+Available types: model, source, seed, snapshot, test, exposure.
+
+NOTE: In sql mode, generic tests are inferred from YAML declarations
+with dlin-specific IDs. Use --source manifest for exact dependency resolution.")]
     pub node_types: Option<Vec<String>>,
 
-    /// Data source: sql (parse SQL files directly, default) or manifest (use manifest.json from dbt compile)
+    /// Data source: sql (default) or manifest
     #[arg(long, default_value = "sql")]
     pub source: SourceType,
 
-    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    /// Path to manifest.json file or directory containing target/manifest.json
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// Select which fields to include in JSON node output (comma-separated). Only the specified fields are emitted; unspecified fields are omitted. Available: unique_id, label, node_type, file_path, description, materialization, tags, columns, sql_content, exposure. Default (when neither --json-fields nor --json-full is given): unique_id, label, node_type, file_path. The exposure field is an object containing label, type, url, maturity, and owner; it is non-null only for exposure nodes and must be explicitly requested via --json-fields or --json-full. Note: sql_content reads raw SQL files on disk in sql mode, or compiled_code from manifest.json in manifest mode (requires prior `dbt compile`)
-    #[arg(long, value_delimiter = ',', conflicts_with = "json_full")]
+    /// Select which fields to include in JSON node output (comma-separated)
+    #[arg(long, value_delimiter = ',', conflicts_with = "json_full", long_help = "\
+Select which fields to include in JSON node output (comma-separated).
+Only the specified fields are emitted; unspecified fields are omitted.
+
+Available fields:
+  unique_id, label, node_type, file_path, description,
+  materialization, tags, columns, sql_content, exposure
+
+Default (when neither --json-fields nor --json-full is given):
+  unique_id, label, node_type, file_path
+
+The exposure field is an object containing label, type, url, maturity,
+and owner; it is non-null only for exposure nodes and must be explicitly
+requested via --json-fields or --json-full.
+
+Note: sql_content reads raw SQL files on disk in sql mode, or
+compiled_code from manifest.json in manifest mode (requires prior
+`dbt compile`).")]
     pub json_fields: Option<Vec<String>>,
 
-    /// Shorthand for specifying all available fields in --json-fields. Cannot be combined with --json-fields
-    #[arg(long, conflicts_with = "json_fields")]
+    /// Include all available fields in JSON output
+    #[arg(long, conflicts_with = "json_fields", long_help = "\
+Shorthand for specifying all available fields in --json-fields.
+Cannot be combined with --json-fields.")]
     pub json_full: bool,
 
     /// Suppress warning messages
