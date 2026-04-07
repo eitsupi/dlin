@@ -189,7 +189,12 @@ fn process_yaml_files(
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
     let mut schemas: Vec<SchemaFile> = Vec::new();
 
-    for yaml_path in &files.yaml_files {
+    // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
+    // deterministic across filesystems/OSes.
+    let mut sorted_yaml_files = files.yaml_files.clone();
+    sorted_yaml_files.sort();
+
+    for yaml_path in &sorted_yaml_files {
         let content = read_file(yaml_path)?;
         let schema = match parse_schema_file(&content, Some(yaml_path.as_path())) {
             Ok(s) => s,
@@ -1489,5 +1494,70 @@ models:
             .filter(|e| e.weight().edge_type == EdgeType::Test)
             .count();
         assert_eq!(source_test_edges, 1);
+    }
+
+    #[test]
+    fn test_generic_test_ids_deterministic_across_yaml_order() {
+        // Duplicate test names across two YAML files should produce the same
+        // suffixed IDs regardless of the order the files are passed in.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        let sub_dir = models_dir.join("sub");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        fs::write(models_dir.join("orders.sql"), "SELECT 1 AS order_id").unwrap();
+
+        // Two YAML files that both declare a not_null test on orders.order_id
+        let yaml_a = models_dir.join("a_schema.yml");
+        let yaml_b = sub_dir.join("b_schema.yml");
+        let yaml_content = r#"
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+"#;
+        fs::write(&yaml_a, yaml_content).unwrap();
+        fs::write(&yaml_b, yaml_content).unwrap();
+
+        // Build with files in forward order
+        let files_fwd = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![yaml_a.clone(), yaml_b.clone()],
+            ..Default::default()
+        };
+        let graph_fwd =
+            build_graph(&project_dir, &files_fwd, None, true, false, &HashMap::new()).unwrap();
+
+        // Build with files in reverse order
+        let files_rev = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![yaml_b, yaml_a],
+            ..Default::default()
+        };
+        let graph_rev =
+            build_graph(&project_dir, &files_rev, None, true, false, &HashMap::new()).unwrap();
+
+        // Both should produce the same set of test unique_ids
+        let mut ids_fwd: Vec<String> = graph_fwd
+            .node_indices()
+            .filter(|&i| graph_fwd[i].node_type == NodeType::Test)
+            .map(|i| graph_fwd[i].unique_id.clone())
+            .collect();
+        ids_fwd.sort();
+
+        let mut ids_rev: Vec<String> = graph_rev
+            .node_indices()
+            .filter(|&i| graph_rev[i].node_type == NodeType::Test)
+            .map(|i| graph_rev[i].unique_id.clone())
+            .collect();
+        ids_rev.sort();
+
+        assert_eq!(ids_fwd, ids_rev);
+        assert_eq!(ids_fwd.len(), 2);
+        assert!(ids_fwd.contains(&"test.not_null.orders.order_id".to_string()));
+        assert!(ids_fwd.contains(&"test.not_null.orders.order_id_2".to_string()));
     }
 }
