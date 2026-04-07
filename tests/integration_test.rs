@@ -1166,7 +1166,12 @@ mod sql_mode_test_warning {
     #[test]
     fn test_impact_warns_when_tests_affected() {
         let output = std::process::Command::new(binary_path())
-            .args(["impact", "stg_orders", "-p", fixture_dir().to_str().unwrap()])
+            .args([
+                "impact",
+                "stg_orders",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+            ])
             .output()
             .expect("Failed to run binary");
 
@@ -1198,7 +1203,13 @@ mod sql_mode_test_warning {
     fn test_graph_warns_when_output_contains_tests() {
         // Default node types include test, so the warning should appear.
         let output = std::process::Command::new(binary_path())
-            .args(["graph", "-p", fixture_dir().to_str().unwrap(), "-o", "plain"])
+            .args([
+                "graph",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "-o",
+                "plain",
+            ])
             .output()
             .expect("Failed to run binary");
 
