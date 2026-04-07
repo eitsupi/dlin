@@ -154,12 +154,14 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
-    warn_sql_mode_test_limitation(
-        &args.source,
-        type_names.iter().any(|t| t.eq_ignore_ascii_case("test")),
-    );
     let filtered =
         graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
+    warn_sql_mode_test_limitation(
+        &args.source,
+        filtered
+            .node_weights()
+            .any(|n| n.node_type == graph::types::NodeType::Test),
+    );
 
     // Collapse intermediate nodes if requested
     let filtered = if let Some(collapse_mode) = args.collapse {
@@ -321,11 +323,13 @@ fn run_list_command(args: ListArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
+    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
     warn_sql_mode_test_limitation(
         &args.source,
-        type_names.iter().any(|t| t.eq_ignore_ascii_case("test")),
+        filtered
+            .node_weights()
+            .any(|n| n.node_type == graph::types::NodeType::Test),
     );
-    let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
     // Resolve JSON fields for list
     let json_fields =

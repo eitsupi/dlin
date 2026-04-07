@@ -1158,42 +1158,70 @@ mod error_format {
     }
 }
 
-mod impact_warning {
+mod sql_mode_test_warning {
     use super::*;
 
+    const WARNING_NEEDLE: &str = "sql mode infers generic tests";
+
     #[test]
-    fn test_impact_shows_sql_mode_test_warning() {
-        // simple_project has a singular test, so impact on stg_orders should
-        // emit the sql-mode test limitation warning on stderr.
+    fn test_impact_warns_when_tests_affected() {
         let output = std::process::Command::new(binary_path())
-            .args([
-                "impact",
-                "stg_orders",
-                "-p",
-                fixture_dir().to_str().unwrap(),
-            ])
+            .args(["impact", "stg_orders", "-p", fixture_dir().to_str().unwrap()])
             .output()
             .expect("Failed to run binary");
 
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("sql mode infers generic tests"),
+            stderr.contains(WARNING_NEEDLE),
             "Expected sql-mode test warning in stderr, got: {stderr}"
         );
     }
 
     #[test]
     fn test_impact_no_warning_when_no_tests_affected() {
-        // Impact on a leaf model with no downstream tests should not warn.
-        // `customers` is a mart model; its only downstream is the exposure
-        // `weekly_report`, so no tests are affected.
+        // `customers` has only the exposure downstream, no tests.
+        let output = std::process::Command::new(binary_path())
+            .args(["impact", "customers", "-p", fixture_dir().to_str().unwrap()])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when no tests affected: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_graph_warns_when_output_contains_tests() {
+        // Default node types include test, so the warning should appear.
+        let output = std::process::Command::new(binary_path())
+            .args(["graph", "-p", fixture_dir().to_str().unwrap(), "-o", "plain"])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(WARNING_NEEDLE),
+            "Expected sql-mode test warning for graph default output, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_graph_no_warning_when_tests_excluded() {
+        // Explicitly request only model nodes — no tests in output.
         let output = std::process::Command::new(binary_path())
             .args([
-                "impact",
-                "customers",
+                "graph",
                 "-p",
                 fixture_dir().to_str().unwrap(),
+                "-o",
+                "plain",
+                "--node-type",
+                "model",
             ])
             .output()
             .expect("Failed to run binary");
@@ -1201,8 +1229,44 @@ mod impact_warning {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode infers generic tests"),
-            "Unexpected sql-mode test warning when no tests affected: {stderr}"
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when tests excluded via --node-type: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_list_warns_when_output_contains_tests() {
+        let output = std::process::Command::new(binary_path())
+            .args(["list", "-p", fixture_dir().to_str().unwrap()])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(WARNING_NEEDLE),
+            "Expected sql-mode test warning for list default output, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_list_no_warning_when_tests_excluded() {
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "--node-type",
+                "model",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when tests excluded via --node-type: {stderr}"
         );
     }
 }
