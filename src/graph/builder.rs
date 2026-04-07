@@ -14,7 +14,7 @@ use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
 };
-use crate::parser::yaml_schema::{ExposureDefinition, parse_schema_file};
+use crate::parser::yaml_schema::{ExposureDefinition, SchemaFile, parse_schema_file};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -171,16 +171,32 @@ struct YamlModelMeta {
     columns: Vec<String>,
 }
 
-/// Parse YAML schema files: create source nodes, collect model metadata and exposures
+/// Result of parsing YAML schema files.
+/// The third element pairs each `SchemaFile` with the relative path of the
+/// YAML file it was parsed from (used to populate `file_path` on test nodes).
+type YamlResult = (
+    HashMap<String, YamlModelMeta>,
+    Vec<ExposureDefinition>,
+    Vec<(SchemaFile, PathBuf)>,
+);
+
+/// Parse YAML schema files: create source nodes, collect model metadata, exposures,
+/// and parsed schemas (for generic test extraction).
 fn process_yaml_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-) -> Result<(HashMap<String, YamlModelMeta>, Vec<ExposureDefinition>)> {
+) -> Result<YamlResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
+    let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
 
-    for yaml_path in &files.yaml_files {
+    // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
+    // deterministic across filesystems/OSes.
+    let mut sorted_yaml_files = files.yaml_files.clone();
+    sorted_yaml_files.sort();
+
+    for yaml_path in &sorted_yaml_files {
         let content = read_file(yaml_path)?;
         let schema = match parse_schema_file(&content, Some(yaml_path.as_path())) {
             Ok(s) => s,
@@ -207,10 +223,15 @@ fn process_yaml_files(
             model_meta.insert(model_def.name.clone(), meta);
         }
 
-        exposures.extend(schema.exposures.into_iter());
+        exposures.extend(schema.exposures.iter().cloned());
+        let relative_path = yaml_path
+            .strip_prefix(project_dir)
+            .unwrap_or(yaml_path)
+            .to_path_buf();
+        schemas.push((schema, relative_path));
     }
 
-    Ok((model_meta, exposures))
+    Ok((model_meta, exposures, schemas))
 }
 
 /// Cached extraction result for a model SQL file (refs and sources).
@@ -442,10 +463,19 @@ fn process_sql_edges(
             (&owned.0, &owned.1)
         };
 
+        // Use EdgeType::Test when the target node is a test, so all test
+        // relationships render with consistent edge labels/styles.
+        let is_test = *file_type == "test";
+
         for ref_call in refs {
             let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
+            let edge_type = if is_test {
+                EdgeType::Test
+            } else {
+                EdgeType::Ref
+            };
             gb.graph
-                .add_edge(dep_idx, current_idx, EdgeData::direct(EdgeType::Ref));
+                .add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
         }
 
         for source_call in sources {
@@ -454,8 +484,13 @@ fn process_sql_edges(
                 &source_call.table_name,
                 sql_path,
             );
+            let edge_type = if is_test {
+                EdgeType::Test
+            } else {
+                EdgeType::Source
+            };
             gb.graph
-                .add_edge(source_idx, current_idx, EdgeData::direct(EdgeType::Source));
+                .add_edge(source_idx, current_idx, EdgeData::direct(edge_type));
         }
     }
 
@@ -499,6 +534,132 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
     }
 }
 
+/// Deduplicate a candidate unique_id by appending `_2`, `_3`, … if it already
+/// exists in the node map.  Returns `(unique_id, suffix)` where `suffix` is
+/// `None` when no deduplication was needed, or `Some("_2")` etc. when it was.
+/// Callers can append the suffix to labels so they stay distinct too.
+fn dedup_unique_id(
+    candidate: &str,
+    node_map: &HashMap<String, NodeIndex>,
+) -> (String, Option<String>) {
+    if !node_map.contains_key(candidate) {
+        return (candidate.to_string(), None);
+    }
+    let mut n = 2u32;
+    loop {
+        let suffix = format!("_{}", n);
+        let suffixed = format!("{}{}", candidate, suffix);
+        if !node_map.contains_key(&suffixed) {
+            return (suffixed, Some(suffix));
+        }
+        n += 1;
+    }
+}
+
+/// Add a generic test node to the graph and connect it to the parent.
+fn add_generic_test_node(
+    gb: &mut GraphBuilder,
+    parent_idx: NodeIndex,
+    unique_id: String,
+    label: String,
+    file_path: Option<PathBuf>,
+) {
+    let idx = gb.add_node(NodeData {
+        unique_id,
+        label,
+        node_type: NodeType::Test,
+        file_path,
+        description: None,
+        materialization: None,
+        tags: vec![],
+        columns: vec![],
+        exposure: None,
+    });
+    gb.graph
+        .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+}
+
+/// Create test nodes for YAML-declared generic tests (not_null, unique, etc.)
+/// and connect them to their parent model/source nodes.
+fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)]) {
+    for (schema, yaml_path) in schemas {
+        let file_path = Some(yaml_path.clone());
+
+        // Model-level generic tests
+        for model_def in &schema.models {
+            let parent_id = format!("model.{}", model_def.name);
+            let parent_idx = match gb.node_map.get(&parent_id) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+
+            // Model-level tests (not attached to a column)
+            for test_def in &model_def.tests {
+                let test_name = match test_def.test_name() {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let candidate = format!("test.{}.{}", test_name, model_def.name);
+                let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                let mut label = format!("{}_{}", test_name, model_def.name);
+                if let Some(s) = suffix {
+                    label.push_str(&s);
+                }
+                add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+            }
+
+            // Column-level tests
+            for col in &model_def.columns {
+                for test_def in &col.tests {
+                    let test_name = match test_def.test_name() {
+                        Some(name) => name,
+                        None => continue,
+                    };
+                    let candidate = format!("test.{}.{}.{}", test_name, model_def.name, col.name);
+                    let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                    let mut label = format!("{}_{}_{}", test_name, model_def.name, col.name);
+                    if let Some(s) = suffix {
+                        label.push_str(&s);
+                    }
+                    add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+                }
+            }
+        }
+
+        // Source-level generic tests (column-level only)
+        for source_def in &schema.sources {
+            for table in &source_def.tables {
+                let parent_id = format!("source.{}.{}", source_def.name, table.name);
+                let parent_idx = match gb.node_map.get(&parent_id) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
+                for col in &table.columns {
+                    for test_def in &col.tests {
+                        let test_name = match test_def.test_name() {
+                            Some(name) => name,
+                            None => continue,
+                        };
+                        let candidate = format!(
+                            "test.{}.{}.{}.{}",
+                            test_name, source_def.name, table.name, col.name
+                        );
+                        let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                        let mut label = format!(
+                            "{}_{}_{}_{}",
+                            test_name, source_def.name, table.name, col.name
+                        );
+                        if let Some(s) = suffix {
+                            label.push_str(&s);
+                        }
+                        add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
@@ -523,7 +684,7 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let (model_meta, exposures) = process_yaml_files(&mut gb, files, project_dir)?;
+    let (model_meta, exposures, schemas) = process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
         &mut gb,
         files,
@@ -556,6 +717,7 @@ pub fn build_graph(
         vars,
     )?;
     process_exposures(&mut gb, &exposures);
+    process_generic_tests(&mut gb, &schemas);
 
     disk_cache.save();
 
@@ -827,8 +989,13 @@ models:
         let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
         // model + test = 2 nodes
         assert_eq!(graph.node_count(), 2);
-        // ref edge: stg_orders → assert_positive
+        // test edge: stg_orders → assert_positive
         assert_eq!(graph.edge_count(), 1);
+
+        // Singular SQL tests should use EdgeType::Test
+        use petgraph::visit::IntoEdgeReferences;
+        let edge = graph.edge_references().next().unwrap();
+        assert_eq!(edge.weight().edge_type, EdgeType::Test);
     }
 
     #[test]
@@ -1260,5 +1427,188 @@ models:
             .unwrap();
         assert!(graph.contains_edge(electronics, combined));
         assert!(graph.contains_edge(clothing, combined));
+    }
+
+    #[test]
+    fn test_generic_tests_from_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        fs::write(project_dir.join("dbt_project.yml"), "name: test_proj\n").unwrap();
+        fs::write(models_dir.join("orders.sql"), "SELECT 1 AS order_id").unwrap();
+
+        // Schema with generic tests on columns
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+sources:
+  - name: raw
+    tables:
+      - name: events
+        columns:
+          - name: event_id
+            data_tests:
+              - not_null
+models:
+  - name: orders
+    data_tests:
+      - dbt_utils.expression_is_true:
+          expression: "a = b"
+      - dbt_utils.expression_is_true:
+          expression: "c = d"
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // 1 model + 1 source + 2 column tests + 1 source test + 2 model-level tests = 7
+        assert_eq!(graph.node_count(), 7);
+
+        let test_nodes: Vec<_> = graph
+            .node_indices()
+            .filter(|&i| graph[i].node_type == NodeType::Test)
+            .collect();
+        assert_eq!(test_nodes.len(), 5);
+
+        // Verify test unique_ids
+        let mut test_ids: Vec<&str> = test_nodes
+            .iter()
+            .map(|&i| graph[i].unique_id.as_str())
+            .collect();
+        test_ids.sort();
+        assert!(test_ids.contains(&"test.not_null.orders.order_id"));
+        assert!(test_ids.contains(&"test.unique.orders.order_id"));
+        assert!(test_ids.contains(&"test.not_null.raw.events.event_id"));
+        // Model-level tests: first gets base ID, second gets _2 suffix
+        assert!(test_ids.contains(&"test.dbt_utils.expression_is_true.orders"));
+        assert!(test_ids.contains(&"test.dbt_utils.expression_is_true.orders_2"));
+
+        // All test edges from model (2 column + 2 model-level = 4)
+        let model_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.orders")
+            .unwrap();
+        let source_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "source.raw.events")
+            .unwrap();
+
+        let model_test_edges = graph
+            .edges_directed(model_idx, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().edge_type == EdgeType::Test)
+            .count();
+        assert_eq!(model_test_edges, 4);
+
+        let source_test_edges = graph
+            .edges_directed(source_idx, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().edge_type == EdgeType::Test)
+            .count();
+        assert_eq!(source_test_edges, 1);
+
+        // All generic test nodes should have file_path pointing to the YAML file
+        for &ti in &test_nodes {
+            assert_eq!(
+                graph[ti].file_path.as_deref(),
+                Some(std::path::Path::new("models/schema.yml")),
+                "test node '{}' should have file_path",
+                graph[ti].unique_id,
+            );
+        }
+
+        // Deduped test labels must also be distinct (suffix applied to label)
+        let mut test_labels: Vec<&str> = test_nodes
+            .iter()
+            .map(|&i| graph[i].label.as_str())
+            .collect();
+        test_labels.sort();
+        let deduped_len = test_labels.len();
+        test_labels.dedup();
+        assert_eq!(
+            test_labels.len(),
+            deduped_len,
+            "All test labels should be unique"
+        );
+        // Verify the deduped model-level test labels
+        assert!(test_labels.contains(&"dbt_utils.expression_is_true_orders"));
+        assert!(test_labels.contains(&"dbt_utils.expression_is_true_orders_2"));
+    }
+
+    #[test]
+    fn test_generic_test_ids_deterministic_across_yaml_order() {
+        // Duplicate test names across two YAML files should produce the same
+        // suffixed IDs regardless of the order the files are passed in.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        let sub_dir = models_dir.join("sub");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        fs::write(models_dir.join("orders.sql"), "SELECT 1 AS order_id").unwrap();
+
+        // Two YAML files that both declare a not_null test on orders.order_id
+        let yaml_a = models_dir.join("a_schema.yml");
+        let yaml_b = sub_dir.join("b_schema.yml");
+        let yaml_content = r#"
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+"#;
+        fs::write(&yaml_a, yaml_content).unwrap();
+        fs::write(&yaml_b, yaml_content).unwrap();
+
+        // Build with files in forward order
+        let files_fwd = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![yaml_a.clone(), yaml_b.clone()],
+            ..Default::default()
+        };
+        let graph_fwd =
+            build_graph(&project_dir, &files_fwd, None, true, false, &HashMap::new()).unwrap();
+
+        // Build with files in reverse order
+        let files_rev = DiscoveredFiles {
+            model_sql_files: vec![project_dir.join("models/orders.sql")],
+            yaml_files: vec![yaml_b, yaml_a],
+            ..Default::default()
+        };
+        let graph_rev =
+            build_graph(&project_dir, &files_rev, None, true, false, &HashMap::new()).unwrap();
+
+        // Both should produce the same set of test unique_ids
+        let mut ids_fwd: Vec<String> = graph_fwd
+            .node_indices()
+            .filter(|&i| graph_fwd[i].node_type == NodeType::Test)
+            .map(|i| graph_fwd[i].unique_id.clone())
+            .collect();
+        ids_fwd.sort();
+
+        let mut ids_rev: Vec<String> = graph_rev
+            .node_indices()
+            .filter(|&i| graph_rev[i].node_type == NodeType::Test)
+            .map(|i| graph_rev[i].unique_id.clone())
+            .collect();
+        ids_rev.sort();
+
+        assert_eq!(ids_fwd, ids_rev);
+        assert_eq!(ids_fwd.len(), 2);
+        assert!(ids_fwd.contains(&"test.not_null.orders.order_id".to_string()));
+        assert!(ids_fwd.contains(&"test.not_null.orders.order_id_2".to_string()));
     }
 }

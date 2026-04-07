@@ -231,7 +231,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "dlin"
-version = "0.1.1"
+version = "0.1.2-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -241,6 +241,7 @@ dependencies = [
  "insta",
  "libc",
  "minijinja",
+ "path-slash",
  "petgraph",
  "rayon",
  "regex",
@@ -575,6 +576,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "path-slash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e91099d4268b0e11973f036e885d652fb0b21fedcf69738c627f94db6a44f42"
 
 [[package]]
 name = "petgraph"

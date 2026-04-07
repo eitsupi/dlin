@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 
+use path_slash::PathExt as _;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
 use serde_json::Value;
@@ -96,7 +97,7 @@ pub fn build_node_value(
         map.insert(
             "file_path".into(),
             match node.file_path {
-                Some(ref p) => Value::String(p.to_string_lossy().into()),
+                Some(ref p) => Value::String(p.to_slash_lossy().into_owned()),
                 None => Value::Null,
             },
         );

@@ -51,6 +51,35 @@ pub enum TestDefinition {
     Complex(serde_json::Value),
 }
 
+impl TestDefinition {
+    /// Extract the test name from either variant.
+    ///
+    /// - `Simple("not_null")` → `"not_null"`
+    /// - `Complex({"unique": {...}})` → `"unique"`
+    /// - `Complex({"name": "custom", "test_name": "accepted_values", ...})` → `"accepted_values"`
+    pub fn test_name(&self) -> Option<&str> {
+        match self {
+            TestDefinition::Simple(s) => Some(s.as_str()),
+            TestDefinition::Complex(v) => {
+                let obj = v.as_object()?;
+                // Alternative format: {"name": "...", "test_name": "accepted_values", ...}
+                if let Some(tn) = obj.get("test_name").and_then(|v| v.as_str()) {
+                    return Some(tn);
+                }
+                // Standard format: single-key map like {"unique": {...}}
+                // Note: serde_json::Map uses BTreeMap, so keys() is alphabetically ordered.
+                // Skip objects that only have meta-keys (name/config/arguments).
+                for key in obj.keys() {
+                    if !matches!(key.as_str(), "config" | "arguments" | "name") {
+                        return Some(key.as_str());
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelDefinition {
     pub name: String,
@@ -62,6 +91,9 @@ pub struct ModelDefinition {
     pub config: Option<ModelConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Model-level tests (not attached to a specific column)
+    #[serde(default, alias = "data_tests")]
+    pub tests: Vec<TestDefinition>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -283,5 +315,36 @@ sources:
         assert!(schema.sources.is_empty());
         assert!(schema.models.is_empty());
         assert!(schema.exposures.is_empty());
+    }
+
+    #[test]
+    fn test_test_name_extraction() {
+        // Simple string test
+        let simple = TestDefinition::Simple("not_null".to_string());
+        assert_eq!(simple.test_name(), Some("not_null"));
+
+        // Complex single-key map: {"unique": {"config": ...}}
+        let complex_single = TestDefinition::Complex(serde_json::json!({
+            "unique": {"config": {"where": "id > 0"}}
+        }));
+        assert_eq!(complex_single.test_name(), Some("unique"));
+
+        // Complex with test_name field: {"name": "custom", "test_name": "accepted_values", ...}
+        let complex_named = TestDefinition::Complex(serde_json::json!({
+            "name": "custom_test_name",
+            "test_name": "accepted_values",
+            "arguments": {"values": [1, 2]}
+        }));
+        assert_eq!(complex_named.test_name(), Some("accepted_values"));
+
+        // Complex relationships test
+        let relationships = TestDefinition::Complex(serde_json::json!({
+            "relationships": {"arguments": {"to": "ref('customers')", "field": "id"}}
+        }));
+        assert_eq!(relationships.test_name(), Some("relationships"));
+
+        // Edge case: {"name": "something"} without test_name should return None
+        let name_only = TestDefinition::Complex(serde_json::json!({"name": "something"}));
+        assert_eq!(name_only.test_name(), None);
     }
 }

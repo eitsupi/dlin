@@ -959,7 +959,9 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("sql mode detects only singular tests"),
+            stderr.contains(
+                "sql mode infers generic tests from YAML declarations; test IDs are dlin-specific"
+            ),
             "Expected sql-mode test warning in stderr, got: {stderr}"
         );
     }
@@ -976,7 +978,9 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("sql mode detects only singular tests"),
+            stderr.contains(
+                "sql mode infers generic tests from YAML declarations; test IDs are dlin-specific"
+            ),
             "Expected sql-mode test warning even without explicit --node-type, got: {stderr}"
         );
     }
@@ -997,7 +1001,9 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains(
+                "sql mode infers generic tests from YAML declarations; test IDs are dlin-specific"
+            ),
             "Warning should be suppressed by --quiet, got: {stderr}"
         );
     }
@@ -1022,7 +1028,9 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains(
+                "sql mode infers generic tests from YAML declarations; test IDs are dlin-specific"
+            ),
             "Warning should not appear when test type is excluded, got: {stderr}"
         );
     }
@@ -1046,7 +1054,9 @@ mod cli {
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.contains("sql mode detects only singular tests"),
+            !stderr.contains(
+                "sql mode infers generic tests from YAML declarations; test IDs are dlin-specific"
+            ),
             "Warning should not appear in manifest mode, got: {stderr}"
         );
     }
@@ -1145,5 +1155,222 @@ mod error_format {
             stderr.starts_with("Error: "),
             "Expected text error, got: {stderr}"
         );
+    }
+}
+
+mod sql_mode_test_warning {
+    use super::*;
+
+    const WARNING_NEEDLE: &str = "sql mode infers generic tests";
+
+    #[test]
+    fn test_impact_warns_when_tests_affected() {
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "impact",
+                "stg_orders",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(WARNING_NEEDLE),
+            "Expected sql-mode test warning in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_impact_no_warning_when_no_tests_affected() {
+        // `customers` has only the exposure downstream, no tests.
+        let output = std::process::Command::new(binary_path())
+            .args(["impact", "customers", "-p", fixture_dir().to_str().unwrap()])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when no tests affected: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_graph_warns_when_output_contains_tests() {
+        // Default node types include test, so the warning should appear.
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "graph",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "-o",
+                "plain",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(WARNING_NEEDLE),
+            "Expected sql-mode test warning for graph default output, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_graph_no_warning_when_tests_excluded() {
+        // Explicitly request only model nodes — no tests in output.
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "graph",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "-o",
+                "plain",
+                "--node-type",
+                "model",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when tests excluded via --node-type: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_list_warns_when_output_contains_tests() {
+        let output = std::process::Command::new(binary_path())
+            .args(["list", "-p", fixture_dir().to_str().unwrap()])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(WARNING_NEEDLE),
+            "Expected sql-mode test warning for list default output, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_list_no_warning_when_tests_excluded() {
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "--node-type",
+                "model",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(WARNING_NEEDLE),
+            "Unexpected warning when tests excluded via --node-type: {stderr}"
+        );
+    }
+}
+
+mod generic_test_metadata {
+    use super::*;
+
+    /// Create a temp project with a model and generic YAML tests.
+    fn setup_generic_test_project() -> tempfile::TempDir {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        fs::create_dir_all(dir.join("models")).unwrap();
+        fs::write(dir.join("dbt_project.yml"), "name: test_proj\n").unwrap();
+        fs::write(dir.join("models/orders.sql"), "SELECT 1 AS order_id").unwrap();
+        fs::write(
+            dir.join("models/schema.yml"),
+            r#"
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - unique
+"#,
+        )
+        .unwrap();
+
+        tmp
+    }
+
+    #[test]
+    fn test_generic_test_has_yaml_file_path() {
+        let tmp = setup_generic_test_project();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+                "--node-type",
+                "test",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let nodes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        for node in &nodes {
+            assert_eq!(
+                node["file_path"].as_str(),
+                Some("models/schema.yml"),
+                "Generic test should have YAML file_path, got: {}",
+                node
+            );
+        }
+    }
+
+    #[test]
+    fn test_generic_test_sql_content_is_null() {
+        let tmp = setup_generic_test_project();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "list",
+                "-p",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+                "--json-full",
+                "--node-type",
+                "test",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let nodes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        for node in &nodes {
+            assert!(
+                node["sql_content"].is_null(),
+                "Generic test sql_content should be null (not YAML), got: {}",
+                node["sql_content"]
+            );
+        }
     }
 }

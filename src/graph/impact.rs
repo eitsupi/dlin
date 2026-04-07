@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use path_slash::PathExt as _;
 use petgraph::Direction;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -132,7 +133,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                     file_path: node
                         .file_path
                         .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned()),
+                        .map(|p| p.to_slash_lossy().into_owned()),
                     severity,
                     distance: next_distance,
                     sql_content: None,

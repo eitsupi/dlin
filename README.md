@@ -270,7 +270,7 @@ dlin graph --node-type model,source   # filter by node type
 
 dlin aims to work without `dbt compile`. By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
 
-**SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed.
+**SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed. Generic tests (`not_null`, `unique`, `relationships`, etc.) are inferred from YAML schema declarations.
 
 **Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
 
@@ -279,6 +279,7 @@ dlin aims to work without `dbt compile`. By default it parses SQL files directly
 - `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
 - Runtime context (`target.type`, `env_var()`) is not evaluated
 - Conditional Jinja branches use default values; non-default paths may be missed
+- Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
 
 When these limitations matter, use `--source manifest`.
 

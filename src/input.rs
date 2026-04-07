@@ -1,6 +1,8 @@
 use std::io::{self, BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 
+use path_slash::PathExt as _;
+
 use crate::graph::types::LineageGraph;
 use crate::parser::project::ResolvedPaths;
 use crate::parser::yaml_schema;
@@ -232,13 +234,13 @@ fn resolve_sql_to_label(
     let project_dir = normalize_path(project_dir);
     let relative = abs_path.strip_prefix(&project_dir).ok()?;
     // Normalize to forward slashes once (loop-invariant) for Windows compatibility
-    let rel_str = relative.to_string_lossy().replace('\\', "/");
+    let rel_str = relative.to_slash_lossy();
 
     graph.node_indices().find_map(|idx| {
         let node = &graph[idx];
         match &node.file_path {
             Some(node_path) => {
-                let node_str = node_path.to_string_lossy().replace('\\', "/");
+                let node_str = node_path.to_slash_lossy();
                 if node_str == rel_str {
                     Some(node.label.clone())
                 } else {

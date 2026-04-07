@@ -15,8 +15,8 @@ or HTML.
 Data sources:
   sql (default)   Parse SQL files via regex + minijinja. No Python or dbt required.
                   Detects ref() and source() calls in SQL, plus exposures from YAML.
-                  YAML-defined generic tests (not_null, unique, etc.) are NOT detected
-                  — use manifest mode for full test coverage.
+                  Generic tests (not_null, unique, etc.) are inferred from YAML declarations
+                  with dlin-specific IDs — use manifest mode for exact dependency resolution.
   manifest        Read a pre-compiled manifest.json for full accuracy. Requires
                   `dbt compile` (or `dbt run`/`dbt build`) to have been run first.
                   Use `dlin check-manifest` to verify freshness before querying.
@@ -262,9 +262,8 @@ pub struct GraphArgs {
     /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
     ///
-    /// WARNING: In sql mode, only singular tests (SQL files in tests/) are detected.
-    /// YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected.
-    /// Use --source manifest for full test coverage.
+    /// NOTE: In sql mode, generic tests are inferred from YAML declarations
+    /// with dlin-specific IDs. Use --source manifest for exact dependency resolution.
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
@@ -633,9 +632,8 @@ pub struct ListArgs {
     /// Filter output by node type (comma-separated). Default: all types.
     /// Available types: model, source, seed, snapshot, test, exposure.
     ///
-    /// WARNING: In sql mode, only singular tests (SQL files in tests/) are detected.
-    /// YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected.
-    /// Use --source manifest for full test coverage.
+    /// NOTE: In sql mode, generic tests are inferred from YAML declarations
+    /// with dlin-specific IDs. Use --source manifest for exact dependency resolution.
     #[arg(long = "node-type", value_delimiter = ',')]
     pub node_types: Option<Vec<String>>,
 
@@ -688,7 +686,7 @@ impl OutputFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum SourceType {
-    /// Parse SQL files directly — no dbt/Python required. Exposures are detected from YAML, but YAML-defined generic tests (not_null, unique, relationships, etc.) are NOT detected — only singular test SQL files are found
+    /// Parse SQL files directly — no dbt/Python required. Exposures and generic tests are detected from YAML with dlin-specific IDs; use manifest mode for exact test dependency resolution
     Sql,
     /// Use dbt manifest.json — full accuracy, requires prior `dbt compile`
     Manifest,

@@ -1,6 +1,6 @@
 [package]
 name = "dlin"
-version = "0.1.1"
+version = "0.1.2-alpha.1"
 edition = "2024"
 description = "A fast CLI tool for dbt model lineage analysis"
 license = "MIT"
@@ -29,6 +29,7 @@ indexmap = "2"
 minijinja = "2"
 rayon = "1"
 globset = "0.4"
+path-slash = "0.2.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

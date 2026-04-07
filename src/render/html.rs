@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use path_slash::PathExt as _;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
 
@@ -49,7 +50,7 @@ fn build_html_json(graph: &LineageGraph) -> String {
                 file_path: node
                     .file_path
                     .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned()),
+                    .map(|p| p.to_slash_lossy().into_owned()),
                 description: node.description.clone(),
                 materialization: node.materialization.clone(),
                 tags: node.tags.clone(),

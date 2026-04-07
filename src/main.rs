@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
+use path_slash::PathExt as _;
 
 use dlin::cli::{
     self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat,
@@ -154,9 +155,14 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
-    warn_sql_mode_test_limitation(&args.source, &type_names);
     let filtered =
         graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
+    warn_sql_mode_test_limitation(
+        &args.source,
+        filtered
+            .node_weights()
+            .any(|n| n.node_type == graph::types::NodeType::Test),
+    );
 
     // Collapse intermediate nodes if requested
     let filtered = if let Some(collapse_mode) = args.collapse {
@@ -318,8 +324,13 @@ fn run_list_command(args: ListArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
-    warn_sql_mode_test_limitation(&args.source, &type_names);
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
+    warn_sql_mode_test_limitation(
+        &args.source,
+        filtered
+            .node_weights()
+            .any(|n| n.node_type == graph::types::NodeType::Test),
+    );
 
     // Resolve JSON fields for list
     let json_fields =
@@ -430,7 +441,9 @@ fn collect_sql_contents_for_source(
     }
 }
 
-/// Collect SQL file contents for all nodes that have a file_path.
+/// Collect SQL file contents for all nodes that have a `.sql` file_path.
+/// Nodes whose file_path points to a non-SQL file (e.g. YAML schema files
+/// for generic tests) are skipped.
 #[cfg(not(tarpaulin_include))]
 fn collect_sql_contents(
     graph: &graph::types::LineageGraph,
@@ -440,6 +453,12 @@ fn collect_sql_contents(
     for idx in graph.node_indices() {
         let node = &graph[idx];
         if let Some(ref rel_path) = node.file_path {
+            let is_sql = rel_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"));
+            if !is_sql {
+                continue;
+            }
             let full_path = project_dir.join(rel_path);
             match std::fs::read_to_string(&full_path) {
                 Ok(content) => {
@@ -504,6 +523,8 @@ fn run_impact_command(
         anyhow::bail!("no models found matching: {}", models.join(", "));
     }
 
+    warn_sql_mode_test_limitation(source, reports.iter().any(|r| r.affected_tests > 0));
+
     match output {
         cli::ImpactOutputFormat::Text => {
             for report in &reports {
@@ -516,17 +537,15 @@ fn run_impact_command(
     Ok(())
 }
 
-/// Warn when sql mode is used with test node types, since YAML-defined generic
-/// tests are not detected in that mode.
+/// Warn when sql mode is used and the output involves test nodes, since
+/// YAML-defined generic tests are inferred from declarations only.
 #[cfg(not(tarpaulin_include))]
-fn warn_sql_mode_test_limitation(source: &SourceType, type_names: &[String]) {
-    if matches!(source, SourceType::Sql)
-        && type_names.iter().any(|t| t.eq_ignore_ascii_case("test"))
-    {
+fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {
+    if matches!(source, SourceType::Sql) && has_tests {
         dlin::warn!(
-            "sql mode detects only singular tests (SQL files in tests/); \
-             YAML-defined generic tests (not_null, unique, etc.) are not included. \
-             Use --source manifest for full test coverage"
+            "sql mode infers generic tests from YAML declarations; \
+             test IDs are dlin-specific and do not match dbt's naming. \
+             Use --source manifest for exact dependency resolution"
         );
     }
 }
@@ -703,7 +722,7 @@ fn check_manifest_freshness(
             && mtime > manifest_mtime
         {
             let rel = file.strip_prefix(project_dir).unwrap_or(file);
-            stale_files.push(rel.to_string_lossy().into_owned());
+            stale_files.push(rel.to_slash_lossy().into_owned());
         }
     }
     stale_files.sort();
@@ -837,9 +856,9 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 "manifest_path": manifest_path.to_string_lossy(),
                 "is_stale": is_stale,
                 "stale_file_count": stale_files.len(),
-                "stale_files": stale_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "stale_files": stale_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
                 "deleted_file_count": deleted_files.len(),
-                "deleted_files": deleted_files.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "deleted_files": deleted_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
             });
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
