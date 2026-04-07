@@ -1334,9 +1334,7 @@ models:
         assert_eq!(nodes.len(), 2);
 
         for node in &nodes {
-            let fp = node["file_path"]
-                .as_str()
-                .expect("file_path should be set");
+            let fp = node["file_path"].as_str().expect("file_path should be set");
             // Normalize Windows backslashes for cross-platform comparison
             let normalized = fp.replace('\\', "/");
             assert_eq!(
