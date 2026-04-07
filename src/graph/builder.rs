@@ -535,16 +535,22 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 }
 
 /// Deduplicate a candidate unique_id by appending `_2`, `_3`, … if it already
-/// exists in the node map.
-fn dedup_unique_id(candidate: &str, node_map: &HashMap<String, NodeIndex>) -> String {
+/// exists in the node map.  Returns `(unique_id, suffix)` where `suffix` is
+/// `None` when no deduplication was needed, or `Some("_2")` etc. when it was.
+/// Callers can append the suffix to labels so they stay distinct too.
+fn dedup_unique_id(
+    candidate: &str,
+    node_map: &HashMap<String, NodeIndex>,
+) -> (String, Option<String>) {
     if !node_map.contains_key(candidate) {
-        return candidate.to_string();
+        return (candidate.to_string(), None);
     }
     let mut n = 2u32;
     loop {
-        let suffixed = format!("{}_{}", candidate, n);
+        let suffix = format!("_{}", n);
+        let suffixed = format!("{}{}", candidate, suffix);
         if !node_map.contains_key(&suffixed) {
-            return suffixed;
+            return (suffixed, Some(suffix));
         }
         n += 1;
     }
@@ -594,8 +600,11 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                     None => continue,
                 };
                 let candidate = format!("test.{}.{}", test_name, model_def.name);
-                let unique_id = dedup_unique_id(&candidate, &gb.node_map);
-                let label = format!("{}_{}", test_name, model_def.name);
+                let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                let mut label = format!("{}_{}", test_name, model_def.name);
+                if let Some(s) = suffix {
+                    label.push_str(&s);
+                }
                 add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
             }
 
@@ -607,8 +616,11 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                         None => continue,
                     };
                     let candidate = format!("test.{}.{}.{}", test_name, model_def.name, col.name);
-                    let unique_id = dedup_unique_id(&candidate, &gb.node_map);
-                    let label = format!("{}_{}_{}", test_name, model_def.name, col.name);
+                    let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                    let mut label = format!("{}_{}_{}", test_name, model_def.name, col.name);
+                    if let Some(s) = suffix {
+                        label.push_str(&s);
+                    }
                     add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
                 }
             }
@@ -632,11 +644,14 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                             "test.{}.{}.{}.{}",
                             test_name, source_def.name, table.name, col.name
                         );
-                        let unique_id = dedup_unique_id(&candidate, &gb.node_map);
-                        let label = format!(
+                        let (unique_id, suffix) = dedup_unique_id(&candidate, &gb.node_map);
+                        let mut label = format!(
                             "{}_{}_{}_{}",
                             test_name, source_def.name, table.name, col.name
                         );
+                        if let Some(s) = suffix {
+                            label.push_str(&s);
+                        }
                         add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
                     }
                 }
@@ -1513,6 +1528,23 @@ models:
                 graph[ti].unique_id,
             );
         }
+
+        // Deduped test labels must also be distinct (suffix applied to label)
+        let mut test_labels: Vec<&str> = test_nodes
+            .iter()
+            .map(|&i| graph[i].label.as_str())
+            .collect();
+        test_labels.sort();
+        let deduped_len = test_labels.len();
+        test_labels.dedup();
+        assert_eq!(
+            test_labels.len(),
+            deduped_len,
+            "All test labels should be unique"
+        );
+        // Verify the deduped model-level test labels
+        assert!(test_labels.contains(&"dbt_utils.expression_is_true_orders"));
+        assert!(test_labels.contains(&"dbt_utils.expression_is_true_orders_2"));
     }
 
     #[test]
