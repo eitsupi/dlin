@@ -171,11 +171,13 @@ struct YamlModelMeta {
     columns: Vec<String>,
 }
 
-/// Result of parsing YAML schema files
+/// Result of parsing YAML schema files.
+/// The third element pairs each `SchemaFile` with the relative path of the
+/// YAML file it was parsed from (used to populate `file_path` on test nodes).
 type YamlResult = (
     HashMap<String, YamlModelMeta>,
     Vec<ExposureDefinition>,
-    Vec<SchemaFile>,
+    Vec<(SchemaFile, PathBuf)>,
 );
 
 /// Parse YAML schema files: create source nodes, collect model metadata, exposures,
@@ -187,7 +189,7 @@ fn process_yaml_files(
 ) -> Result<YamlResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
-    let mut schemas: Vec<SchemaFile> = Vec::new();
+    let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
 
     // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
     // deterministic across filesystems/OSes.
@@ -222,7 +224,11 @@ fn process_yaml_files(
         }
 
         exposures.extend(schema.exposures.iter().cloned());
-        schemas.push(schema);
+        let relative_path = yaml_path
+            .strip_prefix(project_dir)
+            .unwrap_or(yaml_path)
+            .to_path_buf();
+        schemas.push((schema, relative_path));
     }
 
     Ok((model_meta, exposures, schemas))
@@ -550,12 +556,13 @@ fn add_generic_test_node(
     parent_idx: NodeIndex,
     unique_id: String,
     label: String,
+    file_path: Option<PathBuf>,
 ) {
     let idx = gb.add_node(NodeData {
         unique_id,
         label,
         node_type: NodeType::Test,
-        file_path: None,
+        file_path,
         description: None,
         materialization: None,
         tags: vec![],
@@ -568,8 +575,10 @@ fn add_generic_test_node(
 
 /// Create test nodes for YAML-declared generic tests (not_null, unique, etc.)
 /// and connect them to their parent model/source nodes.
-fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
-    for schema in schemas {
+fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)]) {
+    for (schema, yaml_path) in schemas {
+        let file_path = Some(yaml_path.clone());
+
         // Model-level generic tests
         for model_def in &schema.models {
             let parent_id = format!("model.{}", model_def.name);
@@ -587,7 +596,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                 let candidate = format!("test.{}.{}", test_name, model_def.name);
                 let unique_id = dedup_unique_id(&candidate, &gb.node_map);
                 let label = format!("{}_{}", test_name, model_def.name);
-                add_generic_test_node(gb, parent_idx, unique_id, label);
+                add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
             }
 
             // Column-level tests
@@ -600,7 +609,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                     let candidate = format!("test.{}.{}.{}", test_name, model_def.name, col.name);
                     let unique_id = dedup_unique_id(&candidate, &gb.node_map);
                     let label = format!("{}_{}_{}", test_name, model_def.name, col.name);
-                    add_generic_test_node(gb, parent_idx, unique_id, label);
+                    add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
                 }
             }
         }
@@ -628,7 +637,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[SchemaFile]) {
                             "{}_{}_{}_{}",
                             test_name, source_def.name, table.name, col.name
                         );
-                        add_generic_test_node(gb, parent_idx, unique_id, label);
+                        add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
                     }
                 }
             }
@@ -1494,6 +1503,16 @@ models:
             .filter(|e| e.weight().edge_type == EdgeType::Test)
             .count();
         assert_eq!(source_test_edges, 1);
+
+        // All generic test nodes should have file_path pointing to the YAML file
+        for &ti in &test_nodes {
+            assert_eq!(
+                graph[ti].file_path.as_deref(),
+                Some(std::path::Path::new("models/schema.yml")),
+                "test node '{}' should have file_path",
+                graph[ti].unique_id,
+            );
+        }
     }
 
     #[test]
