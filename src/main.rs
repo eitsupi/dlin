@@ -154,7 +154,10 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
-    warn_sql_mode_test_limitation(&args.source, &type_names);
+    warn_sql_mode_test_limitation(
+        &args.source,
+        type_names.iter().any(|t| t.eq_ignore_ascii_case("test")),
+    );
     let filtered =
         graph::filter::filter_output_node_types(&filtered, &type_names, !args.no_transitive);
 
@@ -318,7 +321,10 @@ fn run_list_command(args: ListArgs) -> Result<()> {
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
         );
     }
-    warn_sql_mode_test_limitation(&args.source, &type_names);
+    warn_sql_mode_test_limitation(
+        &args.source,
+        type_names.iter().any(|t| t.eq_ignore_ascii_case("test")),
+    );
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
     // Resolve JSON fields for list
@@ -504,6 +510,8 @@ fn run_impact_command(
         anyhow::bail!("no models found matching: {}", models.join(", "));
     }
 
+    warn_sql_mode_test_limitation(source, reports.iter().any(|r| r.affected_tests > 0));
+
     match output {
         cli::ImpactOutputFormat::Text => {
             for report in &reports {
@@ -516,13 +524,11 @@ fn run_impact_command(
     Ok(())
 }
 
-/// Warn when sql mode is used with test node types, since YAML-defined generic
-/// tests are inferred from declarations only.
+/// Warn when sql mode is used and the output involves test nodes, since
+/// YAML-defined generic tests are inferred from declarations only.
 #[cfg(not(tarpaulin_include))]
-fn warn_sql_mode_test_limitation(source: &SourceType, type_names: &[String]) {
-    if matches!(source, SourceType::Sql)
-        && type_names.iter().any(|t| t.eq_ignore_ascii_case("test"))
-    {
+fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {
+    if matches!(source, SourceType::Sql) && has_tests {
         dlin::warn!(
             "sql mode infers generic tests from YAML declarations; \
              test IDs are dlin-specific and do not match dbt's naming. \

@@ -1157,3 +1157,52 @@ mod error_format {
         );
     }
 }
+
+mod impact_warning {
+    use super::*;
+
+    #[test]
+    fn test_impact_shows_sql_mode_test_warning() {
+        // simple_project has a singular test, so impact on stg_orders should
+        // emit the sql-mode test limitation warning on stderr.
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "impact",
+                "stg_orders",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("sql mode infers generic tests"),
+            "Expected sql-mode test warning in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_impact_no_warning_when_no_tests_affected() {
+        // Impact on a leaf model with no downstream tests should not warn.
+        // `customers` is a mart model; its only downstream is the exposure
+        // `weekly_report`, so no tests are affected.
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "impact",
+                "customers",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("sql mode infers generic tests"),
+            "Unexpected sql-mode test warning when no tests affected: {stderr}"
+        );
+    }
+}
