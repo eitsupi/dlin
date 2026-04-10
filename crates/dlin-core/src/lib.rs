@@ -10,7 +10,7 @@ pub mod render;
 pub enum CollapseMode {
     /// Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
     Endpoints,
-    /// Keep only source/exposure nodes and focus models
+    /// Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
     Focal,
 }
 

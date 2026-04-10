@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Core library for dbt model lineage analysis"
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["dbt", "lineage", "dag", "sql"]
 categories = ["development-tools", "visualization"]
 
