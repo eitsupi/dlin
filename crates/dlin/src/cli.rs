@@ -76,38 +76,7 @@ where why and hint are either strings or null."
     pub command: Command,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum CollapseMode {
-    /// Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
-    Endpoints,
-    /// Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
-    Focal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum GroupBy {
-    /// Group nodes by node type (source, model, test, etc.)
-    NodeType,
-    /// Group nodes by their file directory (e.g. models/staging, models/marts)
-    Directory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Direction {
-    /// Left to right (default)
-    LR,
-    /// Top to bottom
-    TB,
-}
-
-impl std::fmt::Display for Direction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Direction::LR => write!(f, "LR"),
-            Direction::TB => write!(f, "TB"),
-        }
-    }
-}
+pub use dlin_core::{CollapseMode, Direction, GroupBy, ListOutputFormat};
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum ErrorFormat {
@@ -874,12 +843,6 @@ pub enum SourceType {
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum ImpactOutputFormat {
     Text,
-    Json,
-}
-
-#[derive(Debug, Clone, clap::ValueEnum)]
-pub enum ListOutputFormat {
-    Plain,
     Json,
 }
 

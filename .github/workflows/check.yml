@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/check.yml
-      - src/**
+      - crates/**
       - tests/**
       - Cargo.*
       - "!**/*.md"
@@ -13,7 +13,7 @@ on:
       - main
     paths:
       - .github/workflows/check.yml
-      - src/**
+      - crates/**
       - tests/**
       - Cargo.*
       - "!**/*.md"

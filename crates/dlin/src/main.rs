@@ -5,14 +5,16 @@ use anyhow::Result;
 use clap::Parser;
 use path_slash::PathExt as _;
 
-use dlin::cli::{
-    self, CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat,
-    GraphArgs, GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+mod cli;
+
+use cli::{
+    CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat, GraphArgs,
+    GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
 };
-use dlin::graph;
-use dlin::input;
-use dlin::parser;
-use dlin::render;
+use dlin_core::graph;
+use dlin_core::input;
+use dlin_core::parser;
+use dlin_core::render;
 
 /// Reset SIGPIPE to default behavior so broken pipes terminate the process
 /// silently instead of causing panics. Rust's runtime sets SIG_IGN on SIGPIPE,
@@ -34,23 +36,23 @@ fn main() {
     let cli = Cli::parse();
 
     // Set error format before anything else so warnings/errors use it
-    dlin::set_error_format_json(cli.error_format == ErrorFormat::Json);
+    dlin_core::set_error_format_json(cli.error_format == ErrorFormat::Json);
 
     let result = match cli.command {
         Command::Graph(args) => {
-            dlin::set_quiet(args.quiet);
+            dlin_core::set_quiet(args.quiet);
             run_graph_command(args)
         }
         Command::List(args) => {
-            dlin::set_quiet(args.quiet);
+            dlin_core::set_quiet(args.quiet);
             run_list_command(args)
         }
         Command::Summary(args) => {
-            dlin::set_quiet(args.quiet);
+            dlin_core::set_quiet(args.quiet);
             run_summary_command(args)
         }
         Command::CheckManifest(args) => {
-            dlin::set_quiet(args.quiet);
+            dlin_core::set_quiet(args.quiet);
             run_check_manifest_command(args)
         }
         Command::Impact {
@@ -64,7 +66,7 @@ fn main() {
             refresh_cache,
             quiet,
         } => {
-            dlin::set_quiet(quiet);
+            dlin_core::set_quiet(quiet);
             let stdin_lines = input::read_stdin_lines();
             let mut raw_inputs = model;
             raw_inputs.extend(stdin_lines);
@@ -88,8 +90,8 @@ fn main() {
     };
 
     if let Err(err) = result {
-        let diag = dlin::Diagnostic::from_error(&err);
-        eprintln!("{}", dlin::format_diagnostic(&diag));
+        let diag = dlin_core::Diagnostic::from_error(&err);
+        eprintln!("{}", dlin_core::format_diagnostic(&diag));
         std::process::exit(1);
     }
 }
@@ -149,7 +151,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
-        dlin::warn!(
+        dlin_core::warn!(
             "unknown node type '{}'. Known types: {}",
             t,
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
@@ -167,7 +169,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Collapse intermediate nodes if requested
     let filtered = if let Some(collapse_mode) = args.collapse {
         if args.no_transitive {
-            dlin::warn!(
+            dlin_core::warn!(
                 "--collapse has no effect with --no-transitive (transitive edges are required to preserve connectivity)"
             );
             filtered
@@ -201,7 +203,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     if !matches!(args.output, cli::OutputFormat::Json)
         && (args.json_fields.is_some() || args.json_full)
     {
-        dlin::warn!(
+        dlin_core::warn!(
             "--json-fields/--json-full have no effect with -o {}",
             args.output.label()
         );
@@ -225,7 +227,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             cli::OutputFormat::Dot | cli::OutputFormat::Mermaid
         )
     {
-        dlin::warn!(
+        dlin_core::warn!(
             "--group-by has no effect with -o {} (supported: dot, mermaid)",
             args.output.label()
         );
@@ -238,7 +240,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
             cli::OutputFormat::Dot | cli::OutputFormat::Mermaid
         )
     {
-        dlin::warn!(
+        dlin_core::warn!(
             "--direction has no effect with -o {} (supported: dot, mermaid)",
             args.output.label()
         );
@@ -246,7 +248,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Warn if --show-columns used with unsupported output format
     if args.show_columns && !matches!(args.output, cli::OutputFormat::Mermaid) {
-        dlin::warn!(
+        dlin_core::warn!(
             "--show-columns has no effect with -o {} (supported: mermaid)",
             args.output.label()
         );
@@ -318,7 +320,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
     for t in &graph::filter::validate_node_type_names(&type_names) {
-        dlin::warn!(
+        dlin_core::warn!(
             "unknown node type '{}'. Known types: {}",
             t,
             graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ")
@@ -340,7 +342,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     if !matches!(args.output, cli::ListOutputFormat::Json)
         && (args.json_fields.is_some() || args.json_full)
     {
-        dlin::warn!("--json-fields/--json-full have no effect with -o plain");
+        dlin_core::warn!("--json-fields/--json-full have no effect with -o plain");
     }
 
     // Collect SQL contents only when sql_content field is requested
@@ -465,7 +467,7 @@ fn collect_sql_contents(
                     map.insert(node.unique_id.clone(), content);
                 }
                 Err(e) => {
-                    dlin::warn!("could not read {}: {}", full_path.display(), e);
+                    dlin_core::warn!("could not read {}: {}", full_path.display(), e);
                 }
             }
         }
@@ -542,7 +544,7 @@ fn run_impact_command(
 #[cfg(not(tarpaulin_include))]
 fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {
     if matches!(source, SourceType::Sql) && has_tests {
-        dlin::warn!(
+        dlin_core::warn!(
             "sql mode infers generic tests from YAML declarations; \
              test IDs are dlin-specific and do not match dbt's naming. \
              Use --source manifest for exact dependency resolution"
@@ -731,7 +733,7 @@ fn check_manifest_freshness(
     let deleted_files = match parser::manifest::load_manifest(&resolved) {
         Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
         Err(e) => {
-            dlin::warn!("cannot parse manifest.json for deleted-file check: {}", e);
+            dlin_core::warn!("cannot parse manifest.json for deleted-file check: {}", e);
             return None;
         }
     };
@@ -798,7 +800,7 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
                 }
             }
             Err(e) => {
-                dlin::warn!("cannot read metadata for {}: {}", file.display(), e);
+                dlin_core::warn!("cannot read metadata for {}: {}", file.display(), e);
                 // Treat unreadable files as stale to fail safe
                 let rel = file.strip_prefix(&project_dir).unwrap_or(file);
                 stale_files.push(rel.to_path_buf());

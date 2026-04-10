@@ -1,0 +1,40 @@
+[package]
+name = "dlin-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core library for dbt model lineage analysis"
+readme = "../../README.md"
+keywords = ["dbt", "lineage", "dag", "sql"]
+categories = ["development-tools", "visualization"]
+
+[features]
+clap = ["dep:clap"]
+
+[dependencies]
+clap = { workspace = true, optional = true }
+petgraph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-saphyr = { workspace = true }
+regex = { workspace = true }
+walkdir = { workspace = true }
+colored = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+minijinja = { workspace = true }
+rayon = { workspace = true }
+globset = { workspace = true }
+path-slash = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+regex = { workspace = true }
+insta = { workspace = true }
+serial_test = { workspace = true }
+
+[lints]
+workspace = true

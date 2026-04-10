@@ -1,9 +1,55 @@
-pub mod cli;
 pub mod error;
 pub mod graph;
 pub mod input;
 pub mod parser;
 pub mod render;
+
+/// Graph collapse strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum CollapseMode {
+    /// Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
+    Endpoints,
+    /// Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
+    Focal,
+}
+
+/// Grouping strategy for graph output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum GroupBy {
+    /// Group nodes by node type (source, model, test, etc.)
+    NodeType,
+    /// Group nodes by their file directory
+    Directory,
+}
+
+/// Layout direction for graph output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum Direction {
+    /// Left to right (default)
+    LR,
+    /// Top to bottom
+    TB,
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::LR => write!(f, "LR"),
+            Direction::TB => write!(f, "TB"),
+        }
+    }
+}
+
+/// Output format for the list command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum ListOutputFormat {
+    Plain,
+    Json,
+}
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 

@@ -640,9 +640,9 @@ mod tests {
 
     #[test]
     fn test_exposure_metadata_from_fixture() {
-        let manifest_path =
-            std::path::Path::new("tests/fixtures/simple_project/target/manifest.json");
-        let graph = build_graph_from_manifest(manifest_path).unwrap();
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/simple_project/target/manifest.json");
+        let graph = build_graph_from_manifest(&manifest_path).unwrap();
 
         let exp_idx = graph
             .node_indices()
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn test_build_graph_from_fixture_manifest() {
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/simple_project/target/manifest.json");
+            .join("../../tests/fixtures/simple_project/target/manifest.json");
 
         if !fixture_path.exists() {
             // Skip if fixture not yet created
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn test_load_manifest() {
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/simple_project/target/manifest.json");
+            .join("../../tests/fixtures/simple_project/target/manifest.json");
 
         let manifest = load_manifest(&fixture_path).unwrap();
         assert!(!manifest.nodes.is_empty());
@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn test_collect_sql_contents_from_fixture() {
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/simple_project/target/manifest.json");
+            .join("../../tests/fixtures/simple_project/target/manifest.json");
 
         let manifest = load_manifest(&fixture_path).unwrap();
         let sql_contents = manifest.collect_sql_contents();

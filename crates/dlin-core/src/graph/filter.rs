@@ -477,11 +477,11 @@ pub fn filter_output_node_types(
 /// originate from the same graph.
 pub fn collapse_intermediate(
     graph: &LineageGraph,
-    mode: crate::cli::CollapseMode,
+    mode: crate::CollapseMode,
     preserve: &HashSet<NodeIndex>,
 ) -> LineageGraph {
     let mut keep: HashSet<_> = match mode {
-        crate::cli::CollapseMode::Endpoints => graph
+        crate::CollapseMode::Endpoints => graph
             .node_indices()
             .filter(|&idx| {
                 graph
@@ -494,7 +494,7 @@ pub fn collapse_intermediate(
                         .is_none()
             })
             .collect(),
-        crate::cli::CollapseMode::Focal => graph
+        crate::CollapseMode::Focal => graph
             .node_indices()
             .filter(|&idx| matches!(graph[idx].node_type, NodeType::Source | NodeType::Exposure))
             .collect(),
@@ -1500,7 +1500,7 @@ mod tests {
 
     // -- Collapse intermediate tests (endpoints mode) --------------------------
 
-    use crate::cli::CollapseMode;
+    use crate::CollapseMode;
 
     #[test]
     fn test_collapse_endpoints_basic() {
@@ -2099,7 +2099,7 @@ mod tests {
             graph,
             &mut buf,
             None,
-            crate::cli::Direction::LR,
+            crate::Direction::LR,
             false,
         )
         .unwrap();

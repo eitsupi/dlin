@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use serde_json::Value;
 
 use super::json::build_node_value;
-use crate::cli::ListOutputFormat;
+use crate::ListOutputFormat;
 use crate::graph::types::*;
 
 /// Resolve which fields to emit for list JSON, and validate field names.

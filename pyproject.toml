@@ -29,5 +29,5 @@ Homepage = "https://github.com/eitsupi/dlin"
 
 [tool.maturin]
 bindings = "bin"
-manifest-path = "Cargo.toml"
+manifest-path = "crates/dlin/Cargo.toml"
 strip = true

@@ -3,8 +3,8 @@ use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
-use crate::cli::{Direction, GroupBy};
 use crate::graph::types::*;
+use crate::{Direction, GroupBy};
 
 /// Render the lineage graph as a Mermaid flowchart to stdout
 pub fn render_mermaid(
@@ -684,7 +684,7 @@ mod tests {
 
         let collapsed = crate::graph::filter::collapse_intermediate(
             &graph,
-            crate::cli::CollapseMode::Endpoints,
+            crate::CollapseMode::Endpoints,
             &std::collections::HashSet::new(),
         );
         let output = render_to_string_with_columns(&collapsed);
