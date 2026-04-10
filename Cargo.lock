@@ -235,11 +235,25 @@ version = "0.1.2-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
+ "dlin-core",
+ "libc",
+ "path-slash",
+ "regex",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dlin-core"
+version = "0.1.2-alpha.1"
+dependencies = [
+ "anyhow",
+ "clap",
  "colored",
  "globset",
  "indexmap",
  "insta",
- "libc",
  "minijinja",
  "path-slash",
  "petgraph",

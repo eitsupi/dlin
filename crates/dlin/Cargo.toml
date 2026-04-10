@@ -1,0 +1,35 @@
+[package]
+name = "dlin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A fast CLI tool for dbt model lineage analysis"
+readme = "../../README.md"
+keywords = ["dbt", "lineage", "dag", "sql", "cli"]
+categories = ["command-line-utilities", "visualization"]
+
+[[bin]]
+name = "dlin"
+path = "src/main.rs"
+
+[dependencies]
+dlin-core = { workspace = true, features = ["clap"] }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+path-slash = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+dlin-core = { workspace = true }
+tempfile = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+serde-saphyr = { workspace = true }
+
+[lints]
+workspace = true

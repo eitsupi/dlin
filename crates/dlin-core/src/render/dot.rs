@@ -3,8 +3,8 @@ use std::io::{self, Write};
 
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
-use crate::cli::{Direction, GroupBy};
 use crate::graph::types::*;
+use crate::{Direction, GroupBy};
 
 /// Render the lineage graph as Graphviz DOT format to stdout
 pub fn render_dot(graph: &LineageGraph, group_by: Option<GroupBy>, direction: Direction) {
