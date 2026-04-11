@@ -34,7 +34,7 @@ insta = "1"
 serial_test = "3.4.0"
 
 # internal
-dlin-core = { path = "crates/dlin-core" }
+dlin-core = { version = "0.1.2", path = "crates/dlin-core" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
