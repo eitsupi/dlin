@@ -1072,10 +1072,10 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &result)
             };
-            if let Err(e) = res
-                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
-            {
-                return Err(anyhow::anyhow!(e));
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
             } else if let Err(e) = writeln!(out)
                 && e.kind() != std::io::ErrorKind::BrokenPipe
             {
