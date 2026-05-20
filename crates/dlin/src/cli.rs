@@ -1831,9 +1831,8 @@ mod tests {
 
     #[test]
     fn test_debug_parse_sql_positional_arg() {
-        let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap(),
-        );
+        let args =
+            unwrap_debug(Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap());
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert_eq!(a.sql.as_deref(), Some("SELECT 1"));
@@ -1846,9 +1845,7 @@ mod tests {
     #[test]
     fn test_debug_parse_sql_no_arg_ok() {
         // No positional arg is allowed (stdin will be read at runtime)
-        let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql"]).unwrap(),
-        );
+        let args = unwrap_debug(Cli::try_parse_from(["dlin", "debug", "parse-sql"]).unwrap());
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert!(a.sql.is_none());
@@ -1908,9 +1905,8 @@ mod tests {
 
     #[test]
     fn test_debug_parse_sql_default_dialect_is_generic() {
-        let args = unwrap_debug(
-            Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap(),
-        );
+        let args =
+            unwrap_debug(Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap());
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert_eq!(a.dialect, polyglot_sql::DialectType::Generic);
@@ -1983,12 +1979,7 @@ mod tests {
 
     #[test]
     fn test_debug_trace_column_requires_column() {
-        let result = Cli::try_parse_from([
-            "dlin",
-            "debug",
-            "trace-column",
-            "SELECT a FROM t",
-        ]);
+        let result = Cli::try_parse_from(["dlin", "debug", "trace-column", "SELECT a FROM t"]);
         assert!(result.is_err(), "trace-column should require --column");
     }
 

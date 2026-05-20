@@ -729,10 +729,10 @@ fn run_column_lineage_command(
         if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
             return Err(anyhow::anyhow!(e));
         }
-    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n") {
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(e.into());
-        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
     }
 
     cache.save();
@@ -801,10 +801,10 @@ fn run_column_impact_command(
         if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
             return Err(anyhow::anyhow!(e));
         }
-    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n") {
-        if e.kind() != std::io::ErrorKind::BrokenPipe {
-            return Err(e.into());
-        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
     }
 
     cache.save();
@@ -1072,10 +1072,10 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &result)
             };
-            if let Err(e) = res {
-                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
-                }
+            if let Err(e) = res
+                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
+            {
+                return Err(anyhow::anyhow!(e));
             } else if let Err(e) = writeln!(out)
                 && e.kind() != std::io::ErrorKind::BrokenPipe
             {
@@ -1146,10 +1146,10 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &expr)
             };
-            if let Err(e) = res {
-                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
-                }
+            if let Err(e) = res
+                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
+            {
+                return Err(anyhow::anyhow!(e));
             }
             writeln!(out)?;
         }
@@ -1165,9 +1165,12 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
         if table_def.is_empty() {
             continue;
         }
-        let (table_name, cols_str) = table_def
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("invalid schema format '{}': expected table:col1,col2", table_def))?;
+        let (table_name, cols_str) = table_def.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid schema format '{}': expected table:col1,col2",
+                table_def
+            )
+        })?;
         let columns: Vec<(String, polyglot_sql::expressions::DataType)> = cols_str
             .split(',')
             .map(|c| {
@@ -1201,10 +1204,7 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
 
     // Expand CTE stars if schema is provided
     if let Some(ref s) = schema {
-        polyglot_sql::lineage::expand_cte_stars(
-            &mut expr,
-            Some(s as &dyn polyglot_sql::Schema),
-        );
+        polyglot_sql::lineage::expand_cte_stars(&mut expr, Some(s as &dyn polyglot_sql::Schema));
     }
 
     let lineage_result = if let Some(ref s) = schema {
@@ -1236,10 +1236,10 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &node)
             };
-            if let Err(e) = res {
-                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
-                }
+            if let Err(e) = res
+                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
+            {
+                return Err(anyhow::anyhow!(e));
             }
             writeln!(out)?;
         }
