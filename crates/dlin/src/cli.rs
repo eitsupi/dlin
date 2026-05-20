@@ -531,7 +531,9 @@ Column resolution order:
   2. SQL inference from compiled_code (fallback when YAML is absent)
 
 Output: JSON array per model with the following structure:
-  model       model name
+  model             model name
+  traced_columns    number of columns successfully traced
+  total_columns     total number of columns attempted
   columns[]
     column          output column name
     transformation  how the column was derived:

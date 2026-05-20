@@ -12,6 +12,10 @@ use crate::parser::manifest::Manifest;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelColumnLineage {
     pub model: String,
+    /// Number of columns successfully traced
+    pub traced_columns: usize,
+    /// Total number of columns attempted (0 when model/SQL could not be loaded)
+    pub total_columns: usize,
     pub columns: Vec<ColumnLineageEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
@@ -211,8 +215,7 @@ impl ColumnLineageCache {
             // Auto-create .gitignore to prevent accidental commits
             let gitignore = parent.join(".gitignore");
             if !gitignore.exists()
-                && let Err(e) =
-                    std::fs::write(&gitignore, "# Automatically created by dlin\n*\n")
+                && let Err(e) = std::fs::write(&gitignore, "# Automatically created by dlin\n*\n")
             {
                 crate::warn!("could not create {}: {}", gitignore.display(), e);
             }
@@ -275,6 +278,8 @@ pub fn compute_column_lineage(
         None => {
             return ModelColumnLineage {
                 model: model_name.to_string(),
+                traced_columns: 0,
+                total_columns: 0,
                 columns: vec![],
                 errors: vec![format!("model '{}' not found in manifest", model_name)],
             };
@@ -286,6 +291,8 @@ pub fn compute_column_lineage(
         None => {
             return ModelColumnLineage {
                 model: model_name.to_string(),
+                traced_columns: 0,
+                total_columns: 0,
                 columns: vec![],
                 errors: vec![format!(
                     "model '{}' has no compiled_code (run `dbt compile` first)",
@@ -321,6 +328,8 @@ pub fn compute_column_lineage(
     if column_names.is_empty() {
         return ModelColumnLineage {
             model: model_name.to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![format!(
                 "model '{}': could not determine output columns (YAML has no columns and SQL inference failed)",
@@ -334,6 +343,8 @@ pub fn compute_column_lineage(
         Err(e) => {
             return ModelColumnLineage {
                 model: model_name.to_string(),
+                traced_columns: 0,
+                total_columns: column_names.len(),
                 columns: vec![],
                 errors: vec![format!("failed to parse SQL for '{}': {}", model_name, e)],
             };
@@ -380,6 +391,8 @@ pub fn compute_column_lineage(
 
     let result = ModelColumnLineage {
         model: model_name.to_string(),
+        traced_columns: columns.len(),
+        total_columns: total,
         columns,
         errors,
     };
@@ -2192,6 +2205,67 @@ select * from orders"#;
         );
     }
 
+    #[test]
+    fn test_traced_total_columns_success() {
+        let manifest = make_test_manifest();
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert_eq!(result.total_columns, 4);
+        assert_eq!(result.traced_columns, 4);
+    }
+
+    #[test]
+    fn test_traced_total_columns_partial_failure() {
+        let mut manifest = make_test_manifest();
+        let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+        node.columns.insert(
+            "nonexistent_col".to_string(),
+            ManifestColumn {
+                name: "nonexistent_col".to_string(),
+            },
+        );
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert_eq!(result.total_columns, 5);
+        assert_eq!(result.traced_columns, 4);
+    }
+
+    #[test]
+    fn test_traced_total_columns_model_not_found() {
+        let manifest = make_test_manifest();
+        let result = compute_column_lineage(
+            &manifest,
+            "nonexistent",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert_eq!(result.total_columns, 0);
+        assert_eq!(result.traced_columns, 0);
+    }
+
+    #[test]
+    fn test_traced_total_columns_in_json() {
+        let manifest = make_test_manifest();
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["traced_columns"], 4);
+        assert_eq!(parsed["total_columns"], 4);
+    }
+
     // --- Regression tests for known issues ---
 
     #[test]
@@ -3196,6 +3270,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "test_model".to_string(),
+            traced_columns: 1,
+            total_columns: 1,
             columns: vec![ColumnLineageEntry {
                 column: "id".to_string(),
                 transformation: TransformationType::Direct,
@@ -3233,6 +3309,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3255,6 +3333,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3277,6 +3357,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3306,6 +3388,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3334,6 +3418,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::disabled();
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3357,6 +3443,8 @@ select * from orders"#;
         let mut cache = ColumnLineageCache::load(project_dir, None);
         let lineage = ModelColumnLineage {
             model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
@@ -3375,6 +3463,8 @@ select * from orders"#;
         let mut fresh = ColumnLineageCache::fresh(project_dir, None);
         let lineage2 = ModelColumnLineage {
             model: "m2".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
             columns: vec![],
             errors: vec![],
         };
