@@ -44,17 +44,19 @@ Error format (--error-format):
                   Also settable via DLIN_ERROR_FORMAT=json",
     after_long_help = "\
 Examples:
-  dlin graph                              # Full lineage (ASCII art)
-  dlin graph -o json                      # Full lineage as JSON
-  dlin graph orders -u 2 -d 1             # orders with 2 upstream, 1 downstream
-  dlin graph -o json --json-full          # JSON with all fields
-  dlin list -o json                       # List all node names as JSON
-  dlin list orders stg_orders -o json     # List specific models as JSON
-  dlin impact orders -o json              # Downstream impact analysis
-  dlin summary                            # Project overview (node counts, etc.)
-  dlin summary -o json                    # Project overview as JSON
-  dlin check-manifest || dbt compile      # Recompile if stale or files deleted
-  git diff --name-only main | dlin graph  # Lineage of changed files",
+  dlin graph                                       # Full lineage (ASCII art)
+  dlin graph -o json                               # Full lineage as JSON
+  dlin graph orders -u 2 -d 1                      # orders with 2 upstream, 1 downstream
+  dlin graph -o json --json-full                   # JSON with all fields
+  dlin list -o json                                # List all node names as JSON
+  dlin list orders stg_orders -o json              # List specific models as JSON
+  dlin impact orders -o json                       # Downstream impact analysis
+  dlin summary                                     # Project overview (node counts, etc.)
+  dlin summary -o json                             # Project overview as JSON
+  dlin check-manifest || dbt compile               # Recompile if stale or files deleted
+  git diff --name-only main | dlin graph           # Lineage of changed files
+  dlin column-lineage orders                       # Column lineage (requires dbt compile)
+  dlin column-impact stg_orders --column order_id  # Column impact (requires dbt compile)",
     version
 )]
 pub struct Cli {
@@ -520,17 +522,31 @@ Examples:
         long_about = "\
 Compute column-level lineage for one or more models.
 
-Traces each output column back to its source columns using SQL analysis \
-(powered by polyglot-sql). Requires manifest.json with compiled_code \
-(run `dbt compile` first) and column definitions in YAML.
+Traces each output column back to its raw source columns, following the DAG \
+across intermediate models. Requires manifest.json with compiled SQL \
+(run `dbt compile` first).
 
-Only models with both compiled_code and YAML-defined columns are supported.
+Column resolution order:
+  1. YAML column definitions (schema.yml / models.yml)
+  2. SQL inference from compiled_code (fallback when YAML is absent)
 
-Output: JSON array of column lineage reports.
+Output: JSON array per model with the following structure:
+  model       model name
+  columns[]
+    column    output column name
+    sources[]
+      table         source model or raw table name
+      column        source column name
+      transformation  how the column was derived:
+                      direct     passed through unchanged
+                      renamed    aliased (e.g. id AS order_id)
+                      computed   expression or function
+                      aggregated aggregate function (SUM, COUNT, etc.)
+  errors[]    parse or resolution errors (non-empty → exit code 1)
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, etc.)",
+  1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
   # Column lineage for a single model
@@ -543,7 +559,10 @@ Examples:
   dlin column-lineage orders stg_orders
 
   # With explicit manifest path
-  dlin column-lineage orders --manifest-path target/manifest.json"
+  dlin column-lineage orders --manifest-path target/manifest.json
+
+  # BigQuery project
+  dlin column-lineage orders --dialect bigquery"
     )]
     ColumnLineage {
         /// Model names to analyze column lineage for
@@ -553,7 +572,8 @@ Examples:
         #[arg(long)]
         column: Vec<String>,
 
-        /// SQL dialect for parsing [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+        /// SQL dialect for parsing (default: generic).
+        /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
         #[arg(long)]
         dialect: Option<DialectType>,
 
@@ -597,11 +617,15 @@ Shows which downstream models and columns depend on a specific column,
 tracing through the DAG to find all affected outputs. This is the reverse
 direction of column-lineage (which traces upstream sources).
 
+Takes a single model and one or more --column flags (required).
+
 Requires compiled SQL in manifest.json — run `dbt compile` first.
+
+Output: JSON array per column with affected downstream columns and models.
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, etc.)",
+  1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
   # Impact of changing a single column
@@ -611,7 +635,10 @@ Examples:
   dlin column-impact stg_orders --column order_id --column status
 
   # With explicit manifest path
-  dlin column-impact stg_orders --column order_id --manifest-path target/manifest.json"
+  dlin column-impact stg_orders --column order_id --manifest-path target/manifest.json
+
+  # BigQuery project
+  dlin column-impact stg_orders --column order_id --dialect bigquery"
     )]
     ColumnImpact {
         /// Model name to analyze column impact for
@@ -621,7 +648,8 @@ Examples:
         #[arg(long, required = true)]
         column: Vec<String>,
 
-        /// SQL dialect for parsing [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+        /// SQL dialect for parsing (default: generic).
+        /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
         #[arg(long)]
         dialect: Option<DialectType>,
 
@@ -650,7 +678,7 @@ Examples:
         quiet: bool,
     },
 
-    /// Low-level debugging tools for polyglot-sql parsing and lineage
+    /// Low-level debugging tools for SQL parsing and lineage tracing
     #[command(
         long_about = "\
 Low-level debugging tools for polyglot-sql parsing and column lineage.
