@@ -533,15 +533,18 @@ Column resolution order:
 Output: JSON array per model with the following structure:
   model       model name
   columns[]
-    column    output column name
+    column          output column name
+    transformation  how the column was derived:
+                      direct       passed through unchanged (including renames)
+                      aggregation  aggregate function (SUM, COUNT, etc.)
+                      expression   arithmetic or other expression
+                      cast         type cast (CAST(x AS INT))
+                      conditional  CASE WHEN expression
+                      unknown      could not classify
     sources[]
       table         source model or raw table name
       column        source column name
-      transformation  how the column was derived:
-                      direct     passed through unchanged
-                      renamed    aliased (e.g. id AS order_id)
-                      computed   expression or function
-                      aggregated aggregate function (SUM, COUNT, etc.)
+      model_path[]  intermediate models traversed (omitted if empty)
   errors[]    parse or resolution errors (non-empty → exit code 1)
 
 Exit codes:
