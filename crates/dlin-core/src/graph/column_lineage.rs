@@ -17,7 +17,7 @@ pub struct ModelColumnLineage {
     /// Total number of columns attempted (0 when model/SQL could not be loaded)
     pub total_columns: usize,
     pub columns: Vec<ColumnLineageEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub errors: Vec<String>,
 }
 

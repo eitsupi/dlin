@@ -704,13 +704,34 @@ fn run_column_lineage_command(
                 report
                     .columns
                     .retain(|entry| column_filter.contains(entry.column.as_str()));
-                // Only recompute counts when analysis was actually attempted.
+                // Only recompute counts and filter errors when analysis was actually attempted.
                 // total_columns==0 indicates a load error (model not found, no
                 // compiled_code, etc.) — preserve the zero so callers can
                 // distinguish "nothing requested" from "nothing found".
                 if report.total_columns > 0 {
+                    // Remove per-column errors for columns outside the filter and
+                    // the stale partial-failure summary; regenerate the summary below.
+                    report.errors.retain(|err| {
+                        if let Some(rest) = err.strip_prefix("column '")
+                            && let Some(col_end) = rest.find('\'')
+                        {
+                            return column_filter.contains(&rest[..col_end]);
+                        }
+                        false
+                    });
                     report.traced_columns = report.columns.len();
                     report.total_columns = column_filter.len();
+                    // Regenerate partial-failure summary for requested columns.
+                    let failed = report.total_columns - report.traced_columns;
+                    if failed > 0 && !report.columns.is_empty() {
+                        report.errors.insert(
+                            0,
+                            format!(
+                                "model '{}': traced {}/{} columns ({} failed)",
+                                report.model, report.traced_columns, report.total_columns, failed,
+                            ),
+                        );
+                    }
                 }
             }
             report

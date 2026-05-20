@@ -1466,4 +1466,65 @@ models:
         // columns[] must be empty
         assert!(report["columns"].as_array().unwrap().is_empty());
     }
+
+    #[test]
+    fn test_column_lineage_column_filter_suppresses_unrelated_errors() {
+        // stg_partial_fail declares "ghost_col" in YAML but the SQL only outputs
+        // "order_id". Without a filter both columns are attempted; ghost_col fails.
+        // With --column order_id, ghost_col's error must be filtered out so that
+        // the exit code is 0 and errors[] is empty.
+        let fixture = column_lineage_fixture_dir();
+
+        // First confirm that without a filter, ghost_col causes a non-zero exit.
+        let unfiltered = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_partial_fail",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+        assert!(
+            !unfiltered.status.success(),
+            "expected non-zero exit when ghost_col fails"
+        );
+        let unfiltered_json: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&unfiltered.stdout)).unwrap();
+        assert!(
+            !unfiltered_json[0]["errors"].as_array().unwrap().is_empty(),
+            "expected errors[] to be non-empty without filter"
+        );
+
+        // Now with --column order_id: ghost_col's error must be suppressed.
+        let filtered = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_partial_fail",
+                "--column",
+                "order_id",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+        assert!(
+            filtered.status.success(),
+            "expected zero exit when only the successful column is requested; stderr: {}",
+            String::from_utf8_lossy(&filtered.stderr)
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&filtered.stdout)).unwrap();
+        let report = &reports[0];
+        assert_eq!(report["traced_columns"], 1);
+        assert_eq!(report["total_columns"], 1);
+        assert_eq!(report["columns"].as_array().unwrap().len(), 1);
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "ghost_col's error must not appear after --column order_id filter; errors: {:?}",
+            report["errors"]
+        );
+    }
 }
