@@ -1,26 +1,28 @@
-use dlin::graph::column_lineage::ColumnLineageCache;
+use dlin_core::graph::column_lineage::ColumnLineageCache;
 use polyglot_sql::DialectType;
 use std::path::PathBuf;
 
 fn column_lineage_fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("tests")
         .join("fixtures")
         .join("column_lineage_project")
 }
 
-fn load_fixture_manifest() -> dlin::parser::manifest::Manifest {
+fn load_fixture_manifest() -> dlin_core::parser::manifest::Manifest {
     let manifest_path = column_lineage_fixture_dir()
         .join("target")
         .join("manifest.json");
-    dlin::parser::manifest::load_manifest(&manifest_path).unwrap()
+    dlin_core::parser::manifest::load_manifest(&manifest_path).unwrap()
 }
 
 #[test]
 fn test_stg_orders_cte_star_with_rename() {
     // stg_orders uses: WITH renamed AS (SELECT id AS order_id, ...) SELECT * FROM renamed
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "stg_orders",
         DialectType::Generic,
@@ -62,7 +64,7 @@ fn test_stg_orders_cte_star_with_rename() {
 fn test_orders_cte_star_with_schema_and_join() {
     // orders model: CTEs with SELECT * FROM 3-part qualified tables, then JOIN
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "orders",
         DialectType::Generic,
@@ -98,7 +100,7 @@ fn test_orders_cte_star_with_schema_and_join() {
 fn test_customers_sql_inference_without_yaml_columns() {
     // customers model has no YAML columns — columns should be inferred from SQL
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "customers",
         DialectType::Generic,
@@ -120,7 +122,7 @@ fn test_customers_sql_inference_without_yaml_columns() {
 fn test_order_enriched_nested_cte_star() {
     // 3-level nested CTE: base_orders -> with_payments -> final, all using SELECT *
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "order_enriched",
         DialectType::Generic,
@@ -168,7 +170,7 @@ fn test_source_table_not_empty() {
     let manifest = load_fixture_manifest();
 
     for model in ["stg_orders", "orders"] {
-        let result = dlin::graph::column_lineage::compute_column_lineage(
+        let result = dlin_core::graph::column_lineage::compute_column_lineage(
             &manifest,
             model,
             DialectType::Generic,
@@ -201,7 +203,7 @@ fn test_yaml_columns_supplement_partial_sql_inference() {
     //   With YAML+SQL merge in resolve_node_columns, the schema has all 4 columns,
     //   enabling full star expansion and lineage tracing.
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "mart_yaml_star",
         DialectType::Generic,
@@ -237,7 +239,7 @@ fn test_cross_model_orders_traces_to_raw_sources() {
     // orders depends on stg_orders + stg_payments which depend on raw sources.
     // Cross-model should trace through to raw source columns.
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_cross_model_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "orders",
         DialectType::Generic,
@@ -294,13 +296,13 @@ fn test_cross_model_orders_traces_to_raw_sources() {
 fn test_cross_model_stg_orders_unchanged() {
     // stg_orders only depends on raw sources, so cross-model should give same result
     let manifest = load_fixture_manifest();
-    let single = dlin::graph::column_lineage::compute_column_lineage(
+    let single = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "stg_orders",
         DialectType::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    let cross = dlin::graph::column_lineage::compute_cross_model_column_lineage(
+    let cross = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "stg_orders",
         DialectType::Generic,
@@ -324,7 +326,7 @@ fn test_cross_model_customers_three_levels() {
     // customers → orders → stg_orders/stg_payments → raw sources
     // This tests 3-level deep tracing
     let manifest = load_fixture_manifest();
-    let result = dlin::graph::column_lineage::compute_cross_model_column_lineage(
+    let result = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "customers",
         DialectType::Generic,
