@@ -704,6 +704,8 @@ fn run_column_lineage_command(
                 report
                     .columns
                     .retain(|entry| column_filter.contains(entry.column.as_str()));
+                report.traced_columns = report.columns.len();
+                report.total_columns = column_filter.len();
             }
             report
         })

@@ -1379,4 +1379,54 @@ models:
             );
         }
     }
+
+    fn column_lineage_fixture_dir() -> std::path::PathBuf {
+        workspace_root()
+            .join("tests")
+            .join("fixtures")
+            .join("column_lineage_project")
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_updates_counts() {
+        // When --column filter is applied, traced_columns and total_columns must
+        // reflect the filtered set, not the full model's counts.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        // Only the requested column should be present
+        let columns = report["columns"].as_array().unwrap();
+        assert_eq!(columns.len(), 1, "only order_id should be in columns[]");
+        assert_eq!(columns[0]["column"], "order_id");
+        // Counts must reflect the filtered set
+        assert_eq!(
+            report["traced_columns"], 1,
+            "traced_columns should be 1 (filtered to 1 column)"
+        );
+        assert_eq!(
+            report["total_columns"], 1,
+            "total_columns should be 1 (requested 1 column)"
+        );
+    }
 }
