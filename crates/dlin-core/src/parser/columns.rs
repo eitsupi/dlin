@@ -1,0 +1,645 @@
+use polyglot_sql::expressions::Expression;
+use regex::Regex;
+use std::sync::LazyLock;
+
+/// Regex to strip Jinja tags {{ ... }} and {%- ... -%} etc.
+static JINJA_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{\{-?[\s\S]*?-?\}\}|\{%-?[\s\S]*?-?%\}").unwrap());
+
+/// Regex to strip Jinja comments {# ... #}
+static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
+
+/// Extract column names from the outermost SELECT clause of a SQL string.
+///
+/// This is a best-effort regex-based extraction, not a full SQL parser.
+/// It handles:
+/// - `SELECT col1, col2 FROM ...` -> `["col1", "col2"]`
+/// - `SELECT t.col1 AS alias1` -> `["alias1"]`
+/// - `SELECT col1 as alias1` -> `["alias1"]`
+/// - `SELECT *` -> `["*"]`
+/// - `SELECT DISTINCT col1, col2` -> `["col1", "col2"]`
+/// - Jinja tags are stripped before parsing
+/// - Subqueries in parentheses are skipped
+/// - Multiline SELECT clauses are handled
+pub fn extract_select_columns(sql: &str) -> Vec<String> {
+    // Strip Jinja comments and tags
+    let cleaned = JINJA_COMMENT.replace_all(sql, "");
+    let cleaned = JINJA_TAG.replace_all(&cleaned, "__jinja__");
+
+    // Find the last top-level SELECT keyword (not inside parentheses).
+    // This handles CTEs correctly: `WITH cte AS (SELECT ... ) SELECT ...`
+    // where the CTE's SELECT is inside parentheses.
+    let select_end = match find_last_top_level_select(&cleaned) {
+        Some(end) => end,
+        None => return vec![],
+    };
+
+    // Find the first top-level FROM after the SELECT (not inside parentheses)
+    let after_select = &cleaned[select_end..];
+    let select_body = match find_top_level_from(after_select) {
+        Some(pos) => &after_select[..pos],
+        None => return vec![],
+    };
+
+    // Split on commas, but not commas inside parentheses
+    let items = split_top_level_commas(select_body);
+
+    items
+        .iter()
+        .filter_map(|item| classify_select_item(item.trim()))
+        .collect()
+}
+
+/// Classify a single SELECT item and return its column name, if any.
+fn classify_select_item(item: &str) -> Option<String> {
+    if item.is_empty() {
+        return None;
+    }
+
+    // Items starting with '(' are subqueries; check for alias after closing paren
+    if item.starts_with('(') {
+        return extract_alias_after_paren(item);
+    }
+
+    let col = extract_column_name(item);
+    if col.is_empty() { None } else { Some(col) }
+}
+
+/// Find the byte offset just after the last top-level SELECT keyword (not inside parentheses).
+/// Also skips DISTINCT if present. Returns the position where the column list begins.
+fn find_last_top_level_select(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut depth: u32 = 0;
+    let mut last_select_end: Option<usize> = None;
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+            }
+            b's' | b'S' if depth == 0 => {
+                if check_keyword_at(bytes, i, len, b"SELECT") {
+                    let end = i + 6;
+                    // Skip optional DISTINCT
+                    let after = skip_whitespace(bytes, end, len);
+                    if check_keyword_at(bytes, after, len, b"DISTINCT") {
+                        let after_distinct = skip_whitespace(bytes, after + 8, len);
+                        last_select_end = Some(after_distinct);
+                    } else {
+                        last_select_end = Some(after);
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    last_select_end
+}
+
+/// Check if the bytes at position `i` match the given keyword (case-insensitive)
+/// with word boundaries on both sides.
+fn check_keyword_at(bytes: &[u8], i: usize, len: usize, keyword: &[u8]) -> bool {
+    let klen = keyword.len();
+    if i + klen > len {
+        return false;
+    }
+    for j in 0..klen {
+        if !bytes[i + j].eq_ignore_ascii_case(&keyword[j]) {
+            return false;
+        }
+    }
+    let before_ok = i == 0 || is_word_boundary(bytes[i - 1]);
+    let after_ok = i + klen >= len || is_word_boundary(bytes[i + klen]);
+    before_ok && after_ok
+}
+
+/// Skip whitespace characters and return the next non-whitespace position.
+fn skip_whitespace(bytes: &[u8], start: usize, len: usize) -> usize {
+    let mut i = start;
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Check if a byte is a word boundary character (not alphanumeric and not underscore)
+fn is_word_boundary(b: u8) -> bool {
+    !b.is_ascii_alphanumeric() && b != b'_'
+}
+
+/// Check if position `i` in string `s` starts a top-level `FROM` keyword with proper boundaries.
+/// Uses byte-level comparison to avoid panics on multi-byte UTF-8 characters.
+fn check_from_at(_s: &str, bytes: &[u8], i: usize, len: usize) -> bool {
+    if i + 4 > len {
+        return false;
+    }
+    let from_match = matches!(bytes[i], b'f' | b'F')
+        && matches!(bytes[i + 1], b'r' | b'R')
+        && matches!(bytes[i + 2], b'o' | b'O')
+        && matches!(bytes[i + 3], b'm' | b'M');
+    if !from_match {
+        return false;
+    }
+    let before_ok = i == 0 || is_word_boundary(bytes[i - 1]);
+    let after_ok = i + 4 >= len || is_word_boundary(bytes[i + 4]);
+    before_ok && after_ok
+}
+
+/// Find the position of the first top-level `FROM` keyword (not inside parentheses).
+/// Returns the byte offset of the start of `FROM` relative to the input string.
+fn find_top_level_from(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut depth: u32 = 0;
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+            }
+            b'f' | b'F' if depth == 0 => {
+                if check_from_at(s, bytes, i, len) {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+/// Split a string on commas that are not inside parentheses.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                items.push(current.clone());
+                current.clear();
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        items.push(current);
+    }
+
+    items
+}
+
+/// Extract the alias after a closing parenthesis, e.g., `(SELECT ...) AS alias`
+fn extract_alias_after_paren(item: &str) -> Option<String> {
+    // Find the last closing paren
+    let close = item.rfind(')')?;
+    let after = item[close + 1..].trim();
+    if after.is_empty() {
+        return None;
+    }
+    // Strip leading AS (case-insensitive) using byte comparison to avoid
+    // panics on multi-byte UTF-8 characters
+    let after = if after.len() >= 3
+        && matches!(after.as_bytes()[0], b'a' | b'A')
+        && matches!(after.as_bytes()[1], b's' | b'S')
+        && after.as_bytes()[2].is_ascii_whitespace()
+    {
+        after[2..].trim()
+    } else {
+        after
+    };
+    if after.is_empty() {
+        None
+    } else {
+        Some(clean_identifier(after))
+    }
+}
+
+/// Extract the effective column name from a single SELECT item.
+///
+/// Rules:
+/// 1. If `AS alias` is present, return the alias.
+/// 2. If `table.column`, return column.
+/// 3. Otherwise return the token itself (e.g., `*`, `col1`).
+fn extract_column_name(item: &str) -> String {
+    let item = item.trim();
+
+    // Check for AS alias (case-insensitive) - look for last " AS " or " as "
+    // We search from the end to handle expressions like `CAST(x AS int) AS col`
+    if let Some(alias) = find_last_as_alias(item) {
+        return clean_identifier(&alias);
+    }
+
+    // No alias; take the last token (handles `table.col` and bare `col`)
+    let last_token = item.split_whitespace().last().unwrap_or(item);
+
+    // Handle table.column
+    if let Some(pos) = last_token.rfind('.') {
+        return clean_identifier(&last_token[pos + 1..]);
+    }
+
+    clean_identifier(last_token)
+}
+
+/// Check if position `i` (a whitespace char) starts a top-level ` AS ` token.
+/// Returns the position after "AS " if matched.
+/// Uses byte-level comparison to avoid panics on multi-byte UTF-8 characters.
+fn is_as_keyword_at(_item: &str, bytes: &[u8], i: usize, len: usize) -> Option<usize> {
+    if i + 3 >= len {
+        return None;
+    }
+    let as_match = matches!(bytes[i + 1], b'a' | b'A') && matches!(bytes[i + 2], b's' | b'S');
+    if as_match && matches!(bytes[i + 3], b' ' | b'\t' | b'\n' | b'\r') {
+        Some(i + 4)
+    } else {
+        None
+    }
+}
+
+/// Find the alias from the last ` AS ` keyword that is not inside parentheses.
+fn find_last_as_alias(item: &str) -> Option<String> {
+    let bytes = item.as_bytes();
+    let len = bytes.len();
+    let mut depth = 0;
+    let mut last_as_pos: Option<usize> = None;
+
+    let mut i = 0;
+    while i < len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b' ' | b'\t' | b'\n' | b'\r' if depth == 0 => {
+                if let Some(pos) = is_as_keyword_at(item, bytes, i, len) {
+                    last_as_pos = Some(pos);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    last_as_pos.map(|pos| item[pos..].trim().to_string())
+}
+
+/// Clean an identifier: trim whitespace and remove surrounding backticks or quotes.
+fn clean_identifier(s: &str) -> String {
+    let s = s.trim();
+    let s = s.trim_matches('`');
+    let s = s.trim_matches('"');
+    s.to_string()
+}
+
+/// Extract output column names from a parsed polyglot-sql Expression.
+///
+/// Applies CTE star expansion to resolve `SELECT *` through CTEs,
+/// then reads the output column names from the outermost SELECT.
+/// Returns an empty Vec if the expression is not a SELECT or parsing fails.
+pub fn extract_select_columns_from_expr(
+    expr: &Expression,
+    schema: Option<&dyn polyglot_sql::Schema>,
+) -> Vec<String> {
+    let mut owned = expr.clone();
+    polyglot_sql::lineage::expand_cte_stars(&mut owned, schema);
+    match &owned {
+        Expression::Select(select) => select
+            .expressions
+            .iter()
+            .filter_map(|e| match e {
+                Expression::Alias(a) => Some(a.alias.name.clone()),
+                Expression::Column(c) => {
+                    if c.name.name == "*" {
+                        None // unresolved qualified star
+                    } else {
+                        Some(c.name.name.clone())
+                    }
+                }
+                Expression::Identifier(id) => Some(id.name.clone()),
+                Expression::Star(_) => None, // unresolved star
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_from_expr_cte_star() {
+        let sql = r#"with
+source as (select * from "raw"."raw_orders"),
+renamed as (
+    select id as order_id, customer as customer_id, ordered_at
+    from source
+)
+select * from renamed"#;
+        let expr =
+            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let cols = extract_select_columns_from_expr(&expr, None);
+        assert_eq!(cols, vec!["order_id", "customer_id", "ordered_at"]);
+    }
+
+    #[test]
+    fn test_extract_from_expr_cte_star_with_cast() {
+        // Realistic dbt stg_orders pattern with ::numeric cast
+        let sql = r#"with
+source as (
+    select * from "jaffle_shop"."raw"."raw_orders"
+),
+renamed as (
+    select
+        id as order_id,
+        store_id as location_id,
+        customer as customer_id,
+        subtotal as subtotal_cents,
+        tax_paid as tax_paid_cents,
+        order_total as order_total_cents,
+        (subtotal / 100)::numeric(16, 2) as subtotal,
+        (tax_paid / 100)::numeric(16, 2) as tax_paid,
+        (order_total / 100)::numeric(16, 2) as order_total,
+        date_trunc('day', ordered_at) as ordered_at
+    from source
+)
+select * from renamed"#;
+        let expr =
+            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let cols = extract_select_columns_from_expr(&expr, None);
+        assert!(cols.contains(&"order_id".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"customer_id".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"ordered_at".to_string()), "cols: {:?}", cols);
+        assert!(cols.contains(&"order_total".to_string()), "cols: {:?}", cols);
+        assert_eq!(cols.len(), 10, "cols: {:?}", cols);
+    }
+
+    #[test]
+    fn test_simple_select() {
+        let sql = "SELECT col1, col2 FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn test_select_with_aliases() {
+        let sql = "SELECT col1 AS alias1, col2 as alias2 FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["alias1", "alias2"]);
+    }
+
+    #[test]
+    fn test_select_with_table_prefixes() {
+        let sql = "SELECT t.col1, t.col2 FROM my_table t";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn test_select_star() {
+        let sql = "SELECT * FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["*"]);
+    }
+
+    #[test]
+    fn test_select_distinct() {
+        let sql = "SELECT DISTINCT col1, col2 FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn test_select_with_jinja() {
+        let sql = r#"
+            {{ config(materialized='table') }}
+
+            SELECT
+                order_id,
+                {{ dbt_utils.star(from=ref('stg_orders')) }},
+                customer_id
+            FROM {{ ref('stg_orders') }}
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["order_id", "__jinja__", "customer_id"]);
+    }
+
+    #[test]
+    fn test_multiline_select() {
+        let sql = r#"
+            SELECT
+                order_id,
+                customer_id,
+                order_date,
+                status
+            FROM orders
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(
+            cols,
+            vec!["order_id", "customer_id", "order_date", "status"]
+        );
+    }
+
+    #[test]
+    fn test_cte_gets_outer_select() {
+        let sql = r#"
+            WITH cte AS (
+                SELECT inner_col1, inner_col2 FROM raw_table
+            )
+            SELECT outer_col1, outer_col2 FROM cte
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["outer_col1", "outer_col2"]);
+    }
+
+    #[test]
+    fn test_multiple_ctes_gets_final_select() {
+        let sql = r#"
+            WITH cte1 AS (
+                SELECT * FROM raw_table
+            ),
+            cte2 AS (
+                SELECT a, b FROM cte1
+            )
+            SELECT
+                onramp_name,
+                count(distinct client_id) as total_known_clients,
+                sum(total_deals) as total_deals
+            FROM cte2
+            GROUP BY 1
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(
+            cols,
+            vec!["onramp_name", "total_known_clients", "total_deals"]
+        );
+    }
+
+    #[test]
+    fn test_select_with_function() {
+        let sql = "SELECT COUNT(*) AS total, SUM(amount) AS total_amount FROM orders";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["total", "total_amount"]);
+    }
+
+    #[test]
+    fn test_select_table_prefix_with_alias() {
+        let sql = "SELECT t.col1 AS alias1, t.col2 FROM my_table t";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["alias1", "col2"]);
+    }
+
+    #[test]
+    fn test_no_select() {
+        let sql = "INSERT INTO my_table VALUES (1, 2, 3)";
+        let cols = extract_select_columns(sql);
+        assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_jinja_comments() {
+        let sql = r#"
+            {# Select all order columns #}
+            SELECT order_id, status FROM orders
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["order_id", "status"]);
+    }
+
+    #[test]
+    fn test_select_with_cast() {
+        let sql = "SELECT CAST(order_id AS INTEGER) AS order_id, status FROM orders";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["order_id", "status"]);
+    }
+
+    #[test]
+    fn test_select_with_subquery_alias() {
+        let sql = "SELECT (SELECT MAX(id) FROM t) AS max_id, name FROM users";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["max_id", "name"]);
+    }
+
+    #[test]
+    fn test_typical_dbt_model() {
+        let sql = r#"
+            {{ config(materialized='view') }}
+
+            SELECT
+                order_id,
+                customer_id,
+                order_date,
+                status,
+                amount
+            FROM {{ ref('stg_orders') }}
+        "#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(
+            cols,
+            vec!["order_id", "customer_id", "order_date", "status", "amount"]
+        );
+    }
+
+    #[test]
+    fn test_select_case_insensitive() {
+        let sql = "select col1, col2 from my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn test_select_with_multibyte_utf8_comment() {
+        // GitHub Issue #1: panic on multi-byte UTF-8 characters
+        let sql = r#"SELECT
+    case
+      when flag = true then false -- 日本語コメント
+      else flag
+    end as flag
+FROM my_table"#;
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["flag"]);
+    }
+
+    #[test]
+    fn test_select_with_multibyte_utf8_string_literal() {
+        let sql = "SELECT '中文字符' AS label, col1 FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["label", "col1"]);
+    }
+
+    #[test]
+    fn test_select_with_korean_comment_no_panic() {
+        // Verify no panic on Korean characters (comment stripping is a separate concern)
+        let sql = "SELECT col1, col2 -- 한국어 코멘트\nFROM my_table";
+        let cols = extract_select_columns(sql);
+        assert!(!cols.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_emoji_comment_no_panic() {
+        // Verify no panic on emoji characters (comment stripping is a separate concern)
+        let sql = "SELECT col1 -- 🎉 celebration\nFROM my_table";
+        let cols = extract_select_columns(sql);
+        assert!(!cols.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_backtick_identifiers() {
+        let sql = "SELECT `col1`, `col2` FROM my_table";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn test_extract_alias_after_paren_no_alias() {
+        // Subquery with no alias after the closing paren
+        let result = extract_alias_after_paren("(SELECT 1)");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_alias_after_paren_bare_alias() {
+        // Subquery with bare alias (no AS keyword)
+        let result = extract_alias_after_paren("(SELECT 1) my_alias");
+        assert_eq!(result, Some("my_alias".to_string()));
+    }
+
+    #[test]
+    fn test_extract_alias_after_paren_as_alias() {
+        // Subquery with AS alias
+        let result = extract_alias_after_paren("(SELECT 1) AS my_alias");
+        assert_eq!(result, Some("my_alias".to_string()));
+    }
+
+    #[test]
+    fn test_extract_alias_after_paren_no_paren() {
+        // No closing paren at all
+        let result = extract_alias_after_paren("SELECT 1");
+        assert!(result.is_none());
+    }
+}

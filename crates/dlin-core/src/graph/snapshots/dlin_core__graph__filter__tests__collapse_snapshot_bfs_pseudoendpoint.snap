@@ -1,0 +1,10 @@
+---
+source: src/graph/filter.rs
+expression: render_mermaid(&collapsed)
+---
+flowchart LR
+    source_raw_x(["raw_x"])
+
+
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    class source_raw_x source

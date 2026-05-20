@@ -1,31 +1,21 @@
-[package]
-name = "dlin"
-version = "0.1.0"
-edition = "2021"
-description = "A fast CLI tool for dbt model lineage analysis"
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/dlin"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.2"
+edition = "2024"
 license = "MIT"
 repository = "https://github.com/eitsupi/dlin"
 homepage = "https://github.com/eitsupi/dlin"
-readme = "README.md"
-keywords = ["dbt", "lineage", "dag", "sql", "cli"]
-categories = ["command-line-utilities", "visualization"]
 
-[[bin]]
-name = "dlin"
-path = "src/main.rs"
-
-[features]
-default = ["tui"]
-tui = ["ratatui", "crossterm"]
-
-[dependencies]
-clap = { version = "4", features = ["derive", "env"] }
+[workspace.dependencies]
 petgraph = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-saphyr = "0.0.21"
 regex = "1"
-chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
 colored = "2"
 anyhow = "1"
@@ -35,19 +25,25 @@ minijinja = "2"
 rayon = "1"
 globset = "0.4"
 polyglot-sql = { git = "https://github.com/tobilg/polyglot.git", rev = "a5b0009", default-features = false, features = ["all-dialects"] }
-
-[target.'cfg(unix)'.dependencies]
+path-slash = "0.2.1"
+clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 
-# TUI dependencies (feature-gated)
-ratatui = { version = "0.29", optional = true }
-crossterm = { version = "0.28", optional = true }
+# dev
+tempfile = "3"
+insta = "1"
+serial_test = "3.4.0"
 
-[lints.rust]
+# internal
+dlin-core = { version = "0.1.2", path = "crates/dlin-core" }
+
+[workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
-[dev-dependencies]
-tempfile = "3"
-regex = "1"
-insta = "1"
-jugar-probar = { version = "1.0.2", default-features = false, features = ["tui"] }
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "s"
+panic = "abort"

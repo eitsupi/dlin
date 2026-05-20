@@ -1,0 +1,32 @@
+---
+source: src/render/dot.rs
+expression: output
+---
+digraph dbt_lineage {
+  rankdir=LR;
+  node [shape=box, style=filled, fontname="Helvetica"];
+
+  subgraph cluster__other_ {
+    label="(other)";
+    style=rounded;
+
+    "exposure.dashboard" [label="exp:dashboard", fillcolor="#E74C3C", fontcolor="white"];
+  }
+  subgraph cluster_models_marts {
+    label="models/marts";
+    style=rounded;
+
+    "model.orders" [label="orders", fillcolor="#4A90D9", fontcolor="white"];
+  }
+  subgraph cluster_models_staging {
+    label="models/staging";
+    style=rounded;
+
+    "model.stg_orders" [label="stg_orders", fillcolor="#4A90D9", fontcolor="white"];
+    "source.raw.orders" [label="src:raw.orders", fillcolor="#27AE60", fontcolor="white"];
+  }
+
+  "model.orders" -> "exposure.dashboard" [label="exposure", style=bold];
+  "model.stg_orders" -> "model.orders" [label="ref"];
+  "source.raw.orders" -> "model.stg_orders" [label="source", style=dashed];
+}

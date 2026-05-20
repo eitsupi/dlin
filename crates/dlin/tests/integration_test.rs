@@ -4,15 +4,21 @@ use std::path::PathBuf;
 // but for unit-level integration tests, we'll test the core logic inline.
 // For artifact tests, we test the JSON parsing directly.
 
-fn fixture_dir() -> PathBuf {
+fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+fn fixture_dir() -> PathBuf {
+    workspace_root()
         .join("tests")
         .join("fixtures")
         .join("simple_project")
 }
 
 fn binary_path() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut path = workspace_root();
     path.push("target");
     path.push("debug");
     path.push("dlin");
@@ -50,7 +56,7 @@ mod parsing {
     #[test]
     fn test_load_project() {
         let dir = fixture_dir();
-        let project = dlin::parser::project::DbtProject::load(&dir).unwrap();
+        let project = dlin_core::parser::project::DbtProject::load(&dir).unwrap();
         assert_eq!(project.name, "simple_project");
     }
 

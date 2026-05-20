@@ -1,0 +1,33 @@
+---
+source: src/render/mermaid.rs
+expression: output
+---
+flowchart LR
+    subgraph model["Model"]
+        model_orders["orders"]
+        model_stg_orders["stg_orders"]
+    end
+    subgraph source["Source"]
+        source_raw_orders(["raw.orders"])
+    end
+    subgraph test["Test"]
+        test_orders_positive{"orders_positive"}
+    end
+    subgraph exposure["Exposure"]
+        exposure_dashboard>"dashboard"]
+    end
+
+    model_orders ==>|exposure| exposure_dashboard
+    model_orders -.->|test| test_orders_positive
+    model_stg_orders -->|ref| model_orders
+    source_raw_orders -.->|source| model_stg_orders
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    classDef test fill:#1ABC9C,stroke:#333,color:#fff
+    classDef exposure fill:#E74C3C,stroke:#333,color:#fff
+    class exposure_dashboard exposure
+    class model_orders model
+    class model_stg_orders model
+    class source_raw_orders source
+    class test_orders_positive test

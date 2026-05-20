@@ -1,0 +1,14 @@
+---
+source: src/render/mermaid.rs
+expression: output
+---
+flowchart LR
+    exposure_dashboard>"dashboard"]
+    source_raw_orders(["raw.orders<br/>---<br/>id, customer_id, amount"])
+
+    source_raw_orders ==>|"exposure (via 2)"| exposure_dashboard
+
+    classDef source fill:#27AE60,stroke:#333,color:#fff
+    classDef exposure fill:#E74C3C,stroke:#333,color:#fff
+    class exposure_dashboard exposure
+    class source_raw_orders source
