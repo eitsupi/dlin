@@ -210,11 +210,7 @@ fn test_yaml_columns_supplement_partial_sql_inference() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(
-        result.errors.is_empty(),
-        "errors: {:?}",
-        result.errors
-    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(
         result.columns.len(),
         4,

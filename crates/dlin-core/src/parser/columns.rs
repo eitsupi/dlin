@@ -360,8 +360,7 @@ renamed as (
     from source
 )
 select * from renamed"#;
-        let expr =
-            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
         let cols = extract_select_columns_from_expr(&expr, None);
         assert_eq!(cols, vec!["order_id", "customer_id", "ordered_at"]);
     }
@@ -388,13 +387,20 @@ renamed as (
     from source
 )
 select * from renamed"#;
-        let expr =
-            polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
+        let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
         let cols = extract_select_columns_from_expr(&expr, None);
         assert!(cols.contains(&"order_id".to_string()), "cols: {:?}", cols);
-        assert!(cols.contains(&"customer_id".to_string()), "cols: {:?}", cols);
+        assert!(
+            cols.contains(&"customer_id".to_string()),
+            "cols: {:?}",
+            cols
+        );
         assert!(cols.contains(&"ordered_at".to_string()), "cols: {:?}", cols);
-        assert!(cols.contains(&"order_total".to_string()), "cols: {:?}", cols);
+        assert!(
+            cols.contains(&"order_total".to_string()),
+            "cols: {:?}",
+            cols
+        );
         assert_eq!(cols.len(), 10, "cols: {:?}", cols);
     }
 
