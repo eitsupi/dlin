@@ -704,8 +704,14 @@ fn run_column_lineage_command(
                 report
                     .columns
                     .retain(|entry| column_filter.contains(entry.column.as_str()));
-                report.traced_columns = report.columns.len();
-                report.total_columns = column_filter.len();
+                // Only recompute counts when analysis was actually attempted.
+                // total_columns==0 indicates a load error (model not found, no
+                // compiled_code, etc.) — preserve the zero so callers can
+                // distinguish "nothing requested" from "nothing found".
+                if report.total_columns > 0 {
+                    report.traced_columns = report.columns.len();
+                    report.total_columns = column_filter.len();
+                }
             }
             report
         })

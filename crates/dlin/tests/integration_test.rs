@@ -1429,4 +1429,41 @@ models:
             "total_columns should be 1 (requested 1 column)"
         );
     }
+
+    #[test]
+    fn test_column_lineage_column_filter_preserves_zero_counts_on_error() {
+        // When the model cannot be loaded (e.g. not found), total_columns is 0.
+        // Applying --column should NOT overwrite it with the filter size.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "nonexistent_model",
+                "--column",
+                "some_col",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        // Exit code is 1 (error) but JSON should still be emitted
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        // Model not found → no analysis ran → counts must stay 0
+        assert_eq!(
+            report["traced_columns"], 0,
+            "traced_columns should remain 0 for a missing model"
+        );
+        assert_eq!(
+            report["total_columns"], 0,
+            "total_columns should remain 0 for a missing model, not overwritten by filter size"
+        );
+        // columns[] must be empty
+        assert!(report["columns"].as_array().unwrap().is_empty());
+    }
 }
