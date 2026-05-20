@@ -210,10 +210,11 @@ impl ColumnLineageCache {
             }
             // Auto-create .gitignore to prevent accidental commits
             let gitignore = parent.join(".gitignore");
-            if !gitignore.exists() {
-                if let Err(e) = std::fs::write(&gitignore, "# Automatically created by dlin\n*\n") {
-                    crate::warn!("could not create {}: {}", gitignore.display(), e);
-                }
+            if !gitignore.exists()
+                && let Err(e) =
+                    std::fs::write(&gitignore, "# Automatically created by dlin\n*\n")
+            {
+                crate::warn!("could not create {}: {}", gitignore.display(), e);
             }
         }
         match serde_json::to_string(&cf) {
@@ -625,12 +626,12 @@ fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String
             continue;
         }
         for dep_id in &node.depends_on.nodes {
-            if let Some(dep_node) = manifest.nodes.get(dep_id) {
-                if dep_node.resource_type == "model" {
-                    map.entry(dep_node.name.clone())
-                        .or_default()
-                        .push(node.name.clone());
-                }
+            if let Some(dep_node) = manifest.nodes.get(dep_id)
+                && dep_node.resource_type == "model"
+            {
+                map.entry(dep_node.name.clone())
+                    .or_default()
+                    .push(node.name.clone());
             }
         }
     }
@@ -942,17 +943,17 @@ fn build_schema_from_manifest(
         }
 
         // Try as a source
-        if let Some(dep_source) = manifest.sources.get(dep_id) {
-            if !dep_source.columns.is_empty() {
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
-                    .columns
-                    .keys()
-                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                    .collect();
-                let table_name = &dep_source.name;
-                if schema.add_table(table_name, &cols, None).is_ok() {
-                    has_entries = true;
-                }
+        if let Some(dep_source) = manifest.sources.get(dep_id)
+            && !dep_source.columns.is_empty()
+        {
+            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
+                .columns
+                .keys()
+                .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
+                .collect();
+            let table_name = &dep_source.name;
+            if schema.add_table(table_name, &cols, None).is_ok() {
+                has_entries = true;
             }
         }
     }
@@ -1030,16 +1031,16 @@ fn build_yaml_schema_for_node(
             continue;
         }
 
-        if let Some(dep_source) = manifest.sources.get(dep_id) {
-            if !dep_source.columns.is_empty() {
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
-                    .columns
-                    .keys()
-                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                    .collect();
-                if schema.add_table(&dep_source.name, &cols, None).is_ok() {
-                    has_entries = true;
-                }
+        if let Some(dep_source) = manifest.sources.get(dep_id)
+            && !dep_source.columns.is_empty()
+        {
+            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
+                .columns
+                .keys()
+                .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
+                .collect();
+            if schema.add_table(&dep_source.name, &cols, None).is_ok() {
+                has_entries = true;
             }
         }
     }
@@ -1075,6 +1076,21 @@ fn compute_manifest_columns_hash(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
 ) -> u64 {
+    let mut visited: HashSet<String> = HashSet::new();
+    hash_node_columns_transitive(manifest, node, &mut visited)
+}
+
+/// Recursively hash a node's YAML columns and its transitive dependency inputs.
+///
+/// `visited` prevents infinite loops in case of cyclic dependency graphs.
+/// Sources (leaves) are hashed by their column list only; intermediate nodes
+/// are hashed recursively so that grandparent schema changes invalidate the
+/// cache all the way up.
+fn hash_node_columns_transitive(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+    visited: &mut HashSet<String>,
+) -> u64 {
     let mut parts: Vec<String> = Vec::new();
 
     // Own YAML columns (sorted for determinism)
@@ -1083,29 +1099,30 @@ fn compute_manifest_columns_hash(
     for col in own_cols {
         parts.push(col.clone());
     }
+    // Own compiled SQL — captures column changes not reflected in YAML
+    if let Some(code) = &node.compiled_code {
+        parts.push(format!("sql:{}", hash_str(code)));
+    }
     parts.push("|".to_string()); // separator between own and upstream
 
-    // Upstream dependencies' YAML columns and compiled SQL hashes.
-    // SQL hashes are included so that upstream column changes not reflected in YAML
-    // (e.g. a new column added to compiled SQL without updating the manifest) still
-    // invalidate the cache.
+    // Recursively hash upstream dependencies so that grandparent schema changes
+    // (e.g. a new column added to a grandparent's SQL) also invalidate this cache.
     let mut dep_ids: Vec<&String> = node.depends_on.nodes.iter().collect();
     dep_ids.sort();
     for dep_id in dep_ids {
+        parts.push(dep_id.clone());
+        if visited.contains(dep_id) {
+            // Already visited; skip to avoid infinite recursion in cyclic graphs
+            continue;
+        }
+        visited.insert(dep_id.clone());
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let mut cols: Vec<&String> = dep_node.columns.keys().collect();
-            cols.sort();
-            parts.push(dep_id.clone());
-            for col in cols {
-                parts.push(col.clone());
-            }
-            if let Some(code) = &dep_node.compiled_code {
-                parts.push(format!("sql:{}", hash_str(code)));
-            }
+            let dep_hash = hash_node_columns_transitive(manifest, dep_node, visited);
+            parts.push(format!("node:{}", dep_hash));
         } else if let Some(dep_source) = manifest.sources.get(dep_id) {
+            // Sources are leaves — hash their columns directly
             let mut cols: Vec<&String> = dep_source.columns.keys().collect();
             cols.sort();
-            parts.push(dep_id.clone());
             for col in cols {
                 parts.push(col.clone());
             }
