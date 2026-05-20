@@ -302,14 +302,17 @@ pub fn compute_column_lineage(
         return cached.clone();
     }
 
-    // Get column names: prefer YAML-defined columns, fall back to SQL inference
+    // Get column names: union of YAML-defined and SQL-inferred columns so that
+    // partially documented models include undocumented SQL output columns.
     let column_names: Vec<String> = {
-        let mut names: Vec<String> = node.columns.keys().cloned().collect();
-        if names.is_empty() {
-            // Infer from compiled SQL
-            let schema = build_yaml_schema_for_node(manifest, node);
-            names = infer_output_columns(compiled_code, dialect, schema.as_ref());
-        }
+        let mut names: HashSet<String> = node.columns.keys().cloned().collect();
+        let schema = build_yaml_schema_for_node(manifest, node);
+        names.extend(infer_output_columns(
+            compiled_code,
+            dialect,
+            schema.as_ref(),
+        ));
+        let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
         names
     };
@@ -319,7 +322,7 @@ pub fn compute_column_lineage(
             model: model_name.to_string(),
             columns: vec![],
             errors: vec![format!(
-                "model '{}': could not determine output columns (no YAML columns and SQL inference failed)",
+                "model '{}': could not determine output columns (YAML has no columns and SQL inference failed)",
                 model_name
             )],
         };
@@ -381,7 +384,13 @@ pub fn compute_column_lineage(
     };
 
     // Store in disk cache
-    cache.insert(model_name, compiled_code, dialect, manifest_columns_hash, result.clone());
+    cache.insert(
+        model_name,
+        compiled_code,
+        dialect,
+        manifest_columns_hash,
+        result.clone(),
+    );
 
     result
 }
@@ -948,11 +957,7 @@ fn build_schema_from_manifest(
         }
     }
 
-    if has_entries {
-        Some(schema)
-    } else {
-        None
-    }
+    if has_entries { Some(schema) } else { None }
 }
 
 /// Resolve columns for a manifest node.
@@ -1039,11 +1044,7 @@ fn build_yaml_schema_for_node(
         }
     }
 
-    if has_entries {
-        Some(schema)
-    } else {
-        None
-    }
+    if has_entries { Some(schema) } else { None }
 }
 
 /// Infer output column names from a model's compiled SQL by parsing it and extracting
@@ -1084,7 +1085,10 @@ fn compute_manifest_columns_hash(
     }
     parts.push("|".to_string()); // separator between own and upstream
 
-    // Upstream dependencies' YAML columns
+    // Upstream dependencies' YAML columns and compiled SQL hashes.
+    // SQL hashes are included so that upstream column changes not reflected in YAML
+    // (e.g. a new column added to compiled SQL without updating the manifest) still
+    // invalidate the cache.
     let mut dep_ids: Vec<&String> = node.depends_on.nodes.iter().collect();
     dep_ids.sort();
     for dep_id in dep_ids {
@@ -1094,6 +1098,9 @@ fn compute_manifest_columns_hash(
             parts.push(dep_id.clone());
             for col in cols {
                 parts.push(col.clone());
+            }
+            if let Some(code) = &dep_node.compiled_code {
+                parts.push(format!("sql:{}", hash_str(code)));
             }
         } else if let Some(dep_source) = manifest.sources.get(dep_id) {
             let mut cols: Vec<&String> = dep_source.columns.keys().collect();
@@ -3216,7 +3223,11 @@ select * from orders"#;
         cache.save();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
-        assert!(cache2.get("m", "SELECT 2", DialectType::Generic, 0).is_none());
+        assert!(
+            cache2
+                .get("m", "SELECT 2", DialectType::Generic, 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -3234,9 +3245,11 @@ select * from orders"#;
         cache.save();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
-        assert!(cache2
-            .get("m", "SELECT 1", DialectType::Snowflake, 0)
-            .is_none());
+        assert!(
+            cache2
+                .get("m", "SELECT 1", DialectType::Snowflake, 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -3255,13 +3268,17 @@ select * from orders"#;
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
         // Same hash → hit
-        assert!(cache2
-            .get("m", "SELECT 1", DialectType::Generic, 42)
-            .is_some());
+        assert!(
+            cache2
+                .get("m", "SELECT 1", DialectType::Generic, 42)
+                .is_some()
+        );
         // Different hash → miss (YAML columns changed in manifest)
-        assert!(cache2
-            .get("m", "SELECT 1", DialectType::Generic, 99)
-            .is_none());
+        assert!(
+            cache2
+                .get("m", "SELECT 1", DialectType::Generic, 99)
+                .is_none()
+        );
     }
 
     #[test]
@@ -3288,7 +3305,11 @@ select * from orders"#;
         std::fs::write(&cache_path, serde_json::to_string(&cf).unwrap()).unwrap();
 
         let cache2 = ColumnLineageCache::load(project_dir, None);
-        assert!(cache2.get("m", "SELECT 1", DialectType::Generic, 0).is_none());
+        assert!(
+            cache2
+                .get("m", "SELECT 1", DialectType::Generic, 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -3301,7 +3322,11 @@ select * from orders"#;
         };
         cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
         // Disabled cache still works in-memory (only disk persistence is disabled)
-        assert!(cache.get("m", "SELECT 1", DialectType::Generic, 0).is_some());
+        assert!(
+            cache
+                .get("m", "SELECT 1", DialectType::Generic, 0)
+                .is_some()
+        );
         // But save is a no-op (no cache_path)
         cache.save();
     }
@@ -3323,7 +3348,11 @@ select * from orders"#;
 
         // Fresh cache ignores existing entries
         let fresh = ColumnLineageCache::fresh(project_dir, None);
-        assert!(fresh.get("m", "SELECT 1", DialectType::Generic, 0).is_none());
+        assert!(
+            fresh
+                .get("m", "SELECT 1", DialectType::Generic, 0)
+                .is_none()
+        );
 
         // But can save new entries
         let mut fresh = ColumnLineageCache::fresh(project_dir, None);
@@ -3336,8 +3365,10 @@ select * from orders"#;
         fresh.save();
 
         let reloaded = ColumnLineageCache::load(project_dir, None);
-        assert!(reloaded
-            .get("m2", "SELECT 2", DialectType::Generic, 0)
-            .is_some());
+        assert!(
+            reloaded
+                .get("m2", "SELECT 2", DialectType::Generic, 0)
+                .is_some()
+        );
     }
 }
