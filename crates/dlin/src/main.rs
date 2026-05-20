@@ -710,9 +710,11 @@ fn run_column_lineage_command(
         .collect();
 
     // Print warnings for errors
+    let mut has_errors = false;
     for report in &reports {
         for err in &report.errors {
             dlin_core::warn!("{}", err);
+            has_errors = true;
         }
     }
 
@@ -737,6 +739,9 @@ fn run_column_lineage_command(
 
     cache.save();
 
+    if has_errors {
+        anyhow::bail!("column lineage analysis completed with errors");
+    }
     Ok(())
 }
 
@@ -782,9 +787,11 @@ fn run_column_impact_command(
         .collect();
 
     // Print warnings for errors
+    let mut has_errors = false;
     for report in &reports {
         for err in &report.errors {
             dlin_core::warn!("{}", err);
+            has_errors = true;
         }
     }
 
@@ -809,6 +816,9 @@ fn run_column_impact_command(
 
     cache.save();
 
+    if has_errors {
+        anyhow::bail!("column impact analysis completed with errors");
+    }
     Ok(())
 }
 
@@ -1146,12 +1156,15 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &expr)
             };
-            if let Err(e) = res
-                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = writeln!(out)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
             {
-                return Err(anyhow::anyhow!(e));
+                return Err(e.into());
             }
-            writeln!(out)?;
         }
     }
     Ok(())
@@ -1236,12 +1249,15 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
             } else {
                 serde_json::to_writer(&mut out, &node)
             };
-            if let Err(e) = res
-                && e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe)
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = writeln!(out)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
             {
-                return Err(anyhow::anyhow!(e));
+                return Err(e.into());
             }
-            writeln!(out)?;
         }
         Err(e) => {
             return Err(anyhow::anyhow!("lineage error: {}", e));
