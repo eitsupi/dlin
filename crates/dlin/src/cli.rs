@@ -571,6 +571,7 @@ Examples:
     )]
     ColumnLineage {
         /// Model names to analyze column lineage for
+        #[arg(required = true)]
         model: Vec<String>,
 
         /// Specific columns to analyze (analyzes all columns if omitted)
@@ -1693,11 +1694,12 @@ mod tests {
 
     #[test]
     fn test_column_lineage_no_model() {
-        let cli = Cli::try_parse_from(["dlin", "column-lineage"]).unwrap();
-        match cli.command {
-            Command::ColumnLineage { model, .. } => assert!(model.is_empty()),
-            _ => panic!("Expected ColumnLineage subcommand"),
-        }
+        // model is required at the clap level
+        let result = Cli::try_parse_from(["dlin", "column-lineage"]);
+        assert!(
+            result.is_err(),
+            "column-lineage should require at least one model"
+        );
     }
 
     #[test]

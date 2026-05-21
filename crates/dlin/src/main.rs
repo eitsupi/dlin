@@ -1252,13 +1252,16 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
         })?;
         let columns: Vec<(String, polyglot_sql::expressions::DataType)> = cols_str
             .split(',')
-            .map(|c| {
-                (
-                    c.trim().to_string(),
-                    polyglot_sql::expressions::DataType::Unknown,
-                )
-            })
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .map(|c| (c.to_string(), polyglot_sql::expressions::DataType::Unknown))
             .collect();
+        if columns.is_empty() {
+            anyhow::bail!(
+                "invalid schema format '{}': table has no columns",
+                table_name.trim()
+            );
+        }
         schema
             .add_table(table_name.trim(), &columns, None)
             .map_err(|e| anyhow::anyhow!("schema error: {}", e))?;
@@ -1378,5 +1381,20 @@ mod tests {
     fn test_parse_schema_string_invalid_format() {
         let result = parse_schema_string("no_colon");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_empty_columns_rejected() {
+        // "t:" and "t:a,,b" should error due to no/empty column names
+        assert!(parse_schema_string("t:").is_err());
+        assert!(parse_schema_string("t:,").is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_consecutive_commas_ignored() {
+        // "t:a,,b" — the empty segment is dropped, result has only a and b
+        let schema = parse_schema_string("t:a,,b").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b"]);
     }
 }
