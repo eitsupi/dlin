@@ -1174,11 +1174,12 @@ fn read_sql_input(sql: Option<&str>) -> Result<String> {
         return Ok(s.to_string());
     }
     // Read from stdin
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    let mut stdin = std::io::stdin();
+    if std::io::IsTerminal::is_terminal(&stdin) {
         anyhow::bail!("provide SQL as an argument or via stdin");
     }
     let mut buf = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+    std::io::Read::read_to_string(&mut stdin, &mut buf)?;
     if buf.is_empty() {
         anyhow::bail!("no SQL input received from stdin");
     }

@@ -1025,11 +1025,12 @@ fn build_schema_from_manifest(
             // often uses schema.table even when a database is set in the manifest.
             let schema_fq =
                 make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
+            let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
             for alias in [
                 schema_fq.as_str(),
                 physical_identifier,
                 dep_source.name.as_str(),
-                &format!("{}.{}", dep_source.source_name, dep_source.name),
+                source_qualified.as_str(),
             ] {
                 if alias != physical_fq {
                     let _ = schema.add_table(alias, &cols, None);
@@ -1137,11 +1138,12 @@ fn build_yaml_schema_for_node(
             // often uses schema.table even when a database is set in the manifest.
             let schema_fq =
                 make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
+            let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
             for alias in [
                 schema_fq.as_str(),
                 physical_identifier,
                 dep_source.name.as_str(),
-                &format!("{}.{}", dep_source.source_name, dep_source.name),
+                source_qualified.as_str(),
             ] {
                 if alias != physical_fq {
                     let _ = schema.add_table(alias, &cols, None);
