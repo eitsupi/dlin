@@ -965,14 +965,26 @@ fn build_schema_from_manifest(
                 .keys()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
-            // Register with short name (e.g. "orders")
-            if schema.add_table(&dep_source.name, &cols, None).is_ok() {
+            let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
+            // Primary: physical FQ name (e.g. "mydb.raw.accounts")
+            let physical_fq = make_fq_table_name(
+                dep_source.database.as_deref(),
+                dep_source.schema.as_deref(),
+                physical_identifier,
+            );
+            if schema.add_table(&physical_fq, &cols, None).is_ok() {
                 has_entries = true;
             }
-            // Also register as "source_name.table" (e.g. "raw.orders") so that
-            // compiled SQL referencing `raw`.`orders` can be resolved via the schema.
-            let fq_source = format!("{}.{}", dep_source.source_name, dep_source.name);
-            let _ = schema.add_table(&fq_source, &cols, None);
+            // Fallback aliases
+            for alias in [
+                physical_identifier,
+                dep_source.name.as_str(),
+                &format!("{}.{}", dep_source.source_name, dep_source.name),
+            ] {
+                if alias != physical_fq {
+                    let _ = schema.add_table(alias, &cols, None);
+                }
+            }
         }
     }
 
@@ -1057,14 +1069,26 @@ fn build_yaml_schema_for_node(
                 .keys()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
-            // Register with short name (e.g. "orders")
-            if schema.add_table(&dep_source.name, &cols, None).is_ok() {
+            let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
+            // Primary: physical FQ name (e.g. "mydb.raw.accounts")
+            let physical_fq = make_fq_table_name(
+                dep_source.database.as_deref(),
+                dep_source.schema.as_deref(),
+                physical_identifier,
+            );
+            if schema.add_table(&physical_fq, &cols, None).is_ok() {
                 has_entries = true;
             }
-            // Also register as "source_name.table" (e.g. "raw.orders") so that
-            // compiled SQL referencing `raw`.`orders` can be resolved via the schema.
-            let fq_source = format!("{}.{}", dep_source.source_name, dep_source.name);
-            let _ = schema.add_table(&fq_source, &cols, None);
+            // Fallback aliases
+            for alias in [
+                physical_identifier,
+                dep_source.name.as_str(),
+                &format!("{}.{}", dep_source.source_name, dep_source.name),
+            ] {
+                if alias != physical_fq {
+                    let _ = schema.add_table(alias, &cols, None);
+                }
+            }
         }
     }
 
@@ -1350,6 +1374,9 @@ mod tests {
                 description: None,
                 path: None,
                 columns: source_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -1705,6 +1732,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: raw_orders_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -1728,6 +1758,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: raw_payments_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -2305,6 +2338,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: src_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -2435,6 +2471,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: user_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -2458,6 +2497,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: region_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -2647,6 +2689,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: user_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 
@@ -2670,6 +2715,9 @@ select * from orders"#;
                 description: None,
                 path: None,
                 columns: region_cols,
+                database: None,
+                schema: None,
+                identifier: None,
             },
         );
 

@@ -1608,4 +1608,72 @@ models:
             errors
         );
     }
+
+    #[test]
+    fn test_column_lineage_source_physical_schema_differs_from_source_name() {
+        // Regression test: when source_name != physical schema (e.g. source_name="salesforce",
+        // schema="raw"), dbt compiled SQL uses the physical schema ("raw"."accounts"), not
+        // "salesforce"."accounts". The schema registration must use the physical schema so
+        // that SELECT * expansion works correctly.
+        //
+        // The fixture has:
+        //   source salesforce.accounts with schema: raw (physical)
+        //   stg_accounts model with compiled SQL: SELECT ... FROM "raw"."accounts"
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_accounts",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "column-lineage for stg_accounts should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        assert_eq!(report["model"], "stg_accounts");
+
+        // All 3 YAML columns should be traced successfully
+        let columns = report["columns"].as_array().unwrap();
+        assert_eq!(
+            columns.len(),
+            3,
+            "stg_accounts should have 3 traced columns, got: {:?}; errors: {:?}",
+            columns.iter().map(|c| &c["column"]).collect::<Vec<_>>(),
+            report["errors"]
+        );
+
+        // account_id traces from raw.accounts.id (via SELECT * expansion)
+        let account_id = columns
+            .iter()
+            .find(|c| c["column"] == "account_id")
+            .expect("account_id column should be present");
+        let sources = account_id["sources"].as_array().unwrap();
+        assert!(
+            !sources.is_empty(),
+            "account_id should have sources after physical schema registration"
+        );
+        assert!(
+            sources.iter().any(|s| s["column"] == "id"),
+            "account_id should trace to source column 'id'; got: {:?}",
+            sources
+        );
+
+        // No errors — the physical schema registration enables SELECT * expansion
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "should have no errors for stg_accounts; got: {:?}",
+            report["errors"]
+        );
+    }
 }

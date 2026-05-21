@@ -322,6 +322,36 @@
       "schema": "main",
       "sources": null,
       "unique_id": "model.clp.stg_bad_sql"
+    },
+    "model.clp.stg_accounts": {
+      "unique_id": "model.clp.stg_accounts",
+      "name": "stg_accounts",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.salesforce.accounts"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": ["staging"]
+      },
+      "description": "Staged accounts from Salesforce source where source_name != physical schema",
+      "path": "models/staging/stg_accounts.sql",
+      "columns": {
+        "account_id": {
+          "name": "account_id"
+        },
+        "account_name": {
+          "name": "account_name"
+        },
+        "owner_id": {
+          "name": "owner_id"
+        }
+      },
+      "compiled_code": "select id as account_id, name as account_name, owner_id from \"raw\".\"accounts\"",
+      "database": "shop",
+      "schema": "main"
     }
   },
   "sources": {
@@ -388,6 +418,26 @@
         },
         "payment_method": {
           "name": "payment_method"
+        }
+      }
+    },
+    "source.clp.salesforce.accounts": {
+      "unique_id": "source.clp.salesforce.accounts",
+      "name": "accounts",
+      "source_name": "salesforce",
+      "resource_type": "source",
+      "description": "Salesforce accounts — physical schema is 'raw', not 'salesforce'",
+      "path": "models/staging/schema.yml",
+      "schema": "raw",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "name": {
+          "name": "name"
+        },
+        "owner_id": {
+          "name": "owner_id"
         }
       }
     }

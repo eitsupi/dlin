@@ -59,6 +59,15 @@ pub struct ManifestSource {
     /// Column definitions keyed by column name
     #[serde(default)]
     pub columns: HashMap<String, ManifestColumn>,
+    /// Physical database name (may differ from source_name)
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Physical schema name (may differ from source_name)
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Physical table identifier (defaults to name when absent)
+    #[serde(default)]
+    pub identifier: Option<String>,
 }
 
 /// A column entry in the manifest
@@ -523,6 +532,9 @@ mod tests {
                     description: Some("Raw orders table".to_string()),
                     path: Some("models/staging/schema.yml".to_string()),
                     columns: HashMap::new(),
+                    database: None,
+                    schema: None,
+                    identifier: None,
                 },
             )]),
             exposures: HashMap::new(),
@@ -1030,6 +1042,9 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
                 (
@@ -1042,6 +1057,9 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
             ]),
@@ -1166,6 +1184,9 @@ mod tests {
                     description: None,
                     path: Some("models/staging/schema.yml".to_string()),
                     columns: HashMap::new(),
+                    database: None,
+                    schema: None,
+                    identifier: None,
                 },
             )]),
             exposures: HashMap::new(),
@@ -1196,6 +1217,9 @@ mod tests {
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
                 (
@@ -1208,6 +1232,9 @@ mod tests {
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
             ]),

@@ -80,9 +80,7 @@ fn find_last_top_level_select(s: &str) -> Option<usize> {
             b')' => {
                 depth = depth.saturating_sub(1);
             }
-            b's' | b'S'
-                if depth == 0 && check_keyword_at(bytes, i, len, b"SELECT") =>
-            {
+            b's' | b'S' if depth == 0 && check_keyword_at(bytes, i, len, b"SELECT") => {
                 let end = i + 6;
                 // Skip optional DISTINCT
                 let after = skip_whitespace(bytes, end, len);
