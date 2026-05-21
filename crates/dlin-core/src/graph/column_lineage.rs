@@ -651,10 +651,10 @@ fn find_model_by_name<'a>(
     name: &str,
 ) -> Option<&'a crate::parser::manifest::ManifestNode> {
     // Try direct unique_id lookup (e.g. "model.project.stg_orders")
-    if let Some(node) = manifest.nodes.get(name) {
-        if node.resource_type == "model" {
-            return Some(node);
-        }
+    if let Some(node) = manifest.nodes.get(name)
+        && node.resource_type == "model"
+    {
+        return Some(node);
     }
     // Suffix match: "model.pkg_a.stg_orders" ends with ".stg_orders"
     let suffix = format!(".{}", name);
@@ -3085,6 +3085,149 @@ select * from orders"#;
         assert_eq!(parsed["model"], "stg_orders");
         assert_eq!(parsed["column"], "order_id");
         assert!(parsed["impacted_columns"].is_array());
+        // Verify unique_id is serialized for each impacted column
+        let first = &parsed["impacted_columns"][0];
+        assert!(
+            first["unique_id"].is_string(),
+            "unique_id should be serialized in impacted_columns"
+        );
+    }
+
+    /// Build a manifest with two packages (pkg_a, pkg_b) that each have a model
+    /// named "customers" depending on the same "stg_orders" model.
+    fn make_duplicate_name_manifest() -> Manifest {
+        let mut nodes = HashMap::new();
+
+        // stg_orders in pkg_a (the upstream model being traced)
+        nodes.insert(
+            "model.pkg_a.stg_orders".to_string(),
+            ManifestNode {
+                unique_id: "model.pkg_a.stg_orders".to_string(),
+                name: "stg_orders".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn { nodes: vec![] },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: {
+                    let mut cols = HashMap::new();
+                    cols.insert(
+                        "customer_id".to_string(),
+                        ManifestColumn {
+                            name: "customer_id".to_string(),
+                        },
+                    );
+                    cols
+                },
+                compiled_code: Some("select customer_id from raw_customers".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
+
+        // customers in pkg_a — SELECT customer_id FROM stg_orders
+        nodes.insert(
+            "model.pkg_a.customers".to_string(),
+            ManifestNode {
+                unique_id: "model.pkg_a.customers".to_string(),
+                name: "customers".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.pkg_a.stg_orders".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: {
+                    let mut cols = HashMap::new();
+                    cols.insert(
+                        "customer_id".to_string(),
+                        ManifestColumn {
+                            name: "customer_id".to_string(),
+                        },
+                    );
+                    cols
+                },
+                compiled_code: Some("select customer_id from stg_orders".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
+
+        // customers in pkg_b — same name, different package, same SQL pattern
+        nodes.insert(
+            "model.pkg_b.customers".to_string(),
+            ManifestNode {
+                unique_id: "model.pkg_b.customers".to_string(),
+                name: "customers".to_string(),
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: vec!["model.pkg_a.stg_orders".to_string()],
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                columns: {
+                    let mut cols = HashMap::new();
+                    cols.insert(
+                        "customer_id".to_string(),
+                        ManifestColumn {
+                            name: "customer_id".to_string(),
+                        },
+                    );
+                    cols
+                },
+                compiled_code: Some("select customer_id from stg_orders".to_string()),
+                database: None,
+                schema: None,
+            },
+        );
+
+        Manifest {
+            nodes,
+            sources: HashMap::new(),
+            exposures: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_column_impact_duplicate_model_names_across_packages() {
+        // Two packages each have a "customers" model depending on the same stg_orders.
+        // Both should appear in impacted_columns with distinct unique_ids.
+        let manifest = make_duplicate_name_manifest();
+        let result = compute_column_impact(
+            &manifest,
+            "stg_orders",
+            "customer_id",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let unique_ids: Vec<&str> = result
+            .impacted_columns
+            .iter()
+            .filter(|ic| ic.column == "customer_id")
+            .map(|ic| ic.unique_id.as_str())
+            .collect();
+
+        assert!(
+            unique_ids.contains(&"model.pkg_a.customers"),
+            "pkg_a customers should be impacted, got unique_ids: {:?}",
+            unique_ids
+        );
+        assert!(
+            unique_ids.contains(&"model.pkg_b.customers"),
+            "pkg_b customers should be impacted, got unique_ids: {:?}",
+            unique_ids
+        );
+        assert_eq!(
+            unique_ids.len(),
+            2,
+            "both same-named models should appear separately, got: {:?}",
+            result.impacted_columns
+        );
     }
 
     /// Build a diamond DAG manifest where different columns flow through a shared model:
