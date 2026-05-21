@@ -247,7 +247,9 @@ pub struct ColumnImpactReport {
 /// A downstream column affected by a change to the source column
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImpactedColumn {
-    /// Downstream model name
+    /// Downstream model unique_id (unambiguous across packages)
+    pub unique_id: String,
+    /// Downstream model name (display label)
     pub model: String,
     /// Downstream column name
     pub column: String,
@@ -613,6 +615,7 @@ pub fn compute_column_impact(
                     path.push(dep_name.clone());
 
                     impacted.push(ImpactedColumn {
+                        unique_id: dep_uid.clone(),
                         model: dep_name.clone(),
                         column: entry.column.clone(),
                         transformation: entry.transformation.clone(),
@@ -626,8 +629,8 @@ pub fn compute_column_impact(
         }
     }
 
-    // Sort for deterministic output
-    impacted.sort_by(|a, b| (&a.model, &a.column).cmp(&(&b.model, &b.column)));
+    // Sort for deterministic output; unique_id distinguishes same-named models
+    impacted.sort_by(|a, b| (&a.unique_id, &a.column).cmp(&(&b.unique_id, &b.column)));
     impacted.dedup();
 
     ColumnImpactReport {
