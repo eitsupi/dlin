@@ -732,7 +732,7 @@ fn run_column_lineage_command(
                     report.total_columns = column_filter.len();
                     // Regenerate partial-failure summary for requested columns.
                     let failed = report.total_columns - report.traced_columns;
-                    if failed > 0 && !report.columns.is_empty() {
+                    if failed > 0 {
                         report.errors.insert(
                             0,
                             format!(

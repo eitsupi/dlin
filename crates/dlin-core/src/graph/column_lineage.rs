@@ -71,8 +71,9 @@ struct ColumnLineageCacheEntry {
     compiled_code_hash: u64,
     /// Dialect used for parsing (e.g. "bigquery", "generic")
     dialect: String,
-    /// FNV-1a hash of manifest column definitions that affect the lineage result
-    /// (the model's own columns + upstream dependencies' columns from manifest.json).
+    /// FNV-1a hash covering the model's YAML columns, compiled SQL, and the same
+    /// for all transitive upstream dependencies. Captures any schema or SQL change
+    /// that could alter the lineage result, not just manifest column definitions.
     /// Defaults to 0 for cache entries created before this field was added,
     /// which effectively invalidates them since the computed hash will differ.
     #[serde(default)]
@@ -964,10 +965,14 @@ fn build_schema_from_manifest(
                 .keys()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
-            let table_name = &dep_source.name;
-            if schema.add_table(table_name, &cols, None).is_ok() {
+            // Register with short name (e.g. "orders")
+            if schema.add_table(&dep_source.name, &cols, None).is_ok() {
                 has_entries = true;
             }
+            // Also register as "source_name.table" (e.g. "raw.orders") so that
+            // compiled SQL referencing `raw`.`orders` can be resolved via the schema.
+            let fq_source = format!("{}.{}", dep_source.source_name, dep_source.name);
+            let _ = schema.add_table(&fq_source, &cols, None);
         }
     }
 
@@ -1052,9 +1057,14 @@ fn build_yaml_schema_for_node(
                 .keys()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
+            // Register with short name (e.g. "orders")
             if schema.add_table(&dep_source.name, &cols, None).is_ok() {
                 has_entries = true;
             }
+            // Also register as "source_name.table" (e.g. "raw.orders") so that
+            // compiled SQL referencing `raw`.`orders` can be resolved via the schema.
+            let fq_source = format!("{}.{}", dep_source.source_name, dep_source.name);
+            let _ = schema.add_table(&fq_source, &cols, None);
         }
     }
 

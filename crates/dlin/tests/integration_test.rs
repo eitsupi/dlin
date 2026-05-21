@@ -1529,6 +1529,46 @@ models:
     }
 
     #[test]
+    fn test_column_lineage_column_filter_errors_on_missing_column() {
+        // When --column requests a column that does not exist in any of the model's
+        // output columns, the result should be non-zero exit with an error message.
+        // Previously this yielded empty columns[], empty errors[], and exit 0.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_orders",
+                "--column",
+                "this_column_does_not_exist",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit when requested column is absent from the model"
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        let report = &reports[0];
+        assert!(
+            !report["errors"].as_array().unwrap().is_empty(),
+            "errors[] must be non-empty when the requested column is missing"
+        );
+        assert_eq!(
+            report["traced_columns"], 0,
+            "traced_columns must be 0 for a missing column"
+        );
+        assert_eq!(
+            report["total_columns"], 1,
+            "total_columns must equal the filter size (1 requested column)"
+        );
+    }
+
+    #[test]
     fn test_column_lineage_column_filter_preserves_global_parse_error() {
         // stg_bad_sql has valid YAML columns but invalid SQL, so total_columns > 0
         // and analysis returns a "failed to parse SQL" global error. Applying
