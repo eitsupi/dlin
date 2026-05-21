@@ -80,17 +80,17 @@ fn find_last_top_level_select(s: &str) -> Option<usize> {
             b')' => {
                 depth = depth.saturating_sub(1);
             }
-            b's' | b'S' if depth == 0 => {
-                if check_keyword_at(bytes, i, len, b"SELECT") {
-                    let end = i + 6;
-                    // Skip optional DISTINCT
-                    let after = skip_whitespace(bytes, end, len);
-                    if check_keyword_at(bytes, after, len, b"DISTINCT") {
-                        let after_distinct = skip_whitespace(bytes, after + 8, len);
-                        last_select_end = Some(after_distinct);
-                    } else {
-                        last_select_end = Some(after);
-                    }
+            b's' | b'S'
+                if depth == 0 && check_keyword_at(bytes, i, len, b"SELECT") =>
+            {
+                let end = i + 6;
+                // Skip optional DISTINCT
+                let after = skip_whitespace(bytes, end, len);
+                if check_keyword_at(bytes, after, len, b"DISTINCT") {
+                    let after_distinct = skip_whitespace(bytes, after + 8, len);
+                    last_select_end = Some(after_distinct);
+                } else {
+                    last_select_end = Some(after);
                 }
             }
             _ => {}
@@ -164,10 +164,8 @@ fn find_top_level_from(s: &str) -> Option<usize> {
             b')' => {
                 depth = depth.saturating_sub(1);
             }
-            b'f' | b'F' if depth == 0 => {
-                if check_from_at(s, bytes, i, len) {
-                    return Some(i);
-                }
+            b'f' | b'F' if depth == 0 && check_from_at(s, bytes, i, len) => {
+                return Some(i);
             }
             _ => {}
         }
@@ -288,10 +286,8 @@ fn find_last_as_alias(item: &str) -> Option<String> {
     while i < len {
         match bytes[i] {
             b'(' => depth += 1,
-            b')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            b')' if depth > 0 => {
+                depth -= 1;
             }
             b' ' | b'\t' | b'\n' | b'\r' if depth == 0 => {
                 if let Some(pos) = is_as_keyword_at(item, bytes, i, len) {
