@@ -975,8 +975,13 @@ fn build_schema_from_manifest(
             if schema.add_table(&physical_fq, &cols, None).is_ok() {
                 has_entries = true;
             }
-            // Fallback aliases
+            // Fallback aliases so that compiled SQL using fewer qualifiers can match.
+            // Include the two-part schema.identifier form explicitly: compiled SQL
+            // often uses schema.table even when a database is set in the manifest.
+            let schema_fq =
+                make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
             for alias in [
+                schema_fq.as_str(),
                 physical_identifier,
                 dep_source.name.as_str(),
                 &format!("{}.{}", dep_source.source_name, dep_source.name),
@@ -1079,8 +1084,13 @@ fn build_yaml_schema_for_node(
             if schema.add_table(&physical_fq, &cols, None).is_ok() {
                 has_entries = true;
             }
-            // Fallback aliases
+            // Fallback aliases so that compiled SQL using fewer qualifiers can match.
+            // Include the two-part schema.identifier form explicitly: compiled SQL
+            // often uses schema.table even when a database is set in the manifest.
+            let schema_fq =
+                make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
             for alias in [
+                schema_fq.as_str(),
                 physical_identifier,
                 dep_source.name.as_str(),
                 &format!("{}.{}", dep_source.source_name, dep_source.name),
@@ -1167,11 +1177,22 @@ fn hash_node_columns_transitive(
             let dep_hash = hash_node_columns_transitive(manifest, dep_node, visited);
             parts.push(format!("node:{}", dep_hash));
         } else if let Some(dep_source) = manifest.sources.get(dep_id) {
-            // Sources are leaves — hash their columns directly
+            // Sources are leaves — hash columns and the relation fields used for
+            // schema registration so that changes to database/schema/identifier
+            // correctly invalidate cached lineage results.
             let mut cols: Vec<&String> = dep_source.columns.keys().collect();
             cols.sort();
             for col in cols {
                 parts.push(col.clone());
+            }
+            if let Some(db) = &dep_source.database {
+                parts.push(format!("db:{}", db));
+            }
+            if let Some(s) = &dep_source.schema {
+                parts.push(format!("schema:{}", s));
+            }
+            if let Some(id) = &dep_source.identifier {
+                parts.push(format!("id:{}", id));
             }
         }
     }
