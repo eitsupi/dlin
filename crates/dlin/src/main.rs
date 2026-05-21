@@ -736,8 +736,10 @@ fn run_column_lineage_command(
                     let has_global_errors =
                         report.errors.iter().any(|err| !err.starts_with("column '"));
                     if !has_global_errors {
-                        for col in &column_filter {
-                            let in_output = report.columns.iter().any(|c| c.column == *col);
+                        let mut sorted_cols: Vec<&str> = column_filter.iter().copied().collect();
+                        sorted_cols.sort_unstable();
+                        for col in sorted_cols {
+                            let in_output = report.columns.iter().any(|c| c.column == col);
                             let col_error_prefix = format!("column '{}': ", col);
                             let has_col_error = report
                                 .errors
