@@ -963,9 +963,10 @@ fn build_schema_from_manifest(
         if let Some(dep_source) = manifest.sources.get(dep_id)
             && !dep_source.columns.is_empty()
         {
-            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
-                .columns
-                .keys()
+            let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
+            source_col_names.sort_unstable();
+            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = source_col_names
+                .into_iter()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
@@ -1029,7 +1030,8 @@ fn resolve_node_columns(
         .into_iter()
         .collect();
 
-    let merged: Vec<String> = yaml_cols.union(&inferred_cols).cloned().collect();
+    let mut merged: Vec<String> = yaml_cols.union(&inferred_cols).cloned().collect();
+    merged.sort_unstable();
     merged
 }
 
@@ -1049,9 +1051,10 @@ fn build_yaml_schema_for_node(
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             if !dep_node.columns.is_empty() {
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_node
-                    .columns
-                    .keys()
+                let mut node_col_names: Vec<&String> = dep_node.columns.keys().collect();
+                node_col_names.sort_unstable();
+                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = node_col_names
+                    .into_iter()
                     .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                     .collect();
                 let fq_name = make_fq_table_name(
@@ -1072,9 +1075,10 @@ fn build_yaml_schema_for_node(
         if let Some(dep_source) = manifest.sources.get(dep_id)
             && !dep_source.columns.is_empty()
         {
-            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = dep_source
-                .columns
-                .keys()
+            let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
+            source_col_names.sort_unstable();
+            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = source_col_names
+                .into_iter()
                 .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
                 .collect();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
