@@ -269,10 +269,7 @@ pub fn compute_column_lineage(
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     // Find the node in the manifest
-    let node = manifest
-        .nodes
-        .values()
-        .find(|n| n.name == model_name && n.resource_type == "model");
+    let node = find_model_by_name(manifest, model_name);
 
     let node = match node {
         Some(n) => n,
@@ -538,11 +535,7 @@ pub fn compute_column_impact(
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
     // Verify the model exists
-    let model_exists = manifest
-        .nodes
-        .values()
-        .any(|n| n.name == model_name && n.resource_type == "model");
-    if !model_exists {
+    if find_model_by_name(manifest, model_name).is_none() {
         return ColumnImpactReport {
             model: model_name.to_string(),
             column: column_name.to_string(),
@@ -571,7 +564,11 @@ pub fn compute_column_impact(
         vec![(model_name.to_string(), column_name.to_string(), vec![])];
 
     while let Some((source_model, source_column, current_path)) = queue.pop() {
-        let dependents = match downstream_map.get(&source_model) {
+        // downstream_map is keyed by unique_id; resolve model name to unique_id for lookup
+        let source_key = find_model_by_name(manifest, &source_model)
+            .map(|n| n.unique_id.as_str())
+            .unwrap_or(source_model.as_str());
+        let dependents = match downstream_map.get(source_key) {
             Some(deps) => deps,
             None => continue,
         };
@@ -631,10 +628,50 @@ pub fn compute_column_impact(
     }
 }
 
-/// Build a mapping from model name → list of downstream model names.
+/// Resolve a model node by name from the manifest, with deterministic disambiguation.
+///
+/// Tries exact `unique_id` lookup first, then falls back to suffix match
+/// (`unique_id` ends with `.<name>`). On multiple matches, sorts by `unique_id`
+/// and warns rather than returning a nondeterministic result.
+fn find_model_by_name<'a>(
+    manifest: &'a Manifest,
+    name: &str,
+) -> Option<&'a crate::parser::manifest::ManifestNode> {
+    // Try direct unique_id lookup (e.g. "model.project.stg_orders")
+    if let Some(node) = manifest.nodes.get(name) {
+        if node.resource_type == "model" {
+            return Some(node);
+        }
+    }
+    // Suffix match: "model.pkg_a.stg_orders" ends with ".stg_orders"
+    let suffix = format!(".{}", name);
+    let mut matches: Vec<&crate::parser::manifest::ManifestNode> = manifest
+        .nodes
+        .values()
+        .filter(|n| n.resource_type == "model" && n.unique_id.ends_with(&suffix))
+        .collect();
+    match matches.len() {
+        0 => None,
+        1 => Some(matches[0]),
+        _ => {
+            matches.sort_unstable_by(|a, b| a.unique_id.cmp(&b.unique_id));
+            let ids: Vec<&str> = matches.iter().map(|n| n.unique_id.as_str()).collect();
+            crate::warn!(
+                "model name '{}' is ambiguous (matched: {}); using '{}'",
+                name,
+                ids.join(", "),
+                matches[0].unique_id,
+            );
+            Some(matches[0])
+        }
+    }
+}
+
+/// Build a mapping from model unique_id → list of downstream model names.
 ///
 /// This is the reverse of depends_on: for each model that depends on X,
-/// X maps to that model.
+/// X maps to that model. Using unique_id as keys prevents same-named models
+/// from different packages from being conflated.
 fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -646,7 +683,7 @@ fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String
             if let Some(dep_node) = manifest.nodes.get(dep_id)
                 && dep_node.resource_type == "model"
             {
-                map.entry(dep_node.name.clone())
+                map.entry(dep_node.unique_id.clone())
                     .or_default()
                     .push(node.name.clone());
             }
@@ -712,10 +749,7 @@ fn compute_cross_model_inner(
 fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
-    let node = manifest
-        .nodes
-        .values()
-        .find(|n| n.name == model_name && n.resource_type == "model");
+    let node = find_model_by_name(manifest, model_name);
 
     let node = match node {
         Some(n) => n,
@@ -889,10 +923,7 @@ fn compute_single_column_lineage(
     column_name: &str,
     dialect: DialectType,
 ) -> Vec<ColumnSource> {
-    let node = manifest
-        .nodes
-        .values()
-        .find(|n| n.name == model_name && n.resource_type == "model");
+    let node = find_model_by_name(manifest, model_name);
 
     let node = match node {
         Some(n) => n,
