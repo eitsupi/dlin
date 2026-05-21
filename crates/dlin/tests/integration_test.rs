@@ -1527,4 +1527,45 @@ models:
             report["errors"]
         );
     }
+
+    #[test]
+    fn test_column_lineage_column_filter_preserves_global_parse_error() {
+        // stg_bad_sql has valid YAML columns but invalid SQL, so total_columns > 0
+        // and analysis returns a "failed to parse SQL" global error. Applying
+        // --column must NOT drop that error — it is not a per-column error.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column-lineage",
+                "stg_bad_sql",
+                "--column",
+                "some_col",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        // Exit code must be non-zero because the parse error propagates.
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit for a model with invalid SQL"
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        let report = &reports[0];
+        let errors = report["errors"].as_array().unwrap();
+        assert!(
+            !errors.is_empty(),
+            "global parse error must not be dropped by --column filter"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.as_str().unwrap_or("").contains("failed to parse SQL")),
+            "expected a 'failed to parse SQL' error; got: {:?}",
+            errors
+        );
+    }
 }

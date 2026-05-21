@@ -302,6 +302,26 @@
       "package_name": null,
       "original_file_path": null,
       "sources": null
+    },
+    "model.clp.stg_bad_sql": {
+      "columns": {
+        "some_col": {
+          "name": "some_col"
+        }
+      },
+      "compiled_code": "NOT VALID SQL!!!",
+      "database": "shop",
+      "depends_on": {
+        "nodes": []
+      },
+      "name": "stg_bad_sql",
+      "original_file_path": null,
+      "package_name": null,
+      "path": "models/staging/stg_bad_sql.sql",
+      "resource_type": "model",
+      "schema": "main",
+      "sources": null,
+      "unique_id": "model.clp.stg_bad_sql"
     }
   },
   "sources": {

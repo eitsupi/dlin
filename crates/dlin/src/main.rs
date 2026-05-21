@@ -711,13 +711,22 @@ fn run_column_lineage_command(
                 if report.total_columns > 0 {
                     // Remove per-column errors for columns outside the filter and
                     // the stale partial-failure summary; regenerate the summary below.
+                    // Global errors (e.g. SQL parse failures) are always preserved.
                     report.errors.retain(|err| {
                         if let Some(rest) = err.strip_prefix("column '")
                             && let Some(col_end) = rest.find('\'')
                         {
                             return column_filter.contains(&rest[..col_end]);
                         }
-                        false
+                        // Drop the stale partial-failure summary (will be regenerated).
+                        if err.starts_with("model '")
+                            && err.contains("': traced ")
+                            && err.ends_with(" failed)")
+                        {
+                            return false;
+                        }
+                        // Preserve all other errors (global analysis failures, SQL parse errors, etc.)
+                        true
                     });
                     report.traced_columns = report.columns.len();
                     report.total_columns = column_filter.len();
