@@ -534,49 +534,59 @@ pub fn compute_column_impact(
     dialect: DialectType,
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
-    // Verify the model exists
-    if find_model_by_name(manifest, model_name).is_none() {
-        return ColumnImpactReport {
-            model: model_name.to_string(),
-            column: column_name.to_string(),
-            impacted_columns: vec![],
-            errors: vec![format!("model '{}' not found in manifest", model_name)],
-        };
-    }
+    // Resolve model to node; verify it exists
+    let initial_node = match find_model_by_name(manifest, model_name) {
+        Some(n) => n,
+        None => {
+            return ColumnImpactReport {
+                model: model_name.to_string(),
+                column: column_name.to_string(),
+                impacted_columns: vec![],
+                errors: vec![format!("model '{}' not found in manifest", model_name)],
+            };
+        }
+    };
 
-    // Build reverse dependency map: model_name → list of downstream model names
+    // Build reverse dependency map: unique_id → list of downstream unique_ids
     let downstream_map = build_downstream_model_map(manifest);
 
     let mut impacted = Vec::new();
     let mut errors = Vec::new();
-    // Track (model, column) pairs to avoid re-processing the same column through
-    // the same model, while still allowing different columns to flow through a
-    // shared intermediate model independently.
+    // Track (unique_id, column) pairs; unique_ids avoid conflating same-named
+    // models from different packages.
     let mut visited: HashSet<(String, String)> = HashSet::new();
-    visited.insert((model_name.to_string(), column_name.to_string()));
-    // Cache lineage results per model to avoid redundant compute_column_lineage calls
-    // when the same downstream model appears as a dependent of multiple queue items.
+    let initial_uid = initial_node.unique_id.clone();
+    visited.insert((initial_uid.clone(), column_name.to_string()));
+    // Cache lineage results per unique_id to avoid redundant compute_column_lineage calls.
     let mut lineage_cache: HashMap<String, ModelColumnLineage> = HashMap::new();
 
-    // Seed: find direct dependents of the target model
-    // and check which of their columns reference target model+column
+    // Queue stores (unique_id, column, path); seed with the resolved starting node.
     let mut queue: Vec<(String, String, Vec<String>)> =
-        vec![(model_name.to_string(), column_name.to_string(), vec![])];
+        vec![(initial_uid, column_name.to_string(), vec![])];
 
-    while let Some((source_model, source_column, current_path)) = queue.pop() {
-        // downstream_map is keyed by unique_id; resolve model name to unique_id for lookup
-        let source_key = find_model_by_name(manifest, &source_model)
-            .map(|n| n.unique_id.as_str())
-            .unwrap_or(source_model.as_str());
-        let dependents = match downstream_map.get(source_key) {
+    while let Some((source_uid, source_column, current_path)) = queue.pop() {
+        // Get the source node's short name for SQL table name comparison
+        let source_name = manifest
+            .nodes
+            .get(&source_uid)
+            .map(|n| n.name.as_str())
+            .unwrap_or(source_uid.as_str());
+
+        let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
         };
 
-        for dep_model in dependents {
+        for dep_uid in dependents {
+            let dep_node = match manifest.nodes.get(dep_uid) {
+                Some(n) => n,
+                None => continue,
+            };
+            let dep_name = &dep_node.name;
+
             let lineage = lineage_cache
-                .entry(dep_model.clone())
-                .or_insert_with(|| compute_column_lineage(manifest, dep_model, dialect, cache));
+                .entry(dep_uid.clone())
+                .or_insert_with(|| compute_column_lineage(manifest, dep_uid, dialect, cache));
             for err in &lineage.errors {
                 if !errors.contains(err) {
                     errors.push(err.clone());
@@ -584,15 +594,15 @@ pub fn compute_column_impact(
             }
 
             for entry in &lineage.columns {
-                let pair = (dep_model.clone(), entry.column.clone());
+                let pair = (dep_uid.clone(), entry.column.clone());
                 if visited.contains(&pair) {
                     continue;
                 }
 
-                // Check if any source of this column references the source model+column
+                // Compare SQL lineage table names against the source node's short name
                 let references_source = entry.sources.iter().any(|s| {
                     let table_matches =
-                        s.table == source_model || normalize_table_name(&s.table) == source_model;
+                        s.table == source_name || normalize_table_name(&s.table) == source_name;
                     table_matches && s.column == source_column
                 });
 
@@ -600,17 +610,17 @@ pub fn compute_column_impact(
                     visited.insert(pair);
 
                     let mut path = current_path.clone();
-                    path.push(dep_model.clone());
+                    path.push(dep_name.clone());
 
                     impacted.push(ImpactedColumn {
-                        model: dep_model.clone(),
+                        model: dep_name.clone(),
                         column: entry.column.clone(),
                         transformation: entry.transformation.clone(),
                         model_path: path.clone(),
                     });
 
                     // Enqueue for further downstream tracing
-                    queue.push((dep_model.clone(), entry.column.clone(), path));
+                    queue.push((dep_uid.clone(), entry.column.clone(), path));
                 }
             }
         }
@@ -685,7 +695,7 @@ fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String
             {
                 map.entry(dep_node.unique_id.clone())
                     .or_default()
-                    .push(node.name.clone());
+                    .push(node.unique_id.clone());
             }
         }
     }
@@ -3356,23 +3366,23 @@ select * from orders"#;
         let manifest = make_cross_model_manifest();
         let map = build_downstream_model_map(&manifest);
 
-        // stg_orders is depended on by orders
+        // stg_orders (by unique_id) is depended on by orders
         assert!(
-            map.get("stg_orders")
-                .map_or(false, |deps| deps.contains(&"orders".to_string())),
+            map.get("model.proj.stg_orders").map_or(false, |deps| deps
+                .contains(&"model.proj.orders".to_string())),
             "stg_orders should have orders as downstream, got: {:?}",
-            map.get("stg_orders")
+            map.get("model.proj.stg_orders")
         );
-        // orders is depended on by customers
+        // orders (by unique_id) is depended on by customers
         assert!(
-            map.get("orders")
-                .map_or(false, |deps| deps.contains(&"customers".to_string())),
+            map.get("model.proj.orders").map_or(false, |deps| deps
+                .contains(&"model.proj.customers".to_string())),
             "orders should have customers as downstream, got: {:?}",
-            map.get("orders")
+            map.get("model.proj.orders")
         );
         // customers has no downstream
         assert!(
-            map.get("customers").is_none(),
+            map.get("model.proj.customers").is_none(),
             "customers should have no downstream"
         );
     }
