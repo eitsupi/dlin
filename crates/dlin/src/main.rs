@@ -730,9 +730,34 @@ fn run_column_lineage_command(
                     });
                     report.traced_columns = report.columns.len();
                     report.total_columns = column_filter.len();
-                    // Regenerate partial-failure summary for requested columns.
+
+                    // When there are no global errors, explicitly flag requested columns
+                    // that are absent from both the output and per-column errors.
+                    let has_global_errors =
+                        report.errors.iter().any(|err| !err.starts_with("column '"));
+                    if !has_global_errors {
+                        for col in &column_filter {
+                            let in_output = report.columns.iter().any(|c| c.column == *col);
+                            let col_error_prefix = format!("column '{}': ", col);
+                            let has_col_error = report
+                                .errors
+                                .iter()
+                                .any(|err| err.starts_with(&col_error_prefix));
+                            if !in_output && !has_col_error {
+                                report
+                                    .errors
+                                    .push(format!("column '{}': not found in model output", col));
+                            }
+                        }
+                    }
+
+                    // Regenerate partial-failure summary only when per-column errors exist.
+                    // When failures are due to global errors (e.g. SQL parse failure), the
+                    // summary would be misleading — the global error itself is sufficient.
+                    let has_per_col_errors =
+                        report.errors.iter().any(|err| err.starts_with("column '"));
                     let failed = report.total_columns - report.traced_columns;
-                    if failed > 0 {
+                    if failed > 0 && has_per_col_errors {
                         report.errors.insert(
                             0,
                             format!(

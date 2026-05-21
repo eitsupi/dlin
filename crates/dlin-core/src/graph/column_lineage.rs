@@ -414,6 +414,7 @@ pub fn compute_column_lineage(
 struct LineageContext {
     expanded_expr: Expression,
     schema: Option<polyglot_sql::MappingSchema>,
+    dialect: DialectType,
 }
 
 /// Parse compiled SQL, build schema from manifest, and expand CTE stars.
@@ -439,6 +440,7 @@ fn prepare_lineage_context(
     Ok(LineageContext {
         expanded_expr,
         schema,
+        dialect,
     })
 }
 
@@ -451,17 +453,18 @@ fn prepare_lineage_context(
 /// resolution that only works with schema. The polyglot-sql MAX_LINEAGE_DEPTH=64
 /// limit mitigates the qualify_columns stack overflow risk.
 fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLineageResult, String> {
+    let dialect = Some(ctx.dialect);
     let lineage_result = if let Some(ref s) = ctx.schema {
         polyglot_sql::lineage::lineage_with_schema(
             col_name,
             &ctx.expanded_expr,
             Some(s as &dyn polyglot_sql::Schema),
-            None,
+            dialect,
             false,
         )
-        .or_else(|_| polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false))
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false))
     } else {
-        polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, None, false)
+        polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false)
     };
 
     match lineage_result {
