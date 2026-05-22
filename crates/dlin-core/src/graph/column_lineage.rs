@@ -286,17 +286,21 @@ pub fn compute_column_lineage(
         }
     };
 
+    // Use the node's human-readable name for display/errors; model_name is kept
+    // for cache keys so that unique_id lookups remain consistent.
+    let display_name = node.name.as_str();
+
     let compiled_code = match &node.compiled_code {
         Some(code) => code,
         None => {
             return ModelColumnLineage {
-                model: model_name.to_string(),
+                model: display_name.to_string(),
                 traced_columns: 0,
                 total_columns: 0,
                 columns: vec![],
                 errors: vec![format!(
                     "model '{}' has no compiled_code (run `dbt compile` first)",
-                    model_name
+                    display_name
                 )],
             };
         }
@@ -327,13 +331,13 @@ pub fn compute_column_lineage(
 
     if column_names.is_empty() {
         return ModelColumnLineage {
-            model: model_name.to_string(),
+            model: display_name.to_string(),
             traced_columns: 0,
             total_columns: 0,
             columns: vec![],
             errors: vec![format!(
                 "model '{}': could not determine output columns (YAML has no columns and SQL inference failed)",
-                model_name
+                display_name
             )],
         };
     }
@@ -342,11 +346,11 @@ pub fn compute_column_lineage(
         Ok(ctx) => ctx,
         Err(e) => {
             return ModelColumnLineage {
-                model: model_name.to_string(),
+                model: display_name.to_string(),
                 traced_columns: 0,
                 total_columns: column_names.len(),
                 columns: vec![],
-                errors: vec![format!("failed to parse SQL for '{}': {}", model_name, e)],
+                errors: vec![format!("failed to parse SQL for '{}': {}", display_name, e)],
             };
         }
     };
@@ -381,7 +385,7 @@ pub fn compute_column_lineage(
             0,
             format!(
                 "model '{}': traced {}/{} columns ({} failed)",
-                model_name,
+                display_name,
                 columns.len(),
                 total,
                 failed
@@ -390,7 +394,7 @@ pub fn compute_column_lineage(
     }
 
     let result = ModelColumnLineage {
-        model: model_name.to_string(),
+        model: display_name.to_string(),
         traced_columns: columns.len(),
         total_columns: total,
         columns,

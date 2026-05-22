@@ -1385,7 +1385,7 @@ mod tests {
 
     #[test]
     fn test_parse_schema_string_empty_columns_rejected() {
-        // "t:" and "t:a,,b" should error due to no/empty column names
+        // "t:" (no columns) and "t:," (all empty segments) should error
         assert!(parse_schema_string("t:").is_err());
         assert!(parse_schema_string("t:,").is_err());
     }
