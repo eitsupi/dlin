@@ -539,11 +539,11 @@ These subcommands operate on raw SQL strings without requiring a dbt project \
 or manifest.json, making them useful for isolating parsing or lineage issues.
 
 Subcommands:
-  parse-sql       Parse SQL and display the AST or regenerated SQL
+  parse-sql       Parse SQL and display the AST (Debug or JSON)
   trace-column    Trace a single column's lineage through a SQL statement",
         after_long_help = "\
 Examples:
-  # Parse SQL and show regenerated output
+  # Parse SQL and show AST debug output
   dlin debug parse-sql 'SELECT a, b FROM t' --dialect bigquery
 
   # Parse SQL from a file via stdin
