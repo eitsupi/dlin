@@ -637,17 +637,14 @@ pub enum DebugCommand {
         long_about = "\
 Parse a SQL statement using polyglot-sql and display the result.
 
-By default, shows the regenerated SQL (round-trip through the parser). \
-Use --format to choose between regenerated SQL, AST debug output, or JSON AST.
+By default, shows the Rust Debug representation of the AST. \
+Use --format to choose between AST debug output or JSON AST.
 
 This does not require a dbt project — it operates on raw SQL strings.",
         after_long_help = "\
 Examples:
-  # Parse and regenerate SQL (default)
+  # Show AST debug representation (default)
   dlin debug parse-sql 'SELECT a, b FROM t'
-
-  # Show AST debug representation
-  dlin debug parse-sql 'SELECT a FROM t' --format ast
 
   # Show AST as JSON
   dlin debug parse-sql 'SELECT a FROM t' --format json
@@ -700,8 +697,8 @@ pub struct DebugParseSqlArgs {
     #[arg(long, default_value = "generic")]
     pub dialect: DialectType,
 
-    /// Output format: sql (regenerated SQL), ast (Debug representation), json (JSON AST)
-    #[arg(long, default_value = "sql")]
+    /// Output format: ast (Debug representation), json (JSON AST)
+    #[arg(long, default_value = "ast")]
     pub format: DebugOutputFormat,
 }
 
@@ -726,8 +723,6 @@ pub struct DebugTraceColumnArgs {
 
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum DebugOutputFormat {
-    /// Regenerated SQL (round-trip through parser)
-    Sql,
     /// Rust Debug representation of the AST
     Ast,
     /// JSON serialization of the AST
@@ -1909,7 +1904,7 @@ mod tests {
         match args.command {
             DebugCommand::ParseSql(ref a) => {
                 assert_eq!(a.sql.as_deref(), Some("SELECT 1"));
-                assert!(matches!(a.format, DebugOutputFormat::Sql));
+                assert!(matches!(a.format, DebugOutputFormat::Ast));
             }
             _ => panic!("Expected ParseSql"),
         }

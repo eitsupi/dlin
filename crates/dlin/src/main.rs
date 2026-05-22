@@ -1175,11 +1175,6 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match args.format {
-        DebugOutputFormat::Sql => {
-            let regenerated = polyglot_sql::generate(&expr, args.dialect)
-                .map_err(|e| anyhow::anyhow!("generate error: {}", e))?;
-            writeln!(out, "{}", regenerated)?;
-        }
         DebugOutputFormat::Ast => {
             writeln!(out, "{:#?}", expr)?;
         }
