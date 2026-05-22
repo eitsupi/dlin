@@ -537,9 +537,10 @@ fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLine
 
 /// Return true if any SELECT in the expression tree still has unresolved star
 /// columns after CTE expansion. Used to provide a hint when lineage fails with
-/// "Cannot find column". Checks CTE bodies and subqueries in addition to the
-/// outermost select list so that patterns like
-/// `WITH src AS (SELECT * FROM ext) SELECT id FROM src` are detected.
+/// "Cannot find column". Recursively checks CTE bodies and derived-table
+/// subqueries in FROM/JOIN clauses so that patterns like
+/// `WITH src AS (SELECT * FROM ext) SELECT id FROM src` and
+/// `SELECT id FROM (SELECT * FROM ext) src` are both detected.
 fn has_unresolved_stars(expr: &Expression) -> bool {
     match expr {
         Expression::Select(select) => {
@@ -554,6 +555,14 @@ fn has_unresolved_stars(expr: &Expression) -> bool {
                 if with.ctes.iter().any(|cte| has_unresolved_stars(&cte.this)) {
                     return true;
                 }
+            }
+            if let Some(from) = &select.from {
+                if from.expressions.iter().any(has_unresolved_stars) {
+                    return true;
+                }
+            }
+            if select.joins.iter().any(|j| has_unresolved_stars(&j.this)) {
+                return true;
             }
             false
         }
@@ -2386,6 +2395,35 @@ select * from orders"#;
                 .iter()
                 .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
             "ColumnNotFound errors for CTE-nested stars should include SELECT * hint; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
+        // Derived-table pattern: SELECT id FROM (SELECT * FROM ext) src
+        // The outermost SELECT has no star; the star is inside a FROM subquery.
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code =
+            Some("SELECT id FROM (SELECT * FROM some_external_table) src".to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
+            "ColumnNotFound errors for derived-table stars should include SELECT * hint; got: {:?}",
             result.errors
         );
     }
