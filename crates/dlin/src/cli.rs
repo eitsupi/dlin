@@ -631,7 +631,7 @@ pub struct DebugArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DebugCommand {
-    /// Parse SQL and display the AST or regenerated SQL
+    /// Parse SQL and display the AST (debug or JSON)
     #[command(
         name = "parse-sql",
         long_about = "\
