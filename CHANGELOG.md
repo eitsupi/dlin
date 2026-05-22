@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.0-alpha.1] - 2026-05-22
+
+### Features
+
+- Experimental column lineage subcommands: `dlin column graph` and `dlin column impact` for tracing column-level data flows across dbt models (#33)
+
 ## [0.1.2] - 2026-04-11
 
 ### Features
