@@ -313,7 +313,8 @@ fn clean_identifier(s: &str) -> String {
 ///
 /// Applies CTE star expansion to resolve `SELECT *` through CTEs,
 /// then reads the output column names from the outermost SELECT.
-/// Returns an empty Vec if the expression is not a SELECT or star columns remain unresolved.
+/// Returns an empty Vec if the expression is not a SELECT. Unresolved star columns (`*` or
+/// qualified stars) are silently dropped from the result.
 #[cfg(feature = "column-lineage")]
 pub fn extract_select_columns_from_expr(
     expr: &Expression,

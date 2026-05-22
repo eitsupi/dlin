@@ -1,3 +1,5 @@
+#![cfg(feature = "column-lineage")]
+
 use dlin_core::graph::column_lineage::ColumnLineageCache;
 use polyglot_sql::DialectType;
 use std::path::PathBuf;
