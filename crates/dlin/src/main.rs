@@ -691,24 +691,23 @@ fn run_column_lineage_command(
                 // compiled_code, etc.) — preserve the zero so callers can
                 // distinguish "nothing requested" from "nothing found".
                 if report.total_columns > 0 {
-                    // Remove per-column errors for columns outside the filter and
-                    // the stale partial-failure summary; regenerate the summary below.
+                    // Remove per-column errors for columns outside the filter.
                     // Global errors (e.g. SQL parse failures) are always preserved.
-                    report.errors.retain(|err| {
-                        if let Some(rest) = err.strip_prefix("column '")
-                            && let Some(col_end) = rest.find('\'')
-                        {
-                            return column_filter.contains(&rest[..col_end]);
+                    report.errors.retain(|err| match err {
+                        graph::column_lineage::ColumnLineageError {
+                            kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                            what,
+                            ..
+                        } => {
+                            // Extract column name from "column '<name>': ..." pattern
+                            if let Some(rest) = what.strip_prefix("column '")
+                                && let Some(col_end) = rest.find('\'')
+                            {
+                                return column_filter.contains(&rest[..col_end]);
+                            }
+                            true
                         }
-                        // Drop the stale partial-failure summary (will be regenerated).
-                        if err.starts_with("model '")
-                            && err.contains("': traced ")
-                            && err.ends_with(" failed)")
-                        {
-                            return false;
-                        }
-                        // Preserve all other errors (global analysis failures, SQL parse errors, etc.)
-                        true
+                        _ => true,
                     });
                     report.traced_columns = report.columns.len();
                     report.total_columns = column_filter.len();
@@ -716,7 +715,7 @@ fn run_column_lineage_command(
                     // When there are no global errors, explicitly flag requested columns
                     // that are absent from both the output and per-column errors.
                     let has_global_errors =
-                        report.errors.iter().any(|err| !err.starts_with("column '"));
+                        report.errors.iter().any(|err| !matches!(err.kind, graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound));
                     if !has_global_errors {
                         let mut sorted_cols: Vec<&str> = column_filter.iter().copied().collect();
                         sorted_cols.sort_unstable();
@@ -726,29 +725,16 @@ fn run_column_lineage_command(
                             let has_col_error = report
                                 .errors
                                 .iter()
-                                .any(|err| err.starts_with(&col_error_prefix));
+                                .any(|err| err.what.starts_with(&col_error_prefix));
                             if !in_output && !has_col_error {
-                                report
-                                    .errors
-                                    .push(format!("column '{}': not found in model output", col));
+                                report.errors.push(graph::column_lineage::ColumnLineageError {
+                                    kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                                    what: format!("column '{}': not found in model output", col),
+                                    why: None,
+                                    hint: None,
+                                });
                             }
                         }
-                    }
-
-                    // Regenerate partial-failure summary only when per-column errors exist.
-                    // When failures are due to global errors (e.g. SQL parse failure), the
-                    // summary would be misleading — the global error itself is sufficient.
-                    let has_per_col_errors =
-                        report.errors.iter().any(|err| err.starts_with("column '"));
-                    let failed = report.total_columns - report.traced_columns;
-                    if failed > 0 && has_per_col_errors {
-                        report.errors.insert(
-                            0,
-                            format!(
-                                "model '{}': traced {}/{} columns ({} failed)",
-                                report.model, report.traced_columns, report.total_columns, failed,
-                            ),
-                        );
                     }
                 }
             }

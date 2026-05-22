@@ -1609,8 +1609,8 @@ models:
         assert!(
             errors
                 .iter()
-                .any(|e| e.as_str().unwrap_or("").contains("failed to parse SQL")),
-            "expected a 'failed to parse SQL' error; got: {:?}",
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "expected a parse_failure error; got: {:?}",
             errors
         );
     }

@@ -8,6 +8,42 @@ use serde::{Deserialize, Serialize};
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
+/// Error kind discriminator for column lineage errors.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnLineageErrorKind {
+    /// The specified model was not found in the dbt manifest.
+    ModelNotFound,
+    /// The model has no compiled SQL (run `dbt compile` first).
+    NoCompiledCode,
+    /// Output columns could not be determined (no YAML columns and SQL inference failed).
+    ColumnInferenceFailed,
+    /// The compiled SQL could not be parsed.
+    ParseFailure,
+    /// Lineage for a specific column could not be traced.
+    ColumnNotFound,
+}
+
+/// A structured error from column lineage analysis.
+///
+/// Uses the same `what`/`why`/`hint` field layout as the project-wide
+/// `Diagnostic` type, plus a `kind` discriminator for programmatic handling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColumnLineageError {
+    pub kind: ColumnLineageErrorKind,
+    pub what: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl std::fmt::Display for ColumnLineageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.what)
+    }
+}
+
 /// Column lineage result for a single model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelColumnLineage {
@@ -18,7 +54,7 @@ pub struct ModelColumnLineage {
     pub total_columns: usize,
     pub columns: Vec<ColumnLineageEntry>,
     #[serde(default)]
-    pub errors: Vec<String>,
+    pub errors: Vec<ColumnLineageError>,
 }
 
 /// Lineage for a single output column
@@ -241,7 +277,7 @@ pub struct ColumnImpactReport {
     pub column: String,
     pub impacted_columns: Vec<ImpactedColumn>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<String>,
+    pub errors: Vec<ColumnLineageError>,
 }
 
 /// A downstream column affected by a change to the source column
@@ -281,7 +317,12 @@ pub fn compute_column_lineage(
                 traced_columns: 0,
                 total_columns: 0,
                 columns: vec![],
-                errors: vec![format!("model '{}' not found in manifest", model_name)],
+                errors: vec![ColumnLineageError {
+                    kind: ColumnLineageErrorKind::ModelNotFound,
+                    what: format!("model '{}' not found in manifest", model_name),
+                    why: None,
+                    hint: Some("Run `dlin list` to see available models".to_string()),
+                }],
             };
         }
     };
@@ -298,10 +339,14 @@ pub fn compute_column_lineage(
                 traced_columns: 0,
                 total_columns: 0,
                 columns: vec![],
-                errors: vec![format!(
-                    "model '{}' has no compiled_code (run `dbt compile` first; use `dlin check-manifest` to verify the manifest is up to date)",
-                    display_name
-                )],
+                errors: vec![ColumnLineageError {
+                    kind: ColumnLineageErrorKind::NoCompiledCode,
+                    what: format!("model '{}' has no compiled_code", display_name),
+                    why: Some("compiled SQL is required for column lineage analysis".to_string()),
+                    hint: Some(
+                        "Run `dbt compile` first; use `dlin check-manifest` to verify the manifest is up to date".to_string(),
+                    ),
+                }],
             };
         }
     };
@@ -335,10 +380,19 @@ pub fn compute_column_lineage(
             traced_columns: 0,
             total_columns: 0,
             columns: vec![],
-            errors: vec![format!(
-                "model '{}': could not determine output columns (YAML has no columns and SQL inference failed)",
-                display_name
-            )],
+            errors: vec![ColumnLineageError {
+                kind: ColumnLineageErrorKind::ColumnInferenceFailed,
+                what: format!(
+                    "model '{}': could not determine output columns",
+                    display_name
+                ),
+                why: Some(
+                    "YAML has no columns defined and SQL column inference failed".to_string(),
+                ),
+                hint: Some(
+                    "Add column definitions to the model's YAML, or ensure the SQL is parseable by `dlin debug parse-sql`".to_string(),
+                ),
+            }],
         };
     }
 
@@ -350,7 +404,14 @@ pub fn compute_column_lineage(
                 traced_columns: 0,
                 total_columns: column_names.len(),
                 columns: vec![],
-                errors: vec![format!("failed to parse SQL for '{}': {}", display_name, e)],
+                errors: vec![ColumnLineageError {
+                    kind: ColumnLineageErrorKind::ParseFailure,
+                    what: format!("failed to parse SQL for '{}'", display_name),
+                    why: Some(e),
+                    hint: Some(
+                        "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set".to_string(),
+                    ),
+                }],
             };
         }
     };
@@ -365,7 +426,12 @@ pub fn compute_column_lineage(
                 transformation: result.transformation,
                 sources: result.sources,
             }),
-            Err(e) => Err(format!("column '{}': {}", col_name, e)),
+            Err(e) => Err(ColumnLineageError {
+                kind: ColumnLineageErrorKind::ColumnNotFound,
+                what: format!("column '{}': {}", col_name, e),
+                why: None,
+                hint: None,
+            }),
         })
         .collect();
 
@@ -376,21 +442,6 @@ pub fn compute_column_lineage(
             Ok(entry) => columns.push(entry),
             Err(e) => errors.push(e),
         }
-    }
-
-    // Add summary when some columns failed but not all
-    let failed = total - columns.len();
-    if failed > 0 && !columns.is_empty() {
-        errors.insert(
-            0,
-            format!(
-                "model '{}': traced {}/{} columns ({} failed)",
-                display_name,
-                columns.len(),
-                total,
-                failed
-            ),
-        );
     }
 
     let result = ModelColumnLineage {
@@ -548,7 +599,12 @@ pub fn compute_column_impact(
                 model: model_name.to_string(),
                 column: column_name.to_string(),
                 impacted_columns: vec![],
-                errors: vec![format!("model '{}' not found in manifest", model_name)],
+                errors: vec![ColumnLineageError {
+                    kind: ColumnLineageErrorKind::ModelNotFound,
+                    what: format!("model '{}' not found in manifest", model_name),
+                    why: None,
+                    hint: Some("Run `dlin list` to see available models".to_string()),
+                }],
             };
         }
     };
@@ -812,7 +868,7 @@ fn resolve_source_recursive(
     upstream_models: &HashMap<String, String>,
     visited: &mut HashSet<(String, String)>,
     resolved: &mut Vec<ColumnSource>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
     current_path: &[String],
@@ -1544,7 +1600,7 @@ mod tests {
 
         assert_eq!(result.columns.len(), 0);
         assert!(!result.errors.is_empty());
-        assert!(result.errors[0].contains("not found"));
+        assert!(result.errors[0].what.contains("not found"));
     }
 
     #[test]
@@ -1564,7 +1620,7 @@ mod tests {
         );
 
         assert!(result.columns.is_empty());
-        assert!(result.errors[0].contains("compiled_code"));
+        assert!(result.errors[0].what.contains("compiled_code"));
     }
 
     #[test]
@@ -1610,7 +1666,11 @@ mod tests {
 
         assert!(result.columns.is_empty());
         assert!(!result.errors.is_empty());
-        assert!(result.errors[0].contains("could not determine output columns"));
+        assert!(
+            result.errors[0]
+                .what
+                .contains("could not determine output columns")
+        );
     }
 
     #[test]
@@ -2148,7 +2208,7 @@ select * from orders"#;
             &mut ColumnLineageCache::disabled(),
         );
         assert!(!result.errors.is_empty());
-        assert!(result.errors[0].contains("not found"));
+        assert!(result.errors[0].what.contains("not found"));
     }
 
     #[test]
@@ -2215,17 +2275,22 @@ select * from orders"#;
 
         // Should have 4 successful columns and 1 failed
         assert_eq!(result.columns.len(), 4);
+        assert_eq!(result.traced_columns, 4);
+        assert_eq!(result.total_columns, 5);
         assert!(
             result
                 .errors
                 .iter()
-                .any(|e| e.contains("traced 4/5 columns (1 failed)")),
-            "should include summary, got: {:?}",
+                .any(|e| e.what.contains("nonexistent_col")),
+            "should include per-column error, got: {:?}",
             result.errors
         );
         assert!(
-            result.errors.iter().any(|e| e.contains("nonexistent_col")),
-            "should include per-column error, got: {:?}",
+            result
+                .errors
+                .iter()
+                .all(|e| matches!(e.kind, ColumnLineageErrorKind::ColumnNotFound)),
+            "all errors should be column_not_found, got: {:?}",
             result.errors
         );
     }
@@ -3070,7 +3135,7 @@ select * from orders"#;
         );
 
         assert!(!result.errors.is_empty());
-        assert!(result.errors[0].contains("not found"));
+        assert!(result.errors[0].what.contains("not found"));
     }
 
     #[test]
