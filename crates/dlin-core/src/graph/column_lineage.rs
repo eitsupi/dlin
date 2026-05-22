@@ -417,6 +417,7 @@ pub fn compute_column_lineage(
     };
 
     let total = column_names.len();
+    let has_star_columns = has_unresolved_stars(&ctx.expanded_expr);
 
     let results: Vec<_> = column_names
         .par_iter()
@@ -426,12 +427,19 @@ pub fn compute_column_lineage(
                 transformation: result.transformation,
                 sources: result.sources,
             }),
-            Err(e) => Err(ColumnLineageError {
-                kind: ColumnLineageErrorKind::ColumnNotFound,
-                what: format!("column '{}': {}", col_name, e),
-                why: None,
-                hint: None,
-            }),
+            Err(e) => {
+                let hint = (has_star_columns && e.contains("Cannot find column")).then(|| {
+                    "column may be introduced via SELECT * that could not be expanded; \
+                     define upstream columns in the model YAML to enable full resolution"
+                        .to_string()
+                });
+                Err(ColumnLineageError {
+                    kind: ColumnLineageErrorKind::ColumnNotFound,
+                    what: format!("column '{}': {}", col_name, e),
+                    why: None,
+                    hint,
+                })
+            }
         })
         .collect();
 
@@ -524,6 +532,18 @@ fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLine
     match lineage_result {
         Ok(node) => Ok(extract_leaf_sources(&node)),
         Err(e) => Err(format_lineage_error(&e)),
+    }
+}
+
+/// Return true if the outermost SELECT still has unresolved star columns after
+/// CTE expansion. Used to provide a hint when lineage fails with "Cannot find column".
+fn has_unresolved_stars(expr: &Expression) -> bool {
+    match expr {
+        Expression::Select(select) => select.expressions.iter().any(|e| {
+            matches!(e, Expression::Star(_))
+                || matches!(e, Expression::Column(c) if c.name.name == "*")
+        }),
+        _ => false,
     }
 }
 
@@ -2291,6 +2311,36 @@ select * from orders"#;
                 .iter()
                 .all(|e| matches!(e.kind, ColumnLineageErrorKind::ColumnNotFound)),
             "all errors should be column_not_found, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_column_not_found_hint_when_select_star_unresolved() {
+        // When SELECT * cannot be expanded (external table not in manifest),
+        // ColumnNotFound errors for YAML-defined columns should include the SELECT * hint.
+        let mut manifest = make_test_manifest();
+        // Replace stg_orders SQL with SELECT * from an external table (no schema info)
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some("SELECT * FROM some_external_table".to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        // All columns should fail because SELECT * can't be expanded
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
+            "ColumnNotFound errors should include SELECT * hint when stars remain unresolved; got: {:?}",
             result.errors
         );
     }
