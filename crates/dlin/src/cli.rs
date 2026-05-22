@@ -1722,8 +1722,9 @@ mod tests {
 
     #[test]
     fn test_column_lineage_subcommand() {
-        let args =
-            unwrap_column_graph(Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap());
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+        );
         assert_eq!(args.model, &["orders"]);
         assert!(args.column.is_empty());
     }
@@ -1732,14 +1733,7 @@ mod tests {
     fn test_column_lineage_with_column_filter() {
         let args = unwrap_column_graph(
             Cli::try_parse_from([
-                "dlin",
-                "column",
-                "graph",
-                "orders",
-                "--column",
-                "order_id",
-                "--column",
-                "status",
+                "dlin", "column", "graph", "orders", "--column", "order_id", "--column", "status",
             ])
             .unwrap(),
         );
@@ -1810,8 +1804,9 @@ mod tests {
 
     #[test]
     fn test_column_lineage_default_dialect() {
-        let args =
-            unwrap_column_graph(Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap());
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+        );
         assert!(args.dialect.is_none());
     }
 
@@ -1871,7 +1866,8 @@ mod tests {
             "datafusion",
         ];
         for dialect in dialects {
-            let cli = Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", dialect]);
+            let cli =
+                Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", dialect]);
             assert!(
                 cli.is_ok(),
                 "dialect '{}' should parse successfully, got: {:?}",
@@ -1883,8 +1879,14 @@ mod tests {
 
     #[test]
     fn test_dialect_invalid_value_rejected() {
-        let result =
-            Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", "unknown_db"]);
+        let result = Cli::try_parse_from([
+            "dlin",
+            "column",
+            "graph",
+            "model",
+            "--dialect",
+            "unknown_db",
+        ]);
         assert!(
             result.is_err(),
             "invalid dialect should be rejected by clap"
