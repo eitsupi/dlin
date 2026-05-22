@@ -2429,6 +2429,37 @@ select * from orders"#;
     }
 
     #[test]
+    fn test_column_not_found_hint_when_join_select_star_unresolved() {
+        // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
+        // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(
+            "SELECT id FROM some_table JOIN (SELECT * FROM some_external_table) src ON 1=1"
+                .to_string(),
+        );
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
+            "ColumnNotFound errors for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn test_transformation_classification() {
         // customers model has: customer_id (direct) and order_count (aggregation via count(*))
         let manifest = make_cross_model_manifest();
