@@ -55,8 +55,8 @@ Examples:
   dlin summary -o json                             # Project overview as JSON
   dlin check-manifest || dbt compile               # Recompile if stale or files deleted
   git diff --name-only main | dlin graph           # Lineage of changed files
-  dlin column graph orders                         # Column lineage (requires dbt compile)
-  dlin column impact stg_orders --column order_id  # Column impact (requires dbt compile)",
+  dlin column graph orders                         # Upstream: where do columns come from? (requires dbt compile)
+  dlin column impact stg_orders --column order_id  # Downstream: what depends on this column? (requires dbt compile)",
     version
 )]
 pub struct Cli {
@@ -145,7 +145,14 @@ detail on fewer endpoint nodes.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-File paths are resolved to model names using dbt project configuration.",
+File paths are resolved to model names using dbt project configuration.
+
+Column-level analysis:
+  This command works at the model level (bidirectional, with -u/-d depth control).
+  For column-level lineage tracing, see:
+    dlin column graph   upstream — traces where each output column's data came from
+    dlin column impact  downstream — finds which outputs depend on a given column
+  Both require manifest.json (run `dbt compile` first).",
     after_long_help = "\
 Examples:
   # === Full project lineage ===
@@ -197,7 +204,11 @@ Examples:
 
   # === Column display (mermaid only) ===
   dlin graph -o mermaid --show-columns               # show columns in node labels
-  dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes"
+  dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes
+
+  # === Column-level analysis (requires manifest) ===
+  dlin column graph orders                           # upstream: where do columns come from?
+  dlin column impact stg_orders --column order_id    # downstream: what depends on this column?"
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
@@ -729,11 +740,19 @@ pub enum DebugOutputFormat {
     long_about = "\
 Column-level lineage and impact analysis.
 
-These commands require manifest.json with compiled SQL (run `dbt compile` first).",
+Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
+column analysis is split by direction — each subcommand covers one direction:
+
+  graph     upstream   — traces where each output column's data came from
+  impact    downstream — finds which models/columns are affected by a column change
+
+There are no -u/-d depth flags; the full chain is always traversed in both cases.
+
+Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
     after_long_help = "\
 Examples:
-  dlin column graph orders                         # Column lineage
-  dlin column impact stg_orders --column order_id  # Column impact"
+  dlin column graph orders                         # upstream: where do columns come from?
+  dlin column impact stg_orders --column order_id  # downstream: what depends on this column?"
 )]
 pub struct ColumnArgs {
     #[command(subcommand)]
@@ -747,9 +766,14 @@ pub enum ColumnCommand {
         long_about = "\
 Compute column-level lineage for one or more models.
 
-Traces each output column back to its raw source columns, following the DAG \
-across intermediate models. Requires manifest.json with compiled SQL \
-(run `dbt compile` first).
+Direction: upstream only. Traces backward from a model's output columns to
+their raw source columns across the full DAG. There are no -u/-d depth flags
+— the entire upstream chain is always traversed automatically.
+
+To find what downstream models or columns would be affected by changing a
+specific column, use `dlin column impact` instead.
+
+Requires manifest.json with compiled SQL (run `dbt compile` first).
 
 Column resolution order:
   1. YAML column definitions (schema.yml / models.yml)
@@ -801,9 +825,12 @@ Examples:
         long_about = "\
 Analyze downstream column-level impact of changing a column.
 
-Shows which downstream models and columns depend on a specific column,
-tracing through the DAG to find all affected outputs. This is the reverse
-direction of `column graph` (which traces upstream sources).
+Direction: downstream only. Starting from a specific column, follows forward
+edges to find all dependent models and columns. There are no -u/-d depth flags
+— all downstream dependents are always included.
+
+This is the reverse direction of `dlin column graph` (which traces upstream
+sources). To trace where a column's data comes from, use `dlin column graph`.
 
 Takes a single model and one or more --column flags (required).
 
