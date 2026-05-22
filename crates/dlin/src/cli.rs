@@ -55,8 +55,8 @@ Examples:
   dlin summary -o json                             # Project overview as JSON
   dlin check-manifest || dbt compile               # Recompile if stale or files deleted
   git diff --name-only main | dlin graph           # Lineage of changed files
-  dlin column-lineage orders                       # Column lineage (requires dbt compile)
-  dlin column-impact stg_orders --column order_id  # Column impact (requires dbt compile)",
+  dlin column graph orders                         # Column lineage (requires dbt compile)
+  dlin column impact stg_orders --column order_id  # Column impact (requires dbt compile)",
     version
 )]
 pub struct Cli {
@@ -516,173 +516,8 @@ Examples:
     )]
     Summary(SummaryArgs),
 
-    /// Compute column-level lineage for a model (requires manifest.json)
-    #[command(
-        name = "column-lineage",
-        long_about = "\
-Compute column-level lineage for one or more models.
-
-Traces each output column back to its raw source columns, following the DAG \
-across intermediate models. Requires manifest.json with compiled SQL \
-(run `dbt compile` first).
-
-Column resolution order:
-  1. YAML column definitions (schema.yml / models.yml)
-  2. SQL inference from compiled_code (fallback when YAML is absent)
-
-Output: JSON array per model with the following structure:
-  model             model name
-  traced_columns    number of columns successfully traced
-  total_columns     total number of columns attempted
-  columns[]
-    column          output column name
-    transformation  how the column was derived:
-                      direct       passed through unchanged (including renames)
-                      aggregation  aggregate function (SUM, COUNT, etc.)
-                      expression   arithmetic or other expression
-                      cast         type cast (CAST(x AS INT))
-                      conditional  CASE WHEN expression
-                      unknown      could not classify
-    sources[]
-      table         source model or raw table name
-      column        source column name
-      model_path[]  intermediate models traversed (omitted if empty)
-  errors[]    parse or resolution errors (non-empty → exit code 1)
-
-Exit codes:
-  0   Success
-  1   Error (model not found, no manifest, analysis errors, etc.)",
-        after_long_help = "\
-Examples:
-  # Column lineage for a single model
-  dlin column-lineage orders
-
-  # Specific columns only
-  dlin column-lineage orders --column order_id --column status
-
-  # Multiple models
-  dlin column-lineage orders stg_orders
-
-  # With explicit manifest path
-  dlin column-lineage orders --manifest-path target/manifest.json
-
-  # BigQuery project
-  dlin column-lineage orders --dialect bigquery"
-    )]
-    ColumnLineage {
-        /// Model names to analyze column lineage for
-        #[arg(required = true)]
-        model: Vec<String>,
-
-        /// Specific columns to analyze (analyzes all columns if omitted)
-        #[arg(long)]
-        column: Vec<String>,
-
-        /// SQL dialect for parsing (default: generic).
-        /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
-        #[arg(long)]
-        dialect: Option<DialectType>,
-
-        /// Path to dbt project directory
-        #[arg(short = 'p', long = "project-dir", default_value = ".")]
-        project_dir: PathBuf,
-
-        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
-        #[arg(long)]
-        manifest_path: Option<PathBuf>,
-
-        /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
-        #[arg(long, env = "DLIN_CACHE_DIR")]
-        cache_dir: Option<PathBuf>,
-
-        /// Disable column lineage cache
-        #[arg(long, env = "DLIN_NO_CACHE")]
-        no_cache: bool,
-
-        /// Discard existing cache and rebuild from scratch
-        #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
-        refresh_cache: bool,
-
-        /// Suppress warning messages
-        #[arg(short = 'q', long)]
-        quiet: bool,
-    },
-
-    /// Analyze downstream column-level impact of changing a column
-    ///
-    /// Shows which downstream models and columns would be affected if a
-    /// specific column is modified. This is the reverse direction of
-    /// column-lineage (which traces upstream sources).
-    ///
-    /// Requires manifest.json with compiled SQL (run `dbt compile` first).
-    #[command(
-        long_about = "\
-Analyze downstream column-level impact of changing a column.
-
-Shows which downstream models and columns depend on a specific column,
-tracing through the DAG to find all affected outputs. This is the reverse
-direction of column-lineage (which traces upstream sources).
-
-Takes a single model and one or more --column flags (required).
-
-Requires compiled SQL in manifest.json — run `dbt compile` first.
-
-Output: JSON array per column with affected downstream columns and models.
-
-Exit codes:
-  0   Success
-  1   Error (model not found, no manifest, analysis errors, etc.)",
-        after_long_help = "\
-Examples:
-  # Impact of changing a single column
-  dlin column-impact stg_orders --column order_id
-
-  # Impact of multiple columns
-  dlin column-impact stg_orders --column order_id --column status
-
-  # With explicit manifest path
-  dlin column-impact stg_orders --column order_id --manifest-path target/manifest.json
-
-  # BigQuery project
-  dlin column-impact stg_orders --column order_id --dialect bigquery"
-    )]
-    ColumnImpact {
-        /// Model name to analyze column impact for
-        model: String,
-
-        /// Columns to analyze impact for (required)
-        #[arg(long, required = true)]
-        column: Vec<String>,
-
-        /// SQL dialect for parsing (default: generic).
-        /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
-        #[arg(long)]
-        dialect: Option<DialectType>,
-
-        /// Path to dbt project directory
-        #[arg(short = 'p', long = "project-dir", default_value = ".")]
-        project_dir: PathBuf,
-
-        /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
-        #[arg(long)]
-        manifest_path: Option<PathBuf>,
-
-        /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
-        #[arg(long, env = "DLIN_CACHE_DIR")]
-        cache_dir: Option<PathBuf>,
-
-        /// Disable column lineage cache
-        #[arg(long, env = "DLIN_NO_CACHE")]
-        no_cache: bool,
-
-        /// Discard existing cache and rebuild from scratch
-        #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
-        refresh_cache: bool,
-
-        /// Suppress warning messages
-        #[arg(short = 'q', long)]
-        quiet: bool,
-    },
+    /// Column-level lineage and impact analysis
+    Column(ColumnArgs),
 
     /// Low-level debugging tools for SQL parsing and lineage tracing
     #[command(
@@ -886,6 +721,193 @@ pub enum DebugOutputFormat {
     Ast,
     /// JSON serialization of the AST
     Json,
+}
+
+/// Arguments for `dlin column` subcommand group
+#[derive(Debug, clap::Args)]
+#[command(
+    long_about = "\
+Column-level lineage and impact analysis.
+
+These commands require manifest.json with compiled SQL (run `dbt compile` first).",
+    after_long_help = "\
+Examples:
+  dlin column graph orders                         # Column lineage
+  dlin column impact stg_orders --column order_id  # Column impact"
+)]
+pub struct ColumnArgs {
+    #[command(subcommand)]
+    pub command: ColumnCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ColumnCommand {
+    /// Compute column-level lineage for a model (traces upstream sources)
+    #[command(
+        long_about = "\
+Compute column-level lineage for one or more models.
+
+Traces each output column back to its raw source columns, following the DAG \
+across intermediate models. Requires manifest.json with compiled SQL \
+(run `dbt compile` first).
+
+Column resolution order:
+  1. YAML column definitions (schema.yml / models.yml)
+  2. SQL inference from compiled_code (fallback when YAML is absent)
+
+Output: JSON array per model with the following structure:
+  model             model name
+  traced_columns    number of columns successfully traced
+  total_columns     total number of columns attempted
+  columns[]
+    column          output column name
+    transformation  how the column was derived:
+                      direct       passed through unchanged (including renames)
+                      aggregation  aggregate function (SUM, COUNT, etc.)
+                      expression   arithmetic or other expression
+                      cast         type cast (CAST(x AS INT))
+                      conditional  CASE WHEN expression
+                      unknown      could not classify
+    sources[]
+      table         source model or raw table name
+      column        source column name
+      model_path[]  intermediate models traversed (omitted if empty)
+  errors[]    parse or resolution errors (non-empty → exit code 1)
+
+Exit codes:
+  0   Success
+  1   Error (model not found, no manifest, analysis errors, etc.)",
+        after_long_help = "\
+Examples:
+  # Column lineage for a single model
+  dlin column graph orders
+
+  # Specific columns only
+  dlin column graph orders --column order_id --column status
+
+  # Multiple models
+  dlin column graph orders stg_orders
+
+  # With explicit manifest path
+  dlin column graph orders --manifest-path target/manifest.json
+
+  # BigQuery project
+  dlin column graph orders --dialect bigquery"
+    )]
+    Graph(ColumnGraphArgs),
+
+    /// Analyze downstream column-level impact of changing a column
+    #[command(
+        long_about = "\
+Analyze downstream column-level impact of changing a column.
+
+Shows which downstream models and columns depend on a specific column,
+tracing through the DAG to find all affected outputs. This is the reverse
+direction of `column graph` (which traces upstream sources).
+
+Takes a single model and one or more --column flags (required).
+
+Requires compiled SQL in manifest.json — run `dbt compile` first.
+
+Output: JSON array per column with affected downstream columns and models.
+
+Exit codes:
+  0   Success
+  1   Error (model not found, no manifest, analysis errors, etc.)",
+        after_long_help = "\
+Examples:
+  # Impact of changing a single column
+  dlin column impact stg_orders --column order_id
+
+  # Impact of multiple columns
+  dlin column impact stg_orders --column order_id --column status
+
+  # With explicit manifest path
+  dlin column impact stg_orders --column order_id --manifest-path target/manifest.json
+
+  # BigQuery project
+  dlin column impact stg_orders --column order_id --dialect bigquery"
+    )]
+    Impact(ColumnImpactArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ColumnGraphArgs {
+    /// Model names to analyze column lineage for
+    #[arg(required = true)]
+    pub model: Vec<String>,
+
+    /// Specific columns to analyze (analyzes all columns if omitted)
+    #[arg(long)]
+    pub column: Vec<String>,
+
+    /// SQL dialect for parsing (default: generic).
+    /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+    #[arg(long)]
+    pub dialect: Option<DialectType>,
+
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
+    #[arg(long, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable column lineage cache
+    #[arg(long, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
+    /// Discard existing cache and rebuild from scratch
+    #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+    pub refresh_cache: bool,
+
+    /// Suppress warning messages
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ColumnImpactArgs {
+    /// Model name to analyze column impact for
+    pub model: String,
+
+    /// Columns to analyze impact for (required)
+    #[arg(long, required = true)]
+    pub column: Vec<String>,
+
+    /// SQL dialect for parsing (default: generic).
+    /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+    #[arg(long)]
+    pub dialect: Option<DialectType>,
+
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
+    #[arg(long, env = "DLIN_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
+    /// Disable column lineage cache
+    #[arg(long, env = "DLIN_NO_CACHE")]
+    pub no_cache: bool,
+
+    /// Discard existing cache and rebuild from scratch
+    #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
+    pub refresh_cache: bool,
+
+    /// Suppress warning messages
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -1651,149 +1673,137 @@ mod tests {
         assert_eq!(cli.error_format, ErrorFormat::Json);
     }
 
-    #[test]
-    fn test_column_lineage_subcommand() {
-        let cli = Cli::try_parse_from(["dlin", "column-lineage", "orders"]).unwrap();
+    fn unwrap_column_graph(cli: Cli) -> ColumnGraphArgs {
         match cli.command {
-            Command::ColumnLineage {
-                ref model,
-                ref column,
-                ..
-            } => {
-                assert_eq!(model, &["orders"]);
-                assert!(column.is_empty());
-            }
-            _ => panic!("Expected ColumnLineage subcommand"),
+            Command::Column(col) => match col.command {
+                ColumnCommand::Graph(args) => args,
+                _ => panic!("Expected Column graph subcommand"),
+            },
+            _ => panic!("Expected Column subcommand"),
+        }
+    }
+
+    fn unwrap_column_impact(cli: Cli) -> ColumnImpactArgs {
+        match cli.command {
+            Command::Column(col) => match col.command {
+                ColumnCommand::Impact(args) => args,
+                _ => panic!("Expected Column impact subcommand"),
+            },
+            _ => panic!("Expected Column subcommand"),
         }
     }
 
     #[test]
+    fn test_column_lineage_subcommand() {
+        let args =
+            unwrap_column_graph(Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap());
+        assert_eq!(args.model, &["orders"]);
+        assert!(args.column.is_empty());
+    }
+
+    #[test]
     fn test_column_lineage_with_column_filter() {
-        let cli = Cli::try_parse_from([
-            "dlin",
-            "column-lineage",
-            "orders",
-            "--column",
-            "order_id",
-            "--column",
-            "status",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::ColumnLineage {
-                ref model,
-                ref column,
-                ..
-            } => {
-                assert_eq!(model, &["orders"]);
-                assert_eq!(column, &["order_id", "status"]);
-            }
-            _ => panic!("Expected ColumnLineage subcommand"),
-        }
+        let args = unwrap_column_graph(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "graph",
+                "orders",
+                "--column",
+                "order_id",
+                "--column",
+                "status",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(args.model, &["orders"]);
+        assert_eq!(args.column, &["order_id", "status"]);
     }
 
     #[test]
     fn test_column_lineage_no_model() {
         // model is required at the clap level
-        let result = Cli::try_parse_from(["dlin", "column-lineage"]);
+        let result = Cli::try_parse_from(["dlin", "column", "graph"]);
         assert!(
             result.is_err(),
-            "column-lineage should require at least one model"
+            "column graph should require at least one model"
         );
     }
 
     #[test]
     fn test_column_impact_subcommand() {
-        let cli = Cli::try_parse_from([
-            "dlin",
-            "column-impact",
-            "stg_orders",
-            "--column",
-            "order_id",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::ColumnImpact {
-                ref model,
-                ref column,
-                ..
-            } => {
-                assert_eq!(model, "stg_orders");
-                assert_eq!(column, &["order_id"]);
-            }
-            _ => panic!("Expected ColumnImpact subcommand"),
-        }
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(args.model, "stg_orders");
+        assert_eq!(args.column, &["order_id"]);
     }
 
     #[test]
     fn test_column_impact_requires_column() {
-        // --column is required for column-impact
-        let result = Cli::try_parse_from(["dlin", "column-impact", "stg_orders"]);
-        assert!(result.is_err(), "column-impact should require --column");
+        // --column is required for column impact
+        let result = Cli::try_parse_from(["dlin", "column", "impact", "stg_orders"]);
+        assert!(result.is_err(), "column impact should require --column");
     }
 
     #[test]
     fn test_column_impact_multiple_columns() {
-        let cli = Cli::try_parse_from([
-            "dlin",
-            "column-impact",
-            "stg_orders",
-            "--column",
-            "order_id",
-            "--column",
-            "status",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::ColumnImpact { ref column, .. } => {
-                assert_eq!(column, &["order_id", "status"]);
-            }
-            _ => panic!("Expected ColumnImpact subcommand"),
-        }
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--column",
+                "status",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(args.column, &["order_id", "status"]);
     }
 
     #[test]
     fn test_column_lineage_with_dialect() {
-        let cli =
-            Cli::try_parse_from(["dlin", "column-lineage", "orders", "--dialect", "bigquery"])
-                .unwrap();
-        match cli.command {
-            Command::ColumnLineage { dialect, .. } => {
-                assert_eq!(dialect, Some(polyglot_sql::DialectType::BigQuery));
-            }
-            _ => panic!("Expected ColumnLineage subcommand"),
-        }
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders", "--dialect", "bigquery"])
+                .unwrap(),
+        );
+        assert_eq!(args.dialect, Some(polyglot_sql::DialectType::BigQuery));
     }
 
     #[test]
     fn test_column_lineage_default_dialect() {
-        let cli = Cli::try_parse_from(["dlin", "column-lineage", "orders"]).unwrap();
-        match cli.command {
-            Command::ColumnLineage { dialect, .. } => {
-                assert!(dialect.is_none());
-            }
-            _ => panic!("Expected ColumnLineage subcommand"),
-        }
+        let args =
+            unwrap_column_graph(Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap());
+        assert!(args.dialect.is_none());
     }
 
     #[test]
     fn test_column_impact_with_dialect() {
-        let cli = Cli::try_parse_from([
-            "dlin",
-            "column-impact",
-            "stg_orders",
-            "--column",
-            "order_id",
-            "--dialect",
-            "snowflake",
-        ])
-        .unwrap();
-        match cli.command {
-            Command::ColumnImpact { dialect, .. } => {
-                assert_eq!(dialect, Some(polyglot_sql::DialectType::Snowflake));
-            }
-            _ => panic!("Expected ColumnImpact subcommand"),
-        }
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--dialect",
+                "snowflake",
+            ])
+            .unwrap(),
+        );
+        assert_eq!(args.dialect, Some(polyglot_sql::DialectType::Snowflake));
     }
 
     #[test]
@@ -1834,8 +1844,7 @@ mod tests {
             "datafusion",
         ];
         for dialect in dialects {
-            let cli =
-                Cli::try_parse_from(["dlin", "column-lineage", "model", "--dialect", dialect]);
+            let cli = Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", dialect]);
             assert!(
                 cli.is_ok(),
                 "dialect '{}' should parse successfully, got: {:?}",
@@ -1848,7 +1857,7 @@ mod tests {
     #[test]
     fn test_dialect_invalid_value_rejected() {
         let result =
-            Cli::try_parse_from(["dlin", "column-lineage", "model", "--dialect", "unknown_db"]);
+            Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", "unknown_db"]);
         assert!(
             result.is_err(),
             "invalid dialect should be rejected by clap"

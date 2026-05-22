@@ -9,9 +9,9 @@ use polyglot_sql::{DialectType, Schema as _};
 mod cli;
 
 use cli::{
-    CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, DebugCommand, DebugOutputFormat,
-    Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, SourceType, SummaryArgs,
-    SummaryOutputFormat,
+    CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, Command, DebugCommand,
+    DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, SourceType,
+    SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
 use dlin_core::input;
@@ -57,52 +57,34 @@ fn main() {
             dlin_core::set_quiet(args.quiet);
             run_check_manifest_command(args)
         }
-        Command::ColumnLineage {
-            model,
-            column,
-            dialect,
-            project_dir,
-            manifest_path,
-            cache_dir,
-            no_cache,
-            refresh_cache,
-            quiet,
-        } => {
-            dlin_core::set_quiet(quiet);
-            run_column_lineage_command(
-                model,
-                &column,
-                dialect,
-                &project_dir,
-                manifest_path.as_ref(),
-                cache_dir.as_deref(),
-                no_cache,
-                refresh_cache,
-            )
-        }
-        Command::ColumnImpact {
-            model,
-            column,
-            dialect,
-            project_dir,
-            manifest_path,
-            cache_dir,
-            no_cache,
-            refresh_cache,
-            quiet,
-        } => {
-            dlin_core::set_quiet(quiet);
-            run_column_impact_command(
-                &model,
-                &column,
-                dialect,
-                &project_dir,
-                manifest_path.as_ref(),
-                cache_dir.as_deref(),
-                no_cache,
-                refresh_cache,
-            )
-        }
+        Command::Column(col) => match col.command {
+            ColumnCommand::Graph(args) => {
+                dlin_core::set_quiet(args.quiet);
+                run_column_lineage_command(
+                    args.model,
+                    &args.column,
+                    args.dialect,
+                    &args.project_dir,
+                    args.manifest_path.as_ref(),
+                    args.cache_dir.as_deref(),
+                    args.no_cache,
+                    args.refresh_cache,
+                )
+            }
+            ColumnCommand::Impact(args) => {
+                dlin_core::set_quiet(args.quiet);
+                run_column_impact_command(
+                    &args.model,
+                    &args.column,
+                    args.dialect,
+                    &args.project_dir,
+                    args.manifest_path.as_ref(),
+                    args.cache_dir.as_deref(),
+                    args.no_cache,
+                    args.refresh_cache,
+                )
+            }
+        },
         Command::Debug(args) => run_debug_command(args),
         Command::Impact {
             model,

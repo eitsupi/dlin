@@ -1394,7 +1394,8 @@ models:
         let fixture = column_lineage_fixture_dir();
         let output = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1437,7 +1438,8 @@ models:
         let fixture = column_lineage_fixture_dir();
         let output = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "nonexistent_model",
                 "--column",
                 "some_col",
@@ -1478,7 +1480,8 @@ models:
         // First confirm that without a filter, ghost_col causes a non-zero exit.
         let unfiltered = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_partial_fail",
                 "--project-dir",
                 fixture.to_str().unwrap(),
@@ -1500,7 +1503,8 @@ models:
         // Now with --column order_id: ghost_col's error must be suppressed.
         let filtered = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_partial_fail",
                 "--column",
                 "order_id",
@@ -1536,7 +1540,8 @@ models:
         let fixture = column_lineage_fixture_dir();
         let output = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_orders",
                 "--column",
                 "this_column_does_not_exist",
@@ -1576,7 +1581,8 @@ models:
         let fixture = column_lineage_fixture_dir();
         let output = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_bad_sql",
                 "--column",
                 "some_col",
@@ -1622,7 +1628,8 @@ models:
         let fixture = column_lineage_fixture_dir();
         let output = std::process::Command::new(binary_path())
             .args([
-                "column-lineage",
+                "column",
+                "graph",
                 "stg_accounts",
                 "--project-dir",
                 fixture.to_str().unwrap(),
@@ -1633,7 +1640,7 @@ models:
 
         assert!(
             output.status.success(),
-            "column-lineage for stg_accounts should succeed; stderr: {}",
+            "column graph for stg_accounts should succeed; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
