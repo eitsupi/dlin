@@ -535,14 +535,29 @@ fn run_column_lineage(col_name: &str, ctx: &LineageContext) -> Result<ColumnLine
     }
 }
 
-/// Return true if the outermost SELECT still has unresolved star columns after
-/// CTE expansion. Used to provide a hint when lineage fails with "Cannot find column".
+/// Return true if any SELECT in the expression tree still has unresolved star
+/// columns after CTE expansion. Used to provide a hint when lineage fails with
+/// "Cannot find column". Checks CTE bodies and subqueries in addition to the
+/// outermost select list so that patterns like
+/// `WITH src AS (SELECT * FROM ext) SELECT id FROM src` are detected.
 fn has_unresolved_stars(expr: &Expression) -> bool {
     match expr {
-        Expression::Select(select) => select.expressions.iter().any(|e| {
-            matches!(e, Expression::Star(_))
-                || matches!(e, Expression::Column(c) if c.name.name == "*")
-        }),
+        Expression::Select(select) => {
+            let outer_has_star = select.expressions.iter().any(|e| {
+                matches!(e, Expression::Star(_))
+                    || matches!(e, Expression::Column(c) if c.name.name == "*")
+            });
+            if outer_has_star {
+                return true;
+            }
+            if let Some(with) = &select.with {
+                if with.ctes.iter().any(|cte| has_unresolved_stars(&cte.this)) {
+                    return true;
+                }
+            }
+            false
+        }
+        Expression::Subquery(subq) => has_unresolved_stars(&subq.this),
         _ => false,
     }
 }
@@ -2341,6 +2356,36 @@ select * from orders"#;
                 .iter()
                 .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
             "ColumnNotFound errors should include SELECT * hint when stars remain unresolved; got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_column_not_found_hint_when_cte_select_star_unresolved() {
+        // When a CTE body has SELECT * from an external table, the hint should still
+        // fire for the outer query's ColumnNotFound errors even though the outermost
+        // SELECT list has no star.
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code =
+            Some("WITH src AS (SELECT * FROM some_external_table) SELECT id FROM src".to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
+            "ColumnNotFound errors for CTE-nested stars should include SELECT * hint; got: {:?}",
             result.errors
         );
     }
