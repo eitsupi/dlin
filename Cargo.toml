@@ -42,7 +42,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 [profile.dist]
 inherits = "release"
-lto = "fat"
+# FIXME: fat LTO causes polyglot-sql's large match statements to be inlined into
+# the dlin binary, bloating it from ~7.5 MB to ~12 MB. Use thin LTO until the
+# upstream semantic→generate feature dependency is removed from polyglot-sql,
+# after which generator.rs will be excluded from the build entirely.
+lto = "thin"
 codegen-units = 1
 strip = true
 opt-level = "s"
