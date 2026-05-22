@@ -15,7 +15,7 @@ name = "dlin"
 path = "src/main.rs"
 
 [dependencies]
-dlin-core = { workspace = true, features = ["clap"] }
+dlin-core = { workspace = true, features = ["clap", "column-lineage"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }

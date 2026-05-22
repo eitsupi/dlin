@@ -299,7 +299,7 @@ pub fn compute_column_lineage(
                 total_columns: 0,
                 columns: vec![],
                 errors: vec![format!(
-                    "model '{}' has no compiled_code (run `dbt compile` first)",
+                    "model '{}' has no compiled_code (run `dbt compile` first; use `dlin check-manifest` to verify the manifest is up to date)",
                     display_name
                 )],
             };

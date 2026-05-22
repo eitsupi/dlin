@@ -1,3 +1,4 @@
+#[cfg(feature = "column-lineage")]
 use polyglot_sql::expressions::Expression;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -313,6 +314,7 @@ fn clean_identifier(s: &str) -> String {
 /// Applies CTE star expansion to resolve `SELECT *` through CTEs,
 /// then reads the output column names from the outermost SELECT.
 /// Returns an empty Vec if the expression is not a SELECT or star columns remain unresolved.
+#[cfg(feature = "column-lineage")]
 pub fn extract_select_columns_from_expr(
     expr: &Expression,
     schema: Option<&dyn polyglot_sql::Schema>,
@@ -345,6 +347,7 @@ pub fn extract_select_columns_from_expr(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "column-lineage")]
     #[test]
     fn test_extract_from_expr_cte_star() {
         let sql = r#"with
@@ -359,6 +362,7 @@ select * from renamed"#;
         assert_eq!(cols, vec!["order_id", "customer_id", "ordered_at"]);
     }
 
+    #[cfg(feature = "column-lineage")]
     #[test]
     fn test_extract_from_expr_cte_star_with_cast() {
         // Realistic dbt stg_orders pattern with ::numeric cast
