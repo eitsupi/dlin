@@ -312,7 +312,7 @@ fn clean_identifier(s: &str) -> String {
 ///
 /// Applies CTE star expansion to resolve `SELECT *` through CTEs,
 /// then reads the output column names from the outermost SELECT.
-/// Returns an empty Vec if the expression is not a SELECT or parsing fails.
+/// Returns an empty Vec if the expression is not a SELECT or star columns remain unresolved.
 pub fn extract_select_columns_from_expr(
     expr: &Expression,
     schema: Option<&dyn polyglot_sql::Schema>,
