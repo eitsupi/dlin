@@ -38,6 +38,12 @@ pub struct ManifestNode {
     pub columns: HashMap<String, ManifestColumn>,
     /// Compiled SQL code (Jinja resolved) — present after `dbt compile` or `dbt run`
     pub compiled_code: Option<String>,
+    /// Database name (e.g., "jaffle_shop")
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Schema name (e.g., "main")
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 /// A source entry in the manifest
@@ -53,6 +59,15 @@ pub struct ManifestSource {
     /// Column definitions keyed by column name
     #[serde(default)]
     pub columns: HashMap<String, ManifestColumn>,
+    /// Physical database name (may differ from source_name)
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Physical schema name (may differ from source_name)
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Physical table identifier (defaults to name when absent)
+    #[serde(default)]
+    pub identifier: Option<String>,
 }
 
 /// A column entry in the manifest
@@ -503,6 +518,8 @@ mod tests {
                     path: Some("models/staging/stg_orders.sql".to_string()),
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::from([(
@@ -515,6 +532,9 @@ mod tests {
                     description: Some("Raw orders table".to_string()),
                     path: Some("models/staging/schema.yml".to_string()),
                     columns: HashMap::new(),
+                    database: None,
+                    schema: None,
+                    identifier: None,
                 },
             )]),
             exposures: HashMap::new(),
@@ -560,6 +580,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -678,6 +700,8 @@ mod tests {
                         path: Some("seeds/countries.csv".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -695,6 +719,8 @@ mod tests {
                         path: Some("snapshots/snap_orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
             ]),
@@ -734,6 +760,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -750,6 +778,8 @@ mod tests {
                         path: Some("tests/assert_positive.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
             ]),
@@ -804,6 +834,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -833,6 +865,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -915,6 +949,8 @@ mod tests {
                     path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
+                    database: None,
+                    schema: None,
                 },
             )]),
             sources: HashMap::new(),
@@ -948,6 +984,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -964,6 +1002,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -986,6 +1026,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
             ]),
@@ -1000,6 +1042,9 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
                 (
@@ -1012,6 +1057,9 @@ mod tests {
                         description: None,
                         path: None,
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
             ]),
@@ -1089,6 +1137,8 @@ mod tests {
                         path: Some("models/staging/stg_orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1103,6 +1153,8 @@ mod tests {
                         path: Some("models/marts/orders.sql".to_string()),
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1117,6 +1169,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
             ]),
@@ -1130,6 +1184,9 @@ mod tests {
                     description: None,
                     path: Some("models/staging/schema.yml".to_string()),
                     columns: HashMap::new(),
+                    database: None,
+                    schema: None,
+                    identifier: None,
                 },
             )]),
             exposures: HashMap::new(),
@@ -1160,6 +1217,9 @@ mod tests {
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
                 (
@@ -1172,6 +1232,9 @@ mod tests {
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
                         columns: HashMap::new(),
+                        database: None,
+                        schema: None,
+                        identifier: None,
                     },
                 ),
             ]),
@@ -1212,6 +1275,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: Some("select * from raw.orders".to_string()),
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1228,6 +1293,8 @@ mod tests {
                         compiled_code: Some(
                             "select count(*) from orders where id is null".to_string(),
                         ),
+                        database: None,
+                        schema: None,
                     },
                 ),
                 (
@@ -1242,6 +1309,8 @@ mod tests {
                         path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
+                        database: None,
+                        schema: None,
                     },
                 ),
             ]),

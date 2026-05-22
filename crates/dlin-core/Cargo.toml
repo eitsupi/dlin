@@ -12,9 +12,11 @@ categories = ["development-tools", "visualization"]
 
 [features]
 clap = ["dep:clap"]
+column-lineage = ["dep:polyglot-sql"]
 
 [dependencies]
 clap = { workspace = true, optional = true }
+polyglot-sql = { workspace = true, optional = true }
 petgraph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

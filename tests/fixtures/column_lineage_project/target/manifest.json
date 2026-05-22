@@ -1,0 +1,446 @@
+{
+  "nodes": {
+    "model.clp.stg_orders": {
+      "unique_id": "model.clp.stg_orders",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.raw.orders"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": [
+          "staging"
+        ]
+      },
+      "description": "Staged orders with column renames",
+      "path": "models/staging/stg_orders.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        }
+      },
+      "compiled_code": "with renamed as (\n    select\n        id as order_id,\n        user_id as customer_id,\n        order_date,\n        status\n    from `raw`.`orders`\n)\nselect * from renamed",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.stg_customers": {
+      "unique_id": "model.clp.stg_customers",
+      "name": "stg_customers",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.raw.customers"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": [
+          "staging"
+        ]
+      },
+      "description": "Staged customers",
+      "path": "models/staging/stg_customers.sql",
+      "columns": {
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "first_name": {
+          "name": "first_name"
+        },
+        "last_name": {
+          "name": "last_name"
+        },
+        "email": {
+          "name": "email"
+        }
+      },
+      "compiled_code": "select id as customer_id, first_name, last_name, email from `raw`.`customers`",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.stg_payments": {
+      "unique_id": "model.clp.stg_payments",
+      "name": "stg_payments",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.raw.payments"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": [
+          "staging"
+        ]
+      },
+      "description": "Staged payments",
+      "path": "models/staging/stg_payments.sql",
+      "columns": {
+        "payment_id": {
+          "name": "payment_id"
+        },
+        "order_id": {
+          "name": "order_id"
+        },
+        "amount": {
+          "name": "amount"
+        },
+        "payment_method": {
+          "name": "payment_method"
+        }
+      },
+      "compiled_code": "select id as payment_id, order_id, amount, payment_method from `raw`.`payments`",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.orders": {
+      "unique_id": "model.clp.orders",
+      "name": "orders",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_orders",
+          "model.clp.stg_payments"
+        ]
+      },
+      "config": {
+        "materialized": "table",
+        "tags": [
+          "marts"
+        ]
+      },
+      "description": "Orders fact table with CTE+SELECT* pattern and 3-part names",
+      "path": "models/marts/orders.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        },
+        "total_amount": {
+          "name": "total_amount"
+        },
+        "payment_method": {
+          "name": "payment_method"
+        }
+      },
+      "compiled_code": "with\norder_data as (\n    select * from \"shop\".\"main\".\"stg_orders\"\n),\npayment_data as (\n    select * from \"shop\".\"main\".\"stg_payments\"\n)\nselect\n    order_data.order_id,\n    order_data.customer_id,\n    order_data.order_date,\n    order_data.status,\n    payment_data.amount as total_amount,\n    payment_data.payment_method\nfrom order_data\nleft join payment_data on order_data.order_id = payment_data.order_id",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.customers": {
+      "unique_id": "model.clp.customers",
+      "name": "customers",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_customers",
+          "model.clp.orders"
+        ]
+      },
+      "config": {
+        "materialized": "table",
+        "tags": [
+          "marts"
+        ]
+      },
+      "description": "Customers dimension with aggregation \u2014 no YAML columns (tests SQL inference)",
+      "path": "models/marts/customers.sql",
+      "compiled_code": "select\n    c.customer_id,\n    c.first_name,\n    c.last_name,\n    c.email,\n    count(o.order_id) as order_count,\n    sum(o.total_amount) as lifetime_value\nfrom \"shop\".\"main\".\"stg_customers\" c\nleft join \"shop\".\"main\".\"orders\" o on c.customer_id = o.customer_id\ngroup by 1, 2, 3, 4",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.stg_orders_passthrough": {
+      "unique_id": "model.clp.stg_orders_passthrough",
+      "name": "stg_orders_passthrough",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.raw.orders"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": [
+          "staging"
+        ]
+      },
+      "description": "Passthrough with SELECT id, * \u2014 SQL inference only captures 'id', not the star columns",
+      "path": "models/staging/stg_orders_passthrough.sql",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "user_id": {
+          "name": "user_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        }
+      },
+      "compiled_code": "select id, * from `raw`.`orders`",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.mart_yaml_star": {
+      "unique_id": "model.clp.mart_yaml_star",
+      "name": "mart_yaml_star",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_orders_passthrough"
+        ]
+      },
+      "config": {
+        "materialized": "table",
+        "tags": [
+          "marts"
+        ]
+      },
+      "description": "Tests YAML column completion: upstream SQL inference is partial, YAML fills the gaps",
+      "path": "models/marts/mart_yaml_star.sql",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "user_id": {
+          "name": "user_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        }
+      },
+      "compiled_code": "with source as (\n    select * from \"shop\".\"main\".\"stg_orders_passthrough\"\n)\nselect * from source",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.order_enriched": {
+      "unique_id": "model.clp.order_enriched",
+      "name": "order_enriched",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_orders",
+          "model.clp.stg_payments"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": [
+          "marts"
+        ]
+      },
+      "description": "Nested CTE with SELECT* through multiple levels",
+      "path": "models/marts/order_enriched.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "customer_id": {
+          "name": "customer_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        },
+        "amount": {
+          "name": "amount"
+        }
+      },
+      "compiled_code": "with\nbase_orders as (\n    select * from \"shop\".\"main\".\"stg_orders\"\n),\nwith_payments as (\n    select\n        base_orders.*,\n        p.amount\n    from base_orders\n    left join \"shop\".\"main\".\"stg_payments\" p on base_orders.order_id = p.order_id\n),\nfinal as (\n    select * from with_payments\n)\nselect * from final",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.stg_partial_fail": {
+      "unique_id": "model.clp.stg_partial_fail",
+      "name": "stg_partial_fail",
+      "depends_on": {
+        "nodes": [
+          "source.clp.raw.orders"
+        ]
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "ghost_col": {
+          "name": "ghost_col"
+        }
+      },
+      "compiled_code": "select id as order_id from `raw`.`orders`",
+      "path": "models/staging/stg_partial_fail.sql",
+      "schema": "main",
+      "database": "shop",
+      "resource_type": "model",
+      "package_name": null,
+      "original_file_path": null,
+      "sources": null
+    },
+    "model.clp.stg_bad_sql": {
+      "columns": {
+        "some_col": {
+          "name": "some_col"
+        }
+      },
+      "compiled_code": "NOT VALID SQL!!!",
+      "database": "shop",
+      "depends_on": {
+        "nodes": []
+      },
+      "name": "stg_bad_sql",
+      "original_file_path": null,
+      "package_name": null,
+      "path": "models/staging/stg_bad_sql.sql",
+      "resource_type": "model",
+      "schema": "main",
+      "sources": null,
+      "unique_id": "model.clp.stg_bad_sql"
+    },
+    "model.clp.stg_accounts": {
+      "unique_id": "model.clp.stg_accounts",
+      "name": "stg_accounts",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "source.clp.salesforce.accounts"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": ["staging"]
+      },
+      "description": "Staged accounts from Salesforce source where source_name != physical schema",
+      "path": "models/staging/stg_accounts.sql",
+      "columns": {
+        "account_id": {
+          "name": "account_id"
+        },
+        "account_name": {
+          "name": "account_name"
+        },
+        "owner_id": {
+          "name": "owner_id"
+        }
+      },
+      "compiled_code": "select id as account_id, name as account_name, owner_id from \"raw\".\"accounts\"",
+      "database": "shop",
+      "schema": "main"
+    }
+  },
+  "sources": {
+    "source.clp.raw.orders": {
+      "unique_id": "source.clp.raw.orders",
+      "name": "orders",
+      "source_name": "raw",
+      "resource_type": "source",
+      "description": "Raw orders",
+      "path": "models/staging/schema.yml",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "user_id": {
+          "name": "user_id"
+        },
+        "order_date": {
+          "name": "order_date"
+        },
+        "status": {
+          "name": "status"
+        }
+      }
+    },
+    "source.clp.raw.customers": {
+      "unique_id": "source.clp.raw.customers",
+      "name": "customers",
+      "source_name": "raw",
+      "resource_type": "source",
+      "description": "Raw customers",
+      "path": "models/staging/schema.yml",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "first_name": {
+          "name": "first_name"
+        },
+        "last_name": {
+          "name": "last_name"
+        },
+        "email": {
+          "name": "email"
+        }
+      }
+    },
+    "source.clp.raw.payments": {
+      "unique_id": "source.clp.raw.payments",
+      "name": "payments",
+      "source_name": "raw",
+      "resource_type": "source",
+      "description": "Raw payments",
+      "path": "models/staging/schema.yml",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "order_id": {
+          "name": "order_id"
+        },
+        "amount": {
+          "name": "amount"
+        },
+        "payment_method": {
+          "name": "payment_method"
+        }
+      }
+    },
+    "source.clp.salesforce.accounts": {
+      "unique_id": "source.clp.salesforce.accounts",
+      "name": "accounts",
+      "source_name": "salesforce",
+      "resource_type": "source",
+      "description": "Salesforce accounts — physical schema is 'raw', not 'salesforce'",
+      "path": "models/staging/schema.yml",
+      "schema": "raw",
+      "columns": {
+        "id": {
+          "name": "id"
+        },
+        "name": {
+          "name": "name"
+        },
+        "owner_id": {
+          "name": "owner_id"
+        }
+      }
+    }
+  },
+  "exposures": {}
+}

@@ -1379,4 +1379,308 @@ models:
             );
         }
     }
+
+    fn column_lineage_fixture_dir() -> std::path::PathBuf {
+        workspace_root()
+            .join("tests")
+            .join("fixtures")
+            .join("column_lineage_project")
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_updates_counts() {
+        // When --column filter is applied, traced_columns and total_columns must
+        // reflect the filtered set, not the full model's counts.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        // Only the requested column should be present
+        let columns = report["columns"].as_array().unwrap();
+        assert_eq!(columns.len(), 1, "only order_id should be in columns[]");
+        assert_eq!(columns[0]["column"], "order_id");
+        // Counts must reflect the filtered set
+        assert_eq!(
+            report["traced_columns"], 1,
+            "traced_columns should be 1 (filtered to 1 column)"
+        );
+        assert_eq!(
+            report["total_columns"], 1,
+            "total_columns should be 1 (requested 1 column)"
+        );
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_preserves_zero_counts_on_error() {
+        // When the model cannot be loaded (e.g. not found), total_columns is 0.
+        // Applying --column should NOT overwrite it with the filter size.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "nonexistent_model",
+                "--column",
+                "some_col",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        // Exit code is 1 (error) but JSON should still be emitted
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        // Model not found → no analysis ran → counts must stay 0
+        assert_eq!(
+            report["traced_columns"], 0,
+            "traced_columns should remain 0 for a missing model"
+        );
+        assert_eq!(
+            report["total_columns"], 0,
+            "total_columns should remain 0 for a missing model, not overwritten by filter size"
+        );
+        // columns[] must be empty
+        assert!(report["columns"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_suppresses_unrelated_errors() {
+        // stg_partial_fail declares "ghost_col" in YAML but the SQL only outputs
+        // "order_id". Without a filter both columns are attempted; ghost_col fails.
+        // With --column order_id, ghost_col's error must be filtered out so that
+        // the exit code is 0 and errors[] is empty.
+        let fixture = column_lineage_fixture_dir();
+
+        // First confirm that without a filter, ghost_col causes a non-zero exit.
+        let unfiltered = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_partial_fail",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+        assert!(
+            !unfiltered.status.success(),
+            "expected non-zero exit when ghost_col fails"
+        );
+        let unfiltered_json: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&unfiltered.stdout)).unwrap();
+        assert!(
+            !unfiltered_json[0]["errors"].as_array().unwrap().is_empty(),
+            "expected errors[] to be non-empty without filter"
+        );
+
+        // Now with --column order_id: ghost_col's error must be suppressed.
+        let filtered = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_partial_fail",
+                "--column",
+                "order_id",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+        assert!(
+            filtered.status.success(),
+            "expected zero exit when only the successful column is requested; stderr: {}",
+            String::from_utf8_lossy(&filtered.stderr)
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&filtered.stdout)).unwrap();
+        let report = &reports[0];
+        assert_eq!(report["traced_columns"], 1);
+        assert_eq!(report["total_columns"], 1);
+        assert_eq!(report["columns"].as_array().unwrap().len(), 1);
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "ghost_col's error must not appear after --column order_id filter; errors: {:?}",
+            report["errors"]
+        );
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_errors_on_missing_column() {
+        // When --column requests a column that does not exist in any of the model's
+        // output columns, the result should be non-zero exit with an error message.
+        // Previously this yielded empty columns[], empty errors[], and exit 0.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_orders",
+                "--column",
+                "this_column_does_not_exist",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit when requested column is absent from the model"
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        let report = &reports[0];
+        assert!(
+            !report["errors"].as_array().unwrap().is_empty(),
+            "errors[] must be non-empty when the requested column is missing"
+        );
+        assert_eq!(
+            report["traced_columns"], 0,
+            "traced_columns must be 0 for a missing column"
+        );
+        assert_eq!(
+            report["total_columns"], 1,
+            "total_columns must equal the filter size (1 requested column)"
+        );
+    }
+
+    #[test]
+    fn test_column_lineage_column_filter_preserves_global_parse_error() {
+        // stg_bad_sql has valid YAML columns but invalid SQL, so total_columns > 0
+        // and analysis returns a "failed to parse SQL" global error. Applying
+        // --column must NOT drop that error — it is not a per-column error.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_bad_sql",
+                "--column",
+                "some_col",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        // Exit code must be non-zero because the parse error propagates.
+        assert!(
+            !output.status.success(),
+            "expected non-zero exit for a model with invalid SQL"
+        );
+        let reports: Vec<serde_json::Value> =
+            serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+        let report = &reports[0];
+        let errors = report["errors"].as_array().unwrap();
+        assert!(
+            !errors.is_empty(),
+            "global parse error must not be dropped by --column filter"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "expected a parse_failure error; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_column_lineage_source_physical_schema_differs_from_source_name() {
+        // Regression test: when source_name != physical schema (e.g. source_name="salesforce",
+        // schema="raw"), dbt compiled SQL uses the physical schema ("raw"."accounts"), not
+        // "salesforce"."accounts". The schema registration must use the physical schema so
+        // that SELECT * expansion works correctly.
+        //
+        // The fixture has:
+        //   source salesforce.accounts with schema: raw (physical)
+        //   stg_accounts model with compiled SQL: SELECT ... FROM "raw"."accounts"
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "graph",
+                "stg_accounts",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "column graph for stg_accounts should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reports.len(), 1);
+
+        let report = &reports[0];
+        assert_eq!(report["model"], "stg_accounts");
+
+        // All 3 YAML columns should be traced successfully
+        let columns = report["columns"].as_array().unwrap();
+        assert_eq!(
+            columns.len(),
+            3,
+            "stg_accounts should have 3 traced columns, got: {:?}; errors: {:?}",
+            columns.iter().map(|c| &c["column"]).collect::<Vec<_>>(),
+            report["errors"]
+        );
+
+        // account_id traces from raw.accounts.id (via SELECT * expansion)
+        let account_id = columns
+            .iter()
+            .find(|c| c["column"] == "account_id")
+            .expect("account_id column should be present");
+        let sources = account_id["sources"].as_array().unwrap();
+        assert!(
+            !sources.is_empty(),
+            "account_id should have sources after physical schema registration"
+        );
+        assert!(
+            sources.iter().any(|s| s["column"] == "id"),
+            "account_id should trace to source column 'id'; got: {:?}",
+            sources
+        );
+
+        // No errors — the physical schema registration enables SELECT * expansion
+        assert!(
+            report["errors"].as_array().unwrap().is_empty(),
+            "should have no errors for stg_accounts; got: {:?}",
+            report["errors"]
+        );
+    }
 }

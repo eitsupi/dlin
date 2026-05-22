@@ -196,7 +196,7 @@ impl ExtractionCache {
 }
 
 /// Simple string hash using FNV-1a for deterministic, fast hashing
-fn hash_str(s: &str) -> u64 {
+pub(crate) fn hash_str(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in s.bytes() {
         hash ^= byte as u64;

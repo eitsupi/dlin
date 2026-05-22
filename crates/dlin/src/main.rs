@@ -1,15 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
 use path_slash::PathExt as _;
+use polyglot_sql::{DialectType, Schema as _};
 
 mod cli;
 
 use cli::{
-    CheckManifestArgs, CheckManifestOutputFormat, Cli, Command, Direction, ErrorFormat, GraphArgs,
-    GroupBy, ListArgs, SourceType, SummaryArgs, SummaryOutputFormat,
+    CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, Command, DebugCommand,
+    DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, SourceType,
+    SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
 use dlin_core::input;
@@ -55,6 +57,35 @@ fn main() {
             dlin_core::set_quiet(args.quiet);
             run_check_manifest_command(args)
         }
+        Command::Column(col) => match col.command {
+            ColumnCommand::Graph(args) => {
+                dlin_core::set_quiet(args.quiet);
+                run_column_lineage_command(
+                    args.model,
+                    &args.column,
+                    args.dialect,
+                    &args.project_dir,
+                    args.manifest_path.as_ref(),
+                    args.cache_dir.as_deref(),
+                    args.no_cache,
+                    args.refresh_cache,
+                )
+            }
+            ColumnCommand::Impact(args) => {
+                dlin_core::set_quiet(args.quiet);
+                run_column_impact_command(
+                    &args.model,
+                    &args.column,
+                    args.dialect,
+                    &args.project_dir,
+                    args.manifest_path.as_ref(),
+                    args.cache_dir.as_deref(),
+                    args.no_cache,
+                    args.refresh_cache,
+                )
+            }
+        },
+        Command::Debug(args) => run_debug_command(args),
         Command::Impact {
             model,
             project_dir,
@@ -609,6 +640,221 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Run the `column-lineage` subcommand
+#[cfg(not(tarpaulin_include))]
+#[allow(clippy::too_many_arguments)]
+fn run_column_lineage_command(
+    models: Vec<String>,
+    columns: &[String],
+    dialect: Option<DialectType>,
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
+) -> Result<()> {
+    let dialect = dialect.unwrap_or(DialectType::Generic);
+
+    if models.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments)");
+    }
+
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved)?;
+
+    let mut cache = if no_cache {
+        graph::column_lineage::ColumnLineageCache::disabled()
+    } else if refresh_cache {
+        graph::column_lineage::ColumnLineageCache::fresh(&project_dir, cache_dir)
+    } else {
+        graph::column_lineage::ColumnLineageCache::load(&project_dir, cache_dir)
+    };
+
+    let column_filter: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
+
+    let reports: Vec<_> = models
+        .iter()
+        .map(|model| {
+            let mut report = graph::column_lineage::compute_cross_model_column_lineage(
+                &manifest, model, dialect, &mut cache,
+            );
+            if !column_filter.is_empty() {
+                report
+                    .columns
+                    .retain(|entry| column_filter.contains(entry.column.as_str()));
+                // Only recompute counts and filter errors when analysis was actually attempted.
+                // total_columns==0 indicates a load error (model not found, no
+                // compiled_code, etc.) — preserve the zero so callers can
+                // distinguish "nothing requested" from "nothing found".
+                if report.total_columns > 0 {
+                    // Remove per-column errors for columns outside the filter.
+                    // Global errors (e.g. SQL parse failures) are always preserved.
+                    report.errors.retain(|err| match err {
+                        graph::column_lineage::ColumnLineageError {
+                            kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                            what,
+                            ..
+                        } => {
+                            // Extract column name from "column '<name>': ..." pattern
+                            if let Some(rest) = what.strip_prefix("column '")
+                                && let Some(col_end) = rest.find('\'')
+                            {
+                                return column_filter.contains(&rest[..col_end]);
+                            }
+                            true
+                        }
+                        _ => true,
+                    });
+                    report.traced_columns = report.columns.len();
+                    report.total_columns = column_filter.len();
+
+                    // When there are no global errors, explicitly flag requested columns
+                    // that are absent from both the output and per-column errors.
+                    let has_global_errors =
+                        report.errors.iter().any(|err| !matches!(err.kind, graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound));
+                    if !has_global_errors {
+                        let mut sorted_cols: Vec<&str> = column_filter.iter().copied().collect();
+                        sorted_cols.sort_unstable();
+                        for col in sorted_cols {
+                            let in_output = report.columns.iter().any(|c| c.column == col);
+                            let col_error_prefix = format!("column '{}': ", col);
+                            let has_col_error = report
+                                .errors
+                                .iter()
+                                .any(|err| err.what.starts_with(&col_error_prefix));
+                            if !in_output && !has_col_error {
+                                report.errors.push(graph::column_lineage::ColumnLineageError {
+                                    kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                                    what: format!("column '{}': not found in model output", col),
+                                    why: None,
+                                    hint: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            report
+        })
+        .collect();
+
+    // Print warnings for errors
+    let mut has_errors = false;
+    for report in &reports {
+        for err in &report.errors {
+            dlin_core::warn!("{}", err);
+            has_errors = true;
+        }
+    }
+
+    // Output JSON
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let pretty = std::io::IsTerminal::is_terminal(&stdout);
+    let res = if pretty {
+        serde_json::to_writer_pretty(&mut out, &reports)
+    } else {
+        serde_json::to_writer(&mut out, &reports)
+    };
+    if let Err(e) = res {
+        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+            return Err(anyhow::anyhow!(e));
+        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
+    }
+
+    cache.save();
+
+    if has_errors {
+        anyhow::bail!("column lineage analysis completed with errors");
+    }
+    Ok(())
+}
+
+/// Run the `column-impact` subcommand
+#[cfg(not(tarpaulin_include))]
+#[allow(clippy::too_many_arguments)]
+fn run_column_impact_command(
+    model: &str,
+    columns: &[String],
+    dialect: Option<DialectType>,
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
+) -> Result<()> {
+    let dialect = dialect.unwrap_or(DialectType::Generic);
+
+    if columns.is_empty() {
+        anyhow::bail!("no columns specified (use --column)");
+    }
+
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved)?;
+
+    let mut cache = if no_cache {
+        graph::column_lineage::ColumnLineageCache::disabled()
+    } else if refresh_cache {
+        graph::column_lineage::ColumnLineageCache::fresh(&project_dir, cache_dir)
+    } else {
+        graph::column_lineage::ColumnLineageCache::load(&project_dir, cache_dir)
+    };
+
+    let reports: Vec<_> = columns
+        .iter()
+        .map(|col| {
+            graph::column_lineage::compute_column_impact(&manifest, model, col, dialect, &mut cache)
+        })
+        .collect();
+
+    // Print warnings for errors
+    let mut has_errors = false;
+    for report in &reports {
+        for err in &report.errors {
+            dlin_core::warn!("{}", err);
+            has_errors = true;
+        }
+    }
+
+    // Output JSON
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let pretty = std::io::IsTerminal::is_terminal(&stdout);
+    let res = if pretty {
+        serde_json::to_writer_pretty(&mut out, &reports)
+    } else {
+        serde_json::to_writer(&mut out, &reports)
+    };
+    if let Err(e) = res {
+        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+            return Err(anyhow::anyhow!(e));
+        }
+    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
+    }
+
+    cache.save();
+
+    if has_errors {
+        anyhow::bail!("column impact analysis completed with errors");
+    }
+    Ok(())
+}
+
 /// Run the `summary` subcommand
 #[cfg(not(tarpaulin_include))]
 fn run_summary_command(args: SummaryArgs) -> Result<()> {
@@ -887,4 +1133,231 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Read SQL input from positional argument or stdin.
+#[cfg(not(tarpaulin_include))]
+fn read_sql_input(sql: Option<&str>) -> Result<String> {
+    if let Some(s) = sql {
+        return Ok(s.to_string());
+    }
+    // Read from stdin
+    let mut stdin = std::io::stdin();
+    if std::io::IsTerminal::is_terminal(&stdin) {
+        anyhow::bail!("provide SQL as an argument or via stdin");
+    }
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut stdin, &mut buf)?;
+    if buf.is_empty() {
+        anyhow::bail!("no SQL input received from stdin");
+    }
+    Ok(buf)
+}
+
+/// Run the `debug` subcommand
+#[cfg(not(tarpaulin_include))]
+fn run_debug_command(args: cli::DebugArgs) -> Result<()> {
+    match args.command {
+        DebugCommand::ParseSql(args) => run_debug_parse_sql(args),
+        DebugCommand::TraceColumn(args) => run_debug_trace_column(args),
+    }
+}
+
+/// Run `debug parse-sql`
+#[cfg(not(tarpaulin_include))]
+fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
+    use std::io::Write;
+
+    let sql = read_sql_input(args.sql.as_deref())?;
+    let expr = polyglot_sql::parse_one(&sql, args.dialect)
+        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match args.format {
+        DebugOutputFormat::Ast => {
+            writeln!(out, "{:#?}", expr)?;
+        }
+        DebugOutputFormat::Json => {
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &expr)
+            } else {
+                serde_json::to_writer(&mut out, &expr)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = writeln!(out)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a schema string like "table1:col1,col2;table2:col3,col4" into a MappingSchema.
+fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> {
+    let mut schema = polyglot_sql::MappingSchema::new();
+    for table_def in schema_str.split(';') {
+        let table_def = table_def.trim();
+        if table_def.is_empty() {
+            continue;
+        }
+        let (table_name, cols_str) = table_def.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid schema format '{}': expected table:col1,col2",
+                table_def
+            )
+        })?;
+        let columns: Vec<(String, polyglot_sql::expressions::DataType)> = cols_str
+            .split(',')
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .map(|c| (c.to_string(), polyglot_sql::expressions::DataType::Unknown))
+            .collect();
+        if columns.is_empty() {
+            anyhow::bail!(
+                "invalid schema format '{}': table has no columns",
+                table_name.trim()
+            );
+        }
+        schema
+            .add_table(table_name.trim(), &columns, None)
+            .map_err(|e| anyhow::anyhow!("schema error: {}", e))?;
+    }
+    Ok(schema)
+}
+
+/// Run `debug trace-column`
+#[cfg(not(tarpaulin_include))]
+fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
+    use std::io::Write;
+
+    let sql = read_sql_input(args.sql.as_deref())?;
+    let mut expr = polyglot_sql::parse_one(&sql, args.dialect)
+        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
+
+    let schema = args
+        .schema
+        .as_deref()
+        .map(parse_schema_string)
+        .transpose()?;
+
+    // Expand CTE stars if schema is provided
+    if let Some(ref s) = schema {
+        polyglot_sql::lineage::expand_cte_stars(&mut expr, Some(s as &dyn polyglot_sql::Schema));
+    }
+
+    let lineage_result = if let Some(ref s) = schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            &args.column,
+            &expr,
+            Some(s as &dyn polyglot_sql::Schema),
+            Some(args.dialect),
+            false,
+        )
+        .or_else(|err| {
+            dlin_core::warn!(
+                "lineage_with_schema failed: {}, falling back to schema-less lineage",
+                err
+            );
+            polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
+        })
+    } else {
+        polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
+    };
+
+    match lineage_result {
+        Ok(node) => {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &node)
+            } else {
+                serde_json::to_writer(&mut out, &node)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = writeln!(out)
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e.into());
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("lineage error: {}", e));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyglot_sql::Schema;
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn test_parse_schema_string_single_table() {
+        let schema = parse_schema_string("t:a,b,c").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_multiple_tables() {
+        let schema = parse_schema_string("orders:id,amount;customers:id,name").unwrap();
+        let order_cols = schema.column_names("orders").unwrap();
+        assert_eq!(sorted(order_cols), vec!["amount", "id"]);
+        let cust_cols = schema.column_names("customers").unwrap();
+        assert_eq!(sorted(cust_cols), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_whitespace_tolerance() {
+        let schema = parse_schema_string(" t : a , b ; u : x ").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b"]);
+        let cols2 = schema.column_names("u").unwrap();
+        assert_eq!(cols2, vec!["x"]);
+    }
+
+    #[test]
+    fn test_parse_schema_string_empty() {
+        let schema = parse_schema_string("").unwrap();
+        assert!(schema.column_names("t").is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_invalid_format() {
+        let result = parse_schema_string("no_colon");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_empty_columns_rejected() {
+        // "t:" (no columns) and "t:," (all empty segments) should error
+        assert!(parse_schema_string("t:").is_err());
+        assert!(parse_schema_string("t:,").is_err());
+    }
+
+    #[test]
+    fn test_parse_schema_string_consecutive_commas_ignored() {
+        // "t:a,,b" — the empty segment is dropped, result has only a and b
+        let schema = parse_schema_string("t:a,,b").unwrap();
+        let cols = schema.column_names("t").unwrap();
+        assert_eq!(sorted(cols), vec!["a", "b"]);
+    }
 }
