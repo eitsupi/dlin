@@ -50,7 +50,11 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
             }
 
             let first = &entry.sources[0];
-            let src_str = format_source(first.table.as_str(), first.column.as_str(), &first.model_path);
+            let src_str = format_source(
+                first.table.as_str(),
+                first.column.as_str(),
+                &first.model_path,
+            );
             writeln!(
                 w,
                 "  {:width$}  →  {} ({})",
@@ -63,7 +67,8 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
             // Additional sources on continuation lines
             let indent = " ".repeat(2 + col_width + 2 + 3 + 2); // "  " + col + "  →  "
             for src in entry.sources.iter().skip(1) {
-                let src_str = format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
+                let src_str =
+                    format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
                 writeln!(
                     w,
                     "{}  {} ({})",
@@ -198,7 +203,11 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             report.model,
             report.column,
             report.impacted_columns.len(),
-            if report.impacted_columns.len() == 1 { "" } else { "s" },
+            if report.impacted_columns.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
         )?;
 
         if report.impacted_columns.is_empty() {
@@ -271,15 +280,15 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
             // model_path ends with ic.model; the intermediate hops precede it.
             let via_str = if ic.model_path.len() > 1 {
                 let intermediate = &ic.model_path[..ic.model_path.len() - 1];
-                format!(" (via {})", intermediate.join(" → "))
+                let escaped: Vec<String> = intermediate
+                    .iter()
+                    .map(|m| super::mermaid_escape(m))
+                    .collect();
+                format!(" (via {})", escaped.join(" \u{2192} "))
             } else {
                 String::new()
             };
-            let label = format!(
-                "{}{}",
-                transformation_label(&ic.transformation),
-                via_str
-            );
+            let label = format!("{}{}", transformation_label(&ic.transformation), via_str);
 
             // Edge direction: source column → impacted column
             edges.push((
@@ -377,7 +386,10 @@ mod tests {
         ColumnLineageEntry, ColumnSource, ImpactedColumn, ModelColumnLineage,
     };
 
-    fn make_lineage(model: &str, entries: Vec<(&str, TransformationType, Vec<(&str, &str)>)>) -> ModelColumnLineage {
+    fn make_lineage(
+        model: &str,
+        entries: Vec<(&str, TransformationType, Vec<(&str, &str)>)>,
+    ) -> ModelColumnLineage {
         let traced = entries.len();
         let total = entries.len();
         ModelColumnLineage {
@@ -408,14 +420,26 @@ mod tests {
         let report = make_lineage(
             "orders",
             vec![
-                ("order_id", TransformationType::Direct, vec![("stg_orders", "order_id")]),
-                ("total", TransformationType::Expression, vec![("stg_orders", "price")]),
+                (
+                    "order_id",
+                    TransformationType::Direct,
+                    vec![("stg_orders", "order_id")],
+                ),
+                (
+                    "total",
+                    TransformationType::Expression,
+                    vec![("stg_orders", "price")],
+                ),
             ],
         );
         let mut buf = Vec::new();
         render_column_graph_plain_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("orders (2/2 columns traced)"), "header: {}", out);
+        assert!(
+            out.contains("orders (2/2 columns traced)"),
+            "header: {}",
+            out
+        );
         assert!(out.contains("order_id"), "column: {}", out);
         assert!(out.contains("stg_orders.order_id"), "source: {}", out);
         assert!(out.contains("direct"), "transformation: {}", out);
@@ -438,22 +462,38 @@ mod tests {
         let mut buf = Vec::new();
         render_column_graph_plain_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("(no sources)"), "should show no sources: {}", out);
+        assert!(
+            out.contains("(no sources)"),
+            "should show no sources: {}",
+            out
+        );
     }
 
     #[test]
     fn test_mermaid_single_model() {
         let report = make_lineage(
             "orders",
-            vec![("order_id", TransformationType::Direct, vec![("stg_orders", "order_id")])],
+            vec![(
+                "order_id",
+                TransformationType::Direct,
+                vec![("stg_orders", "order_id")],
+            )],
         );
         let mut buf = Vec::new();
         render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.starts_with("flowchart LR"), "header: {}", out);
         // Subgraphs now use index-based IDs with quoted labels
-        assert!(out.contains(r#"["orders"]"#), "orders subgraph label: {}", out);
-        assert!(out.contains(r#"["stg_orders"]"#), "stg_orders subgraph label: {}", out);
+        assert!(
+            out.contains(r#"["orders"]"#),
+            "orders subgraph label: {}",
+            out
+        );
+        assert!(
+            out.contains(r#"["stg_orders"]"#),
+            "stg_orders subgraph label: {}",
+            out
+        );
         assert!(out.contains("direct"), "edge label: {}", out);
     }
 
@@ -481,8 +521,16 @@ mod tests {
         let mut buf = Vec::new();
         render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains(r#"["raw.orders"]"#), "raw.orders label: {}", out);
-        assert!(out.contains(r#"["raw_orders"]"#), "raw_orders label: {}", out);
+        assert!(
+            out.contains(r#"["raw.orders"]"#),
+            "raw.orders label: {}",
+            out
+        );
+        assert!(
+            out.contains(r#"["raw_orders"]"#),
+            "raw_orders label: {}",
+            out
+        );
         // The two subgraph IDs must differ (sg0 vs sg1)
         assert!(out.contains("subgraph sg0"), "sg0: {}", out);
         assert!(out.contains("subgraph sg1"), "sg1: {}", out);
@@ -492,14 +540,22 @@ mod tests {
     fn test_mermaid_label_escaping() {
         let report = make_lineage(
             "orders",
-            vec![("amount<usd>", TransformationType::Direct, vec![("raw.orders", "amount<usd>")])],
+            vec![(
+                "amount<usd>",
+                TransformationType::Direct,
+                vec![("raw.orders", "amount<usd>")],
+            )],
         );
         let mut buf = Vec::new();
         render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("#lt;"), "less-than escaped: {}", out);
         assert!(out.contains("#gt;"), "greater-than escaped: {}", out);
-        assert!(!out.contains("amount<usd>"), "raw angle brackets absent: {}", out);
+        assert!(
+            !out.contains("amount<usd>"),
+            "raw angle brackets absent: {}",
+            out
+        );
     }
 
     #[test]
@@ -542,7 +598,11 @@ mod tests {
         let mut buf = Vec::new();
         render_column_impact_plain_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("customers.customer_order_id"), "target: {}", out);
+        assert!(
+            out.contains("customers.customer_order_id"),
+            "target: {}",
+            out
+        );
         assert!(out.contains("via orders"), "intermediate path: {}", out);
     }
 
@@ -564,8 +624,16 @@ mod tests {
         render_column_impact_mermaid_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.starts_with("flowchart LR"), "header: {}", out);
-        assert!(out.contains(r#"["stg_orders"]"#), "source subgraph label: {}", out);
-        assert!(out.contains(r#"["orders"]"#), "target subgraph label: {}", out);
+        assert!(
+            out.contains(r#"["stg_orders"]"#),
+            "source subgraph label: {}",
+            out
+        );
+        assert!(
+            out.contains(r#"["orders"]"#),
+            "target subgraph label: {}",
+            out
+        );
     }
 
     #[test]

@@ -199,7 +199,6 @@ fn node_label(node: &NodeData, show_columns: bool) -> String {
     }
 }
 
-
 /// Generate the Mermaid shape string for a node
 fn node_shape(node: &NodeData, show_columns: bool) -> String {
     let id = mermaid_id(&node.unique_id);
@@ -709,7 +708,10 @@ mod tests {
     #[test]
     fn test_mermaid_escape() {
         assert_eq!(super::super::mermaid_escape("hello"), "hello");
-        assert_eq!(super::super::mermaid_escape(r#"a "b" c"#), "a #quot;b#quot; c");
+        assert_eq!(
+            super::super::mermaid_escape(r#"a "b" c"#),
+            "a #quot;b#quot; c"
+        );
         assert_eq!(super::super::mermaid_escape("a<b>c"), "a#lt;b#gt;c");
         assert_eq!(super::super::mermaid_escape("col#1"), "col#num;1");
     }
