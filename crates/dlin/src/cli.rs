@@ -863,6 +863,10 @@ pub struct ColumnGraphArgs {
     #[arg(long)]
     pub column: Vec<String>,
 
+    /// Output format: json (default), plain, mermaid
+    #[arg(short = 'o', long, default_value = "json")]
+    pub output: ColumnOutputFormat,
+
     /// SQL dialect for parsing (default: generic).
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long)]
@@ -901,6 +905,10 @@ pub struct ColumnImpactArgs {
     /// Columns to analyze impact for (required)
     #[arg(long, required = true)]
     pub column: Vec<String>,
+
+    /// Output format: json (default), plain, mermaid
+    #[arg(short = 'o', long, default_value = "json")]
+    pub output: ColumnOutputFormat,
 
     /// SQL dialect for parsing (default: generic).
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
@@ -1197,6 +1205,16 @@ pub enum SourceType {
 pub enum ImpactOutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColumnOutputFormat {
+    /// Machine-readable JSON array (default)
+    Json,
+    /// Human-readable plain-text table
+    Plain,
+    /// Mermaid flowchart diagram
+    Mermaid,
 }
 
 #[cfg(test)]
@@ -1886,6 +1904,90 @@ mod tests {
             result.is_err(),
             "invalid dialect should be rejected by clap"
         );
+    }
+
+    // -- ColumnOutputFormat tests --------------------------------------------
+
+    #[test]
+    fn test_column_graph_default_output_is_json() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_column_graph_output_plain() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "plain"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Plain));
+    }
+
+    #[test]
+    fn test_column_graph_output_mermaid() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "mermaid"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
+    }
+
+    #[test]
+    fn test_column_graph_invalid_output_rejected() {
+        let result = Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "ascii"]);
+        assert!(result.is_err(), "ascii is not a valid column output format");
+    }
+
+    #[test]
+    fn test_column_impact_default_output_is_json() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_column_impact_output_plain() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "-o",
+                "plain",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Plain));
+    }
+
+    #[test]
+    fn test_column_impact_output_mermaid() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--output",
+                "mermaid",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
     }
 
     // -- Debug subcommand tests -----------------------------------------------

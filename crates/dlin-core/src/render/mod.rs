@@ -1,6 +1,8 @@
 use std::io;
 
 pub mod ascii;
+#[cfg(feature = "column-lineage")]
+pub mod column_graph;
 pub mod dot;
 pub mod html;
 pub mod impact;
