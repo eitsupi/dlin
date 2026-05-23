@@ -119,11 +119,6 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                     .or_default()
                     .insert(src.column.clone());
 
-                // Add intermediate models from model_path (no column info available)
-                for mid in &src.model_path {
-                    model_columns.entry(mid.clone()).or_default();
-                }
-
                 edges.push((
                     src.table.clone(),
                     src.column.clone(),
@@ -135,13 +130,25 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
         }
     }
 
-    // Build stable index map to avoid ID collisions between models whose names
+    // Build stable index maps to avoid ID collisions between models whose names
     // differ only in characters that sanitize_id maps to '_' (e.g. "raw.orders"
     // vs "raw_orders" both become "raw_orders").
     let model_index: BTreeMap<&str, usize> = model_columns
         .keys()
         .enumerate()
         .map(|(i, k)| (k.as_str(), i))
+        .collect();
+    // Pre-compute column → index per model for O(1) node ID lookup.
+    let column_index: BTreeMap<&str, BTreeMap<&str, usize>> = model_columns
+        .iter()
+        .map(|(model, cols)| {
+            let col_map = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.as_str(), i))
+                .collect();
+            (model.as_str(), col_map)
+        })
         .collect();
 
     // Render subgraphs
@@ -170,8 +177,8 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
     // Render edges (deduplicated)
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (from_model, from_col, to_model, to_col, label) in &edges {
-        let from_node = indexed_node_id(&model_index, &model_columns, from_model, from_col);
-        let to_node = indexed_node_id(&model_index, &model_columns, to_model, to_col);
+        let from_node = indexed_node_id(&model_index, &column_index, from_model, from_col);
+        let to_node = indexed_node_id(&model_index, &column_index, to_model, to_col);
         let edge_str = format!("  {} -->|\"{}\"|{}", from_node, label, to_node);
         if seen.insert(edge_str.clone()) {
             writeln!(w, "{}", edge_str)?;
@@ -302,11 +309,22 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
         }
     }
 
-    // Build stable index map to avoid ID collisions (same reason as column graph).
+    // Build stable index maps to avoid ID collisions (same reason as column graph).
     let model_index: BTreeMap<&str, usize> = model_columns
         .keys()
         .enumerate()
         .map(|(i, k)| (k.as_str(), i))
+        .collect();
+    let column_index: BTreeMap<&str, BTreeMap<&str, usize>> = model_columns
+        .iter()
+        .map(|(model, cols)| {
+            let col_map = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.as_str(), i))
+                .collect();
+            (model.as_str(), col_map)
+        })
         .collect();
 
     for (model, columns) in &model_columns {
@@ -333,8 +351,8 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (from_model, from_col, to_model, to_col, label) in &edges {
-        let from_node = indexed_node_id(&model_index, &model_columns, from_model, from_col);
-        let to_node = indexed_node_id(&model_index, &model_columns, to_model, to_col);
+        let from_node = indexed_node_id(&model_index, &column_index, from_model, from_col);
+        let to_node = indexed_node_id(&model_index, &column_index, to_model, to_col);
         let edge_str = format!("  {} -->|\"{}\"|{}", from_node, label, to_node);
         if seen.insert(edge_str.clone()) {
             writeln!(w, "{}", edge_str)?;
@@ -365,10 +383,10 @@ fn format_source(table: &str, column: &str, model_path: &[String]) -> String {
     }
 }
 
-/// Return the Mermaid node ID for `(model, col)` using index-based stable IDs.
+/// Return the Mermaid node ID for `(model, col)` using pre-built index maps.
 fn indexed_node_id(
     model_index: &BTreeMap<&str, usize>,
-    model_columns: &BTreeMap<String, BTreeSet<String>>,
+    column_index: &BTreeMap<&str, BTreeMap<&str, usize>>,
     model: &str,
     col: &str,
 ) -> String {
@@ -376,9 +394,9 @@ fn indexed_node_id(
         .get(model)
         .copied()
         .expect("model must be registered before calling indexed_node_id");
-    let cidx = model_columns
+    let cidx = column_index
         .get(model)
-        .and_then(|cols| cols.iter().position(|c| c.as_str() == col))
+        .and_then(|m| m.get(col).copied())
         .expect("column must be registered before calling indexed_node_id");
     format!("n{}_{}", midx, cidx)
 }
