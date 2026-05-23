@@ -628,8 +628,16 @@ mod tests {
         let mut buf = Vec::new();
         render_column_impact_plain_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("customer_order_id"), "column: {}", out);
-        assert!(out.contains("customers"), "target model: {}", out);
+        assert!(
+            out.contains("customer_order_id  →  customers ("),
+            "line format: {}",
+            out
+        );
+        assert!(
+            !out.contains("customers.customer_order_id"),
+            "column must not be duplicated: {}",
+            out
+        );
         assert!(out.contains("via orders"), "intermediate path: {}", out);
     }
 
