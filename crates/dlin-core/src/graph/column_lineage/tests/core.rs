@@ -797,6 +797,85 @@ fn test_traced_total_columns_success() {
 }
 
 #[test]
+fn test_scalar_function_transformation() {
+    // Bug: UPPER(x) and CONCAT(x,y) were classified as unknown instead of expression.
+    // COALESCE has a dedicated AST variant and was always correct; UPPER uses the
+    // specialized Upper variant and CONCAT uses the generic Function variant.
+    let manifest = make_transformation_manifest();
+    let result = compute_column_lineage(
+        &manifest,
+        "scalar_funcs",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let find = |name: &str| {
+        result
+            .columns
+            .iter()
+            .find(|c| c.column == name)
+            .unwrap_or_else(|| panic!("{name} not found"))
+            .transformation
+            .clone()
+    };
+
+    assert_eq!(find("col_upper"), TransformationType::Expression, "UPPER should be expression");
+    assert_eq!(find("col_concat"), TransformationType::Expression, "CONCAT should be expression");
+    assert_eq!(
+        find("col_coalesce"),
+        TransformationType::Expression,
+        "COALESCE should remain expression"
+    );
+}
+
+#[test]
+fn test_cte_passthrough_inherits_transformation() {
+    // Bug: when a CTE computes an expression and the next SELECT references it by
+    // name (pass-through), the transformation type was incorrectly reported as direct.
+    let manifest = make_transformation_manifest();
+
+    // UPPER → pass-through: should be expression, not direct
+    let result_upper = compute_column_lineage(
+        &manifest,
+        "passthrough_upper",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result_upper.errors.is_empty(), "errors: {:?}", result_upper.errors);
+    let status_upper = result_upper
+        .columns
+        .iter()
+        .find(|c| c.column == "status_upper")
+        .expect("status_upper not found");
+    assert_eq!(
+        status_upper.transformation,
+        TransformationType::Expression,
+        "UPPER pass-through should be expression, not direct"
+    );
+
+    // COALESCE → pass-through: should be expression, not direct
+    let result_coalesce = compute_column_lineage(
+        &manifest,
+        "passthrough_coalesce",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result_coalesce.errors.is_empty(), "errors: {:?}", result_coalesce.errors);
+    let status_coalesced = result_coalesce
+        .columns
+        .iter()
+        .find(|c| c.column == "status_coalesced")
+        .expect("status_coalesced not found");
+    assert_eq!(
+        status_coalesced.transformation,
+        TransformationType::Expression,
+        "COALESCE pass-through should be expression, not direct"
+    );
+}
+
+#[test]
 fn test_traced_total_columns_partial_failure() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
