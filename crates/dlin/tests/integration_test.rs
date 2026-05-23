@@ -1395,7 +1395,7 @@ models:
         let output = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1439,7 +1439,7 @@ models:
         let output = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "nonexistent_model",
                 "--column",
                 "some_col",
@@ -1481,7 +1481,7 @@ models:
         let unfiltered = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_partial_fail",
                 "--project-dir",
                 fixture.to_str().unwrap(),
@@ -1504,7 +1504,7 @@ models:
         let filtered = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_partial_fail",
                 "--column",
                 "order_id",
@@ -1541,7 +1541,7 @@ models:
         let output = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_orders",
                 "--column",
                 "this_column_does_not_exist",
@@ -1582,7 +1582,7 @@ models:
         let output = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_bad_sql",
                 "--column",
                 "some_col",
@@ -1629,7 +1629,7 @@ models:
         let output = std::process::Command::new(binary_path())
             .args([
                 "column",
-                "graph",
+                "upstream",
                 "stg_accounts",
                 "--project-dir",
                 fixture.to_str().unwrap(),
@@ -1640,7 +1640,7 @@ models:
 
         assert!(
             output.status.success(),
-            "column graph for stg_accounts should succeed; stderr: {}",
+            "column upstream for stg_accounts should succeed; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
