@@ -607,7 +607,16 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("stg_orders.order_id"), "header: {}", out);
         assert!(out.contains("1 impacted column"), "count: {}", out);
-        assert!(out.contains("orders.order_id"), "downstream model: {}", out);
+        assert!(
+            out.contains("order_id  →  orders ("),
+            "line format: {}",
+            out
+        );
+        assert!(
+            !out.contains("→  orders.order_id"),
+            "column must not be duplicated in arrow target: {}",
+            out
+        );
         assert!(!out.contains("via"), "no via for direct: {}", out);
     }
 
