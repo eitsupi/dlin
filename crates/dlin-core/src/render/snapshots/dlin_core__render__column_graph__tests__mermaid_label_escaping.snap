@@ -1,0 +1,13 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+expression: "graph_mermaid(&[report])"
+---
+flowchart LR
+  subgraph sg0["orders"]
+    n0_0["amount#lt;usd#gt;"]
+  end
+  subgraph sg1["raw.orders"]
+    n1_0["amount#lt;usd#gt;"]
+  end
+
+  n1_0 -->|"direct"|n0_0

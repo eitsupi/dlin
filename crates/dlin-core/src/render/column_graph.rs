@@ -445,6 +445,30 @@ mod tests {
         }
     }
 
+    fn graph_plain(reports: &[ModelColumnLineage]) -> String {
+        let mut buf = Vec::new();
+        render_column_graph_plain_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn graph_mermaid(reports: &[ModelColumnLineage]) -> String {
+        let mut buf = Vec::new();
+        render_column_graph_mermaid_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn impact_plain(reports: &[ColumnImpactReport]) -> String {
+        let mut buf = Vec::new();
+        render_column_impact_plain_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn impact_mermaid(reports: &[ColumnImpactReport]) -> String {
+        let mut buf = Vec::new();
+        render_column_impact_mermaid_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
     #[test]
     fn test_plain_single_model() {
         let report = make_lineage(
@@ -462,18 +486,7 @@ mod tests {
                 ),
             ],
         );
-        let mut buf = Vec::new();
-        render_column_graph_plain_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.contains("orders (2/2 columns traced)"),
-            "header: {}",
-            out
-        );
-        assert!(out.contains("order_id"), "column: {}", out);
-        assert!(out.contains("stg_orders.order_id"), "source: {}", out);
-        assert!(out.contains("direct"), "transformation: {}", out);
-        assert!(out.contains("expression"), "transformation: {}", out);
+        insta::assert_snapshot!(graph_plain(&[report]));
     }
 
     #[test]
@@ -489,14 +502,7 @@ mod tests {
             }],
             errors: vec![],
         };
-        let mut buf = Vec::new();
-        render_column_graph_plain_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.contains("(no sources)"),
-            "should show no sources: {}",
-            out
-        );
+        insta::assert_snapshot!(graph_plain(&[report]));
     }
 
     #[test]
@@ -509,22 +515,7 @@ mod tests {
                 vec![("stg_orders", "order_id")],
             )],
         );
-        let mut buf = Vec::new();
-        render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.starts_with("flowchart LR"), "header: {}", out);
-        // Subgraphs now use index-based IDs with quoted labels
-        assert!(
-            out.contains(r#"["orders"]"#),
-            "orders subgraph label: {}",
-            out
-        );
-        assert!(
-            out.contains(r#"["stg_orders"]"#),
-            "stg_orders subgraph label: {}",
-            out
-        );
-        assert!(out.contains("direct"), "edge label: {}", out);
+        insta::assert_snapshot!(graph_mermaid(&[report]));
     }
 
     #[test]
@@ -533,37 +524,18 @@ mod tests {
             "orders",
             vec![("id", TransformationType::Direct, vec![("raw.orders", "id")])],
         );
-        let mut buf = Vec::new();
-        render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        // dotted names should be quoted in subgraph label
-        assert!(out.contains(r#""raw.orders""#), "quoted label: {}", out);
+        insta::assert_snapshot!(graph_mermaid(&[report]));
     }
 
     #[test]
     fn test_mermaid_id_collision_avoided() {
-        // "raw.orders" and "raw_orders" sanitize to the same string but must
-        // produce distinct subgraph IDs.
+        // "raw.orders" and "raw_orders" must produce distinct subgraph IDs
+        // despite sanitizing to the same string.
         let report = make_lineage(
             "raw_orders",
             vec![("id", TransformationType::Direct, vec![("raw.orders", "id")])],
         );
-        let mut buf = Vec::new();
-        render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.contains(r#"["raw.orders"]"#),
-            "raw.orders label: {}",
-            out
-        );
-        assert!(
-            out.contains(r#"["raw_orders"]"#),
-            "raw_orders label: {}",
-            out
-        );
-        // The two subgraph IDs must differ (sg0 vs sg1)
-        assert!(out.contains("subgraph sg0"), "sg0: {}", out);
-        assert!(out.contains("subgraph sg1"), "sg1: {}", out);
+        insta::assert_snapshot!(graph_mermaid(&[report]));
     }
 
     #[test]
@@ -576,16 +548,7 @@ mod tests {
                 vec![("raw.orders", "amount<usd>")],
             )],
         );
-        let mut buf = Vec::new();
-        render_column_graph_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("#lt;"), "less-than escaped: {}", out);
-        assert!(out.contains("#gt;"), "greater-than escaped: {}", out);
-        assert!(
-            !out.contains("amount<usd>"),
-            "raw angle brackets absent: {}",
-            out
-        );
+        insta::assert_snapshot!(graph_mermaid(&[report]));
     }
 
     #[test]
@@ -602,22 +565,7 @@ mod tests {
             }],
             errors: vec![],
         };
-        let mut buf = Vec::new();
-        render_column_impact_plain_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("stg_orders.order_id"), "header: {}", out);
-        assert!(out.contains("1 impacted column"), "count: {}", out);
-        assert!(
-            out.contains("order_id  →  orders ("),
-            "line format: {}",
-            out
-        );
-        assert!(
-            !out.contains("→  orders.order_id"),
-            "column must not be duplicated in arrow target: {}",
-            out
-        );
-        assert!(!out.contains("via"), "no via for direct: {}", out);
+        insta::assert_snapshot!(impact_plain(&[report]));
     }
 
     #[test]
@@ -634,20 +582,7 @@ mod tests {
             }],
             errors: vec![],
         };
-        let mut buf = Vec::new();
-        render_column_impact_plain_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.contains("customer_order_id  →  customers ("),
-            "line format: {}",
-            out
-        );
-        assert!(
-            !out.contains("customers.customer_order_id"),
-            "column must not be duplicated: {}",
-            out
-        );
-        assert!(out.contains("via orders"), "intermediate path: {}", out);
+        insta::assert_snapshot!(impact_plain(&[report]));
     }
 
     #[test]
@@ -664,20 +599,7 @@ mod tests {
             }],
             errors: vec![],
         };
-        let mut buf = Vec::new();
-        render_column_impact_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.starts_with("flowchart LR"), "header: {}", out);
-        assert!(
-            out.contains(r#"["stg_orders"]"#),
-            "source subgraph label: {}",
-            out
-        );
-        assert!(
-            out.contains(r#"["orders"]"#),
-            "target subgraph label: {}",
-            out
-        );
+        insta::assert_snapshot!(impact_mermaid(&[report]));
     }
 
     #[test]
@@ -694,9 +616,6 @@ mod tests {
             }],
             errors: vec![],
         };
-        let mut buf = Vec::new();
-        render_column_impact_mermaid_to_writer(&[report], &mut buf).unwrap();
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("via orders"), "indirect edge label: {}", out);
+        insta::assert_snapshot!(impact_mermaid(&[report]));
     }
 }
