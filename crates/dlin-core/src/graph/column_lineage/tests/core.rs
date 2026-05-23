@@ -821,8 +821,16 @@ fn test_scalar_function_transformation() {
             .clone()
     };
 
-    assert_eq!(find("col_upper"), TransformationType::Expression, "UPPER should be expression");
-    assert_eq!(find("col_concat"), TransformationType::Expression, "CONCAT should be expression");
+    assert_eq!(
+        find("col_upper"),
+        TransformationType::Expression,
+        "UPPER should be expression"
+    );
+    assert_eq!(
+        find("col_concat"),
+        TransformationType::Expression,
+        "CONCAT should be expression"
+    );
     assert_eq!(
         find("col_coalesce"),
         TransformationType::Expression,
@@ -843,7 +851,11 @@ fn test_cte_passthrough_inherits_transformation() {
         DialectType::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(result_upper.errors.is_empty(), "errors: {:?}", result_upper.errors);
+    assert!(
+        result_upper.errors.is_empty(),
+        "errors: {:?}",
+        result_upper.errors
+    );
     let status_upper = result_upper
         .columns
         .iter()
@@ -862,7 +874,11 @@ fn test_cte_passthrough_inherits_transformation() {
         DialectType::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(result_coalesce.errors.is_empty(), "errors: {:?}", result_coalesce.errors);
+    assert!(
+        result_coalesce.errors.is_empty(),
+        "errors: {:?}",
+        result_coalesce.errors
+    );
     let status_coalesced = result_coalesce
         .columns
         .iter()
