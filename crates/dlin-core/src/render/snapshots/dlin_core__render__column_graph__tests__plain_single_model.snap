@@ -1,0 +1,7 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+expression: "graph_plain(&[report])"
+---
+orders (2/2 columns traced)
+  order_id  →  stg_orders.order_id (direct)
+  total     →  stg_orders.price (expression)

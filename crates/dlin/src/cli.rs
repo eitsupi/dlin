@@ -774,32 +774,41 @@ Column resolution order:
   1. YAML column definitions (schema.yml / models.yml)
   2. SQL inference from compiled_code (fallback when YAML is absent)
 
-Output: JSON array per model with the following structure:
-  model             model name
-  traced_columns    number of columns successfully traced
-  total_columns     total number of columns attempted
-  columns[]
-    column          output column name
-    transformation  how the column was derived:
-                      direct       passed through unchanged (including renames)
-                      aggregation  aggregate function (SUM, COUNT, etc.)
-                      expression   arithmetic or other expression
-                      cast         type cast (CAST(x AS INT))
-                      conditional  CASE WHEN expression
-                      unknown      could not classify
-    sources[]
-      table         source model or raw table name
-      column        source column name
-      model_path[]  intermediate models traversed (omitted if empty)
-  errors[]    parse or resolution errors (non-empty → exit code 1)
+Output format (-o/--output):
+  json (default)  JSON array per model with the following structure:
+    model             model name
+    traced_columns    number of columns successfully traced
+    total_columns     total number of columns attempted
+    columns[]
+      column          output column name
+      transformation  how the column was derived:
+                        direct       passed through unchanged (including renames)
+                        aggregation  aggregate function (SUM, COUNT, etc.)
+                        expression   arithmetic or other expression
+                        cast         type cast (CAST(x AS INT))
+                        conditional  CASE WHEN expression
+                        unknown      could not classify
+      sources[]
+        table         source model or raw table name
+        column        source column name
+        model_path[]  intermediate models traversed (omitted if empty)
+    errors[]    parse or resolution errors (non-empty → exit code 1)
+  plain           human-readable text, one model per block
+  mermaid         Mermaid flowchart (LR) with subgraphs per model
 
 Exit codes:
   0   Success
   1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
-  # Column lineage for a single model
+  # Column lineage for a single model (JSON output)
   dlin column graph orders
+
+  # Human-readable plain output
+  dlin column graph orders -o plain
+
+  # Mermaid flowchart
+  dlin column graph orders -o mermaid
 
   # Specific columns only
   dlin column graph orders --column order_id --column status
@@ -831,15 +840,24 @@ Takes a single model and one or more --column flags (required).
 
 Requires compiled SQL in manifest.json — run `dbt compile` first.
 
-Output: JSON array per column with affected downstream columns and models.
+Output format (-o/--output):
+  json (default)  JSON array per column with affected downstream columns and models
+  plain           human-readable text, one source column per block
+  mermaid         Mermaid flowchart (LR) showing impacted columns across models
 
 Exit codes:
   0   Success
   1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
-  # Impact of changing a single column
+  # Impact of changing a single column (JSON output)
   dlin column impact stg_orders --column order_id
+
+  # Human-readable plain output
+  dlin column impact stg_orders --column order_id -o plain
+
+  # Mermaid flowchart
+  dlin column impact stg_orders --column order_id -o mermaid
 
   # Impact of multiple columns
   dlin column impact stg_orders --column order_id --column status
@@ -862,6 +880,10 @@ pub struct ColumnGraphArgs {
     /// Specific columns to analyze (analyzes all columns if omitted)
     #[arg(long)]
     pub column: Vec<String>,
+
+    /// Output format: json (default), plain, mermaid
+    #[arg(short = 'o', long, default_value = "json")]
+    pub output: ColumnOutputFormat,
 
     /// SQL dialect for parsing (default: generic).
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
@@ -901,6 +923,10 @@ pub struct ColumnImpactArgs {
     /// Columns to analyze impact for (required)
     #[arg(long, required = true)]
     pub column: Vec<String>,
+
+    /// Output format: json (default), plain, mermaid
+    #[arg(short = 'o', long, default_value = "json")]
+    pub output: ColumnOutputFormat,
 
     /// SQL dialect for parsing (default: generic).
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
@@ -1197,6 +1223,16 @@ pub enum SourceType {
 pub enum ImpactOutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColumnOutputFormat {
+    /// Machine-readable JSON array (default)
+    Json,
+    /// Human-readable plain-text table
+    Plain,
+    /// Mermaid flowchart diagram
+    Mermaid,
 }
 
 #[cfg(test)]
@@ -1886,6 +1922,90 @@ mod tests {
             result.is_err(),
             "invalid dialect should be rejected by clap"
         );
+    }
+
+    // -- ColumnOutputFormat tests --------------------------------------------
+
+    #[test]
+    fn test_column_graph_default_output_is_json() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_column_graph_output_plain() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "plain"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Plain));
+    }
+
+    #[test]
+    fn test_column_graph_output_mermaid() {
+        let args = unwrap_column_graph(
+            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "mermaid"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
+    }
+
+    #[test]
+    fn test_column_graph_invalid_output_rejected() {
+        let result = Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "ascii"]);
+        assert!(result.is_err(), "ascii is not a valid column output format");
+    }
+
+    #[test]
+    fn test_column_impact_default_output_is_json() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Json));
+    }
+
+    #[test]
+    fn test_column_impact_output_plain() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "-o",
+                "plain",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Plain));
+    }
+
+    #[test]
+    fn test_column_impact_output_mermaid() {
+        let args = unwrap_column_impact(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "impact",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--output",
+                "mermaid",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
     }
 
     // -- Debug subcommand tests -----------------------------------------------

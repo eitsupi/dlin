@@ -9,9 +9,9 @@ use polyglot_sql::{DialectType, Schema as _};
 mod cli;
 
 use cli::{
-    CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, Command, DebugCommand,
-    DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, SourceType,
-    SummaryArgs, SummaryOutputFormat,
+    CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, ColumnOutputFormat, Command,
+    DebugCommand, DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs,
+    SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
 use dlin_core::input;
@@ -63,6 +63,7 @@ fn main() {
                 run_column_lineage_command(
                     args.model,
                     &args.column,
+                    &args.output,
                     args.dialect,
                     &args.project_dir,
                     args.manifest_path.as_ref(),
@@ -76,6 +77,7 @@ fn main() {
                 run_column_impact_command(
                     &args.model,
                     &args.column,
+                    &args.output,
                     args.dialect,
                     &args.project_dir,
                     args.manifest_path.as_ref(),
@@ -646,6 +648,7 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 fn run_column_lineage_command(
     models: Vec<String>,
     columns: &[String],
+    output: &ColumnOutputFormat,
     dialect: Option<DialectType>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
@@ -751,23 +754,32 @@ fn run_column_lineage_command(
         }
     }
 
-    // Output JSON
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let pretty = std::io::IsTerminal::is_terminal(&stdout);
-    let res = if pretty {
-        serde_json::to_writer_pretty(&mut out, &reports)
-    } else {
-        serde_json::to_writer(&mut out, &reports)
-    };
-    if let Err(e) = res {
-        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-            return Err(anyhow::anyhow!(e));
+    match output {
+        ColumnOutputFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &reports)
+            } else {
+                serde_json::to_writer(&mut out, &reports)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e.into());
+            }
         }
-    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(e.into());
+        ColumnOutputFormat::Plain => {
+            render::column_graph::render_column_graph_plain(&reports);
+        }
+        ColumnOutputFormat::Mermaid => {
+            render::column_graph::render_column_graph_mermaid(&reports);
+        }
     }
 
     cache.save();
@@ -784,6 +796,7 @@ fn run_column_lineage_command(
 fn run_column_impact_command(
     model: &str,
     columns: &[String],
+    output: &ColumnOutputFormat,
     dialect: Option<DialectType>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
@@ -828,23 +841,32 @@ fn run_column_impact_command(
         }
     }
 
-    // Output JSON
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let pretty = std::io::IsTerminal::is_terminal(&stdout);
-    let res = if pretty {
-        serde_json::to_writer_pretty(&mut out, &reports)
-    } else {
-        serde_json::to_writer(&mut out, &reports)
-    };
-    if let Err(e) = res {
-        if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-            return Err(anyhow::anyhow!(e));
+    match output {
+        ColumnOutputFormat::Json => {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            let pretty = std::io::IsTerminal::is_terminal(&stdout);
+            let res = if pretty {
+                serde_json::to_writer_pretty(&mut out, &reports)
+            } else {
+                serde_json::to_writer(&mut out, &reports)
+            };
+            if let Err(e) = res {
+                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
+                    return Err(anyhow::anyhow!(e));
+                }
+            } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(e.into());
+            }
         }
-    } else if let Err(e) = std::io::Write::write_all(&mut out, b"\n")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(e.into());
+        ColumnOutputFormat::Plain => {
+            render::column_graph::render_column_impact_plain(&reports);
+        }
+        ColumnOutputFormat::Mermaid => {
+            render::column_graph::render_column_impact_mermaid(&reports);
+        }
     }
 
     cache.save();

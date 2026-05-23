@@ -191,31 +191,12 @@ fn node_label(node: &NodeData, show_columns: bool) -> String {
         let cols = node.columns.join(", ");
         format!(
             "{}<br/>---<br/>{}",
-            mermaid_escape(&node.label),
-            mermaid_escape(&cols)
+            super::mermaid_escape(&node.label),
+            super::mermaid_escape(&cols)
         )
     } else {
-        mermaid_escape(&node.label)
+        super::mermaid_escape(&node.label)
     }
-}
-
-/// Escape characters that are special inside Mermaid double-quoted labels.
-///
-/// Mermaid uses `#entity;` syntax (not HTML `&entity;`).
-/// We escape `"`, `<`, `>`, and `#` so user-provided text cannot break
-/// the label syntax or interfere with `<br/>` separators we insert.
-fn mermaid_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '#' => out.push_str("#num;"),
-            '"' => out.push_str("#quot;"),
-            '<' => out.push_str("#lt;"),
-            '>' => out.push_str("#gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// Generate the Mermaid shape string for a node
@@ -726,9 +707,12 @@ mod tests {
 
     #[test]
     fn test_mermaid_escape() {
-        assert_eq!(mermaid_escape("hello"), "hello");
-        assert_eq!(mermaid_escape(r#"a "b" c"#), "a #quot;b#quot; c");
-        assert_eq!(mermaid_escape("a<b>c"), "a#lt;b#gt;c");
-        assert_eq!(mermaid_escape("col#1"), "col#num;1");
+        assert_eq!(super::super::mermaid_escape("hello"), "hello");
+        assert_eq!(
+            super::super::mermaid_escape(r#"a "b" c"#),
+            "a #quot;b#quot; c"
+        );
+        assert_eq!(super::super::mermaid_escape("a<b>c"), "a#lt;b#gt;c");
+        assert_eq!(super::super::mermaid_escape("col#1"), "col#num;1");
     }
 }

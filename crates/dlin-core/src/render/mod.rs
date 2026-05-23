@@ -1,6 +1,8 @@
 use std::io;
 
 pub mod ascii;
+#[cfg(feature = "column-lineage")]
+pub mod column_graph;
 pub mod dot;
 pub mod html;
 pub mod impact;
@@ -52,6 +54,25 @@ pub(crate) fn directory_label(node: &crate::graph::types::NodeData) -> String {
             .unwrap_or_else(|| NO_DIRECTORY_LABEL.to_string()),
         None => NO_DIRECTORY_LABEL.to_string(),
     }
+}
+
+/// Escape characters that are special inside Mermaid double-quoted labels.
+///
+/// Mermaid uses `#entity;` syntax (not HTML `&entity;`).
+/// We escape `"`, `<`, `>`, and `#` so user-provided text cannot break
+/// the label syntax or interfere with `<br/>` separators we insert.
+pub(crate) fn mermaid_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '#' => out.push_str("#num;"),
+            '"' => out.push_str("#quot;"),
+            '<' => out.push_str("#lt;"),
+            '>' => out.push_str("#gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Sanitize a string into a valid identifier for DOT/Mermaid (only `[A-Za-z0-9_]`).

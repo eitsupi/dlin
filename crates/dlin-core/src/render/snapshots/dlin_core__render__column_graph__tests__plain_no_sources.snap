@@ -1,0 +1,6 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+expression: "graph_plain(&[report])"
+---
+orders (0/1 columns traced)
+  id  (no sources)

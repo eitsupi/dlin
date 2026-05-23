@@ -1,0 +1,6 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+expression: "impact_plain(&[report])"
+---
+stg_orders.order_id (1 impacted column)
+  customer_order_id  →  customers (direct, via orders)
