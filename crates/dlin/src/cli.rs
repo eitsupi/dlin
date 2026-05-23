@@ -774,32 +774,41 @@ Column resolution order:
   1. YAML column definitions (schema.yml / models.yml)
   2. SQL inference from compiled_code (fallback when YAML is absent)
 
-Output: JSON array per model with the following structure:
-  model             model name
-  traced_columns    number of columns successfully traced
-  total_columns     total number of columns attempted
-  columns[]
-    column          output column name
-    transformation  how the column was derived:
-                      direct       passed through unchanged (including renames)
-                      aggregation  aggregate function (SUM, COUNT, etc.)
-                      expression   arithmetic or other expression
-                      cast         type cast (CAST(x AS INT))
-                      conditional  CASE WHEN expression
-                      unknown      could not classify
-    sources[]
-      table         source model or raw table name
-      column        source column name
-      model_path[]  intermediate models traversed (omitted if empty)
-  errors[]    parse or resolution errors (non-empty → exit code 1)
+Output format (-o/--output):
+  json (default)  JSON array per model with the following structure:
+    model             model name
+    traced_columns    number of columns successfully traced
+    total_columns     total number of columns attempted
+    columns[]
+      column          output column name
+      transformation  how the column was derived:
+                        direct       passed through unchanged (including renames)
+                        aggregation  aggregate function (SUM, COUNT, etc.)
+                        expression   arithmetic or other expression
+                        cast         type cast (CAST(x AS INT))
+                        conditional  CASE WHEN expression
+                        unknown      could not classify
+      sources[]
+        table         source model or raw table name
+        column        source column name
+        model_path[]  intermediate models traversed (omitted if empty)
+    errors[]    parse or resolution errors (non-empty → exit code 1)
+  plain           human-readable text, one model per block
+  mermaid         Mermaid flowchart (LR) with subgraphs per model
 
 Exit codes:
   0   Success
   1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
-  # Column lineage for a single model
+  # Column lineage for a single model (JSON output)
   dlin column graph orders
+
+  # Human-readable plain output
+  dlin column graph orders -o plain
+
+  # Mermaid flowchart
+  dlin column graph orders -o mermaid
 
   # Specific columns only
   dlin column graph orders --column order_id --column status
@@ -831,15 +840,24 @@ Takes a single model and one or more --column flags (required).
 
 Requires compiled SQL in manifest.json — run `dbt compile` first.
 
-Output: JSON array per column with affected downstream columns and models.
+Output format (-o/--output):
+  json (default)  JSON array per column with affected downstream columns and models
+  plain           human-readable text, one source column per block
+  mermaid         Mermaid flowchart (LR) showing impacted columns across models
 
 Exit codes:
   0   Success
   1   Error (model not found, no manifest, analysis errors, etc.)",
         after_long_help = "\
 Examples:
-  # Impact of changing a single column
+  # Impact of changing a single column (JSON output)
   dlin column impact stg_orders --column order_id
+
+  # Human-readable plain output
+  dlin column impact stg_orders --column order_id -o plain
+
+  # Mermaid flowchart
+  dlin column impact stg_orders --column order_id -o mermaid
 
   # Impact of multiple columns
   dlin column impact stg_orders --column order_id --column status
