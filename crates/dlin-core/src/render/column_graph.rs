@@ -38,6 +38,8 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
             .max()
             .unwrap_or(0);
 
+        // Prefix is "  " (2) + col padded to col_width + "  →  " (5 display cols)
+        let indent = " ".repeat(2 + col_width + 5);
         for entry in &report.columns {
             if entry.sources.is_empty() {
                 writeln!(
@@ -63,10 +65,6 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 transformation_label(&entry.transformation),
                 width = col_width
             )?;
-
-            // Additional sources on continuation lines
-            // Prefix is "  " (2) + col padded to col_width + "  →  " (5 display cols)
-            let indent = " ".repeat(2 + col_width + 5);
             for src in entry.sources.iter().skip(1) {
                 let src_str =
                     format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
@@ -251,10 +249,9 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             };
             writeln!(
                 w,
-                "  {:width$}  →  {}.{} ({}{})",
+                "  {:width$}  →  {} ({}{})",
                 ic.column,
                 ic.model,
-                ic.column,
                 transformation_label(&ic.transformation),
                 via_str,
                 width = col_width
@@ -631,11 +628,8 @@ mod tests {
         let mut buf = Vec::new();
         render_column_impact_plain_to_writer(&[report], &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(
-            out.contains("customers.customer_order_id"),
-            "target: {}",
-            out
-        );
+        assert!(out.contains("customer_order_id"), "column: {}", out);
+        assert!(out.contains("customers"), "target model: {}", out);
         assert!(out.contains("via orders"), "intermediate path: {}", out);
     }
 
