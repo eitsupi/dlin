@@ -55,8 +55,8 @@ Examples:
   dlin summary -o json                             # Project overview as JSON
   dlin check-manifest || dbt compile               # Recompile if stale or files deleted
   git diff --name-only main | dlin graph           # Lineage of changed files
-  dlin column graph orders                         # Upstream: where do columns come from? (requires dbt compile)
-  dlin column impact stg_orders --column order_id  # Downstream: what depends on this column? (requires dbt compile)",
+  dlin column upstream orders                      # Upstream: where do columns come from? (requires dbt compile)
+  dlin column downstream stg_orders --column order_id  # Downstream: what depends on this column? (requires dbt compile)",
     version
 )]
 pub struct Cli {
@@ -150,8 +150,8 @@ File paths are resolved to model names using dbt project configuration.
 Column-level analysis:
   This command works at the model level (bidirectional, with -u/-d depth control).
   For column-level lineage tracing, see:
-    dlin column graph   upstream — traces where each output column's data came from
-    dlin column impact  downstream — finds which outputs depend on a given column
+    dlin column upstream    — traces where each output column's data came from
+    dlin column downstream  — finds which outputs depend on a given column
   Both require manifest.json (run `dbt compile` first).",
     after_long_help = "\
 Examples:
@@ -207,8 +207,8 @@ Examples:
   dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes
 
   # === Column-level analysis (requires manifest) ===
-  dlin column graph orders                           # upstream: where do columns come from?
-  dlin column impact stg_orders --column order_id    # downstream: what depends on this column?"
+  dlin column upstream orders                             # upstream: where do columns come from?
+  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
@@ -738,16 +738,16 @@ Column-level lineage and impact analysis.
 Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
 column analysis is split by direction — each subcommand covers one direction:
 
-  graph     upstream   — traces where each output column's data came from
-  impact    downstream — finds which models/columns are affected by a column change
+  upstream    — traces where each output column's data came from
+  downstream  — finds which models/columns are affected by a column change
 
 There are no -u/-d depth flags; the full chain is always traversed in both cases.
 
 Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
     after_long_help = "\
 Examples:
-  dlin column graph orders                         # upstream: where do columns come from?
-  dlin column impact stg_orders --column order_id  # downstream: what depends on this column?"
+  dlin column upstream orders                             # upstream: where do columns come from?
+  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
 )]
 pub struct ColumnArgs {
     #[command(subcommand)]
@@ -766,7 +766,7 @@ their raw source columns across the full DAG. There are no -u/-d depth flags
 — the entire upstream chain is always traversed automatically.
 
 To find what downstream models or columns would be affected by changing a
-specific column, use `dlin column impact` instead.
+specific column, use `dlin column downstream` instead.
 
 Requires manifest.json with compiled SQL (run `dbt compile` first).
 
@@ -802,27 +802,27 @@ Exit codes:
         after_long_help = "\
 Examples:
   # Column lineage for a single model (JSON output)
-  dlin column graph orders
+  dlin column upstream orders
 
   # Human-readable plain output
-  dlin column graph orders -o plain
+  dlin column upstream orders -o plain
 
   # Mermaid flowchart
-  dlin column graph orders -o mermaid
+  dlin column upstream orders -o mermaid
 
   # Specific columns only
-  dlin column graph orders --column order_id --column status
+  dlin column upstream orders --column order_id --column status
 
   # Multiple models
-  dlin column graph orders stg_orders
+  dlin column upstream orders stg_orders
 
   # With explicit manifest path
-  dlin column graph orders --manifest-path target/manifest.json
+  dlin column upstream orders --manifest-path target/manifest.json
 
   # BigQuery project
-  dlin column graph orders --dialect bigquery"
+  dlin column upstream orders --dialect bigquery"
     )]
-    Graph(ColumnGraphArgs),
+    Upstream(ColumnGraphArgs),
 
     /// Analyze downstream column-level impact of changing a column
     #[command(
@@ -833,8 +833,8 @@ Direction: downstream only. Starting from a specific column, follows forward
 edges to find all dependent models and columns. There are no -u/-d depth flags
 — all downstream dependents are always included.
 
-This is the reverse direction of `dlin column graph` (which traces upstream
-sources). To trace where a column's data comes from, use `dlin column graph`.
+This is the reverse direction of `dlin column upstream` (which traces upstream
+sources). To trace where a column's data comes from, use `dlin column upstream`.
 
 Takes a single model and one or more --column flags (required).
 
@@ -851,24 +851,24 @@ Exit codes:
         after_long_help = "\
 Examples:
   # Impact of changing a single column (JSON output)
-  dlin column impact stg_orders --column order_id
+  dlin column downstream stg_orders --column order_id
 
   # Human-readable plain output
-  dlin column impact stg_orders --column order_id -o plain
+  dlin column downstream stg_orders --column order_id -o plain
 
   # Mermaid flowchart
-  dlin column impact stg_orders --column order_id -o mermaid
+  dlin column downstream stg_orders --column order_id -o mermaid
 
   # Impact of multiple columns
-  dlin column impact stg_orders --column order_id --column status
+  dlin column downstream stg_orders --column order_id --column status
 
   # With explicit manifest path
-  dlin column impact stg_orders --column order_id --manifest-path target/manifest.json
+  dlin column downstream stg_orders --column order_id --manifest-path target/manifest.json
 
   # BigQuery project
-  dlin column impact stg_orders --column order_id --dialect bigquery"
+  dlin column downstream stg_orders --column order_id --dialect bigquery"
     )]
-    Impact(ColumnImpactArgs),
+    Downstream(ColumnImpactArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -917,7 +917,7 @@ pub struct ColumnGraphArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ColumnImpactArgs {
-    /// Model name to analyze column impact for
+    /// Model name to analyze column downstream impact for
     pub model: String,
 
     /// Columns to analyze impact for (required)
@@ -1731,40 +1731,41 @@ mod tests {
         assert_eq!(cli.error_format, ErrorFormat::Json);
     }
 
-    fn unwrap_column_graph(cli: Cli) -> ColumnGraphArgs {
+    fn unwrap_column_upstream(cli: Cli) -> ColumnGraphArgs {
         match cli.command {
             Command::Column(col) => match col.command {
-                ColumnCommand::Graph(args) => args,
-                _ => panic!("Expected Column graph subcommand"),
+                ColumnCommand::Upstream(args) => args,
+                _ => panic!("Expected Column upstream subcommand"),
             },
             _ => panic!("Expected Column subcommand"),
         }
     }
 
-    fn unwrap_column_impact(cli: Cli) -> ColumnImpactArgs {
+    fn unwrap_column_downstream(cli: Cli) -> ColumnImpactArgs {
         match cli.command {
             Command::Column(col) => match col.command {
-                ColumnCommand::Impact(args) => args,
-                _ => panic!("Expected Column impact subcommand"),
+                ColumnCommand::Downstream(args) => args,
+                _ => panic!("Expected Column downstream subcommand"),
             },
             _ => panic!("Expected Column subcommand"),
         }
     }
 
     #[test]
-    fn test_column_lineage_subcommand() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+    fn test_column_upstream_subcommand() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
         assert_eq!(args.model, &["orders"]);
         assert!(args.column.is_empty());
     }
 
     #[test]
-    fn test_column_lineage_with_column_filter() {
-        let args = unwrap_column_graph(
+    fn test_column_upstream_with_column_filter() {
+        let args = unwrap_column_upstream(
             Cli::try_parse_from([
-                "dlin", "column", "graph", "orders", "--column", "order_id", "--column", "status",
+                "dlin", "column", "upstream", "orders", "--column", "order_id", "--column",
+                "status",
             ])
             .unwrap(),
         );
@@ -1773,22 +1774,22 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_no_model() {
+    fn test_column_upstream_no_model() {
         // model is required at the clap level
-        let result = Cli::try_parse_from(["dlin", "column", "graph"]);
+        let result = Cli::try_parse_from(["dlin", "column", "upstream"]);
         assert!(
             result.is_err(),
-            "column graph should require at least one model"
+            "column upstream should require at least one model"
         );
     }
 
     #[test]
-    fn test_column_impact_subcommand() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_subcommand() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1800,19 +1801,19 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_requires_column() {
-        // --column is required for column impact
-        let result = Cli::try_parse_from(["dlin", "column", "impact", "stg_orders"]);
-        assert!(result.is_err(), "column impact should require --column");
+    fn test_column_downstream_requires_column() {
+        // --column is required for column downstream
+        let result = Cli::try_parse_from(["dlin", "column", "downstream", "stg_orders"]);
+        assert!(result.is_err(), "column downstream should require --column");
     }
 
     #[test]
-    fn test_column_impact_multiple_columns() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_multiple_columns() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1825,29 +1826,36 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_with_dialect() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders", "--dialect", "bigquery"])
-                .unwrap(),
+    fn test_column_upstream_with_dialect() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "upstream",
+                "orders",
+                "--dialect",
+                "bigquery",
+            ])
+            .unwrap(),
         );
         assert_eq!(args.dialect, Some(polyglot_sql::DialectType::BigQuery));
     }
 
     #[test]
-    fn test_column_lineage_default_dialect() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+    fn test_column_upstream_default_dialect() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
         assert!(args.dialect.is_none());
     }
 
     #[test]
-    fn test_column_impact_with_dialect() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_with_dialect() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1898,7 +1906,7 @@ mod tests {
         ];
         for dialect in dialects {
             let cli =
-                Cli::try_parse_from(["dlin", "column", "graph", "model", "--dialect", dialect]);
+                Cli::try_parse_from(["dlin", "column", "upstream", "model", "--dialect", dialect]);
             assert!(
                 cli.is_ok(),
                 "dialect '{}' should parse successfully, got: {:?}",
@@ -1913,7 +1921,7 @@ mod tests {
         let result = Cli::try_parse_from([
             "dlin",
             "column",
-            "graph",
+            "upstream",
             "model",
             "--dialect",
             "unknown_db",
@@ -1927,42 +1935,42 @@ mod tests {
     // -- ColumnOutputFormat tests --------------------------------------------
 
     #[test]
-    fn test_column_graph_default_output_is_json() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders"]).unwrap(),
+    fn test_column_upstream_default_output_is_json() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
         assert!(matches!(args.output, ColumnOutputFormat::Json));
     }
 
     #[test]
-    fn test_column_graph_output_plain() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "plain"]).unwrap(),
+    fn test_column_upstream_output_plain() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "plain"]).unwrap(),
         );
         assert!(matches!(args.output, ColumnOutputFormat::Plain));
     }
 
     #[test]
-    fn test_column_graph_output_mermaid() {
-        let args = unwrap_column_graph(
-            Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "mermaid"]).unwrap(),
+    fn test_column_upstream_output_mermaid() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "mermaid"]).unwrap(),
         );
         assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
     }
 
     #[test]
-    fn test_column_graph_invalid_output_rejected() {
-        let result = Cli::try_parse_from(["dlin", "column", "graph", "orders", "-o", "ascii"]);
+    fn test_column_upstream_invalid_output_rejected() {
+        let result = Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "ascii"]);
         assert!(result.is_err(), "ascii is not a valid column output format");
     }
 
     #[test]
-    fn test_column_impact_default_output_is_json() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_default_output_is_json() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1973,12 +1981,12 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_output_plain() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_output_plain() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",
@@ -1991,12 +1999,12 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_output_mermaid() {
-        let args = unwrap_column_impact(
+    fn test_column_downstream_output_mermaid() {
+        let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
                 "column",
-                "impact",
+                "downstream",
                 "stg_orders",
                 "--column",
                 "order_id",

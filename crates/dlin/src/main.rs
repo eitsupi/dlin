@@ -58,7 +58,7 @@ fn main() {
             run_check_manifest_command(args)
         }
         Command::Column(col) => match col.command {
-            ColumnCommand::Graph(args) => {
+            ColumnCommand::Upstream(args) => {
                 dlin_core::set_quiet(args.quiet);
                 run_column_lineage_command(
                     args.model,
@@ -72,7 +72,7 @@ fn main() {
                     args.refresh_cache,
                 )
             }
-            ColumnCommand::Impact(args) => {
+            ColumnCommand::Downstream(args) => {
                 dlin_core::set_quiet(args.quiet);
                 run_column_impact_command(
                     &args.model,
@@ -872,7 +872,7 @@ fn run_column_impact_command(
     cache.save();
 
     if has_errors {
-        anyhow::bail!("column impact analysis completed with errors");
+        anyhow::bail!("column downstream analysis completed with errors");
     }
     Ok(())
 }
