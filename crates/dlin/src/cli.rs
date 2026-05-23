@@ -55,7 +55,7 @@ Examples:
   dlin summary -o json                             # Project overview as JSON
   dlin check-manifest || dbt compile               # Recompile if stale or files deleted
   git diff --name-only main | dlin graph           # Lineage of changed files
-  dlin column upstream orders                           # Upstream: where do columns come from? (requires dbt compile)
+  dlin column upstream orders                      # Upstream: where do columns come from? (requires dbt compile)
   dlin column downstream stg_orders --column order_id  # Downstream: what depends on this column? (requires dbt compile)",
     version
 )]
@@ -207,7 +207,7 @@ Examples:
   dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes
 
   # === Column-level analysis (requires manifest) ===
-  dlin column upstream orders                              # upstream: where do columns come from?
+  dlin column upstream orders                             # upstream: where do columns come from?
   dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
 )]
 pub struct GraphArgs {
@@ -746,7 +746,7 @@ There are no -u/-d depth flags; the full chain is always traversed in both cases
 Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
     after_long_help = "\
 Examples:
-  dlin column upstream orders                              # upstream: where do columns come from?
+  dlin column upstream orders                             # upstream: where do columns come from?
   dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
 )]
 pub struct ColumnArgs {
