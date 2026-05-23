@@ -1752,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_subcommand() {
+    fn test_column_upstream_subcommand() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
@@ -1761,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_with_column_filter() {
+    fn test_column_upstream_with_column_filter() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from([
                 "dlin", "column", "upstream", "orders", "--column", "order_id", "--column",
@@ -1774,7 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_no_model() {
+    fn test_column_upstream_no_model() {
         // model is required at the clap level
         let result = Cli::try_parse_from(["dlin", "column", "upstream"]);
         assert!(
@@ -1784,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_subcommand() {
+    fn test_column_downstream_subcommand() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1801,14 +1801,14 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_requires_column() {
+    fn test_column_downstream_requires_column() {
         // --column is required for column downstream
         let result = Cli::try_parse_from(["dlin", "column", "downstream", "stg_orders"]);
         assert!(result.is_err(), "column downstream should require --column");
     }
 
     #[test]
-    fn test_column_impact_multiple_columns() {
+    fn test_column_downstream_multiple_columns() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1826,7 +1826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_with_dialect() {
+    fn test_column_upstream_with_dialect() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1842,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_lineage_default_dialect() {
+    fn test_column_upstream_default_dialect() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
@@ -1850,7 +1850,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_with_dialect() {
+    fn test_column_downstream_with_dialect() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1935,7 +1935,7 @@ mod tests {
     // -- ColumnOutputFormat tests --------------------------------------------
 
     #[test]
-    fn test_column_graph_default_output_is_json() {
+    fn test_column_upstream_default_output_is_json() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from(["dlin", "column", "upstream", "orders"]).unwrap(),
         );
@@ -1943,7 +1943,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_graph_output_plain() {
+    fn test_column_upstream_output_plain() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "plain"]).unwrap(),
         );
@@ -1951,7 +1951,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_graph_output_mermaid() {
+    fn test_column_upstream_output_mermaid() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "mermaid"]).unwrap(),
         );
@@ -1959,13 +1959,13 @@ mod tests {
     }
 
     #[test]
-    fn test_column_graph_invalid_output_rejected() {
+    fn test_column_upstream_invalid_output_rejected() {
         let result = Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "ascii"]);
         assert!(result.is_err(), "ascii is not a valid column output format");
     }
 
     #[test]
-    fn test_column_impact_default_output_is_json() {
+    fn test_column_downstream_default_output_is_json() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1981,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_output_plain() {
+    fn test_column_downstream_output_plain() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
@@ -1999,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_impact_output_mermaid() {
+    fn test_column_downstream_output_mermaid() {
         let args = unwrap_column_downstream(
             Cli::try_parse_from([
                 "dlin",
