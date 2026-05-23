@@ -1764,7 +1764,8 @@ mod tests {
     fn test_column_lineage_with_column_filter() {
         let args = unwrap_column_upstream(
             Cli::try_parse_from([
-                "dlin", "column", "upstream", "orders", "--column", "order_id", "--column", "status",
+                "dlin", "column", "upstream", "orders", "--column", "order_id", "--column",
+                "status",
             ])
             .unwrap(),
         );
@@ -1827,8 +1828,15 @@ mod tests {
     #[test]
     fn test_column_lineage_with_dialect() {
         let args = unwrap_column_upstream(
-            Cli::try_parse_from(["dlin", "column", "upstream", "orders", "--dialect", "bigquery"])
-                .unwrap(),
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "upstream",
+                "orders",
+                "--dialect",
+                "bigquery",
+            ])
+            .unwrap(),
         );
         assert_eq!(args.dialect, Some(polyglot_sql::DialectType::BigQuery));
     }
