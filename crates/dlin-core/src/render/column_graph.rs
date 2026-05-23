@@ -65,7 +65,8 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
             )?;
 
             // Additional sources on continuation lines
-            let indent = " ".repeat(2 + col_width + 2 + 3 + 2); // "  " + col + "  →  "
+            // Prefix is "  " (2) + col padded to col_width + "  →  " (5 display cols)
+            let indent = " ".repeat(2 + col_width + 5);
             for src in entry.sources.iter().skip(1) {
                 let src_str =
                     format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
@@ -98,7 +99,7 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
     // Collect all models and their columns to build subgraphs.
     // Key: model name → BTreeSet of column names (sorted)
     let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // Collect edges: (target_model, target_col, src_model, src_col, label)
+    // Collect edges: (src_model, src_col, dst_model, dst_col, label)
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
 
     for report in reports {
@@ -124,10 +125,10 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                 }
 
                 edges.push((
-                    target_model.clone(),
-                    entry.column.clone(),
                     src.table.clone(),
                     src.column.clone(),
+                    target_model.clone(),
+                    entry.column.clone(),
                     transformation_label(&entry.transformation).to_string(),
                 ));
             }
@@ -171,7 +172,7 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
     for (from_model, from_col, to_model, to_col, label) in &edges {
         let from_node = indexed_node_id(&model_index, &model_columns, from_model, from_col);
         let to_node = indexed_node_id(&model_index, &model_columns, to_model, to_col);
-        let edge_str = format!("  {} -->|\"{}\"|{}", to_node, label, from_node);
+        let edge_str = format!("  {} -->|\"{}\"|{}", from_node, label, to_node);
         if seen.insert(edge_str.clone()) {
             writeln!(w, "{}", edge_str)?;
         }
@@ -371,11 +372,14 @@ fn indexed_node_id(
     model: &str,
     col: &str,
 ) -> String {
-    let midx = model_index.get(model).copied().unwrap_or(0);
+    let midx = model_index
+        .get(model)
+        .copied()
+        .expect("model must be registered before calling indexed_node_id");
     let cidx = model_columns
         .get(model)
         .and_then(|cols| cols.iter().position(|c| c.as_str() == col))
-        .unwrap_or(0);
+        .expect("column must be registered before calling indexed_node_id");
     format!("n{}_{}", midx, cidx)
 }
 
