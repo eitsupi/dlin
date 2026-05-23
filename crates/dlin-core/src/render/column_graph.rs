@@ -119,12 +119,23 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                     .or_default()
                     .insert(src.column.clone());
 
+                let via_str = if src.model_path.is_empty() {
+                    String::new()
+                } else {
+                    let escaped: Vec<String> = src
+                        .model_path
+                        .iter()
+                        .map(|m| super::mermaid_escape(m))
+                        .collect();
+                    format!(" (via {})", escaped.join(" \u{2192} "))
+                };
+                let label = format!("{}{}", transformation_label(&entry.transformation), via_str);
                 edges.push((
                     src.table.clone(),
                     src.column.clone(),
                     target_model.clone(),
                     entry.column.clone(),
-                    transformation_label(&entry.transformation).to_string(),
+                    label,
                 ));
             }
         }
