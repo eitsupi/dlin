@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0-alpha.2] - 2026-05-23
+
+### Breaking Changes
+
+- Column lineage subcommands renamed: `dlin column graph` → `dlin column upstream`, `dlin column impact` → `dlin column downstream` (#37)
+
+### Features
+
+- Add `--format` option to column subcommands (`upstream`/`downstream`) for controlling output format (#35)
+
+### Bug Fixes
+
+- Fix incorrect transformation type for function calls and CTE pass-throughs in column lineage (#36)
+
 ## [0.2.0-alpha.1] - 2026-05-22
 
 ### Features
