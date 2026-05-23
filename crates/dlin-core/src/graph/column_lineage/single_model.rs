@@ -106,7 +106,20 @@ pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
 }
 
 fn classify_transformation(node: &polyglot_sql::lineage::LineageNode) -> TransformationType {
-    classify_expression(&node.expression)
+    let t = classify_expression(&node.expression);
+    if t != TransformationType::Direct || node.downstream.is_empty() {
+        return t;
+    }
+    // Direct pass-through: traverse downstream to find the actual transformation type.
+    // This handles the case where a CTE computes an expression and a later SELECT
+    // references the result by name (which looks like Column → Direct at the surface).
+    for child in &node.downstream {
+        let child_t = classify_transformation(child);
+        if child_t != TransformationType::Direct {
+            return child_t;
+        }
+    }
+    TransformationType::Direct
 }
 
 fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
@@ -127,6 +140,13 @@ fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
         Expression::Anonymous(_) | Expression::Coalesce(_) | Expression::NullIf(_) => {
             TransformationType::Expression
         }
+        // Generic function calls (covers CONCAT, NULLIF, SPLIT, etc. parsed as Function)
+        Expression::Function(_) => TransformationType::Expression,
+        // Specialized scalar function variants with their own AST types
+        Expression::Upper(_)
+        | Expression::Lower(_)
+        | Expression::Length(_)
+        | Expression::Concat(_) => TransformationType::Expression,
         _ => TransformationType::Unknown,
     }
 }

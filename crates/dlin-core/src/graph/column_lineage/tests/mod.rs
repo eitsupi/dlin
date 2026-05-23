@@ -640,6 +640,155 @@ fn make_diamond_manifest() -> Manifest {
     }
 }
 
+/// Build a manifest for testing transformation type classification.
+pub(super) fn make_transformation_manifest() -> Manifest {
+    let mut nodes = HashMap::new();
+    let mut sources = HashMap::new();
+
+    let mut raw_cols = HashMap::new();
+    for name in ["id", "status", "name"] {
+        raw_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    sources.insert(
+        "source.proj.raw.orders".to_string(),
+        ManifestSource {
+            unique_id: "source.proj.raw.orders".to_string(),
+            name: "orders".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            columns: raw_cols,
+            database: None,
+            schema: None,
+            identifier: None,
+        },
+    );
+
+    // scalar_funcs: tests Bug 1 — general function calls (UPPER, CONCAT, generic Function)
+    let mut scalar_cols = HashMap::new();
+    for name in ["col_upper", "col_concat", "col_coalesce"] {
+        scalar_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    nodes.insert(
+        "model.proj.scalar_funcs".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.scalar_funcs".to_string(),
+            name: "scalar_funcs".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec!["source.proj.raw.orders".to_string()],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: scalar_cols,
+            compiled_code: Some(
+                concat!(
+                    "select",
+                    " UPPER(status) as col_upper,",
+                    " CONCAT(status, '_x') as col_concat,",
+                    " COALESCE(status, 'default') as col_coalesce",
+                    " from orders"
+                )
+                .to_string(),
+            ),
+            database: None,
+            schema: None,
+        },
+    );
+
+    // passthrough_upper: tests Bug 2 — CTE computes UPPER, next SELECT passes through
+    let mut pt_upper_cols = HashMap::new();
+    for name in ["id", "status_upper"] {
+        pt_upper_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    nodes.insert(
+        "model.proj.passthrough_upper".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.passthrough_upper".to_string(),
+            name: "passthrough_upper".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec!["source.proj.raw.orders".to_string()],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: pt_upper_cols,
+            compiled_code: Some(
+                concat!(
+                    "with step1 as (",
+                    " select id, UPPER(status) as status_upper from orders",
+                    ")",
+                    " select id, status_upper from step1"
+                )
+                .to_string(),
+            ),
+            database: None,
+            schema: None,
+        },
+    );
+
+    // passthrough_coalesce: tests Bug 2 — CTE computes COALESCE, next SELECT passes through
+    let mut pt_coalesce_cols = HashMap::new();
+    for name in ["id", "status_coalesced"] {
+        pt_coalesce_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    nodes.insert(
+        "model.proj.passthrough_coalesce".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.passthrough_coalesce".to_string(),
+            name: "passthrough_coalesce".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec!["source.proj.raw.orders".to_string()],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            columns: pt_coalesce_cols,
+            compiled_code: Some(
+                concat!(
+                    "with step1 as (",
+                    " select id, COALESCE(status, 'default') as status_coalesced from orders",
+                    ")",
+                    " select id, status_coalesced from step1"
+                )
+                .to_string(),
+            ),
+            database: None,
+            schema: None,
+        },
+    );
+
+    Manifest {
+        nodes,
+        sources,
+        exposures: HashMap::new(),
+    }
+}
+
 mod cache;
 mod core;
 mod impact;
