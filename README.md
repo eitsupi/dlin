@@ -4,9 +4,11 @@
 [![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eitsupi/dlin)
 
-dbt lineage analysis CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
+dbt model lineage CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
 
 Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
+
+Experimental column-level lineage (`dlin column upstream` / `dlin column downstream`) is also available. It requires `dbt compile` and `manifest.json`.
 
 ## Motivation
 
@@ -16,7 +18,7 @@ dlin is designed to fill that gap: a CLI tool that lets AI agents understand a d
 
 To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates common Jinja patterns without Python, parallelizes file I/O, and caches aggressively.
 
-The key idea behind dlin is that finding the right models fast is what matters most. AI agents can read SQL and trace column-level relationships on their own; the hard part is knowing which models to look at in the first place. So dlin focuses on model-level lineage and makes that as fast as possible.
+The key idea behind dlin is that finding the right models fast is what matters most. The hard part for agents is knowing which models to look at in the first place. dlin focuses on making model-level lineage as fast as possible, and also offers experimental column-level lineage for deeper analysis.
 
 ## Install
 
@@ -92,11 +94,12 @@ The key line is **"Do NOT grep/cat/find through SQL files"** — without it, age
 
 ## Features
 
-- **No dependencies**: single binary, no Python, no `manifest.json`
+- **No dependencies for model lineage**: single binary, no Python, no `manifest.json`
 - **Recursive upstream / downstream**: `-u N` / `-d N` to control traversal depth
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
+- **Column-level lineage** (experimental): traces columns across models with transformation classification; requires `dbt compile` and `manifest.json`
 
 ## Mermaid diagrams
 
@@ -230,6 +233,126 @@ dlin graph -o dot | dot -Tsvg > out.svg                # Graphviz rendering
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
+## Column-level lineage (Experimental)
+
+> [!WARNING]
+> Column-level lineage depends on [polyglot-sql](https://github.com/tobilg/polyglot) for SQL parsing. Coverage varies by SQL complexity and dialect. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may not resolve correctly. Results should be treated as best-effort.
+
+`dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json` — run `dbt compile` first.
+
+```sh
+# Where does each output column of orders come from?
+dlin column upstream orders
+
+# What downstream columns are affected if stg_orders.order_id changes?
+dlin column downstream stg_orders --column order_id
+
+# Mermaid flowchart
+dlin column upstream customers -o mermaid
+dlin column downstream stg_orders --column order_id -o mermaid
+
+# Specific columns only
+dlin column upstream orders --column order_id --column status
+
+# Verify manifest freshness before querying
+dlin check-manifest && dlin column upstream orders
+```
+
+### Column upstream
+
+Traces backward from a model's output columns to their raw source columns across the full DAG.
+
+```sh
+dlin column upstream customers -o mermaid
+```
+
+```mermaid
+flowchart LR
+  subgraph sg0["c"]
+    n0_0["customer_id"]
+    n0_1["email"]
+    n0_2["first_name"]
+    n0_3["last_name"]
+  end
+  subgraph sg1["customers"]
+    n1_0["customer_id"]
+    n1_1["email"]
+    n1_2["first_name"]
+    n1_3["last_name"]
+    n1_4["lifetime_value"]
+    n1_5["order_count"]
+  end
+  subgraph sg2["o"]
+    n2_0["order_id"]
+    n2_1["total_amount"]
+  end
+
+  n0_0 -->|"direct"|n1_0
+  n0_1 -->|"direct"|n1_1
+  n0_2 -->|"direct"|n1_2
+  n0_3 -->|"direct"|n1_3
+  n2_1 -->|"aggregation"|n1_4
+  n2_0 -->|"aggregation"|n1_5
+```
+
+`c` and `o` are SQL JOIN aliases (`stg_customers` and `orders` respectively). Columns like `customer_id` and `email` pass through unchanged (`direct`), while `lifetime_value` and `order_count` are derived via `SUM` and `COUNT` aggregations (`aggregation`).
+
+The model-level graph shows the same upstream models by their actual names:
+
+```sh
+dlin graph customers -u 1 -d 0 --node-type model --source manifest -o mermaid
+```
+
+```mermaid
+flowchart LR
+    model_customers["customers"]
+    model_orders["orders"]
+    model_stg_customers["stg_customers"]
+
+    model_orders -->|ref| model_customers
+    model_stg_customers -->|ref| model_customers
+
+    classDef model fill:#4A90D9,stroke:#333,color:#fff
+    class model_customers model
+    class model_orders model
+    class model_stg_customers model
+```
+
+Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
+
+### Column downstream
+
+Traces forward from a specific column to all dependent models and columns.
+
+```sh
+dlin column downstream stg_orders --column order_id -o mermaid
+```
+
+```mermaid
+flowchart LR
+  subgraph sg0["order_enriched"]
+    n0_0["order_id"]
+  end
+  subgraph sg1["orders"]
+    n1_0["order_id"]
+  end
+  subgraph sg2["stg_orders"]
+    n2_0["order_id"]
+  end
+
+  n2_0 -->|"direct"|n0_0
+  n2_0 -->|"direct"|n1_0
+```
+
+`stg_orders.order_id` propagates directly into both `orders.order_id` and `order_enriched.order_id`.
+
+### Known limitations
+
+- **Requires `dbt compile`**: no SQL parse mode fallback; manifest with compiled SQL is always needed
+- **SELECT \* chains**: resolution depends on YAML column definitions in upstream models; unresolved columns are reported in `errors[]`
+- **Dialect-specific syntax**: pass `--dialect bigquery` (or other dialect) for better coverage
+- **Performance**: first run parses all upstream models; results are cached in `.dlin_cache/` for subsequent queries
+
 ## Key subcommands
 
 ### `list`
@@ -258,6 +381,18 @@ Impacted Nodes:
   [high    ] customers (model, distance: 1) [models/marts/customers.sql]
   [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
+
+### `column upstream` / `column downstream` (experimental)
+
+```sh
+dlin column upstream orders                               # JSON (default)
+dlin column upstream orders -o plain                      # human-readable
+dlin column upstream orders -o mermaid                    # flowchart
+dlin column downstream stg_orders --column order_id       # downstream impact
+git diff --name-only main | dlin column upstream -o json  # pipe changed files
+```
+
+See [Column-level lineage](#column-level-lineage-experimental) for details and examples.
 
 ## Filtering
 
