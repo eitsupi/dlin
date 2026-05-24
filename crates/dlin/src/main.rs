@@ -674,7 +674,19 @@ fn run_column_lineage_command(
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
-        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+        let all_resolved =
+            input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
+        // column lineage only supports model nodes; filter out sources, tests, etc.
+        // that may be resolved from YAML files (e.g. schema.yml expanded from git diff).
+        // Unknown names are passed through so they produce proper error messages downstream.
+        all_resolved
+            .into_iter()
+            .filter(|name| {
+                graph::filter::try_resolve_node_quiet(&dag, name)
+                    .map(|idx| dag[idx].node_type == graph::types::NodeType::Model)
+                    .unwrap_or(true)
+            })
+            .collect()
     } else {
         raw_inputs
     };
