@@ -532,20 +532,20 @@ fn write_dot_column_graph<W: Write>(
 
     writeln!(w)?;
 
-    // Render edges (deduplicated, sorted for deterministic output).
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Collect edges into a BTreeSet for deduplication and sorted, deterministic output.
+    let mut unique_edges: BTreeSet<String> = BTreeSet::new();
     for (from_model, from_col, to_model, to_col, label) in edges {
         let midx_from = model_index[from_model.as_str()];
         let cidx_from = column_index[from_model.as_str()][from_col.as_str()];
         let midx_to = model_index[to_model.as_str()];
         let cidx_to = column_index[to_model.as_str()][to_col.as_str()];
-        let edge_str = format!(
+        unique_edges.insert(format!(
             r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{}"];"#,
             dot_escape(label)
-        );
-        if seen.insert(edge_str.clone()) {
-            writeln!(w, "{edge_str}")?;
-        }
+        ));
+    }
+    for edge_str in &unique_edges {
+        writeln!(w, "{edge_str}")?;
     }
 
     writeln!(w, "}}")?;

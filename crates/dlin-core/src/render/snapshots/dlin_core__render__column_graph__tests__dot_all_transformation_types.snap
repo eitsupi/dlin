@@ -1,6 +1,6 @@
 ---
 source: crates/dlin-core/src/render/column_graph.rs
-assertion_line: 877
+assertion_line: 880
 expression: "graph_dot(&[report])"
 ---
 digraph column_lineage {
@@ -30,10 +30,10 @@ digraph column_lineage {
     "n1_5" [label="x", fillcolor="#D5D8DC"];
   }
 
-  "n1_3" -> "n0_0" [label="direct"];
-  "n1_1" -> "n0_5" [label="aggregation"];
   "n1_0" -> "n0_2" [label="expression"];
-  "n1_4" -> "n0_1" [label="cast"];
+  "n1_1" -> "n0_5" [label="aggregation"];
   "n1_2" -> "n0_4" [label="conditional"];
+  "n1_3" -> "n0_0" [label="direct"];
+  "n1_4" -> "n0_1" [label="cast"];
   "n1_5" -> "n0_3" [label="unknown"];
 }
