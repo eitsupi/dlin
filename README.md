@@ -391,7 +391,7 @@ dlin graph --node-type model,source   # filter by node type
 
 ## Data sources
 
-dlin aims to work without `dbt compile`. By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
+dlin aims to work without `dbt compile` (column-level lineage being the exception — it always requires `manifest.json`). By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
 
 **SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed. Generic tests (`not_null`, `unique`, `relationships`, etc.) are inferred from YAML schema declarations.
 
