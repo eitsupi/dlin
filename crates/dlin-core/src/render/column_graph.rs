@@ -861,36 +861,20 @@ mod tests {
         let report = make_lineage(
             "orders",
             vec![
-                (
-                    "id",
-                    TransformationType::Direct,
-                    vec![("raw", "id")],
-                ),
+                ("id", TransformationType::Direct, vec![("raw", "id")]),
                 (
                     "total",
                     TransformationType::Aggregation,
                     vec![("raw", "amount")],
                 ),
-                (
-                    "label",
-                    TransformationType::Expression,
-                    vec![("raw", "a")],
-                ),
-                (
-                    "id_cast",
-                    TransformationType::Cast,
-                    vec![("raw", "id_str")],
-                ),
+                ("label", TransformationType::Expression, vec![("raw", "a")]),
+                ("id_cast", TransformationType::Cast, vec![("raw", "id_str")]),
                 (
                     "status",
                     TransformationType::Conditional,
                     vec![("raw", "flag")],
                 ),
-                (
-                    "mystery",
-                    TransformationType::Unknown,
-                    vec![("raw", "x")],
-                ),
+                ("mystery", TransformationType::Unknown, vec![("raw", "x")]),
             ],
         );
         insta::assert_snapshot!(graph_dot(&[report]));
