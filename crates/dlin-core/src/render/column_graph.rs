@@ -515,7 +515,7 @@ fn write_dot_column_graph<W: Write>(
     for (model, columns) in model_columns {
         let midx = model_index[model.as_str()];
         writeln!(w, "  subgraph cluster_{midx} {{")?;
-        writeln!(w, r#"    label="{model}";"#)?;
+        writeln!(w, r#"    label="{}";"#, dot_escape(model))?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for (cidx, col) in columns.iter().enumerate() {
@@ -523,7 +523,8 @@ fn write_dot_column_graph<W: Write>(
             let color = transformation_color(trans);
             writeln!(
                 w,
-                r#"    "n{midx}_{cidx}" [label="{col}", fillcolor="{color}"];"#
+                r#"    "n{midx}_{cidx}" [label="{}", fillcolor="{color}"];"#,
+                dot_escape(col)
             )?;
         }
         writeln!(w, "  }}")?;
@@ -539,7 +540,8 @@ fn write_dot_column_graph<W: Write>(
         let midx_to = model_index[to_model.as_str()];
         let cidx_to = column_index[to_model.as_str()][to_col.as_str()];
         let edge_str = format!(
-            r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{label}"];"#
+            r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{}"];"#,
+            dot_escape(label)
         );
         if seen.insert(edge_str.clone()) {
             writeln!(w, "{edge_str}")?;
@@ -559,6 +561,23 @@ fn transformation_color(t: Option<&TransformationType>) -> &'static str {
         Some(TransformationType::Conditional) => "#F9E79F",
         Some(TransformationType::Unknown) | None => "#D5D8DC",
     }
+}
+
+/// Escape characters that are special inside DOT double-quoted strings.
+///
+/// DOT requires `\` and `"` to be backslash-escaped inside double-quoted
+/// strings. Without this, model or column names containing these characters
+/// would produce syntactically invalid DOT output.
+fn dot_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -939,5 +958,20 @@ mod tests {
             errors: vec![],
         };
         insta::assert_snapshot!(impact_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_escapes_special_chars() {
+        // Model and column names containing `"` and `\` must be properly escaped
+        // in DOT double-quoted strings to produce syntactically valid output.
+        let report = make_lineage(
+            r#"schema."orders""#,
+            vec![(
+                r#"col\"name"#,
+                TransformationType::Direct,
+                vec![(r#"raw\data"#, r#"id"field""#)],
+            )],
+        );
+        insta::assert_snapshot!(graph_dot(&[report]));
     }
 }
