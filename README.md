@@ -382,18 +382,6 @@ Impacted Nodes:
   [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
 
-### `column upstream` / `column downstream` (experimental)
-
-```sh
-dlin column upstream orders                               # JSON (default)
-dlin column upstream orders -o plain                      # human-readable
-dlin column upstream orders -o mermaid                    # flowchart
-dlin column downstream stg_orders --column order_id       # downstream impact
-git diff --name-only main | dlin column upstream -o json  # pipe changed files
-```
-
-See [Column-level lineage](#column-level-lineage-experimental) for details and examples.
-
 ## Filtering
 
 ```sh
