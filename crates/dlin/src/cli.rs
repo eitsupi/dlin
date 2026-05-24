@@ -776,8 +776,8 @@ Column resolution order:
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-File paths (detected by extension or path separator) are resolved to model names \
-using the dbt project configuration.
+  File paths (detected by extension or path separator) are resolved to model names \
+  using the dbt project configuration.
 
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:

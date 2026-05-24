@@ -1752,7 +1752,11 @@ models:
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(reports.len(), 1, "only stg_orders (model) should be analyzed");
+        assert_eq!(
+            reports.len(),
+            1,
+            "only stg_orders (model) should be analyzed"
+        );
         assert_eq!(reports[0]["model"], "stg_orders");
     }
 

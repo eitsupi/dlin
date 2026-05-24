@@ -662,17 +662,23 @@ fn run_column_lineage_command(
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    // Load manifest once — reused for both path resolution and column lineage analysis.
-    let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-    let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
-
-    // Merge CLI positional args and stdin, then resolve file paths to model names.
+    // Merge CLI positional args and stdin before loading the manifest so that a missing
+    // manifest does not mask a "no model names provided" error from the user.
     // CLI-provided names are tracked separately so the model-only filter (below) does
     // not silently swallow explicit user inputs — those surface proper errors downstream.
     let stdin_lines = input::read_stdin_lines();
     let cli_model_set: std::collections::HashSet<String> = cli_models.iter().cloned().collect();
     let mut raw_inputs = cli_models;
     raw_inputs.extend(stdin_lines);
+
+    if raw_inputs.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments or via stdin)");
+    }
+
+    // Load manifest once — reused for both path resolution and column lineage analysis.
+    let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
+
     let models = if input::has_path_like_input(&raw_inputs) {
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
         let cwd = std::env::current_dir()
