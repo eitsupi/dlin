@@ -134,7 +134,9 @@ fn test_order_enriched_nested_cte_star() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.columns.len(), 5);
 
-    // order_id should trace through the CTE chain to stg_orders
+    // order_id should trace through the CTE chain to stg_orders.
+    // The fixture references the table as "shop"."main"."stg_orders" (3-part name),
+    // so source_name is the fully-qualified form.
     let order_id = result
         .columns
         .iter()
@@ -142,7 +144,7 @@ fn test_order_enriched_nested_cte_star() {
         .unwrap();
     assert!(!order_id.sources.is_empty(), "order_id should have sources");
     assert_eq!(order_id.sources[0].column, "order_id");
-    assert_eq!(order_id.sources[0].table, "stg_orders");
+    assert_eq!(order_id.sources[0].table, "shop.main.stg_orders");
 
     // amount should trace to stg_payments (via alias "p")
     let amount = result
