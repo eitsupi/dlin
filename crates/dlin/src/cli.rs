@@ -774,6 +774,11 @@ Column resolution order:
   1. YAML column definitions (schema.yml / models.yml)
   2. SQL inference from compiled_code (fallback when YAML is absent)
 
+Stdin/pipe support:
+  Accepts model names or file paths on stdin (one per line). \
+File paths (detected by extension or path separator) are resolved to model names \
+using the dbt project configuration.
+
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:
     model             model name
@@ -820,7 +825,10 @@ Examples:
   dlin column upstream orders --manifest-path target/manifest.json
 
   # BigQuery project
-  dlin column upstream orders --dialect bigquery"
+  dlin column upstream orders --dialect bigquery
+
+  # From git diff (pipe changed files)
+  git diff --name-only main | dlin column upstream -o json"
     )]
     Upstream(ColumnGraphArgs),
 
@@ -873,8 +881,7 @@ Examples:
 
 #[derive(Debug, clap::Args)]
 pub struct ColumnGraphArgs {
-    /// Model names to analyze column lineage for
-    #[arg(required = true)]
+    /// Model names to analyze column lineage for (also accepts stdin)
     pub model: Vec<String>,
 
     /// Specific columns to analyze (analyzes all columns if omitted)
@@ -1775,12 +1782,15 @@ mod tests {
 
     #[test]
     fn test_column_upstream_no_model() {
-        // model is required at the clap level
-        let result = Cli::try_parse_from(["dlin", "column", "upstream"]);
-        assert!(
-            result.is_err(),
-            "column upstream should require at least one model"
-        );
+        // No positional args is allowed at parse time (stdin may provide models at runtime)
+        let cli = Cli::try_parse_from(["dlin", "column", "upstream"]).unwrap();
+        match cli.command {
+            Command::Column(col) => match col.command {
+                ColumnCommand::Upstream(args) => assert!(args.model.is_empty()),
+                _ => panic!("expected Upstream"),
+            },
+            _ => panic!("expected Column"),
+        }
     }
 
     #[test]

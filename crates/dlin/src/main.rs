@@ -646,7 +646,7 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 #[cfg(not(tarpaulin_include))]
 #[allow(clippy::too_many_arguments)]
 fn run_column_lineage_command(
-    models: Vec<String>,
+    cli_models: Vec<String>,
     columns: &[String],
     output: &ColumnOutputFormat,
     dialect: Option<DialectType>,
@@ -658,13 +658,30 @@ fn run_column_lineage_command(
 ) -> Result<()> {
     let dialect = dialect.unwrap_or(DialectType::Generic);
 
-    if models.is_empty() {
-        anyhow::bail!("no model names provided (specify as arguments)");
-    }
-
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    // Merge CLI positional args and stdin, then resolve file paths to model names
+    let stdin_lines = input::read_stdin_lines();
+    let mut raw_inputs = cli_models;
+    raw_inputs.extend(stdin_lines);
+    let models = if input::has_path_like_input(&raw_inputs) {
+        let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+        let manifest_for_paths = parser::manifest::load_manifest(&resolved)?;
+        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest_for_paths)?;
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
+        let project = parser::project::DbtProject::load(&project_dir)?;
+        let resolved_paths = project.resolve_paths(&project_dir);
+        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+    } else {
+        raw_inputs
+    };
+
+    if models.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments or via stdin)");
+    }
 
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
