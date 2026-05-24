@@ -348,12 +348,12 @@ flowchart LR
     n3_0["order_id"]
   end
 
-  n3_0 -->|"aggregation (via orders)"|n0_0
+  n2_0 -->|"aggregation"|n0_0
   n3_0 -->|"direct"|n1_0
   n3_0 -->|"direct"|n2_0
 ```
 
-`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`, and is also aggregated into `customers.order_count` via `orders`.
+`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`. `orders.order_id` is then aggregated into `customers.order_count`. Each edge shows its per-hop transformation type.
 
 ### Known limitations
 

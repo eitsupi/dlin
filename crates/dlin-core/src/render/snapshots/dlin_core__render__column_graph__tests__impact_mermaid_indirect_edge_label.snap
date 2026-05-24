@@ -6,8 +6,12 @@ flowchart LR
   subgraph sg0["customers"]
     n0_0["customer_order_id"]
   end
-  subgraph sg1["stg_orders"]
+  subgraph sg1["orders"]
     n1_0["order_id"]
   end
+  subgraph sg2["stg_orders"]
+    n2_0["order_id"]
+  end
 
-  n1_0 -->|"direct (via orders)"|n0_0
+  n2_0 -->|"direct"|n1_0
+  n1_0 -->|"direct"|n0_0

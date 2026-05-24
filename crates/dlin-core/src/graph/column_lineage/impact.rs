@@ -25,8 +25,11 @@ pub struct ImpactedColumn {
     pub model: String,
     pub column: String,
     pub transformation: TransformationType,
+    /// Full hop path from source model to this column, ordered source → this model.
+    /// Each entry is (model_name, column_name, transformation). The last entry always
+    /// matches (self.model, self.column, self.transformation).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub model_path: Vec<String>,
+    pub model_path: Vec<(String, String, TransformationType)>,
 }
 
 pub fn compute_column_impact(
@@ -62,7 +65,7 @@ pub fn compute_column_impact(
     visited.insert((initial_uid.clone(), column_name.to_string()));
     let mut lineage_cache: HashMap<String, super::ModelColumnLineage> = HashMap::new();
 
-    let mut queue: Vec<(String, String, Vec<String>)> =
+    let mut queue: Vec<(String, String, Vec<(String, String, TransformationType)>)> =
         vec![(initial_uid, column_name.to_string(), vec![])];
 
     while let Some((source_uid, source_column, current_path)) = queue.pop() {
@@ -109,7 +112,11 @@ pub fn compute_column_impact(
                     visited.insert(pair);
 
                     let mut path = current_path.clone();
-                    path.push(dep_name.clone());
+                    path.push((
+                        dep_name.clone(),
+                        entry.column.clone(),
+                        entry.transformation.clone(),
+                    ));
 
                     impacted.push(ImpactedColumn {
                         unique_id: dep_uid.clone(),

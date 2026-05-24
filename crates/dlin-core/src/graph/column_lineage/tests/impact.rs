@@ -74,7 +74,7 @@ fn test_column_impact_model_path() {
         .find(|ic| ic.model == "customers" && ic.column == "customer_id")
         .unwrap();
     assert!(
-        cust.model_path.contains(&"orders".to_string()),
+        cust.model_path.iter().any(|(m, _, _)| m == "orders"),
         "model_path should include orders, got: {:?}",
         cust.model_path
     );
