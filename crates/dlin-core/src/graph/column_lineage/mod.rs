@@ -48,7 +48,7 @@ pub fn compute_column_lineage(
                     kind: ColumnLineageErrorKind::ModelNotFound,
                     what: format!("model '{}' not found in manifest", model_name),
                     why: None,
-                    hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models".to_string()),
+                    hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
                 }],
             };
         }
