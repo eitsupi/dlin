@@ -662,25 +662,31 @@ fn run_column_lineage_command(
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    // Merge CLI positional args and stdin, then resolve file paths to model names
+    // Load manifest once — reused for both path resolution and column lineage analysis.
+    let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
+
+    // Merge CLI positional args and stdin, then resolve file paths to model names.
+    // CLI-provided names are tracked separately so the model-only filter (below) does
+    // not silently swallow explicit user inputs — those surface proper errors downstream.
     let stdin_lines = input::read_stdin_lines();
+    let cli_model_set: std::collections::HashSet<String> = cli_models.iter().cloned().collect();
     let mut raw_inputs = cli_models;
     raw_inputs.extend(stdin_lines);
     let models = if input::has_path_like_input(&raw_inputs) {
-        let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-        let manifest_for_paths = parser::manifest::load_manifest(&resolved)?;
-        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest_for_paths)?;
+        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
         let all_resolved =
             input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
-        // column lineage only supports model nodes (resource_type == "model"); filter out
-        // sources, tests, analyses, etc. that may be resolved from YAML/SQL file paths.
-        // Analyses share NodeType::Model in the DAG so we check the manifest directly.
-        // Unknown names (not in the DAG) are passed through for proper error messages.
-        let manifest_model_names: std::collections::HashSet<&str> = manifest_for_paths
+        // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
+        // file-path expansion — column lineage only supports resource_type == "model".
+        // Analyses map to NodeType::Model in the DAG so we check the manifest directly.
+        // CLI-provided names and names unknown to the DAG are kept so they produce proper
+        // "model not found" errors rather than being silently dropped.
+        let manifest_model_names: std::collections::HashSet<&str> = manifest
             .nodes
             .values()
             .filter(|n| n.resource_type == "model")
@@ -689,7 +695,8 @@ fn run_column_lineage_command(
         all_resolved
             .into_iter()
             .filter(|name| {
-                manifest_model_names.contains(name.as_str())
+                cli_model_set.contains(name)
+                    || manifest_model_names.contains(name.as_str())
                     || graph::filter::try_resolve_node_quiet(&dag, name).is_none()
             })
             .collect()
@@ -700,9 +707,6 @@ fn run_column_lineage_command(
     if models.is_empty() {
         anyhow::bail!("no model names provided (specify as arguments or via stdin)");
     }
-
-    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-    let manifest = parser::manifest::load_manifest(&resolved)?;
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()
