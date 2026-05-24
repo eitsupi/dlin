@@ -1617,7 +1617,10 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
     assert!(!total_amount.sources.is_empty());
     let src = &total_amount.sources[0];
     assert_ne!(src.table, "p", "source table must not be SQL alias 'p'");
-    assert_ne!(src.table, "stg_payments", "cross-model must trace beyond stg_payments");
+    assert_ne!(
+        src.table, "stg_payments",
+        "cross-model must trace beyond stg_payments"
+    );
     assert_eq!(src.table, "raw.payments");
     assert_eq!(src.column, "amount");
 }
