@@ -543,7 +543,8 @@ There are no -u/-d depth flags; the full chain is always traversed in both cases
 Unlike `dlin graph`/`dlin impact`, there is no --source flag — manifest.json is the only
 data source for column-level analysis.
 
-Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
+Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).
+Use `dlin check-manifest` to verify freshness before querying.",
         after_long_help = "\
 Examples:
   dlin column upstream orders                             # upstream: where do columns come from?
@@ -775,6 +776,7 @@ There is no --source flag; manifest.json is the only data source (unlike
 `dlin graph` which supports both SQL files and manifest).
 
 Requires manifest.json with compiled SQL (run `dbt compile` first).
+Use `dlin check-manifest` to verify freshness before querying.
 
 Column resolution order:
   1. YAML column definitions (schema.yml / models.yml)
@@ -856,6 +858,7 @@ There is no --source flag; manifest.json is the only data source (unlike
 `dlin graph`/`dlin impact` which support both SQL files and manifest).
 
 Requires compiled SQL in manifest.json — run `dbt compile` first.
+Use `dlin check-manifest` to verify freshness before querying.
 
 Output format (-o/--output):
   json (default)  JSON array per column with affected downstream columns and models
