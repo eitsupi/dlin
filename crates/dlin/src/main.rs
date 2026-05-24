@@ -664,10 +664,10 @@ fn run_column_lineage_command(
 
     // Merge CLI positional args and stdin before loading the manifest so that a missing
     // manifest does not mask a "no model names provided" error from the user.
-    // CLI-provided names are tracked separately so the model-only filter (below) does
-    // not silently swallow explicit user inputs — those surface proper errors downstream.
+    // raw_input_set captures every name the user supplied (CLI + stdin) so the model-only
+    // filter below preserves both explicit CLI args and explicit stdin names that happen to
+    // resolve to non-model DAG nodes — those should surface proper errors, not silent drops.
     let stdin_lines = input::read_stdin_lines();
-    let cli_model_set: std::collections::HashSet<String> = cli_models.iter().cloned().collect();
     let mut raw_inputs = cli_models;
     raw_inputs.extend(stdin_lines);
 
@@ -685,13 +685,17 @@ fn run_column_lineage_command(
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
+        // Snapshot all user-provided names before path expansion so they can be exempted from
+        // the model-only filter regardless of whether they came from CLI args or stdin.
+        let raw_input_set: std::collections::HashSet<&str> =
+            raw_inputs.iter().map(|s| s.as_str()).collect();
         let all_resolved =
             input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
         // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
         // file-path expansion — column lineage only supports resource_type == "model".
         // Analyses map to NodeType::Model in the DAG so we check the manifest directly.
-        // CLI-provided names and names unknown to the DAG are kept so they produce proper
-        // "model not found" errors rather than being silently dropped.
+        // User-provided names (CLI and stdin) and names unknown to the DAG are kept so they
+        // produce proper "model not found" errors rather than being silently dropped.
         let manifest_model_names: std::collections::HashSet<&str> = manifest
             .nodes
             .values()
@@ -701,7 +705,7 @@ fn run_column_lineage_command(
         all_resolved
             .into_iter()
             .filter(|name| {
-                cli_model_set.contains(name)
+                raw_input_set.contains(name.as_str())
                     || manifest_model_names.contains(name.as_str())
                     || graph::filter::try_resolve_node_quiet(&dag, name).is_none()
             })
