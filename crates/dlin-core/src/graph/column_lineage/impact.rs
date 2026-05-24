@@ -60,17 +60,27 @@ pub fn compute_column_impact(
 
     let mut impacted = Vec::new();
     let mut errors = Vec::new();
-    // Track traversed edges (from_uid, from_col, to_uid, to_col) rather than visited nodes.
-    // This allows reconverging DAGs to record all paths while preventing cycles: each unique
-    // edge is expanded at most once, so a cycle can never produce a new edge to traverse.
-    let mut visited: HashSet<(String, String, String, String)> = HashSet::new();
     let initial_uid = initial_node.unique_id.clone();
     let mut lineage_cache: HashMap<String, super::ModelColumnLineage> = HashMap::new();
 
-    let mut queue: Vec<(String, String, Vec<(String, String, TransformationType)>)> =
-        vec![(initial_uid, column_name.to_string(), vec![])];
+    // Each queue entry carries its own path-local set of visited (uid, col) pairs.
+    // This allows a node to be processed once per unique path leading to it, while
+    // still preventing cycles within any single path.
+    let mut initial_path_nodes: HashSet<(String, String)> = HashSet::new();
+    initial_path_nodes.insert((initial_uid.clone(), column_name.to_string()));
+    let mut queue: Vec<(
+        String,
+        String,
+        Vec<(String, String, TransformationType)>,
+        HashSet<(String, String)>,
+    )> = vec![(
+        initial_uid,
+        column_name.to_string(),
+        vec![],
+        initial_path_nodes,
+    )];
 
-    while let Some((source_uid, source_column, current_path)) = queue.pop() {
+    while let Some((source_uid, source_column, current_path, path_nodes)) = queue.pop() {
         let source_name = manifest
             .nodes
             .get(&source_uid)
@@ -99,6 +109,11 @@ pub fn compute_column_impact(
             }
 
             for entry in &lineage.columns {
+                let target_key = (dep_uid.clone(), entry.column.clone());
+                if path_nodes.contains(&target_key) {
+                    continue;
+                }
+
                 let references_source = entry.sources.iter().any(|s| {
                     let table_matches =
                         s.table == source_name || normalize_table_name(&s.table) == source_name;
@@ -121,16 +136,9 @@ pub fn compute_column_impact(
                         model_path: path.clone(),
                     });
 
-                    let edge = (
-                        source_uid.clone(),
-                        source_column.clone(),
-                        dep_uid.clone(),
-                        entry.column.clone(),
-                    );
-                    if !visited.contains(&edge) {
-                        visited.insert(edge);
-                        queue.push((dep_uid.clone(), entry.column.clone(), path));
-                    }
+                    let mut new_path_nodes = path_nodes.clone();
+                    new_path_nodes.insert(target_key);
+                    queue.push((dep_uid.clone(), entry.column.clone(), path, new_path_nodes));
                 }
             }
         }
