@@ -171,7 +171,16 @@ fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLine
 fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<ColumnSource>) {
     if node.downstream.is_empty() {
         let name = &node.name;
-        if let Some((table, column)) = name.rsplit_once('.') {
+        if let Some((alias, column)) = name.rsplit_once('.') {
+            // polyglot-sql puts the SQL alias in node.name (e.g. "c.customer_id") and the
+            // actual table name in source_name (e.g. "stg_customers"). Use source_name
+            // when it genuinely differs from the alias, including fully-qualified forms
+            // (e.g. "shop.main.stg_orders" when the SQL uses the short name "stg_orders").
+            let table = if !node.source_name.is_empty() && node.source_name != alias {
+                node.source_name.as_str()
+            } else {
+                alias
+            };
             sources.push(ColumnSource {
                 table: table.to_string(),
                 column: column.to_string(),

@@ -1555,3 +1555,72 @@ fn test_cross_model_diamond_different_columns_through_shared_model() {
         "both paths through shared should resolve independently"
     );
 }
+
+// The orders model uses aliases (stg_orders AS o, stg_payments AS p).
+// These two tests guard against regressions where collect_leaves returns
+// the SQL alias instead of the actual model name.
+
+#[test]
+fn test_join_alias_resolves_to_model_name() {
+    let manifest = make_test_manifest();
+    let result = compute_column_lineage(
+        &manifest,
+        "orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    // p.amount → table must be "stg_payments", not the alias "p"
+    let total_amount = result
+        .columns
+        .iter()
+        .find(|c| c.column == "total_amount")
+        .unwrap();
+    assert_eq!(
+        total_amount.sources[0].table, "stg_payments",
+        "expected stg_payments, got SQL alias 'p': {:?}",
+        total_amount.sources
+    );
+
+    // o.order_id → table must be "stg_orders", not the alias "o"
+    let order_id = result
+        .columns
+        .iter()
+        .find(|c| c.column == "order_id")
+        .unwrap();
+    assert_eq!(
+        order_id.sources[0].table, "stg_orders",
+        "expected stg_orders, got SQL alias 'o': {:?}",
+        order_id.sources
+    );
+}
+
+#[test]
+fn test_cross_model_join_alias_traces_to_raw_source() {
+    // Cross-model lineage must follow through aliases to reach raw sources.
+    // Before the fix, "p" didn't match upstream_models so the trace stopped early.
+    let manifest = make_test_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let total_amount = result
+        .columns
+        .iter()
+        .find(|c| c.column == "total_amount")
+        .unwrap();
+    assert!(!total_amount.sources.is_empty());
+    let src = &total_amount.sources[0];
+    assert_ne!(src.table, "p", "source table must not be SQL alias 'p'");
+    assert_ne!(
+        src.table, "stg_payments",
+        "cross-model must trace beyond stg_payments"
+    );
+    assert_eq!(src.table, "raw.payments");
+    assert_eq!(src.column, "amount");
+}
