@@ -384,7 +384,8 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
     w: &mut W,
 ) -> io::Result<()> {
     let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut column_transformation: BTreeMap<(String, String), TransformationType> = BTreeMap::new();
+    let mut column_transformation: BTreeMap<String, BTreeMap<String, TransformationType>> =
+        BTreeMap::new();
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
 
     for report in reports {
@@ -397,7 +398,9 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                 .or_default()
                 .insert(entry.column.clone());
             column_transformation
-                .entry((target_model.clone(), entry.column.clone()))
+                .entry(target_model.clone())
+                .or_default()
+                .entry(entry.column.clone())
                 .or_insert_with(|| entry.transformation.clone());
 
             for src in &entry.sources {
@@ -440,7 +443,8 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
     w: &mut W,
 ) -> io::Result<()> {
     let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut column_transformation: BTreeMap<(String, String), TransformationType> = BTreeMap::new();
+    let mut column_transformation: BTreeMap<String, BTreeMap<String, TransformationType>> =
+        BTreeMap::new();
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
 
     for report in reports {
@@ -455,7 +459,9 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
                 .or_default()
                 .insert(ic.column.clone());
             column_transformation
-                .entry((ic.model.clone(), ic.column.clone()))
+                .entry(ic.model.clone())
+                .or_default()
+                .entry(ic.column.clone())
                 .or_insert_with(|| ic.transformation.clone());
 
             let via_str = if ic.model_path.len() > 1 {
@@ -483,7 +489,7 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
 fn write_dot_column_graph<W: Write>(
     w: &mut W,
     model_columns: &BTreeMap<String, BTreeSet<String>>,
-    column_transformation: &BTreeMap<(String, String), TransformationType>,
+    column_transformation: &BTreeMap<String, BTreeMap<String, TransformationType>>,
     edges: &[(String, String, String, String, String)],
 ) -> io::Result<()> {
     writeln!(w, "digraph column_lineage {{")?;
@@ -519,7 +525,9 @@ fn write_dot_column_graph<W: Write>(
         writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for (cidx, col) in columns.iter().enumerate() {
-            let trans = column_transformation.get(&(model.clone(), col.clone()));
+            let trans = column_transformation
+                .get(model.as_str())
+                .and_then(|m| m.get(col.as_str()));
             let color = transformation_color(trans);
             writeln!(
                 w,
