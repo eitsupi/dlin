@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0-beta.1] - 2026-05-24
+
+### Breaking Changes
+
+- Column lineage output now includes intermediate hops with per-hop transformation labels, which changes upstream/downstream graph payload structure (#45)
+
+### Features
+
+- Add DOT/Graphviz output to `dlin column upstream` and `dlin column downstream` for visualizing column-level lineage as graphs (#42)
+- Add stdin model input support to `dlin column upstream` for smoother shell-based workflows (#40)
+- Improve model-not-found guidance and column subcommand help text for faster issue diagnosis (#41)
+
+### Bug Fixes
+
+- Fix JOIN alias resolution in column lineage so aliases correctly map back to actual model names (#44)
+
 ## [0.2.0-alpha.2] - 2026-05-23
 
 ### Breaking Changes
