@@ -881,7 +881,7 @@ Examples:
 
 #[derive(Debug, clap::Args)]
 pub struct ColumnGraphArgs {
-    /// Model names to analyze column lineage for (also accepts stdin)
+    /// Model names or file paths to analyze column lineage for (also accepts stdin)
     pub model: Vec<String>,
 
     /// Specific columns to analyze (analyzes all columns if omitted)
