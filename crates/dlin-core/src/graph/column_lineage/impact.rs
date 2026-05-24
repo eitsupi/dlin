@@ -32,6 +32,10 @@ pub struct ImpactedColumn {
     pub model_path: Vec<(String, String, TransformationType)>,
 }
 
+type ImpactPath = Vec<(String, String, TransformationType)>;
+type VisitedPathNodes = HashSet<(String, String)>;
+type ImpactQueueItem = (String, String, ImpactPath, VisitedPathNodes);
+
 pub fn compute_column_impact(
     manifest: &Manifest,
     model_name: &str,
@@ -66,14 +70,9 @@ pub fn compute_column_impact(
     // Each queue entry carries its own path-local set of visited (uid, col) pairs.
     // This allows a node to be processed once per unique path leading to it, while
     // still preventing cycles within any single path.
-    let mut initial_path_nodes: HashSet<(String, String)> = HashSet::new();
+    let mut initial_path_nodes: VisitedPathNodes = HashSet::new();
     initial_path_nodes.insert((initial_uid.clone(), column_name.to_string()));
-    let mut queue: Vec<(
-        String,
-        String,
-        Vec<(String, String, TransformationType)>,
-        HashSet<(String, String)>,
-    )> = vec![(
+    let mut queue: Vec<ImpactQueueItem> = vec![(
         initial_uid,
         column_name.to_string(),
         vec![],

@@ -821,7 +821,12 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         path: None,
         columns: {
             let mut cols = HashMap::new();
-            cols.insert("x".to_string(), ManifestColumn { name: "x".to_string() });
+            cols.insert(
+                "x".to_string(),
+                ManifestColumn {
+                    name: "x".to_string(),
+                },
+            );
             cols
         },
         compiled_code: Some(sql.to_string()),
@@ -831,7 +836,12 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
 
     nodes.insert(
         "model.proj.source_model".to_string(),
-        make_node("model.proj.source_model", "source_model", vec![], "select x from raw_table"),
+        make_node(
+            "model.proj.source_model",
+            "source_model",
+            vec![],
+            "select x from raw_table",
+        ),
     );
     nodes.insert(
         "model.proj.left_model".to_string(),
@@ -856,7 +866,10 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         make_node(
             "model.proj.final_model",
             "final_model",
-            vec!["model.proj.left_model".to_string(), "model.proj.right_model".to_string()],
+            vec![
+                "model.proj.left_model".to_string(),
+                "model.proj.right_model".to_string(),
+            ],
             "select COALESCE(l.x, r.x) as x from left_model l join right_model r on 1=1",
         ),
     );
@@ -879,7 +892,11 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         ),
     );
 
-    Manifest { nodes, sources: HashMap::new(), exposures: HashMap::new() }
+    Manifest {
+        nodes,
+        sources: HashMap::new(),
+        exposures: HashMap::new(),
+    }
 }
 
 mod cache;
