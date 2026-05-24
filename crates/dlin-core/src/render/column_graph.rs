@@ -370,6 +370,197 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
     Ok(())
 }
 
+// ── Column graph (upstream) — DOT ─────────────────────────────────────────────
+
+pub fn render_column_graph_dot(reports: &[ModelColumnLineage]) {
+    super::handle_stdout_result(render_column_graph_dot_to_writer(
+        reports,
+        &mut std::io::stdout().lock(),
+    ));
+}
+
+pub fn render_column_graph_dot_to_writer<W: Write>(
+    reports: &[ModelColumnLineage],
+    w: &mut W,
+) -> io::Result<()> {
+    let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut column_transformation: BTreeMap<(String, String), TransformationType> = BTreeMap::new();
+    let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+
+    for report in reports {
+        let target_model = &report.model;
+        model_columns.entry(target_model.clone()).or_default();
+
+        for entry in &report.columns {
+            model_columns
+                .entry(target_model.clone())
+                .or_default()
+                .insert(entry.column.clone());
+            column_transformation
+                .entry((target_model.clone(), entry.column.clone()))
+                .or_insert_with(|| entry.transformation.clone());
+
+            for src in &entry.sources {
+                model_columns
+                    .entry(src.table.clone())
+                    .or_default()
+                    .insert(src.column.clone());
+
+                let via_str = if src.model_path.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (via {})", src.model_path.join(" -> "))
+                };
+                let label = format!("{}{}", transformation_label(&entry.transformation), via_str);
+                edges.push((
+                    src.table.clone(),
+                    src.column.clone(),
+                    target_model.clone(),
+                    entry.column.clone(),
+                    label,
+                ));
+            }
+        }
+    }
+
+    write_dot_column_graph(w, &model_columns, &column_transformation, &edges)
+}
+
+// ── Column impact (downstream) — DOT ─────────────────────────────────────────
+
+pub fn render_column_impact_dot(reports: &[ColumnImpactReport]) {
+    super::handle_stdout_result(render_column_impact_dot_to_writer(
+        reports,
+        &mut std::io::stdout().lock(),
+    ));
+}
+
+pub fn render_column_impact_dot_to_writer<W: Write>(
+    reports: &[ColumnImpactReport],
+    w: &mut W,
+) -> io::Result<()> {
+    let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut column_transformation: BTreeMap<(String, String), TransformationType> = BTreeMap::new();
+    let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+
+    for report in reports {
+        model_columns
+            .entry(report.model.clone())
+            .or_default()
+            .insert(report.column.clone());
+
+        for ic in &report.impacted_columns {
+            model_columns
+                .entry(ic.model.clone())
+                .or_default()
+                .insert(ic.column.clone());
+            column_transformation
+                .entry((ic.model.clone(), ic.column.clone()))
+                .or_insert_with(|| ic.transformation.clone());
+
+            let via_str = if ic.model_path.len() > 1 {
+                let intermediate = &ic.model_path[..ic.model_path.len() - 1];
+                format!(" (via {})", intermediate.join(" -> "))
+            } else {
+                String::new()
+            };
+            let label = format!("{}{}", transformation_label(&ic.transformation), via_str);
+            edges.push((
+                report.model.clone(),
+                report.column.clone(),
+                ic.model.clone(),
+                ic.column.clone(),
+                label,
+            ));
+        }
+    }
+
+    write_dot_column_graph(w, &model_columns, &column_transformation, &edges)
+}
+
+// ── DOT shared rendering ──────────────────────────────────────────────────────
+
+fn write_dot_column_graph<W: Write>(
+    w: &mut W,
+    model_columns: &BTreeMap<String, BTreeSet<String>>,
+    column_transformation: &BTreeMap<(String, String), TransformationType>,
+    edges: &[(String, String, String, String, String)],
+) -> io::Result<()> {
+    writeln!(w, "digraph column_lineage {{")?;
+    writeln!(w, r#"  compound=true;"#)?;
+    writeln!(
+        w,
+        r#"  node [shape=box, style=filled, fontname="Helvetica"];"#
+    )?;
+    writeln!(w)?;
+
+    // Build stable index maps (same approach as mermaid to avoid ID collisions).
+    let model_index: BTreeMap<&str, usize> = model_columns
+        .keys()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect();
+    let column_index: BTreeMap<&str, BTreeMap<&str, usize>> = model_columns
+        .iter()
+        .map(|(model, cols)| {
+            let col_map = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.as_str(), i))
+                .collect();
+            (model.as_str(), col_map)
+        })
+        .collect();
+
+    for (model, columns) in model_columns {
+        let midx = model_index[model.as_str()];
+        writeln!(w, "  subgraph cluster_{midx} {{")?;
+        writeln!(w, r#"    label="{model}";"#)?;
+        writeln!(w, "    style=rounded;")?;
+        writeln!(w)?;
+        for (cidx, col) in columns.iter().enumerate() {
+            let trans = column_transformation.get(&(model.clone(), col.clone()));
+            let color = transformation_color(trans);
+            writeln!(
+                w,
+                r#"    "n{midx}_{cidx}" [label="{col}", fillcolor="{color}"];"#
+            )?;
+        }
+        writeln!(w, "  }}")?;
+    }
+
+    writeln!(w)?;
+
+    // Render edges (deduplicated, sorted for deterministic output).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for (from_model, from_col, to_model, to_col, label) in edges {
+        let midx_from = model_index[from_model.as_str()];
+        let cidx_from = column_index[from_model.as_str()][from_col.as_str()];
+        let midx_to = model_index[to_model.as_str()];
+        let cidx_to = column_index[to_model.as_str()][to_col.as_str()];
+        let edge_str = format!(
+            r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{label}"];"#
+        );
+        if seen.insert(edge_str.clone()) {
+            writeln!(w, "{edge_str}")?;
+        }
+    }
+
+    writeln!(w, "}}")?;
+    Ok(())
+}
+
+fn transformation_color(t: Option<&TransformationType>) -> &'static str {
+    match t {
+        Some(TransformationType::Direct) => "#AED6F1",
+        Some(TransformationType::Aggregation) => "#FAD7A0",
+        Some(TransformationType::Expression) => "#A9DFBF",
+        Some(TransformationType::Cast) => "#D7BDE2",
+        Some(TransformationType::Conditional) => "#F9E79F",
+        Some(TransformationType::Unknown) | None => "#D5D8DC",
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn transformation_label(t: &TransformationType) -> &'static str {
@@ -466,6 +657,18 @@ mod tests {
     fn impact_mermaid(reports: &[ColumnImpactReport]) -> String {
         let mut buf = Vec::new();
         render_column_impact_mermaid_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn graph_dot(reports: &[ModelColumnLineage]) -> String {
+        let mut buf = Vec::new();
+        render_column_graph_dot_to_writer(reports, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn impact_dot(reports: &[ColumnImpactReport]) -> String {
+        let mut buf = Vec::new();
+        render_column_impact_dot_to_writer(reports, &mut buf).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -617,5 +820,124 @@ mod tests {
             errors: vec![],
         };
         insta::assert_snapshot!(impact_mermaid(&[report]));
+    }
+
+    // ── DOT tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_dot_single_model() {
+        let report = make_lineage(
+            "orders",
+            vec![(
+                "order_id",
+                TransformationType::Direct,
+                vec![("stg_orders", "order_id")],
+            )],
+        );
+        insta::assert_snapshot!(graph_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_all_transformation_types() {
+        let report = make_lineage(
+            "orders",
+            vec![
+                (
+                    "id",
+                    TransformationType::Direct,
+                    vec![("raw", "id")],
+                ),
+                (
+                    "total",
+                    TransformationType::Aggregation,
+                    vec![("raw", "amount")],
+                ),
+                (
+                    "label",
+                    TransformationType::Expression,
+                    vec![("raw", "a")],
+                ),
+                (
+                    "id_cast",
+                    TransformationType::Cast,
+                    vec![("raw", "id_str")],
+                ),
+                (
+                    "status",
+                    TransformationType::Conditional,
+                    vec![("raw", "flag")],
+                ),
+                (
+                    "mystery",
+                    TransformationType::Unknown,
+                    vec![("raw", "x")],
+                ),
+            ],
+        );
+        insta::assert_snapshot!(graph_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_id_collision_avoided() {
+        // "raw.orders" and "raw_orders" would collide if IDs were sanitized
+        let report = make_lineage(
+            "raw_orders",
+            vec![("id", TransformationType::Direct, vec![("raw.orders", "id")])],
+        );
+        insta::assert_snapshot!(graph_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_via_path() {
+        let report = ModelColumnLineage {
+            model: "orders".to_string(),
+            traced_columns: 1,
+            total_columns: 1,
+            columns: vec![ColumnLineageEntry {
+                column: "order_id".to_string(),
+                transformation: TransformationType::Direct,
+                sources: vec![ColumnSource {
+                    table: "raw".to_string(),
+                    column: "id".to_string(),
+                    model_path: vec!["stg_orders".to_string()],
+                }],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(graph_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_impact_single() {
+        let report = ColumnImpactReport {
+            model: "stg_orders".to_string(),
+            column: "order_id".to_string(),
+            impacted_columns: vec![ImpactedColumn {
+                unique_id: "model.orders".to_string(),
+                model: "orders".to_string(),
+                column: "order_id".to_string(),
+                transformation: TransformationType::Direct,
+                model_path: vec!["orders".to_string()],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(impact_dot(&[report]));
+    }
+
+    #[test]
+    fn test_dot_impact_indirect() {
+        let report = ColumnImpactReport {
+            model: "stg_orders".to_string(),
+            column: "order_id".to_string(),
+            impacted_columns: vec![ImpactedColumn {
+                unique_id: "model.customers".to_string(),
+                model: "customers".to_string(),
+                column: "customer_order_id".to_string(),
+                transformation: TransformationType::Expression,
+                model_path: vec!["orders".to_string(), "customers".to_string()],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(impact_dot(&[report]));
     }
 }

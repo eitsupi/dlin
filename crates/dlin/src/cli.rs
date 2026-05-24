@@ -808,6 +808,8 @@ Output format (-o/--output):
     errors[]    parse or resolution errors (non-empty → exit code 1)
   plain           human-readable text, one model per block
   mermaid         Mermaid flowchart (LR) with subgraphs per model
+  dot             Graphviz DOT format; models as clusters, columns as nodes
+                  color-coded by transformation type (pipe to `dot -Tsvg`)
 
 Exit codes:
   0   Success
@@ -864,6 +866,8 @@ Output format (-o/--output):
   json (default)  JSON array per column with affected downstream columns and models
   plain           human-readable text, one source column per block
   mermaid         Mermaid flowchart (LR) showing impacted columns across models
+  dot             Graphviz DOT format; models as clusters, columns as nodes
+                  color-coded by transformation type (pipe to `dot -Tsvg`)
 
 Exit codes:
   0   Success
@@ -1252,6 +1256,8 @@ pub enum ColumnOutputFormat {
     Plain,
     /// Mermaid flowchart diagram
     Mermaid,
+    /// Graphviz DOT format (pipe to `dot -Tsvg > out.svg`)
+    Dot,
 }
 
 #[cfg(test)]
@@ -1978,6 +1984,32 @@ mod tests {
             Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "mermaid"]).unwrap(),
         );
         assert!(matches!(args.output, ColumnOutputFormat::Mermaid));
+    }
+
+    #[test]
+    fn test_column_upstream_output_dot() {
+        let args = unwrap_column_upstream(
+            Cli::try_parse_from(["dlin", "column", "upstream", "orders", "-o", "dot"]).unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Dot));
+    }
+
+    #[test]
+    fn test_column_downstream_output_dot() {
+        let args = unwrap_column_downstream(
+            Cli::try_parse_from([
+                "dlin",
+                "column",
+                "downstream",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "-o",
+                "dot",
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(args.output, ColumnOutputFormat::Dot));
     }
 
     #[test]

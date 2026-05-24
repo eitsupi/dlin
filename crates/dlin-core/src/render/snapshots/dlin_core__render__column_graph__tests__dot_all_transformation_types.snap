@@ -1,0 +1,39 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+assertion_line: 877
+expression: "graph_dot(&[report])"
+---
+digraph column_lineage {
+  compound=true;
+  node [shape=box, style=filled, fontname="Helvetica"];
+
+  subgraph cluster_0 {
+    label="orders";
+    style=rounded;
+
+    "n0_0" [label="id", fillcolor="#AED6F1"];
+    "n0_1" [label="id_cast", fillcolor="#D7BDE2"];
+    "n0_2" [label="label", fillcolor="#A9DFBF"];
+    "n0_3" [label="mystery", fillcolor="#D5D8DC"];
+    "n0_4" [label="status", fillcolor="#F9E79F"];
+    "n0_5" [label="total", fillcolor="#FAD7A0"];
+  }
+  subgraph cluster_1 {
+    label="raw";
+    style=rounded;
+
+    "n1_0" [label="a", fillcolor="#D5D8DC"];
+    "n1_1" [label="amount", fillcolor="#D5D8DC"];
+    "n1_2" [label="flag", fillcolor="#D5D8DC"];
+    "n1_3" [label="id", fillcolor="#D5D8DC"];
+    "n1_4" [label="id_str", fillcolor="#D5D8DC"];
+    "n1_5" [label="x", fillcolor="#D5D8DC"];
+  }
+
+  "n1_3" -> "n0_0" [label="direct"];
+  "n1_1" -> "n0_5" [label="aggregation"];
+  "n1_0" -> "n0_2" [label="expression"];
+  "n1_4" -> "n0_1" [label="cast"];
+  "n1_2" -> "n0_4" [label="conditional"];
+  "n1_5" -> "n0_3" [label="unknown"];
+}
