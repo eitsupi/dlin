@@ -685,8 +685,14 @@ fn run_column_lineage_command(
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let project = parser::project::DbtProject::load(&project_dir)?;
         let resolved_paths = project.resolve_paths(&project_dir);
-        // Snapshot all user-provided names before path expansion so they can be exempted from
-        // the model-only filter regardless of whether they came from CLI args or stdin.
+        // Snapshot all bare user-provided names (CLI args + stdin lines that are NOT
+        // path-like) before path expansion.  These are exempted from the model-only filter
+        // below so an explicit bare name that maps to a non-model node (e.g. a source name
+        // typed directly) reaches the analyzer and surfaces a proper error rather than
+        // being silently dropped.
+        // Note: names derived from file-path or YAML expansion are NOT in raw_input_set and
+        // ARE subject to model-only filtering — this is intentional so that a `git diff`
+        // containing analysis or test SQL paths does not produce spurious errors.
         let raw_input_set: std::collections::HashSet<&str> =
             raw_inputs.iter().map(|s| s.as_str()).collect();
         let all_resolved =
@@ -694,8 +700,6 @@ fn run_column_lineage_command(
         // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
         // file-path expansion — column lineage only supports resource_type == "model".
         // Analyses map to NodeType::Model in the DAG so we check the manifest directly.
-        // User-provided names (CLI and stdin) and names unknown to the DAG are kept so they
-        // produce proper "model not found" errors rather than being silently dropped.
         let manifest_model_names: std::collections::HashSet<&str> = manifest
             .nodes
             .values()

@@ -775,9 +775,9 @@ Column resolution order:
   2. SQL inference from compiled_code (fallback when YAML is absent)
 
 Stdin/pipe support:
-  Accepts model names or file paths on stdin (one per line). \
-  File paths (detected by extension or path separator) are resolved to model names \
-  using the dbt project configuration.
+  Accepts model names or file paths on stdin (one per line).
+  File paths (detected by extension or path separator) are resolved to
+  model names using the dbt project configuration.
 
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:
@@ -1046,8 +1046,8 @@ Plain output: one node name per line, sorted alphabetically.
 JSON output: array of objects with unique_id, label, node_type, and metadata.
 
 Stdin/pipe support:
-  Accepts model names or file paths on stdin (one per line). \
-File paths are resolved to model names using dbt project configuration.",
+  Accepts model names or file paths on stdin (one per line).
+  File paths are resolved to model names using dbt project configuration.",
     after_long_help = "\
 Examples:
   # List all models and sources
