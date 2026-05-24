@@ -204,7 +204,7 @@ fn diagnose(what: String) -> Diagnostic {
         return Diagnostic {
             what,
             why: None,
-            hint: Some("Check the spelling. Run `dlin list` to see available models".to_string()),
+            hint: Some("Check the spelling. Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list` to see available models".to_string()),
         };
     }
 
@@ -222,7 +222,7 @@ fn diagnose(what: String) -> Diagnostic {
         return Diagnostic {
             what,
             why: None,
-            hint: Some("Check the spelling. Run `dlin list` to see available models".to_string()),
+            hint: Some("Check the spelling. Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list` to see available models".to_string()),
         };
     }
 

@@ -47,7 +47,7 @@ pub fn compute_column_impact(
                     kind: ColumnLineageErrorKind::ModelNotFound,
                     what: format!("model '{}' not found in manifest", model_name),
                     why: None,
-                    hint: Some("Run `dlin list` to see available models".to_string()),
+                    hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list` to see available models".to_string()),
                 }],
             };
         }

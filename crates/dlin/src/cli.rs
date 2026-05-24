@@ -528,6 +528,27 @@ Examples:
     Summary(SummaryArgs),
 
     /// Column-level lineage and impact analysis
+    #[command(
+        long_about = "\
+Column-level lineage and impact analysis.
+
+Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
+column analysis is split by direction — each subcommand covers one direction:
+
+  upstream    — traces where each output column's data came from
+  downstream  — finds which models/columns are affected by a column change
+
+There are no -u/-d depth flags; the full chain is always traversed in both cases.
+
+Unlike `dlin graph`/`dlin impact`, there is no --source flag — manifest.json is the only
+data source for column-level analysis.
+
+Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
+        after_long_help = "\
+Examples:
+  dlin column upstream orders                             # upstream: where do columns come from?
+  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
+    )]
     Column(ColumnArgs),
 
     /// Low-level debugging tools for SQL parsing and lineage tracing
@@ -731,24 +752,6 @@ pub enum DebugOutputFormat {
 
 /// Arguments for `dlin column` subcommand group
 #[derive(Debug, clap::Args)]
-#[command(
-    long_about = "\
-Column-level lineage and impact analysis.
-
-Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
-column analysis is split by direction — each subcommand covers one direction:
-
-  upstream    — traces where each output column's data came from
-  downstream  — finds which models/columns are affected by a column change
-
-There are no -u/-d depth flags; the full chain is always traversed in both cases.
-
-Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).",
-    after_long_help = "\
-Examples:
-  dlin column upstream orders                             # upstream: where do columns come from?
-  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?"
-)]
 pub struct ColumnArgs {
     #[command(subcommand)]
     pub command: ColumnCommand,
@@ -767,6 +770,9 @@ their raw source columns across the full DAG. There are no -u/-d depth flags
 
 To find what downstream models or columns would be affected by changing a
 specific column, use `dlin column downstream` instead.
+
+There is no --source flag; manifest.json is the only data source (unlike
+`dlin graph` which supports both SQL files and manifest).
 
 Requires manifest.json with compiled SQL (run `dbt compile` first).
 
@@ -845,6 +851,9 @@ This is the reverse direction of `dlin column upstream` (which traces upstream
 sources). To trace where a column's data comes from, use `dlin column upstream`.
 
 Takes a single model and one or more --column flags (required).
+
+There is no --source flag; manifest.json is the only data source (unlike
+`dlin graph`/`dlin impact` which support both SQL files and manifest).
 
 Requires compiled SQL in manifest.json — run `dbt compile` first.
 
