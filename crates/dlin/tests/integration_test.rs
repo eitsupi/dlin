@@ -1787,6 +1787,61 @@ models:
     }
 
     #[test]
+    fn test_column_upstream_stdin_mixed_path_and_bare_source_name() {
+        // When a file path AND a bare non-model name (source) are piped together, the bare
+        // name must NOT be silently dropped by the model-only filter.  Before the raw_input_set
+        // fix, raw.orders would be dropped and the command would succeed with only stg_orders;
+        // after the fix it should pass through and produce an analysis error, causing exit 1.
+        let fixture = column_lineage_fixture_dir();
+        let sql_path = fixture.join("models/staging/stg_orders.sql");
+        let mut child = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+                "-o",
+                "json",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn binary");
+
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{}\nraw.orders\n", sql_path.display()).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        // raw.orders is a source, not a model — analysis should fail (exit 1).
+        assert!(
+            !output.status.success(),
+            "column upstream should fail when a bare source name is piped; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        // stg_orders must still be present (the SQL path was resolved correctly).
+        assert!(
+            reports.iter().any(|r| r["model"] == "stg_orders"),
+            "stg_orders report should be present; got: {}",
+            stdout
+        );
+        // raw.orders must appear in the output rather than being silently dropped.
+        assert!(
+            reports.iter().any(|r| r["model"] == "raw.orders"),
+            "raw.orders report should be present (not silently dropped); got: {}",
+            stdout
+        );
+    }
+
+    #[test]
     fn test_column_lineage_source_physical_schema_differs_from_source_name() {
         // Regression test: when source_name != physical schema (e.g. source_name="salesforce",
         // schema="raw"), dbt compiled SQL uses the physical schema ("raw"."accounts"), not
