@@ -58,7 +58,7 @@ pub struct ColumnLineageEntry {
 }
 
 /// Classification of the transformation applied to produce an output column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TransformationType {
     /// Direct column reference or rename (e.g. `SELECT id AS order_id`)
@@ -82,7 +82,8 @@ pub struct ColumnSource {
     pub table: String,
     /// Source column name
     pub column: String,
-    /// Cross-model path: intermediate model names traversed to reach this source
+    /// Cross-model path: (model_name, column_name, transformation) triples for intermediate hops
+    /// traversed to reach this source. Ordered from the target model outward toward the leaf source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_path: Vec<String>,
+    pub model_path: Vec<(String, String, TransformationType)>,
 }

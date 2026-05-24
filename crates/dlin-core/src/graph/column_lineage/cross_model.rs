@@ -5,7 +5,7 @@ use polyglot_sql::DialectType;
 use crate::parser::manifest::Manifest;
 
 use super::{
-    ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage,
+    ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
     compute_column_lineage, find_model_by_name,
 };
 
@@ -109,7 +109,7 @@ fn resolve_source_recursive(
     errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
-    current_path: &[String],
+    current_path: &[(String, String, TransformationType)],
 ) {
     let model_name = upstream_models
         .get(&source.table)
@@ -139,9 +139,6 @@ fn resolve_source_recursive(
         }
     };
 
-    let mut extended_path = current_path.to_vec();
-    extended_path.push(model_name.clone());
-
     if !ctx.in_memory_cache.contains_key(&model_name) {
         if ctx.computing.contains(&model_name) {
             let mut leaf = source.clone();
@@ -167,9 +164,19 @@ fn resolve_source_recursive(
         .iter()
         .find(|c| c.column == source.column)
     {
+        // Build extended_path with the transformation type now that we know it
+        let mut extended_path = current_path.to_vec();
+        extended_path.push((
+            model_name.clone(),
+            source.column.clone(),
+            col_entry.transformation.clone(),
+        ));
+
         if col_entry.sources.is_empty() {
+            // Leaf: the column exists at model_name but has no further sources.
+            // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
             let mut leaf = source.clone();
-            leaf.model_path = extended_path;
+            leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
             for s in &col_entry.sources {
@@ -183,13 +190,20 @@ fn resolve_source_recursive(
     } else {
         let on_demand =
             compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
-        if on_demand.is_empty() {
+        let transformation = on_demand
+            .as_ref()
+            .map_or(TransformationType::Unknown, |(_, t)| t.clone());
+        let mut extended_path = current_path.to_vec();
+        extended_path.push((model_name.clone(), source.column.clone(), transformation));
+        let on_demand_sources = on_demand.map(|(sources, _)| sources).unwrap_or_default();
+        if on_demand_sources.is_empty() {
+            // Leaf: column at model_name has no traceable sources — don't self-include in path.
             let mut leaf = source.clone();
-            leaf.model_path = extended_path;
+            leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
             let further_upstream = build_upstream_model_names(ctx.manifest, &model_name);
-            for s in &on_demand {
+            for s in &on_demand_sources {
                 resolve_source_recursive(
                     s,
                     &further_upstream,
@@ -210,27 +224,13 @@ fn compute_single_column_lineage(
     model_name: &str,
     column_name: &str,
     dialect: DialectType,
-) -> Vec<ColumnSource> {
-    let node = find_model_by_name(manifest, model_name);
-
-    let node = match node {
-        Some(n) => n,
-        None => return vec![],
-    };
-
-    let compiled_code = match &node.compiled_code {
-        Some(code) => code,
-        None => return vec![],
-    };
-
-    let ctx = match super::prepare_lineage_context(compiled_code, manifest, node, dialect) {
-        Ok(ctx) => ctx,
-        Err(_) => return vec![],
-    };
-
+) -> Option<(Vec<ColumnSource>, TransformationType)> {
+    let node = find_model_by_name(manifest, model_name)?;
+    let compiled_code = node.compiled_code.as_ref()?;
+    let ctx = super::prepare_lineage_context(compiled_code, manifest, node, dialect).ok()?;
     super::run_column_lineage(column_name, &ctx)
-        .map(|r| r.sources)
-        .unwrap_or_default()
+        .ok()
+        .map(|r| (r.sources, r.transformation))
 }
 
 fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {

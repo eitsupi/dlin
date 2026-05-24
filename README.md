@@ -276,28 +276,52 @@ flowchart LR
     n0_4["lifetime_value"]
     n0_5["order_count"]
   end
-  subgraph sg1["raw.customers"]
-    n1_0["email"]
-    n1_1["first_name"]
-    n1_2["id"]
-    n1_3["last_name"]
+  subgraph sg1["orders"]
+    n1_0["order_id"]
+    n1_1["total_amount"]
   end
-  subgraph sg2["raw.orders"]
-    n2_0["id"]
+  subgraph sg2["raw.customers"]
+    n2_0["email"]
+    n2_1["first_name"]
+    n2_2["id"]
+    n2_3["last_name"]
   end
-  subgraph sg3["raw.payments"]
-    n3_0["amount"]
+  subgraph sg3["raw.orders"]
+    n3_0["id"]
+  end
+  subgraph sg4["raw.payments"]
+    n4_0["amount"]
+  end
+  subgraph sg5["stg_customers"]
+    n5_0["customer_id"]
+    n5_1["email"]
+    n5_2["first_name"]
+    n5_3["last_name"]
+  end
+  subgraph sg6["stg_orders"]
+    n6_0["order_id"]
+  end
+  subgraph sg7["stg_payments"]
+    n7_0["amount"]
   end
 
-  n1_2 -->|"direct (via stg_customers)"|n0_0
-  n1_0 -->|"direct (via stg_customers)"|n0_1
-  n1_1 -->|"direct (via stg_customers)"|n0_2
-  n1_3 -->|"direct (via stg_customers)"|n0_3
-  n3_0 -->|"aggregation (via orders → stg_payments)"|n0_4
-  n2_0 -->|"aggregation (via orders → stg_orders)"|n0_5
+  n2_2 -->|"direct"|n5_0
+  n5_0 -->|"direct"|n0_0
+  n2_0 -->|"direct"|n5_1
+  n5_1 -->|"direct"|n0_1
+  n2_1 -->|"direct"|n5_2
+  n5_2 -->|"direct"|n0_2
+  n2_3 -->|"direct"|n5_3
+  n5_3 -->|"direct"|n0_3
+  n4_0 -->|"direct"|n7_0
+  n7_0 -->|"direct"|n1_1
+  n1_1 -->|"aggregation"|n0_4
+  n3_0 -->|"direct"|n6_0
+  n6_0 -->|"direct"|n1_0
+  n1_0 -->|"aggregation"|n0_5
 ```
 
-`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (`direct`). `lifetime_value` and `order_count` are aggregated from raw source columns via multiple intermediate models, shown in the `via` path on each edge.
+`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (all `direct`). `lifetime_value` and `order_count` are aggregated at the `customers` model — the final edge to `customers` is labeled `aggregation`, while all upstream hops carry their actual transformation type (here `direct`, since staging and mart models pass columns through unchanged).
 
 Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
 
@@ -324,12 +348,12 @@ flowchart LR
     n3_0["order_id"]
   end
 
-  n3_0 -->|"aggregation (via orders)"|n0_0
+  n2_0 -->|"aggregation"|n0_0
   n3_0 -->|"direct"|n1_0
   n3_0 -->|"direct"|n2_0
 ```
 
-`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`, and is also aggregated into `customers.order_count` via `orders`.
+`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`. `orders.order_id` is then aggregated into `customers.order_count`. Each edge shows its per-hop transformation type.
 
 ### Known limitations
 

@@ -111,30 +111,50 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                 .insert(entry.column.clone());
 
             for src in &entry.sources {
-                // Register the source model and column
-                model_columns
-                    .entry(src.table.clone())
-                    .or_default()
-                    .insert(src.column.clone());
-
-                let via_str = if src.model_path.is_empty() {
-                    String::new()
+                let final_label = transformation_label(&entry.transformation).to_string();
+                if src.model_path.is_empty() {
+                    model_columns
+                        .entry(src.table.clone())
+                        .or_default()
+                        .insert(src.column.clone());
+                    edges.push((
+                        src.table.clone(),
+                        src.column.clone(),
+                        target_model.clone(),
+                        entry.column.clone(),
+                        final_label,
+                    ));
                 } else {
-                    let escaped: Vec<String> = src
-                        .model_path
-                        .iter()
-                        .map(|m| super::mermaid_escape(m))
-                        .collect();
-                    format!(" (via {})", escaped.join(" \u{2192} "))
-                };
-                let label = format!("{}{}", transformation_label(&entry.transformation), via_str);
-                edges.push((
-                    src.table.clone(),
-                    src.column.clone(),
-                    target_model.clone(),
-                    entry.column.clone(),
-                    label,
-                ));
+                    // Build edge chain: leaf → path[-1] → ... → path[0] → target
+                    // model_path is ordered from target outward, so reverse it for the chain.
+                    // Each hop carries its own transformation label; the final edge uses
+                    // entry.transformation.
+                    // chain: (model, col, edge_label_for_edge_arriving_at_this_node)
+                    let mut chain: Vec<(String, String, String)> = Vec::new();
+                    chain.push((src.table.clone(), src.column.clone(), String::new()));
+                    for (m, c, t) in src.model_path.iter().rev() {
+                        chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+                    }
+                    chain.push((target_model.clone(), entry.column.clone(), final_label));
+
+                    for (m, c, _) in &chain {
+                        model_columns
+                            .entry(m.clone())
+                            .or_default()
+                            .insert(c.clone());
+                    }
+                    for window in chain.windows(2) {
+                        let (from_m, from_c, _) = &window[0];
+                        let (to_m, to_c, label) = &window[1];
+                        edges.push((
+                            from_m.clone(),
+                            from_c.clone(),
+                            to_m.clone(),
+                            to_c.clone(),
+                            label.clone(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -239,11 +259,14 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             .unwrap_or(0);
 
         for ic in &report.impacted_columns {
-            // model_path ends with ic.model itself (BFS always pushes dep_name).
-            // The intermediate hops are everything before the last element.
+            // model_path is ordered source → final; intermediate hops precede the last element.
             let via_str = if ic.model_path.len() > 1 {
                 let intermediate = &ic.model_path[..ic.model_path.len() - 1];
-                format!(", via {}", intermediate.join(" → "))
+                let parts: Vec<String> = intermediate
+                    .iter()
+                    .map(|(m, c, _)| format!("{}.{}", m, c))
+                    .collect();
+                format!(", via {}", parts.join(" → "))
             } else {
                 String::new()
             };
@@ -286,34 +309,32 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
             .insert(report.column.clone());
 
         for ic in &report.impacted_columns {
-            model_columns
-                .entry(ic.model.clone())
-                .or_default()
-                .insert(ic.column.clone());
+            // Build edge chain: source → model_path[0] → ... → model_path[-1]
+            // model_path is ordered source → final and includes the final model at the end.
+            // chain: (model, col, edge_label_for_arriving_at_this_node)
+            let mut chain: Vec<(String, String, String)> = Vec::new();
+            chain.push((report.model.clone(), report.column.clone(), String::new()));
+            for (m, c, t) in &ic.model_path {
+                chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+            }
 
-            // For multi-hop impacts, label the edge with the intermediate path so
-            // the diagram does not imply a direct connection that does not exist.
-            // model_path ends with ic.model; the intermediate hops precede it.
-            let via_str = if ic.model_path.len() > 1 {
-                let intermediate = &ic.model_path[..ic.model_path.len() - 1];
-                let escaped: Vec<String> = intermediate
-                    .iter()
-                    .map(|m| super::mermaid_escape(m))
-                    .collect();
-                format!(" (via {})", escaped.join(" \u{2192} "))
-            } else {
-                String::new()
-            };
-            let label = format!("{}{}", transformation_label(&ic.transformation), via_str);
-
-            // Edge direction: source column → impacted column
-            edges.push((
-                report.model.clone(),
-                report.column.clone(),
-                ic.model.clone(),
-                ic.column.clone(),
-                label,
-            ));
+            for (m, c, _) in &chain {
+                model_columns
+                    .entry(m.clone())
+                    .or_default()
+                    .insert(c.clone());
+            }
+            for window in chain.windows(2) {
+                let (from_m, from_c, _) = &window[0];
+                let (to_m, to_c, label) = &window[1];
+                edges.push((
+                    from_m.clone(),
+                    from_c.clone(),
+                    to_m.clone(),
+                    to_c.clone(),
+                    label.clone(),
+                ));
+            }
         }
     }
 
@@ -404,24 +425,50 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                 .or_insert_with(|| entry.transformation.clone());
 
             for src in &entry.sources {
-                model_columns
-                    .entry(src.table.clone())
-                    .or_default()
-                    .insert(src.column.clone());
-
-                let via_str = if src.model_path.is_empty() {
-                    String::new()
+                let final_label = transformation_label(&entry.transformation).to_string();
+                if src.model_path.is_empty() {
+                    model_columns
+                        .entry(src.table.clone())
+                        .or_default()
+                        .insert(src.column.clone());
+                    edges.push((
+                        src.table.clone(),
+                        src.column.clone(),
+                        target_model.clone(),
+                        entry.column.clone(),
+                        final_label,
+                    ));
                 } else {
-                    format!(" (via {})", src.model_path.join(" -> "))
-                };
-                let label = format!("{}{}", transformation_label(&entry.transformation), via_str);
-                edges.push((
-                    src.table.clone(),
-                    src.column.clone(),
-                    target_model.clone(),
-                    entry.column.clone(),
-                    label,
-                ));
+                    let mut chain: Vec<(String, String, String)> = Vec::new();
+                    chain.push((src.table.clone(), src.column.clone(), String::new()));
+                    for (m, c, t) in src.model_path.iter().rev() {
+                        chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+                        column_transformation
+                            .entry(m.clone())
+                            .or_default()
+                            .entry(c.clone())
+                            .or_insert_with(|| t.clone());
+                    }
+                    chain.push((target_model.clone(), entry.column.clone(), final_label));
+
+                    for (m, c, _) in &chain {
+                        model_columns
+                            .entry(m.clone())
+                            .or_default()
+                            .insert(c.clone());
+                    }
+                    for window in chain.windows(2) {
+                        let (from_m, from_c, _) = &window[0];
+                        let (to_m, to_c, label) = &window[1];
+                        edges.push((
+                            from_m.clone(),
+                            from_c.clone(),
+                            to_m.clone(),
+                            to_c.clone(),
+                            label.clone(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -454,30 +501,37 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
             .insert(report.column.clone());
 
         for ic in &report.impacted_columns {
-            model_columns
-                .entry(ic.model.clone())
-                .or_default()
-                .insert(ic.column.clone());
-            column_transformation
-                .entry(ic.model.clone())
-                .or_default()
-                .entry(ic.column.clone())
-                .or_insert_with(|| ic.transformation.clone());
+            // Build edge chain: source → model_path[0] → ... → model_path[-1]
+            // model_path is ordered source → final and includes the final model at the end.
+            let mut chain: Vec<(String, String, String)> = Vec::new();
+            chain.push((report.model.clone(), report.column.clone(), String::new()));
+            for (m, c, t) in &ic.model_path {
+                chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+                column_transformation
+                    .entry(m.clone())
+                    .or_default()
+                    .entry(c.clone())
+                    .or_insert_with(|| t.clone());
+            }
 
-            let via_str = if ic.model_path.len() > 1 {
-                let intermediate = &ic.model_path[..ic.model_path.len() - 1];
-                format!(" (via {})", intermediate.join(" -> "))
-            } else {
-                String::new()
-            };
-            let label = format!("{}{}", transformation_label(&ic.transformation), via_str);
-            edges.push((
-                report.model.clone(),
-                report.column.clone(),
-                ic.model.clone(),
-                ic.column.clone(),
-                label,
-            ));
+            for (m, c, _) in &chain {
+                model_columns
+                    .entry(m.clone())
+                    .or_default()
+                    .insert(c.clone());
+            }
+
+            for window in chain.windows(2) {
+                let (from_m, from_c, _) = &window[0];
+                let (to_m, to_c, label) = &window[1];
+                edges.push((
+                    from_m.clone(),
+                    from_c.clone(),
+                    to_m.clone(),
+                    to_c.clone(),
+                    label.clone(),
+                ));
+            }
         }
     }
 
@@ -601,11 +655,19 @@ fn transformation_label(t: &TransformationType) -> &'static str {
     }
 }
 
-fn format_source(table: &str, column: &str, model_path: &[String]) -> String {
+fn format_source(
+    table: &str,
+    column: &str,
+    model_path: &[(String, String, TransformationType)],
+) -> String {
     if model_path.is_empty() {
         format!("{}.{}", table, column)
     } else {
-        format!("{}.{} via {}", table, column, model_path.join(" → "))
+        let mut parts = vec![format!("{}.{}", table, column)];
+        for (m, c, _) in model_path.iter().rev() {
+            parts.push(format!("{}.{}", m, c));
+        }
+        parts.join(" → ")
     }
 }
 
@@ -791,7 +853,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec!["orders".to_string()],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -808,7 +874,18 @@ mod tests {
                 model: "customers".to_string(),
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec!["orders".to_string(), "customers".to_string()],
+                model_path: vec![
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                ],
             }],
             errors: vec![],
         };
@@ -825,7 +902,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec!["orders".to_string()],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -842,7 +923,18 @@ mod tests {
                 model: "customers".to_string(),
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec!["orders".to_string(), "customers".to_string()],
+                model_path: vec![
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                ],
             }],
             errors: vec![],
         };
@@ -910,7 +1002,11 @@ mod tests {
                 sources: vec![ColumnSource {
                     table: "raw".to_string(),
                     column: "id".to_string(),
-                    model_path: vec!["stg_orders".to_string()],
+                    model_path: vec![(
+                        "stg_orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    )],
                 }],
             }],
             errors: vec![],
@@ -928,7 +1024,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec!["orders".to_string()],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -945,7 +1045,18 @@ mod tests {
                 model: "customers".to_string(),
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Expression,
-                model_path: vec!["orders".to_string(), "customers".to_string()],
+                model_path: vec![
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Expression,
+                    ),
+                ],
             }],
             errors: vec![],
         };

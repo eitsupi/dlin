@@ -1,6 +1,5 @@
 ---
 source: crates/dlin-core/src/render/column_graph.rs
-assertion_line: 941
 expression: "impact_dot(&[report])"
 ---
 digraph column_lineage {
@@ -14,11 +13,18 @@ digraph column_lineage {
     "n0_0" [label="customer_order_id", fillcolor="#A9DFBF"];
   }
   subgraph cluster_1 {
+    label="orders";
+    style=rounded;
+
+    "n1_0" [label="order_id", fillcolor="#AED6F1"];
+  }
+  subgraph cluster_2 {
     label="stg_orders";
     style=rounded;
 
-    "n1_0" [label="order_id", fillcolor="#D5D8DC"];
+    "n2_0" [label="order_id", fillcolor="#D5D8DC"];
   }
 
-  "n1_0" -> "n0_0" [label="expression (via orders)"];
+  "n1_0" -> "n0_0" [label="expression"];
+  "n2_0" -> "n1_0" [label="direct"];
 }

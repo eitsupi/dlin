@@ -789,6 +789,116 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     }
 }
 
+/// Build a manifest for testing reconverging DAG where the same column name
+/// flows through two separate paths before merging back:
+///
+///   source_model (x)
+///        |
+///   +----+----+
+///   |         |
+/// left(x)  right(x)   -- each passes x through from source_model
+///   |         |
+///   +----+----+
+///        |
+///    final(x)          -- x from both left and right via COALESCE
+///        |
+///     mart(x)
+///        |
+///  dashboard(x)
+///
+/// The path-local cycle guard allows final/mart/dashboard to appear once per
+/// upstream path rather than being deduplicated to a single entry.
+pub(super) fn make_reconverging_manifest() -> Manifest {
+    let mut nodes = HashMap::new();
+
+    let make_node = |uid: &str, name: &str, deps: Vec<String>, sql: &str| ManifestNode {
+        unique_id: uid.to_string(),
+        name: name.to_string(),
+        resource_type: "model".to_string(),
+        depends_on: DependsOn { nodes: deps },
+        config: ManifestConfig::default(),
+        description: None,
+        path: None,
+        columns: {
+            let mut cols = HashMap::new();
+            cols.insert(
+                "x".to_string(),
+                ManifestColumn {
+                    name: "x".to_string(),
+                },
+            );
+            cols
+        },
+        compiled_code: Some(sql.to_string()),
+        database: None,
+        schema: None,
+    };
+
+    nodes.insert(
+        "model.proj.source_model".to_string(),
+        make_node(
+            "model.proj.source_model",
+            "source_model",
+            vec![],
+            "select x from raw_table",
+        ),
+    );
+    nodes.insert(
+        "model.proj.left_model".to_string(),
+        make_node(
+            "model.proj.left_model",
+            "left_model",
+            vec!["model.proj.source_model".to_string()],
+            "select x from source_model",
+        ),
+    );
+    nodes.insert(
+        "model.proj.right_model".to_string(),
+        make_node(
+            "model.proj.right_model",
+            "right_model",
+            vec!["model.proj.source_model".to_string()],
+            "select x from source_model",
+        ),
+    );
+    nodes.insert(
+        "model.proj.final_model".to_string(),
+        make_node(
+            "model.proj.final_model",
+            "final_model",
+            vec![
+                "model.proj.left_model".to_string(),
+                "model.proj.right_model".to_string(),
+            ],
+            "select COALESCE(l.x, r.x) as x from left_model l join right_model r on 1=1",
+        ),
+    );
+    nodes.insert(
+        "model.proj.mart_model".to_string(),
+        make_node(
+            "model.proj.mart_model",
+            "mart_model",
+            vec!["model.proj.final_model".to_string()],
+            "select x from final_model",
+        ),
+    );
+    nodes.insert(
+        "model.proj.dashboard_model".to_string(),
+        make_node(
+            "model.proj.dashboard_model",
+            "dashboard_model",
+            vec!["model.proj.mart_model".to_string()],
+            "select x from mart_model",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        sources: HashMap::new(),
+        exposures: HashMap::new(),
+    }
+}
+
 mod cache;
 mod core;
 mod impact;

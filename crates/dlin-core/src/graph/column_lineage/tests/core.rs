@@ -354,7 +354,7 @@ fn test_cross_model_single_hop() {
     // model_path should show the hop through stg_orders
     let src = order_id.sources.iter().find(|s| s.column == "id").unwrap();
     assert!(
-        src.model_path.contains(&"stg_orders".to_string()),
+        src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
         "model_path should include stg_orders, got: {:?}",
         src.model_path
     );
@@ -393,17 +393,21 @@ fn test_cross_model_two_hops() {
         .find(|s| s.column == "user_id")
         .unwrap();
     assert!(
-        src.model_path.contains(&"orders".to_string())
-            && src.model_path.contains(&"stg_orders".to_string()),
+        src.model_path.iter().any(|(m, _, _)| m == "orders")
+            && src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
         "model_path should include orders and stg_orders, got: {:?}",
         src.model_path
     );
-    // orders should come before stg_orders in the path
-    let orders_pos = src.model_path.iter().position(|m| m == "orders").unwrap();
+    // orders should come before stg_orders in the path (closer to target)
+    let orders_pos = src
+        .model_path
+        .iter()
+        .position(|(m, _, _)| m == "orders")
+        .unwrap();
     let stg_pos = src
         .model_path
         .iter()
-        .position(|m| m == "stg_orders")
+        .position(|(m, _, _)| m == "stg_orders")
         .unwrap();
     assert!(
         orders_pos < stg_pos,
@@ -442,7 +446,7 @@ fn test_cross_model_join_sources() {
         .find(|s| s.column == "amount")
         .unwrap();
     assert!(
-        src.model_path.contains(&"stg_payments".to_string()),
+        src.model_path.iter().any(|(m, _, _)| m == "stg_payments"),
         "model_path should include stg_payments, got: {:?}",
         src.model_path
     );
