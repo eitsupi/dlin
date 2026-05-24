@@ -676,15 +676,21 @@ fn run_column_lineage_command(
         let resolved_paths = project.resolve_paths(&project_dir);
         let all_resolved =
             input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
-        // column lineage only supports model nodes; filter out sources, tests, etc.
-        // that may be resolved from YAML files (e.g. schema.yml expanded from git diff).
-        // Unknown names are passed through so they produce proper error messages downstream.
+        // column lineage only supports model nodes (resource_type == "model"); filter out
+        // sources, tests, analyses, etc. that may be resolved from YAML/SQL file paths.
+        // Analyses share NodeType::Model in the DAG so we check the manifest directly.
+        // Unknown names (not in the DAG) are passed through for proper error messages.
+        let manifest_model_names: std::collections::HashSet<&str> = manifest_for_paths
+            .nodes
+            .values()
+            .filter(|n| n.resource_type == "model")
+            .map(|n| n.name.as_str())
+            .collect();
         all_resolved
             .into_iter()
             .filter(|name| {
-                graph::filter::try_resolve_node_quiet(&dag, name)
-                    .map(|idx| dag[idx].node_type == graph::types::NodeType::Model)
-                    .unwrap_or(true)
+                manifest_model_names.contains(name.as_str())
+                    || graph::filter::try_resolve_node_quiet(&dag, name).is_none()
             })
             .collect()
     } else {
