@@ -110,7 +110,7 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                 .insert(entry.column.clone());
 
             for src in &entry.sources {
-                let label = transformation_label(&entry.transformation).to_string();
+                let final_label = transformation_label(&entry.transformation).to_string();
                 if src.model_path.is_empty() {
                     model_columns
                         .entry(src.table.clone())
@@ -121,24 +121,27 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                         src.column.clone(),
                         target_model.clone(),
                         entry.column.clone(),
-                        label,
+                        final_label,
                     ));
                 } else {
                     // Build edge chain: leaf → path[-1] → ... → path[0] → target
-                    // model_path is ordered from target outward, so reverse it for the chain
-                    let mut chain: Vec<(String, String)> = Vec::new();
-                    chain.push((src.table.clone(), src.column.clone()));
-                    for hop in src.model_path.iter().rev() {
-                        chain.push(hop.clone());
+                    // model_path is ordered from target outward, so reverse it for the chain.
+                    // Each hop carries its own transformation label; the final edge uses
+                    // entry.transformation.
+                    // chain: (model, col, edge_label_for_edge_arriving_at_this_node)
+                    let mut chain: Vec<(String, String, String)> = Vec::new();
+                    chain.push((src.table.clone(), src.column.clone(), String::new()));
+                    for (m, c, t) in src.model_path.iter().rev() {
+                        chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
                     }
-                    chain.push((target_model.clone(), entry.column.clone()));
+                    chain.push((target_model.clone(), entry.column.clone(), final_label));
 
-                    for (m, c) in &chain {
+                    for (m, c, _) in &chain {
                         model_columns.entry(m.clone()).or_default().insert(c.clone());
                     }
                     for window in chain.windows(2) {
-                        let (from_m, from_c) = &window[0];
-                        let (to_m, to_c) = &window[1];
+                        let (from_m, from_c, _) = &window[0];
+                        let (to_m, to_c, label) = &window[1];
                         edges.push((
                             from_m.clone(),
                             from_c.clone(),
@@ -417,7 +420,7 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                 .or_insert_with(|| entry.transformation.clone());
 
             for src in &entry.sources {
-                let label = transformation_label(&entry.transformation).to_string();
+                let final_label = transformation_label(&entry.transformation).to_string();
                 if src.model_path.is_empty() {
                     model_columns
                         .entry(src.table.clone())
@@ -428,22 +431,22 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                         src.column.clone(),
                         target_model.clone(),
                         entry.column.clone(),
-                        label,
+                        final_label,
                     ));
                 } else {
-                    let mut chain: Vec<(String, String)> = Vec::new();
-                    chain.push((src.table.clone(), src.column.clone()));
-                    for hop in src.model_path.iter().rev() {
-                        chain.push(hop.clone());
+                    let mut chain: Vec<(String, String, String)> = Vec::new();
+                    chain.push((src.table.clone(), src.column.clone(), String::new()));
+                    for (m, c, t) in src.model_path.iter().rev() {
+                        chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
                     }
-                    chain.push((target_model.clone(), entry.column.clone()));
+                    chain.push((target_model.clone(), entry.column.clone(), final_label));
 
-                    for (m, c) in &chain {
+                    for (m, c, _) in &chain {
                         model_columns.entry(m.clone()).or_default().insert(c.clone());
                     }
                     for window in chain.windows(2) {
-                        let (from_m, from_c) = &window[0];
-                        let (to_m, to_c) = &window[1];
+                        let (from_m, from_c, _) = &window[0];
+                        let (to_m, to_c, label) = &window[1];
                         edges.push((
                             from_m.clone(),
                             from_c.clone(),
@@ -632,12 +635,12 @@ fn transformation_label(t: &TransformationType) -> &'static str {
     }
 }
 
-fn format_source(table: &str, column: &str, model_path: &[(String, String)]) -> String {
+fn format_source(table: &str, column: &str, model_path: &[(String, String, TransformationType)]) -> String {
     if model_path.is_empty() {
         format!("{}.{}", table, column)
     } else {
         let mut parts = vec![format!("{}.{}", table, column)];
-        for (m, c) in model_path.iter().rev() {
+        for (m, c, _) in model_path.iter().rev() {
             parts.push(format!("{}.{}", m, c));
         }
         parts.join(" → ")
@@ -945,7 +948,7 @@ mod tests {
                 sources: vec![ColumnSource {
                     table: "raw".to_string(),
                     column: "id".to_string(),
-                    model_path: vec![("stg_orders".to_string(), "order_id".to_string())],
+                    model_path: vec![("stg_orders".to_string(), "order_id".to_string(), TransformationType::Direct)],
                 }],
             }],
             errors: vec![],

@@ -82,8 +82,8 @@ pub struct ColumnSource {
     pub table: String,
     /// Source column name
     pub column: String,
-    /// Cross-model path: (model_name, column_name) pairs for intermediate hops traversed to reach
-    /// this source. Ordered from the target model outward toward the leaf source.
+    /// Cross-model path: (model_name, column_name, transformation) triples for intermediate hops
+    /// traversed to reach this source. Ordered from the target model outward toward the leaf source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_path: Vec<(String, String)>,
+    pub model_path: Vec<(String, String, TransformationType)>,
 }

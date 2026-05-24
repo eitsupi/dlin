@@ -5,7 +5,7 @@ use polyglot_sql::DialectType;
 use crate::parser::manifest::Manifest;
 
 use super::{
-    ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage,
+    ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
     compute_column_lineage, find_model_by_name,
 };
 
@@ -109,7 +109,7 @@ fn resolve_source_recursive(
     errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
-    current_path: &[(String, String)],
+    current_path: &[(String, String, TransformationType)],
 ) {
     let model_name = upstream_models
         .get(&source.table)
@@ -139,9 +139,6 @@ fn resolve_source_recursive(
         }
     };
 
-    let mut extended_path = current_path.to_vec();
-    extended_path.push((model_name.clone(), source.column.clone()));
-
     if !ctx.in_memory_cache.contains_key(&model_name) {
         if ctx.computing.contains(&model_name) {
             let mut leaf = source.clone();
@@ -167,9 +164,19 @@ fn resolve_source_recursive(
         .iter()
         .find(|c| c.column == source.column)
     {
+        // Build extended_path with the transformation type now that we know it
+        let mut extended_path = current_path.to_vec();
+        extended_path.push((
+            model_name.clone(),
+            source.column.clone(),
+            col_entry.transformation.clone(),
+        ));
+
         if col_entry.sources.is_empty() {
+            // Leaf: the column exists at model_name but has no further sources.
+            // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
             let mut leaf = source.clone();
-            leaf.model_path = extended_path;
+            leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
             for s in &col_entry.sources {
@@ -183,9 +190,17 @@ fn resolve_source_recursive(
     } else {
         let on_demand =
             compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
+        // Use Unknown transformation for on-demand columns since we lack the col_entry
+        let mut extended_path = current_path.to_vec();
+        extended_path.push((
+            model_name.clone(),
+            source.column.clone(),
+            TransformationType::Unknown,
+        ));
         if on_demand.is_empty() {
+            // Leaf: column at model_name has no traceable sources — don't self-include in path.
             let mut leaf = source.clone();
-            leaf.model_path = extended_path;
+            leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
             let further_upstream = build_upstream_model_names(ctx.manifest, &model_name);

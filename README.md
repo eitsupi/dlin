@@ -313,15 +313,15 @@ flowchart LR
   n5_2 -->|"direct"|n0_2
   n2_3 -->|"direct"|n5_3
   n5_3 -->|"direct"|n0_3
-  n4_0 -->|"aggregation"|n7_0
-  n7_0 -->|"aggregation"|n1_1
+  n4_0 -->|"direct"|n7_0
+  n7_0 -->|"direct"|n1_1
   n1_1 -->|"aggregation"|n0_4
-  n3_0 -->|"aggregation"|n6_0
-  n6_0 -->|"aggregation"|n1_0
+  n3_0 -->|"direct"|n6_0
+  n6_0 -->|"direct"|n1_0
   n1_0 -->|"aggregation"|n0_5
 ```
 
-`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (`direct`). `lifetime_value` and `order_count` are aggregated through multiple intermediate models — each intermediate model is shown as its own subgraph, with individual edges connecting each hop in the lineage chain.
+`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (all `direct`). `lifetime_value` and `order_count` are aggregated at the `customers` model — the final edge to `customers` is labeled `aggregation`, while all upstream hops carry their actual transformation type (here `direct`, since staging and mart models pass columns through unchanged).
 
 Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
 
