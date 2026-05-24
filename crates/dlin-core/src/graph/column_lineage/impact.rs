@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use polyglot_sql::DialectType;
 use serde::Serialize;
@@ -33,8 +34,41 @@ pub struct ImpactedColumn {
 }
 
 type ImpactPath = Vec<(String, String, TransformationType)>;
-type VisitedPathNodes = HashSet<(String, String)>;
-type ImpactQueueItem = (String, String, ImpactPath, VisitedPathNodes);
+type NodeKey = (String, String);
+
+#[derive(Debug, Clone)]
+struct PathNode {
+    hop: (String, String, TransformationType),
+    parent: Option<Rc<PathNode>>,
+}
+
+#[derive(Debug, Clone)]
+struct VisitedNode {
+    key: NodeKey,
+    parent: Option<Rc<VisitedNode>>,
+}
+
+type ImpactQueueItem = (String, String, Option<Rc<PathNode>>, Rc<VisitedNode>);
+
+fn visited_contains(mut cursor: Option<&Rc<VisitedNode>>, key: &NodeKey) -> bool {
+    while let Some(node) = cursor {
+        if &node.key == key {
+            return true;
+        }
+        cursor = node.parent.as_ref();
+    }
+    false
+}
+
+fn materialize_path(mut cursor: Option<&Rc<PathNode>>) -> ImpactPath {
+    let mut path = Vec::new();
+    while let Some(node) = cursor {
+        path.push(node.hop.clone());
+        cursor = node.parent.as_ref();
+    }
+    path.reverse();
+    path
+}
 
 pub fn compute_column_impact(
     manifest: &Manifest,
@@ -70,16 +104,14 @@ pub fn compute_column_impact(
     // Each queue entry carries its own path-local set of visited (uid, col) pairs.
     // This allows a node to be processed once per unique path leading to it, while
     // still preventing cycles within any single path.
-    let mut initial_path_nodes: VisitedPathNodes = HashSet::new();
-    initial_path_nodes.insert((initial_uid.clone(), column_name.to_string()));
-    let mut queue: Vec<ImpactQueueItem> = vec![(
-        initial_uid,
-        column_name.to_string(),
-        vec![],
-        initial_path_nodes,
-    )];
+    let initial_visited = Rc::new(VisitedNode {
+        key: (initial_uid.clone(), column_name.to_string()),
+        parent: None,
+    });
+    let mut queue: Vec<ImpactQueueItem> =
+        vec![(initial_uid, column_name.to_string(), None, initial_visited)];
 
-    while let Some((source_uid, source_column, current_path, path_nodes)) = queue.pop() {
+    while let Some((source_uid, source_column, current_path, visited_nodes)) = queue.pop() {
         let source_name = manifest
             .nodes
             .get(&source_uid)
@@ -109,7 +141,7 @@ pub fn compute_column_impact(
 
             for entry in &lineage.columns {
                 let target_key = (dep_uid.clone(), entry.column.clone());
-                if path_nodes.contains(&target_key) {
+                if visited_contains(Some(&visited_nodes), &target_key) {
                     continue;
                 }
 
@@ -120,24 +152,33 @@ pub fn compute_column_impact(
                 });
 
                 if references_source {
-                    let mut path = current_path.clone();
-                    path.push((
-                        dep_name.clone(),
-                        entry.column.clone(),
-                        entry.transformation.clone(),
-                    ));
+                    let next_path = Rc::new(PathNode {
+                        hop: (
+                            dep_name.clone(),
+                            entry.column.clone(),
+                            entry.transformation.clone(),
+                        ),
+                        parent: current_path.clone(),
+                    });
 
                     impacted.push(ImpactedColumn {
                         unique_id: dep_uid.clone(),
                         model: dep_name.clone(),
                         column: entry.column.clone(),
                         transformation: entry.transformation.clone(),
-                        model_path: path.clone(),
+                        model_path: materialize_path(Some(&next_path)),
                     });
 
-                    let mut new_path_nodes = path_nodes.clone();
-                    new_path_nodes.insert(target_key);
-                    queue.push((dep_uid.clone(), entry.column.clone(), path, new_path_nodes));
+                    let next_visited = Rc::new(VisitedNode {
+                        key: target_key,
+                        parent: Some(visited_nodes.clone()),
+                    });
+                    queue.push((
+                        dep_uid.clone(),
+                        entry.column.clone(),
+                        Some(next_path),
+                        next_visited,
+                    ));
                 }
             }
         }
