@@ -832,6 +832,9 @@ fn run_column_lineage_command(
         ColumnOutputFormat::Mermaid => {
             render::column_graph::render_column_graph_mermaid(&reports);
         }
+        ColumnOutputFormat::Dot => {
+            render::column_graph::render_column_graph_dot(&reports);
+        }
     }
 
     cache.save();
@@ -918,6 +921,9 @@ fn run_column_impact_command(
         }
         ColumnOutputFormat::Mermaid => {
             render::column_graph::render_column_impact_mermaid(&reports);
+        }
+        ColumnOutputFormat::Dot => {
+            render::column_graph::render_column_impact_dot(&reports);
         }
     }
 
