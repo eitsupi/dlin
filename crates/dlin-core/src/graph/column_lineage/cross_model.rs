@@ -109,7 +109,7 @@ fn resolve_source_recursive(
     errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
-    current_path: &[String],
+    current_path: &[(String, String)],
 ) {
     let model_name = upstream_models
         .get(&source.table)
@@ -140,7 +140,7 @@ fn resolve_source_recursive(
     };
 
     let mut extended_path = current_path.to_vec();
-    extended_path.push(model_name.clone());
+    extended_path.push((model_name.clone(), source.column.clone()));
 
     if !ctx.in_memory_cache.contains_key(&model_name) {
         if ctx.computing.contains(&model_name) {
