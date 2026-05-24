@@ -97,11 +97,6 @@ pub fn compute_column_impact(
             }
 
             for entry in &lineage.columns {
-                let pair = (dep_uid.clone(), entry.column.clone());
-                if visited.contains(&pair) {
-                    continue;
-                }
-
                 let references_source = entry.sources.iter().any(|s| {
                     let table_matches =
                         s.table == source_name || normalize_table_name(&s.table) == source_name;
@@ -109,8 +104,6 @@ pub fn compute_column_impact(
                 });
 
                 if references_source {
-                    visited.insert(pair);
-
                     let mut path = current_path.clone();
                     path.push((
                         dep_name.clone(),
@@ -126,7 +119,13 @@ pub fn compute_column_impact(
                         model_path: path.clone(),
                     });
 
-                    queue.push((dep_uid.clone(), entry.column.clone(), path));
+                    // Only queue for BFS expansion once per (model, column) to avoid
+                    // exponential expansion, but always record every discovered path above.
+                    let pair = (dep_uid.clone(), entry.column.clone());
+                    if !visited.contains(&pair) {
+                        visited.insert(pair);
+                        queue.push((dep_uid.clone(), entry.column.clone(), path));
+                    }
                 }
             }
         }

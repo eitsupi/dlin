@@ -804,7 +804,7 @@ Output format (-o/--output):
       sources[]
         table         source model or raw table name
         column        source column name
-        model_path[]  intermediate [model, column] pairs traversed (omitted if empty)
+        model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
     errors[]    parse or resolution errors (non-empty → exit code 1)
   plain           human-readable text, one model per block
   mermaid         Mermaid flowchart (LR) with subgraphs per model

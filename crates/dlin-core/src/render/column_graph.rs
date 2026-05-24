@@ -66,7 +66,8 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 width = col_width
             )?;
             for src in entry.sources.iter().skip(1) {
-                let src_str = format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
+                let src_str =
+                    format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
                 writeln!(
                     w,
                     "{}  {} ({})",
@@ -137,7 +138,10 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                     chain.push((target_model.clone(), entry.column.clone(), final_label));
 
                     for (m, c, _) in &chain {
-                        model_columns.entry(m.clone()).or_default().insert(c.clone());
+                        model_columns
+                            .entry(m.clone())
+                            .or_default()
+                            .insert(c.clone());
                     }
                     for window in chain.windows(2) {
                         let (from_m, from_c, _) = &window[0];
@@ -315,7 +319,10 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
             }
 
             for (m, c, _) in &chain {
-                model_columns.entry(m.clone()).or_default().insert(c.clone());
+                model_columns
+                    .entry(m.clone())
+                    .or_default()
+                    .insert(c.clone());
             }
             for window in chain.windows(2) {
                 let (from_m, from_c, _) = &window[0];
@@ -440,7 +447,10 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                     chain.push((target_model.clone(), entry.column.clone(), final_label));
 
                     for (m, c, _) in &chain {
-                        model_columns.entry(m.clone()).or_default().insert(c.clone());
+                        model_columns
+                            .entry(m.clone())
+                            .or_default()
+                            .insert(c.clone());
                     }
                     for window in chain.windows(2) {
                         let (from_m, from_c, _) = &window[0];
@@ -500,7 +510,10 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
             }
 
             for (m, c, _) in &chain {
-                model_columns.entry(m.clone()).or_default().insert(c.clone());
+                model_columns
+                    .entry(m.clone())
+                    .or_default()
+                    .insert(c.clone());
             }
 
             for window in chain.windows(2) {
@@ -637,7 +650,11 @@ fn transformation_label(t: &TransformationType) -> &'static str {
     }
 }
 
-fn format_source(table: &str, column: &str, model_path: &[(String, String, TransformationType)]) -> String {
+fn format_source(
+    table: &str,
+    column: &str,
+    model_path: &[(String, String, TransformationType)],
+) -> String {
     if model_path.is_empty() {
         format!("{}.{}", table, column)
     } else {
@@ -831,7 +848,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec![("orders".to_string(), "order_id".to_string(), TransformationType::Direct)],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -849,8 +870,16 @@ mod tests {
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Direct,
                 model_path: vec![
-                    ("orders".to_string(), "order_id".to_string(), TransformationType::Direct),
-                    ("customers".to_string(), "customer_order_id".to_string(), TransformationType::Direct),
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
                 ],
             }],
             errors: vec![],
@@ -868,7 +897,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec![("orders".to_string(), "order_id".to_string(), TransformationType::Direct)],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -886,8 +919,16 @@ mod tests {
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Direct,
                 model_path: vec![
-                    ("orders".to_string(), "order_id".to_string(), TransformationType::Direct),
-                    ("customers".to_string(), "customer_order_id".to_string(), TransformationType::Direct),
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
                 ],
             }],
             errors: vec![],
@@ -956,7 +997,11 @@ mod tests {
                 sources: vec![ColumnSource {
                     table: "raw".to_string(),
                     column: "id".to_string(),
-                    model_path: vec![("stg_orders".to_string(), "order_id".to_string(), TransformationType::Direct)],
+                    model_path: vec![(
+                        "stg_orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    )],
                 }],
             }],
             errors: vec![],
@@ -974,7 +1019,11 @@ mod tests {
                 model: "orders".to_string(),
                 column: "order_id".to_string(),
                 transformation: TransformationType::Direct,
-                model_path: vec![("orders".to_string(), "order_id".to_string(), TransformationType::Direct)],
+                model_path: vec![(
+                    "orders".to_string(),
+                    "order_id".to_string(),
+                    TransformationType::Direct,
+                )],
             }],
             errors: vec![],
         };
@@ -992,8 +1041,16 @@ mod tests {
                 column: "customer_order_id".to_string(),
                 transformation: TransformationType::Expression,
                 model_path: vec![
-                    ("orders".to_string(), "order_id".to_string(), TransformationType::Direct),
-                    ("customers".to_string(), "customer_order_id".to_string(), TransformationType::Expression),
+                    (
+                        "orders".to_string(),
+                        "order_id".to_string(),
+                        TransformationType::Direct,
+                    ),
+                    (
+                        "customers".to_string(),
+                        "customer_order_id".to_string(),
+                        TransformationType::Expression,
+                    ),
                 ],
             }],
             errors: vec![],

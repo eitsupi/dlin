@@ -399,7 +399,11 @@ fn test_cross_model_two_hops() {
         src.model_path
     );
     // orders should come before stg_orders in the path (closer to target)
-    let orders_pos = src.model_path.iter().position(|(m, _, _)| m == "orders").unwrap();
+    let orders_pos = src
+        .model_path
+        .iter()
+        .position(|(m, _, _)| m == "orders")
+        .unwrap();
     let stg_pos = src
         .model_path
         .iter()
