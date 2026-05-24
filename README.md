@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eitsupi/dlin)
 
-dbt model lineage CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json`.
+dbt model lineage CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json` (for model-level lineage).
 
 Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
 
@@ -236,9 +236,9 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 ## Column-level lineage (Experimental)
 
 > [!WARNING]
-> Column-level lineage depends on [polyglot-sql](https://github.com/tobilg/polyglot) for SQL parsing. Coverage varies by SQL complexity and dialect. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may not resolve correctly. Results should be treated as best-effort.
+> Column-level lineage depends on [polyglot-sql](https://github.com/tobilg/polyglot) for SQL parsing. Coverage varies by SQL complexity and dialect. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may not resolve correctly.
 
-`dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json` — run `dbt compile` first.
+`dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json`. Run `dbt compile` first.
 
 ```sh
 # Where does each output column of orders come from?
@@ -260,7 +260,7 @@ dlin check-manifest && dlin column upstream orders
 
 ### Column upstream
 
-Traces backward from a model's output columns to their raw source columns across the full DAG.
+Traces each output column of a model back to its raw source columns.
 
 ```sh
 dlin column upstream customers -o mermaid
@@ -322,7 +322,7 @@ Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cas
 
 ### Column downstream
 
-Traces forward from a specific column to all dependent models and columns.
+Traces a column forward to all downstream models and columns that depend on it.
 
 ```sh
 dlin column downstream stg_orders --column order_id -o mermaid
@@ -344,7 +344,7 @@ flowchart LR
   n2_0 -->|"direct"|n1_0
 ```
 
-`stg_orders.order_id` propagates directly into both `orders.order_id` and `order_enriched.order_id`.
+`stg_orders.order_id` flows into both `orders.order_id` and `order_enriched.order_id`.
 
 ### Known limitations
 
@@ -391,7 +391,7 @@ dlin graph --node-type model,source   # filter by node type
 
 ## Data sources
 
-dlin aims to work without `dbt compile` (column-level lineage being the exception — it always requires `manifest.json`). By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
+dlin aims to work without `dbt compile` (except for column-level lineage, which always requires `manifest.json`). By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
 
 **SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed. Generic tests (`not_null`, `unique`, `relationships`, etc.) are inferred from YAML schema declarations.
 
