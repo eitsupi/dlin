@@ -60,9 +60,11 @@ pub fn compute_column_impact(
 
     let mut impacted = Vec::new();
     let mut errors = Vec::new();
-    let mut visited: HashSet<(String, String)> = HashSet::new();
+    // Track traversed edges (from_uid, from_col, to_uid, to_col) rather than visited nodes.
+    // This allows reconverging DAGs to record all paths while preventing cycles: each unique
+    // edge is expanded at most once, so a cycle can never produce a new edge to traverse.
+    let mut visited: HashSet<(String, String, String, String)> = HashSet::new();
     let initial_uid = initial_node.unique_id.clone();
-    visited.insert((initial_uid.clone(), column_name.to_string()));
     let mut lineage_cache: HashMap<String, super::ModelColumnLineage> = HashMap::new();
 
     let mut queue: Vec<(String, String, Vec<(String, String, TransformationType)>)> =
@@ -119,11 +121,14 @@ pub fn compute_column_impact(
                         model_path: path.clone(),
                     });
 
-                    // Only queue for BFS expansion once per (model, column) to avoid
-                    // exponential expansion, but always record every discovered path above.
-                    let pair = (dep_uid.clone(), entry.column.clone());
-                    if !visited.contains(&pair) {
-                        visited.insert(pair);
+                    let edge = (
+                        source_uid.clone(),
+                        source_column.clone(),
+                        dep_uid.clone(),
+                        entry.column.clone(),
+                    );
+                    if !visited.contains(&edge) {
+                        visited.insert(edge);
                         queue.push((dep_uid.clone(), entry.column.clone(), path));
                     }
                 }
