@@ -295,12 +295,62 @@ fn test_column_impact_reconverging_dag_multi_path() {
     assert!(
         has_left,
         "one mart_model.x path should pass through left_model, paths: {:?}",
-        mart_entries.iter().map(|ic| &ic.model_path).collect::<Vec<_>>()
+        mart_entries
+            .iter()
+            .map(|ic| &ic.model_path)
+            .collect::<Vec<_>>()
     );
     assert!(
         has_right,
         "one mart_model.x path should pass through right_model, paths: {:?}",
-        mart_entries.iter().map(|ic| &ic.model_path).collect::<Vec<_>>()
+        mart_entries
+            .iter()
+            .map(|ic| &ic.model_path)
+            .collect::<Vec<_>>()
+    );
+
+    // dashboard_model.x must also appear at least twice, preserving both upstream paths
+    let dashboard_entries: Vec<_> = result
+        .impacted_columns
+        .iter()
+        .filter(|ic| ic.model == "dashboard_model" && ic.column == "x")
+        .collect();
+    assert!(
+        dashboard_entries.len() >= 2,
+        "dashboard_model.x should appear for each upstream path, got {} entries. impacted: {:?}",
+        dashboard_entries.len(),
+        result.impacted_columns
+    );
+
+    // The two dashboard_model.x entries must have distinct model_paths
+    assert!(
+        dashboard_entries[0].model_path != dashboard_entries[1].model_path,
+        "dashboard_model.x entries should have distinct model_paths, both are: {:?}",
+        dashboard_entries[0].model_path
+    );
+
+    // One dashboard path passes through left_model, the other through right_model
+    let dashboard_has_left = dashboard_entries
+        .iter()
+        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "left_model"));
+    let dashboard_has_right = dashboard_entries
+        .iter()
+        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "right_model"));
+    assert!(
+        dashboard_has_left,
+        "one dashboard_model.x path should pass through left_model, paths: {:?}",
+        dashboard_entries
+            .iter()
+            .map(|ic| &ic.model_path)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        dashboard_has_right,
+        "one dashboard_model.x path should pass through right_model, paths: {:?}",
+        dashboard_entries
+            .iter()
+            .map(|ic| &ic.model_path)
+            .collect::<Vec<_>>()
     );
 }
 
