@@ -184,7 +184,22 @@ pub fn compute_column_impact(
         }
     }
 
-    impacted.sort_by(|a, b| (&a.unique_id, &a.column).cmp(&(&b.unique_id, &b.column)));
+    impacted.sort_by(|a, b| {
+        (
+            &a.unique_id,
+            &a.model,
+            &a.column,
+            &a.transformation,
+            &a.model_path,
+        )
+            .cmp(&(
+                &b.unique_id,
+                &b.model,
+                &b.column,
+                &b.transformation,
+                &b.model_path,
+            ))
+    });
     impacted.dedup();
 
     ColumnImpactReport {

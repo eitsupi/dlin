@@ -58,7 +58,7 @@ pub struct ColumnLineageEntry {
 }
 
 /// Classification of the transformation applied to produce an output column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum TransformationType {
     /// Direct column reference or rename (e.g. `SELECT id AS order_id`)
