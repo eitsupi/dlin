@@ -235,4 +235,73 @@ fn test_build_downstream_model_map() {
     );
 }
 
+/// Reconverging DAG regression: source.x → left.x/right.x → final.x → mart.x → dashboard.x
+///
+/// The path-local cycle guard allows each reconvergence point to appear once per upstream
+/// path. Without it, a global visited set would prevent final/mart/dashboard from being
+/// recorded via the second path, silently dropping half the impact.
+#[test]
+fn test_column_impact_reconverging_dag_multi_path() {
+    let manifest = make_reconverging_manifest();
+    let result = compute_column_impact(
+        &manifest,
+        "source_model",
+        "x",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    // final_model.x must appear at least twice — once via left_model, once via right_model
+    let final_entries: Vec<_> = result
+        .impacted_columns
+        .iter()
+        .filter(|ic| ic.model == "final_model" && ic.column == "x")
+        .collect();
+    assert!(
+        final_entries.len() >= 2,
+        "final_model.x should appear for each upstream path (left and right), \
+         got {} entries. impacted: {:?}",
+        final_entries.len(),
+        result.impacted_columns
+    );
+
+    // mart_model.x must also appear at least twice
+    let mart_entries: Vec<_> = result
+        .impacted_columns
+        .iter()
+        .filter(|ic| ic.model == "mart_model" && ic.column == "x")
+        .collect();
+    assert!(
+        mart_entries.len() >= 2,
+        "mart_model.x should appear for each upstream path, got {} entries. impacted: {:?}",
+        mart_entries.len(),
+        result.impacted_columns
+    );
+
+    // The two mart_model.x entries must have distinct model_paths
+    assert!(
+        mart_entries[0].model_path != mart_entries[1].model_path,
+        "mart_model.x entries should have distinct model_paths, both are: {:?}",
+        mart_entries[0].model_path
+    );
+
+    // One path passes through left_model, the other through right_model
+    let has_left = mart_entries
+        .iter()
+        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "left_model"));
+    let has_right = mart_entries
+        .iter()
+        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "right_model"));
+    assert!(
+        has_left,
+        "one mart_model.x path should pass through left_model, paths: {:?}",
+        mart_entries.iter().map(|ic| &ic.model_path).collect::<Vec<_>>()
+    );
+    assert!(
+        has_right,
+        "one mart_model.x path should pass through right_model, paths: {:?}",
+        mart_entries.iter().map(|ic| &ic.model_path).collect::<Vec<_>>()
+    );
+}
+
 // --- ColumnLineageCache tests ---
