@@ -260,7 +260,7 @@ dlin check-manifest && dlin column upstream orders
 
 ### Column upstream
 
-Traces each output column of a model back to its raw source columns.
+Traces each output column of a model back to its raw source columns, following references across intermediate models.
 
 ```sh
 dlin column upstream customers -o mermaid
@@ -268,55 +268,36 @@ dlin column upstream customers -o mermaid
 
 ```mermaid
 flowchart LR
-  subgraph sg0["c"]
+  subgraph sg0["customers"]
     n0_0["customer_id"]
     n0_1["email"]
     n0_2["first_name"]
     n0_3["last_name"]
+    n0_4["lifetime_value"]
+    n0_5["order_count"]
   end
-  subgraph sg1["customers"]
-    n1_0["customer_id"]
-    n1_1["email"]
-    n1_2["first_name"]
+  subgraph sg1["raw.customers"]
+    n1_0["email"]
+    n1_1["first_name"]
+    n1_2["id"]
     n1_3["last_name"]
-    n1_4["lifetime_value"]
-    n1_5["order_count"]
   end
-  subgraph sg2["o"]
-    n2_0["order_id"]
-    n2_1["total_amount"]
+  subgraph sg2["raw.orders"]
+    n2_0["id"]
+  end
+  subgraph sg3["raw.payments"]
+    n3_0["amount"]
   end
 
-  n0_0 -->|"direct"|n1_0
-  n0_1 -->|"direct"|n1_1
-  n0_2 -->|"direct"|n1_2
-  n0_3 -->|"direct"|n1_3
-  n2_1 -->|"aggregation"|n1_4
-  n2_0 -->|"aggregation"|n1_5
+  n1_2 -->|"direct (via stg_customers)"|n0_0
+  n1_0 -->|"direct (via stg_customers)"|n0_1
+  n1_1 -->|"direct (via stg_customers)"|n0_2
+  n1_3 -->|"direct (via stg_customers)"|n0_3
+  n3_0 -->|"aggregation (via orders → stg_payments)"|n0_4
+  n2_0 -->|"aggregation (via orders → stg_orders)"|n0_5
 ```
 
-`c` and `o` are SQL JOIN aliases (`stg_customers` and `orders` respectively). Columns like `customer_id` and `email` pass through unchanged (`direct`), while `lifetime_value` and `order_count` are derived via `SUM` and `COUNT` aggregations (`aggregation`).
-
-The model-level graph shows the same upstream models by their actual names:
-
-```sh
-dlin graph customers -u 1 -d 0 --node-type model --source manifest -o mermaid
-```
-
-```mermaid
-flowchart LR
-    model_customers["customers"]
-    model_orders["orders"]
-    model_stg_customers["stg_customers"]
-
-    model_orders -->|ref| model_customers
-    model_stg_customers -->|ref| model_customers
-
-    classDef model fill:#4A90D9,stroke:#333,color:#fff
-    class model_customers model
-    class model_orders model
-    class model_stg_customers model
-```
+`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (`direct`). `lifetime_value` and `order_count` are aggregated from raw source columns via multiple intermediate models, shown in the `via` path on each edge.
 
 Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
 
@@ -330,21 +311,25 @@ dlin column downstream stg_orders --column order_id -o mermaid
 
 ```mermaid
 flowchart LR
-  subgraph sg0["order_enriched"]
-    n0_0["order_id"]
+  subgraph sg0["customers"]
+    n0_0["order_count"]
   end
-  subgraph sg1["orders"]
+  subgraph sg1["order_enriched"]
     n1_0["order_id"]
   end
-  subgraph sg2["stg_orders"]
+  subgraph sg2["orders"]
     n2_0["order_id"]
   end
+  subgraph sg3["stg_orders"]
+    n3_0["order_id"]
+  end
 
-  n2_0 -->|"direct"|n0_0
-  n2_0 -->|"direct"|n1_0
+  n3_0 -->|"aggregation (via orders)"|n0_0
+  n3_0 -->|"direct"|n1_0
+  n3_0 -->|"direct"|n2_0
 ```
 
-`stg_orders.order_id` flows into both `orders.order_id` and `order_enriched.order_id`.
+`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`, and is also aggregated into `customers.order_count` via `orders`.
 
 ### Known limitations
 
