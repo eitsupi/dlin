@@ -174,11 +174,8 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
         if let Some((_alias, column)) = name.rsplit_once('.') {
             // polyglot-sql puts the SQL alias in node.name (e.g. "c.customer_id") and the
             // actual table name in source_name (e.g. "stg_customers"). Use source_name
-            // when it genuinely differs from the alias.
-            //
-            // Exception: if source_name is just a schema-qualified form of the alias
-            // (e.g. alias="stg_orders", source_name="shop.main.stg_orders"), the alias
-            // is already the correct short name and should be kept as-is.
+            // when it genuinely differs from the alias, including fully-qualified forms
+            // (e.g. "shop.main.stg_orders" when the SQL uses the short name "stg_orders").
             let table = if !node.source_name.is_empty() && node.source_name != _alias {
                 node.source_name.as_str()
             } else {
