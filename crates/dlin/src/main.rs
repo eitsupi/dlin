@@ -646,7 +646,7 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 #[cfg(not(tarpaulin_include))]
 #[allow(clippy::too_many_arguments)]
 fn run_column_lineage_command(
-    models: Vec<String>,
+    cli_models: Vec<String>,
     columns: &[String],
     output: &ColumnOutputFormat,
     dialect: Option<DialectType>,
@@ -658,16 +658,68 @@ fn run_column_lineage_command(
 ) -> Result<()> {
     let dialect = dialect.unwrap_or(DialectType::Generic);
 
-    if models.is_empty() {
-        anyhow::bail!("no model names provided (specify as arguments)");
-    }
-
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
-    let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-    let manifest = parser::manifest::load_manifest(&resolved)?;
+    // Merge CLI positional args and stdin before loading the manifest so that a missing
+    // manifest does not mask a "no model names provided" error from the user.
+    // raw_input_set captures every name the user supplied (CLI + stdin) so the model-only
+    // filter below preserves both explicit CLI args and explicit stdin names that happen to
+    // resolve to non-model DAG nodes — those should surface proper errors, not silent drops.
+    let stdin_lines = input::read_stdin_lines();
+    let mut raw_inputs = cli_models;
+    raw_inputs.extend(stdin_lines);
+
+    if raw_inputs.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments or via stdin)");
+    }
+
+    // Load manifest once — reused for both path resolution and column lineage analysis.
+    let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
+    let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
+
+    let models = if input::has_path_like_input(&raw_inputs) {
+        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
+        let project = parser::project::DbtProject::load(&project_dir)?;
+        let resolved_paths = project.resolve_paths(&project_dir);
+        // Snapshot all user-provided inputs (both bare names and file paths) before path
+        // expansion.  Path-like strings (e.g. "models/stg.sql") are stored verbatim and
+        // will never match the expanded model names produced by resolve_stdin_inputs, so
+        // they remain subject to the model-only filter below.  Bare names (e.g.
+        // "raw.orders") appear unchanged in both this set and all_resolved, which exempts
+        // them from the model-only filter so they reach the analyzer and surface a proper
+        // error rather than being silently dropped.
+        let raw_input_set: std::collections::HashSet<&str> =
+            raw_inputs.iter().map(|s| s.as_str()).collect();
+        let all_resolved =
+            input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
+        // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
+        // file-path expansion — column lineage only supports resource_type == "model".
+        // Analyses map to NodeType::Model in the DAG so we check the manifest directly.
+        let manifest_model_names: std::collections::HashSet<&str> = manifest
+            .nodes
+            .values()
+            .filter(|n| n.resource_type == "model")
+            .map(|n| n.name.as_str())
+            .collect();
+        all_resolved
+            .into_iter()
+            .filter(|name| {
+                raw_input_set.contains(name.as_str())
+                    || manifest_model_names.contains(name.as_str())
+                    || graph::filter::try_resolve_node_quiet(&dag, name).is_none()
+            })
+            .collect()
+    } else {
+        raw_inputs
+    };
+
+    if models.is_empty() {
+        anyhow::bail!("no model names provided (specify as arguments or via stdin)");
+    }
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()
