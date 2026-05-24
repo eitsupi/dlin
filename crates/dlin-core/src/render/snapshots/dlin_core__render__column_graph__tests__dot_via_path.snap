@@ -1,5 +1,6 @@
 ---
 source: crates/dlin-core/src/render/column_graph.rs
+assertion_line: 1014
 expression: "graph_dot(&[report])"
 ---
 digraph column_lineage {
@@ -22,7 +23,7 @@ digraph column_lineage {
     label="stg_orders";
     style=rounded;
 
-    "n2_0" [label="order_id", fillcolor="#D5D8DC"];
+    "n2_0" [label="order_id", fillcolor="#AED6F1"];
   }
 
   "n1_0" -> "n2_0" [label="direct"];

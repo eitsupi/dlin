@@ -443,6 +443,11 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                     chain.push((src.table.clone(), src.column.clone(), String::new()));
                     for (m, c, t) in src.model_path.iter().rev() {
                         chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+                        column_transformation
+                            .entry(m.clone())
+                            .or_default()
+                            .entry(c.clone())
+                            .or_insert_with(|| t.clone());
                     }
                     chain.push((target_model.clone(), entry.column.clone(), final_label));
 
