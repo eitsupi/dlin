@@ -512,6 +512,23 @@ pub fn collapse_intermediate(
     build_subgraph_with_transitive(graph, &keep)
 }
 
+/// Filter graph to nodes whose label or description contains the keyword (case-insensitive).
+pub fn filter_by_search(graph: &LineageGraph, keyword: &str) -> LineageGraph {
+    let keyword_lower = keyword.to_lowercase();
+    let keep: HashSet<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| {
+            let node = &graph[idx];
+            node.label.to_lowercase().contains(&keyword_lower)
+                || node
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| d.to_lowercase().contains(&keyword_lower))
+        })
+        .collect();
+    build_subgraph(graph, &keep)
+}
+
 /// BFS traversal collecting nodes up to max_depth levels away
 fn bfs_collect(
     graph: &LineageGraph,

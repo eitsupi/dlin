@@ -360,6 +360,13 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         );
     }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
+
+    // Apply search filter (keyword matches label or description)
+    let filtered = if let Some(keyword) = &args.search {
+        graph::filter::filter_by_search(&filtered, keyword)
+    } else {
+        filtered
+    };
     warn_sql_mode_test_limitation(
         &args.source,
         filtered
