@@ -36,6 +36,7 @@ fn make_test_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: stg_orders_cols,
             compiled_code: Some(
                 "select id as order_id, user_id as customer_id, order_date, status from raw.orders"
@@ -67,6 +68,7 @@ fn make_test_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: orders_cols,
             compiled_code: Some("select o.order_id, o.customer_id, p.amount as total_amount from stg_orders o left join stg_payments p on o.order_id = p.order_id".to_string()),
             database: None,
@@ -93,6 +95,7 @@ fn make_test_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: stg_payments_cols,
             compiled_code: Some(
                 "select id as payment_id, order_id, amount, payment_method from raw.payments"
@@ -123,6 +126,7 @@ fn make_test_manifest() -> Manifest {
             resource_type: "source".to_string(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: source_cols,
             database: None,
             schema: None,
@@ -160,6 +164,7 @@ fn make_cross_model_manifest() -> Manifest {
             resource_type: "source".to_string(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: raw_orders_cols,
             database: None,
             schema: None,
@@ -186,6 +191,7 @@ fn make_cross_model_manifest() -> Manifest {
             resource_type: "source".to_string(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: raw_payments_cols,
             database: None,
             schema: None,
@@ -215,6 +221,7 @@ fn make_cross_model_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: stg_orders_cols,
             compiled_code: Some(
                 "select id as order_id, user_id as customer_id, order_date, status from orders"
@@ -247,6 +254,7 @@ fn make_cross_model_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: stg_payments_cols,
             compiled_code: Some(
                 "select id as payment_id, order_id, amount, payment_method from payments"
@@ -282,6 +290,7 @@ fn make_cross_model_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: orders_cols,
             compiled_code: Some(
                 concat!(
@@ -321,6 +330,7 @@ fn make_cross_model_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: customers_cols,
             compiled_code: Some(
                 concat!(
@@ -355,6 +365,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: {
                 let mut cols = HashMap::new();
                 cols.insert(
@@ -384,6 +395,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: {
                 let mut cols = HashMap::new();
                 cols.insert(
@@ -413,6 +425,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: {
                 let mut cols = HashMap::new();
                 cols.insert(
@@ -508,6 +521,7 @@ fn make_diamond_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: raw_cols,
             compiled_code: Some("select x, y from source_table".to_string()),
             database: None,
@@ -537,6 +551,7 @@ fn make_diamond_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: shared_cols,
             compiled_code: Some("select x, y from raw_data".to_string()),
             database: None,
@@ -564,6 +579,7 @@ fn make_diamond_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: left_cols,
             compiled_code: Some("select x from shared".to_string()),
             database: None,
@@ -591,6 +607,7 @@ fn make_diamond_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: right_cols,
             compiled_code: Some("select y from shared".to_string()),
             database: None,
@@ -623,6 +640,7 @@ fn make_diamond_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: out_cols,
             compiled_code: Some(
                 "select l.x as lx, r.y as ry from left_model l join right_model r on 1=1"
@@ -663,6 +681,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             resource_type: "source".to_string(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: raw_cols,
             database: None,
             schema: None,
@@ -692,6 +711,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: scalar_cols,
             compiled_code: Some(
                 concat!(
@@ -730,6 +750,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: pt_upper_cols,
             compiled_code: Some(
                 concat!(
@@ -767,6 +788,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             config: ManifestConfig::default(),
             description: None,
             path: None,
+            original_file_path: None,
             columns: pt_coalesce_cols,
             compiled_code: Some(
                 concat!(
@@ -819,6 +841,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         config: ManifestConfig::default(),
         description: None,
         path: None,
+        original_file_path: None,
         columns: {
             let mut cols = HashMap::new();
             cols.insert(
