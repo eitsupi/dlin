@@ -1,0 +1,6 @@
+---
+source: crates/dlin-core/src/render/column_graph.rs
+expression: "impact_plain(&[report])"
+---
+raw.postcode (1 impacted column)
+  area  →  mart (direct, via stg_app.area [expression])

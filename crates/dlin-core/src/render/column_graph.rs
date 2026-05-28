@@ -966,6 +966,34 @@ mod tests {
     }
 
     #[test]
+    fn test_impact_plain_non_direct_intermediate() {
+        let report = ColumnImpactReport {
+            model: "raw".to_string(),
+            column: "postcode".to_string(),
+            impacted_columns: vec![ImpactedColumn {
+                unique_id: "model.mart".to_string(),
+                model: "mart".to_string(),
+                column: "area".to_string(),
+                transformation: TransformationType::Direct,
+                model_path: vec![
+                    (
+                        "stg_app".to_string(),
+                        "area".to_string(),
+                        TransformationType::Expression,
+                    ),
+                    (
+                        "mart".to_string(),
+                        "area".to_string(),
+                        TransformationType::Direct,
+                    ),
+                ],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(impact_plain(&[report]));
+    }
+
+    #[test]
     fn test_impact_plain_multi_hop() {
         let report = ColumnImpactReport {
             model: "stg_orders".to_string(),
