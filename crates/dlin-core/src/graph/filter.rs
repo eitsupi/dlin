@@ -527,10 +527,7 @@ pub fn filter_by_search(graph: &LineageGraph, patterns: &[regex::Regex]) -> Line
             let node = &graph[idx];
             patterns.iter().all(|re| {
                 re.is_match(&node.label)
-                    || node
-                        .description
-                        .as_deref()
-                        .is_some_and(|d| re.is_match(d))
+                    || node.description.as_deref().is_some_and(|d| re.is_match(d))
             })
         })
         .collect();

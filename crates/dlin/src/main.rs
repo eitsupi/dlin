@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use regex::RegexBuilder;
 use path_slash::PathExt as _;
 use polyglot_sql::{DialectType, Schema as _};
+use regex::RegexBuilder;
 
 mod cli;
 
