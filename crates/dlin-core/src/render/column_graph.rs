@@ -269,7 +269,13 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
                 let intermediate = &ic.model_path[..ic.model_path.len() - 1];
                 let parts: Vec<String> = intermediate
                     .iter()
-                    .map(|(m, c, _)| format!("{}.{}", m, c))
+                    .map(|(m, c, t)| {
+                        if matches!(t, TransformationType::Direct) {
+                            format!("{}.{}", m, c)
+                        } else {
+                            format!("{}.{} [{}]", m, c, transformation_label(t))
+                        }
+                    })
                     .collect();
                 format!(", via {}", parts.join(" → "))
             } else {
@@ -680,8 +686,12 @@ fn format_source(
         format!("{}.{}", table_display, column)
     } else {
         let mut parts = vec![format!("{}.{}", table_display, column)];
-        for (m, c, _) in model_path.iter().rev() {
-            parts.push(format!("{}.{}", m, c));
+        for (m, c, t) in model_path.iter().rev() {
+            if matches!(t, TransformationType::Direct) {
+                parts.push(format!("{}.{}", m, c));
+            } else {
+                parts.push(format!("{}.{} [{}]", m, c, transformation_label(t)));
+            }
         }
         parts.join(" → ")
     }
@@ -911,6 +921,30 @@ mod tests {
     }
 
     #[test]
+    fn test_plain_model_path_non_direct_annotation() {
+        let report = ModelColumnLineage {
+            model: "mart".to_string(),
+            traced_columns: 1,
+            total_columns: 1,
+            columns: vec![ColumnLineageEntry {
+                column: "area".to_string(),
+                transformation: TransformationType::Direct,
+                sources: vec![ColumnSource {
+                    table: "raw".to_string(),
+                    column: "postcode".to_string(),
+                    model_path: vec![(
+                        "stg_app".to_string(),
+                        "area".to_string(),
+                        TransformationType::Expression,
+                    )],
+                }],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(graph_plain(&[report]));
+    }
+
+    #[test]
     fn test_impact_plain() {
         let report = ColumnImpactReport {
             model: "stg_orders".to_string(),
@@ -925,6 +959,34 @@ mod tests {
                     "order_id".to_string(),
                     TransformationType::Direct,
                 )],
+            }],
+            errors: vec![],
+        };
+        insta::assert_snapshot!(impact_plain(&[report]));
+    }
+
+    #[test]
+    fn test_impact_plain_non_direct_intermediate() {
+        let report = ColumnImpactReport {
+            model: "raw".to_string(),
+            column: "postcode".to_string(),
+            impacted_columns: vec![ImpactedColumn {
+                unique_id: "model.mart".to_string(),
+                model: "mart".to_string(),
+                column: "area".to_string(),
+                transformation: TransformationType::Direct,
+                model_path: vec![
+                    (
+                        "stg_app".to_string(),
+                        "area".to_string(),
+                        TransformationType::Expression,
+                    ),
+                    (
+                        "mart".to_string(),
+                        "area".to_string(),
+                        TransformationType::Direct,
+                    ),
+                ],
             }],
             errors: vec![],
         };
