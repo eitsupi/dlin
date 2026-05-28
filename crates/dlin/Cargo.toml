@@ -18,6 +18,7 @@ path = "src/main.rs"
 dlin-core = { workspace = true, features = ["clap", "column-lineage"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
+regex = { workspace = true }
 serde_json = { workspace = true }
 path-slash = { workspace = true }
 polyglot-sql = { workspace = true }
