@@ -183,11 +183,16 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
     // Render subgraphs
     for (model, columns) in &model_columns {
         let midx = model_index[model.as_str()];
+        let display = if model.is_empty() {
+            "(literal)"
+        } else {
+            model.as_str()
+        };
         writeln!(
             w,
             "  subgraph sg{}[\"{}\"]",
             midx,
-            super::mermaid_escape(model)
+            super::mermaid_escape(display)
         )?;
         for (cidx, col) in columns.iter().enumerate() {
             writeln!(
@@ -358,11 +363,16 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
 
     for (model, columns) in &model_columns {
         let midx = model_index[model.as_str()];
+        let display = if model.is_empty() {
+            "(literal)"
+        } else {
+            model.as_str()
+        };
         writeln!(
             w,
             "  subgraph sg{}[\"{}\"]",
             midx,
-            super::mermaid_escape(model)
+            super::mermaid_escape(display)
         )?;
         for (cidx, col) in columns.iter().enumerate() {
             writeln!(
@@ -574,8 +584,13 @@ fn write_dot_column_graph<W: Write>(
 
     for (model, columns) in model_columns {
         let midx = model_index[model.as_str()];
+        let display = if model.is_empty() {
+            "(literal)"
+        } else {
+            model.as_str()
+        };
         writeln!(w, "  subgraph cluster_{midx} {{")?;
-        writeln!(w, r#"    label="{}";"#, dot_escape(model))?;
+        writeln!(w, r#"    label="{}";"#, dot_escape(display))?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for (cidx, col) in columns.iter().enumerate() {
@@ -660,10 +675,11 @@ fn format_source(
     column: &str,
     model_path: &[(String, String, TransformationType)],
 ) -> String {
+    let table_display = if table.is_empty() { "(literal)" } else { table };
     if model_path.is_empty() {
-        format!("{}.{}", table, column)
+        format!("{}.{}", table_display, column)
     } else {
-        let mut parts = vec![format!("{}.{}", table, column)];
+        let mut parts = vec![format!("{}.{}", table_display, column)];
         for (m, c, _) in model_path.iter().rev() {
             parts.push(format!("{}.{}", m, c));
         }
@@ -841,6 +857,57 @@ mod tests {
             )],
         );
         insta::assert_snapshot!(graph_mermaid(&[report]));
+    }
+
+    #[test]
+    fn test_mermaid_empty_table_literal_label() {
+        // table="" represents literal values (NULL, constants, UNNEST results).
+        // Mermaid syntax requires a non-empty subgraph label; "(literal)" is used as fallback.
+        let report = make_lineage(
+            "orders",
+            vec![("flag", TransformationType::Expression, vec![("", "NULL")])],
+        );
+        let output = graph_mermaid(&[report]);
+        assert!(
+            output.contains("(literal)"),
+            "expected '(literal)' fallback label, got:\n{output}"
+        );
+        assert!(
+            !output.contains(r#"subgraph sg0[""]"#),
+            "empty subgraph label must not appear in output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_plain_empty_table_literal_label() {
+        // table="" should render as "(literal).column" in plain output.
+        let report = make_lineage(
+            "orders",
+            vec![("flag", TransformationType::Expression, vec![("", "NULL")])],
+        );
+        let output = graph_plain(&[report]);
+        assert!(
+            output.contains("(literal).NULL"),
+            "expected '(literal).NULL' in plain output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_dot_empty_table_literal_label() {
+        // table="" should render as label="(literal)" in DOT output, not label="".
+        let report = make_lineage(
+            "orders",
+            vec![("flag", TransformationType::Expression, vec![("", "NULL")])],
+        );
+        let output = graph_dot(&[report]);
+        assert!(
+            output.contains("(literal)"),
+            "expected '(literal)' in DOT output, got:\n{output}"
+        );
+        assert!(
+            !output.contains(r#"label="";"#),
+            "empty DOT cluster label must not appear in output:\n{output}"
+        );
     }
 
     #[test]

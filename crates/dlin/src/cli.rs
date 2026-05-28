@@ -804,7 +804,9 @@ Output format (-o/--output):
                         conditional  CASE WHEN expression
                         unknown      could not classify
       sources[]
-        table         source model or raw table name
+        table         source model or raw table name; empty string (\"\") when the
+                      value originates from a literal (NULL, constant, UNNEST, etc.)
+                      — rendered as \"(literal)\" in plain/mermaid/dot outputs
         column        source column name
         model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
     errors[]    parse or resolution errors (non-empty → exit code 1)
