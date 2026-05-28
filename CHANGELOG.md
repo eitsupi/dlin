@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0-beta.2] - 2026-05-28
+
+### Features
+
+- Add `--search` option to `dlin list` for filtering nodes by name or description (#48)
+
+### Bug Fixes
+
+- Column lineage: fix stdin file path matching so `git diff --name-only | dlin column upstream` works correctly with real dbt projects (#52)
+- Column lineage: fix empty-table sources being displayed as blank instead of `(literal)` in mermaid, dot, and plain output (#49)
+- Column lineage: fix non-direct intermediate hops in cross-model lineage being silently dropped in plain text output (#51)
+- Column lineage: fix BigQuery `SAFE.function()` calls generating phantom `safe` column references (via polyglot-sql 0.4.2) (#50)
+
 ## [0.2.0-beta.1] - 2026-05-24
 
 ### Breaking Changes
