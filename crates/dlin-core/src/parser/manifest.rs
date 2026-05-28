@@ -33,6 +33,9 @@ pub struct ManifestNode {
     pub config: ManifestConfig,
     pub description: Option<String>,
     pub path: Option<String>,
+    /// Project-root-relative path (e.g. "models/staging/stg_orders.sql").
+    /// Present in dbt >=1.x manifests; preferred over `path` for file matching.
+    pub original_file_path: Option<String>,
     /// Column definitions keyed by column name
     #[serde(default)]
     pub columns: HashMap<String, ManifestColumn>,
@@ -56,6 +59,8 @@ pub struct ManifestSource {
     pub resource_type: String,
     pub description: Option<String>,
     pub path: Option<String>,
+    /// Project-root-relative path; preferred over `path` for file matching.
+    pub original_file_path: Option<String>,
     /// Column definitions keyed by column name
     #[serde(default)]
     pub columns: HashMap<String, ManifestColumn>,
@@ -205,12 +210,14 @@ impl Manifest {
     pub fn collect_file_paths(&self) -> BTreeSet<String> {
         let mut paths = BTreeSet::new();
         for node in self.nodes.values() {
-            if let Some(ref p) = node.path {
+            let p = node.original_file_path.as_ref().or(node.path.as_ref());
+            if let Some(p) = p {
                 paths.insert(p.clone());
             }
         }
         for source in self.sources.values() {
-            if let Some(ref p) = source.path {
+            let p = source.original_file_path.as_ref().or(source.path.as_ref());
+            if let Some(p) = p {
                 paths.insert(p.clone());
             }
         }
@@ -262,7 +269,11 @@ fn add_source_nodes(
             unique_id: simple_id.clone(),
             label,
             node_type: NodeType::Source,
-            file_path: source.path.as_ref().map(|p| p.into()),
+            file_path: source
+                .original_file_path
+                .as_ref()
+                .or(source.path.as_ref())
+                .map(|p| p.into()),
             description: non_empty_string(&source.description),
             materialization: None,
             tags: vec![],
@@ -292,7 +303,11 @@ fn add_regular_nodes(
             unique_id: simple_id.clone(),
             label: node.name.clone(),
             node_type,
-            file_path: node.path.as_ref().map(|p| p.into()),
+            file_path: node
+                .original_file_path
+                .as_ref()
+                .or(node.path.as_ref())
+                .map(|p| p.into()),
             description: non_empty_string(&node.description),
             materialization: node.config.materialized.clone(),
             tags: node.config.tags.clone(),
@@ -516,6 +531,7 @@ mod tests {
                     },
                     description: Some("Staged orders".to_string()),
                     path: Some("models/staging/stg_orders.sql".to_string()),
+                    original_file_path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
                     database: None,
@@ -531,6 +547,7 @@ mod tests {
                     resource_type: "source".to_string(),
                     description: Some("Raw orders table".to_string()),
                     path: Some("models/staging/schema.yml".to_string()),
+                    original_file_path: None,
                     columns: HashMap::new(),
                     database: None,
                     schema: None,
@@ -578,6 +595,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    original_file_path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
                     database: None,
@@ -698,6 +716,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("seeds/countries.csv".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -717,6 +736,7 @@ mod tests {
                         },
                         description: None,
                         path: Some("snapshots/snap_orders.sql".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -758,6 +778,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -776,6 +797,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("tests/assert_positive.sql".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -832,6 +854,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    original_file_path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
                     database: None,
@@ -863,6 +886,7 @@ mod tests {
                     },
                     description: None,
                     path: None,
+                    original_file_path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
                     database: None,
@@ -935,6 +959,42 @@ mod tests {
     }
 
     #[test]
+    fn test_original_file_path_preferred_over_path() {
+        // dbt >= 1.x sets path to the models-dir-relative path (e.g. "staging/stg_orders.sql")
+        // and original_file_path to the project-root-relative path ("models/staging/stg_orders.sql").
+        // resolve_sql_to_label strips the project root and compares against file_path, so
+        // original_file_path must win when both are present.
+        let manifest = Manifest {
+            nodes: HashMap::from([(
+                "model.proj.stg_orders".to_string(),
+                ManifestNode {
+                    unique_id: "model.proj.stg_orders".to_string(),
+                    name: "stg_orders".to_string(),
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn::default(),
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: Some("staging/stg_orders.sql".to_string()),
+                    original_file_path: Some("models/staging/stg_orders.sql".to_string()),
+                    columns: HashMap::new(),
+                    compiled_code: None,
+                    database: None,
+                    schema: None,
+                },
+            )]),
+            sources: HashMap::new(),
+            exposures: HashMap::new(),
+        };
+
+        let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
+        let node = &graph[graph.node_indices().next().unwrap()];
+        assert_eq!(
+            node.file_path.as_ref().map(|p| p.to_str().unwrap()),
+            Some("models/staging/stg_orders.sql")
+        );
+    }
+
+    #[test]
     fn test_build_graph_analysis_maps_to_model() {
         let manifest = Manifest {
             nodes: HashMap::from([(
@@ -947,6 +1007,7 @@ mod tests {
                     config: ManifestConfig::default(),
                     description: None,
                     path: None,
+                    original_file_path: None,
                     columns: HashMap::new(),
                     compiled_code: None,
                     database: None,
@@ -982,6 +1043,7 @@ mod tests {
                         },
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1000,6 +1062,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1024,6 +1087,7 @@ mod tests {
                         },
                         description: Some("Order fact table".to_string()),
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1041,6 +1105,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         database: None,
                         schema: None,
@@ -1056,6 +1121,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         database: None,
                         schema: None,
@@ -1135,6 +1201,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("models/staging/stg_orders.sql".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1151,6 +1218,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: Some("models/marts/orders.sql".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1167,6 +1235,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
@@ -1183,6 +1252,7 @@ mod tests {
                     resource_type: "source".to_string(),
                     description: None,
                     path: Some("models/staging/schema.yml".to_string()),
+                    original_file_path: None,
                     columns: HashMap::new(),
                     database: None,
                     schema: None,
@@ -1216,6 +1286,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         database: None,
                         schema: None,
@@ -1231,6 +1302,7 @@ mod tests {
                         resource_type: "source".to_string(),
                         description: None,
                         path: Some("models/staging/schema.yml".to_string()),
+                        original_file_path: None,
                         columns: HashMap::new(),
                         database: None,
                         schema: None,
@@ -1273,6 +1345,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: Some("select * from raw.orders".to_string()),
                         database: None,
@@ -1289,6 +1362,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: Some(
                             "select count(*) from orders where id is null".to_string(),
@@ -1307,6 +1381,7 @@ mod tests {
                         config: ManifestConfig::default(),
                         description: None,
                         path: None,
+                        original_file_path: None,
                         columns: HashMap::new(),
                         compiled_code: None,
                         database: None,
