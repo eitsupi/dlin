@@ -49,6 +49,7 @@ Examples:
   dlin graph orders -u 2 -d 1                      # orders with 2 upstream, 1 downstream
   dlin graph -o json --json-full                   # JSON with all fields
   dlin list -o json                                # List all node names as JSON
+  dlin list orders -o json --json-full             # Model details: path, description, columns, materialization
   dlin list orders stg_orders -o json              # List specific models as JSON
   dlin impact orders -o json                       # Downstream impact analysis
   dlin summary                                     # Project overview (node counts, etc.)
