@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
+use regex::RegexBuilder;
 use path_slash::PathExt as _;
 use polyglot_sql::{DialectType, Schema as _};
 
@@ -361,12 +362,18 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     }
     let filtered = graph::filter::filter_output_node_types(&filtered, &type_names, false);
 
-    // Apply search filter (keyword matches label or description)
-    let filtered = if let Some(keyword) = &args.search {
-        graph::filter::filter_by_search(&filtered, keyword)
-    } else {
-        filtered
-    };
+    // Compile search patterns and apply filter (AND across all patterns)
+    let search_patterns = args
+        .search
+        .iter()
+        .map(|p| {
+            RegexBuilder::new(p)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| anyhow::anyhow!("invalid --search pattern {:?}: {}", p, e))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let filtered = graph::filter::filter_by_search(&filtered, &search_patterns);
     warn_sql_mode_test_limitation(
         &args.source,
         filtered

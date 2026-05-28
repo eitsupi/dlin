@@ -512,18 +512,26 @@ pub fn collapse_intermediate(
     build_subgraph_with_transitive(graph, &keep)
 }
 
-/// Filter graph to nodes whose label or description contains the keyword (case-insensitive).
-pub fn filter_by_search(graph: &LineageGraph, keyword: &str) -> LineageGraph {
-    let keyword_lower = keyword.to_lowercase();
+/// Filter graph to nodes matching all of the given regex patterns (AND logic).
+///
+/// Each pattern is tested against the node's label and description (OR within a single pattern).
+/// A node is kept only if every pattern matches at least one of those fields.
+/// An empty slice returns the graph unchanged.
+pub fn filter_by_search(graph: &LineageGraph, patterns: &[regex::Regex]) -> LineageGraph {
+    if patterns.is_empty() {
+        return graph.clone();
+    }
     let keep: HashSet<NodeIndex> = graph
         .node_indices()
         .filter(|&idx| {
             let node = &graph[idx];
-            node.label.to_lowercase().contains(&keyword_lower)
-                || node
-                    .description
-                    .as_deref()
-                    .is_some_and(|d| d.to_lowercase().contains(&keyword_lower))
+            patterns.iter().all(|re| {
+                re.is_match(&node.label)
+                    || node
+                        .description
+                        .as_deref()
+                        .is_some_and(|d| re.is_match(d))
+            })
         })
         .collect();
     build_subgraph(graph, &keep)
@@ -2249,5 +2257,143 @@ mod tests {
 
         let filtered = filter_output_node_types(&g, &["source".into(), "model".into()], true);
         insta::assert_snapshot!(render_mermaid(&filtered));
+    }
+
+    // -- filter_by_search tests -----------------------------------------------
+
+    fn make_node_with_desc(unique_id: &str, label: &str, description: Option<&str>) -> NodeData {
+        NodeData {
+            unique_id: unique_id.into(),
+            label: label.into(),
+            node_type: NodeType::Model,
+            file_path: None,
+            description: description.map(|s| s.to_string()),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+        }
+    }
+
+    fn make_search_graph() -> LineageGraph {
+        let mut g = LineageGraph::new();
+        g.add_node(make_node_with_desc(
+            "model.stg_orders",
+            "stg_orders",
+            Some("Staging model for order data"),
+        ));
+        g.add_node(make_node_with_desc(
+            "model.stg_customers",
+            "stg_customers",
+            Some("Staging model for customer data"),
+        ));
+        g.add_node(make_node_with_desc(
+            "model.order_summary",
+            "order_summary",
+            None,
+        ));
+        g.add_node(make_node_with_desc("model.payments", "payments", None));
+        g
+    }
+
+    fn re(pattern: &str) -> regex::Regex {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_search_by_label() {
+        let g = make_search_graph();
+        let result = filter_by_search(&g, &[re("order")]);
+        let labels: HashSet<String> = result
+            .node_indices()
+            .map(|i| result[i].label.clone())
+            .collect();
+        assert!(labels.contains("stg_orders"));
+        assert!(labels.contains("order_summary"));
+        assert!(!labels.contains("stg_customers"));
+        assert!(!labels.contains("payments"));
+    }
+
+    #[test]
+    fn test_search_by_description() {
+        let g = make_search_graph();
+        // "customer" only appears in stg_customers description
+        let result = filter_by_search(&g, &[re("customer")]);
+        let labels: HashSet<String> = result
+            .node_indices()
+            .map(|i| result[i].label.clone())
+            .collect();
+        assert!(labels.contains("stg_customers"));
+        assert_eq!(result.node_count(), 1);
+    }
+
+    #[test]
+    fn test_search_case_insensitive() {
+        let g = make_search_graph();
+        let result_lower = filter_by_search(&g, &[re("staging")]);
+        let result_upper = filter_by_search(&g, &[re("STAGING")]);
+        let result_mixed = filter_by_search(&g, &[re("Staging")]);
+        assert_eq!(result_lower.node_count(), result_upper.node_count());
+        assert_eq!(result_lower.node_count(), result_mixed.node_count());
+        assert_eq!(result_lower.node_count(), 2); // stg_orders and stg_customers descriptions
+    }
+
+    #[test]
+    fn test_search_no_match() {
+        let g = make_search_graph();
+        let result = filter_by_search(&g, &[re("nonexistent_xyz")]);
+        assert_eq!(result.node_count(), 0);
+    }
+
+    #[test]
+    fn test_search_empty_patterns_returns_all() {
+        let g = make_search_graph();
+        let result = filter_by_search(&g, &[]);
+        assert_eq!(result.node_count(), g.node_count());
+    }
+
+    #[test]
+    fn test_search_multiple_patterns_and_logic() {
+        let g = make_search_graph();
+        // Both "stg" AND "order" must match — only stg_orders qualifies
+        let result = filter_by_search(&g, &[re("stg"), re("order")]);
+        let labels: HashSet<String> = result
+            .node_indices()
+            .map(|i| result[i].label.clone())
+            .collect();
+        assert_eq!(result.node_count(), 1);
+        assert!(labels.contains("stg_orders"));
+    }
+
+    #[test]
+    fn test_search_regex_alternation() {
+        let g = make_search_graph();
+        // OR via regex alternation: matches stg_orders, stg_customers, payments
+        let result = filter_by_search(&g, &[re("customer|payment")]);
+        let labels: HashSet<String> = result
+            .node_indices()
+            .map(|i| result[i].label.clone())
+            .collect();
+        assert!(labels.contains("stg_customers"));
+        assert!(labels.contains("payments"));
+        assert!(!labels.contains("stg_orders"));
+        assert!(!labels.contains("order_summary"));
+    }
+
+    #[test]
+    fn test_search_regex_pattern() {
+        let g = make_search_graph();
+        // Regex: labels starting with "stg_"
+        let result = filter_by_search(&g, &[re("^stg_")]);
+        let labels: HashSet<String> = result
+            .node_indices()
+            .map(|i| result[i].label.clone())
+            .collect();
+        assert!(labels.contains("stg_orders"));
+        assert!(labels.contains("stg_customers"));
+        assert_eq!(result.node_count(), 2);
     }
 }

@@ -50,7 +50,7 @@ Examples:
   dlin graph -o json --json-full                   # JSON with all fields
   dlin list -o json                                # List all node names as JSON
   dlin list orders -o json --json-full             # Model details: path, description, columns, materialization
-  dlin list --search shipping                      # Search models by name or description
+  dlin list --search shipping                      # Search models by name or description (regex)
   dlin list orders stg_orders -o json              # List specific models as JSON
   dlin impact orders -o json                       # Downstream impact analysis
   dlin summary                                     # Project overview (node counts, etc.)
@@ -1083,8 +1083,11 @@ Examples:
   # List models tagged 'finance'
   dlin list -s tag:finance
 
-  # Search models by name or description (case-insensitive)
+  # Search models by name or description (regex, case-insensitive)
   dlin list --search shipping
+  dlin list --search '^stg_'                     # models whose name starts with stg_
+  dlin list --search 'order|payment'             # OR: name/description contains either
+  dlin list --search staging --search customer   # AND: must match both patterns
   dlin list --search shipping -o json --json-full
 
   # Count models (combine with standard tools)
@@ -1140,9 +1143,31 @@ All selectors support glob patterns (*, **, ?, []):
     )]
     pub select: Option<String>,
 
-    /// Search keyword to filter nodes by name or description (case-insensitive substring)
-    #[arg(long, value_name = "KEYWORD")]
-    pub search: Option<String>,
+    /// Filter nodes by name or description using a regex pattern (case-insensitive; repeatable for AND)
+    #[arg(
+        long,
+        value_name = "PATTERN",
+        action = clap::ArgAction::Append,
+        long_help = "\
+Filter nodes whose name or description matches the regex pattern (case-insensitive).
+
+Matching rules:
+  - Tested against model name and description field (OR within a single pattern)
+  - Plain text works as a simple substring match
+  - Repeating --search applies AND logic: all patterns must match
+
+Regex syntax (Rust regex, https://docs.rs/regex):
+  order|payment   match nodes containing 'order' or 'payment'
+  ^stg_           match nodes whose name starts with 'stg_'
+  (?-i)Order      opt out of case-insensitivity for this pattern
+
+Examples:
+  dlin list --search shipping
+  dlin list --search '^stg_'
+  dlin list --search 'order|payment'
+  dlin list --search staging --search customer   # AND: must match both"
+    )]
+    pub search: Vec<String>,
 
     /// Filter output by node type (comma-separated)
     #[arg(
