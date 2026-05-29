@@ -133,11 +133,8 @@ pub fn compute_column_impact(
             let lineage = lineage_cache
                 .entry(dep_uid.clone())
                 .or_insert_with(|| compute_column_lineage(manifest, dep_uid, dialect, cache));
-            for err in &lineage.errors {
-                if !errors.contains(err) {
-                    errors.push(err.clone());
-                }
-            }
+
+            let mut found_on_path = false;
 
             for entry in &lineage.columns {
                 let target_key = (dep_uid.clone(), entry.column.clone());
@@ -152,6 +149,7 @@ pub fn compute_column_impact(
                 });
 
                 if references_source {
+                    found_on_path = true;
                     let next_path = Rc::new(PathNode {
                         hop: (
                             dep_name.clone(),
@@ -179,6 +177,17 @@ pub fn compute_column_impact(
                         Some(next_path),
                         next_visited,
                     ));
+                }
+            }
+
+            // Only propagate errors from models that are actually on the impact path.
+            // Models that are downstream in the DAG but have no column referencing the
+            // tracked source contribute noise errors unrelated to the current trace.
+            if found_on_path {
+                for err in &lineage.errors {
+                    if !errors.contains(err) {
+                        errors.push(err.clone());
+                    }
                 }
             }
         }
