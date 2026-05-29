@@ -354,4 +354,236 @@ fn test_column_impact_reconverging_dag_multi_path() {
     );
 }
 
+/// Build a manifest for testing that off-path model errors don't leak into the report:
+///
+///   source_model (col_x, col_y)
+///        |
+///   +----+------+
+///   |            |
+/// relevant_model  sibling_model
+///  (col_x)        (col_y, sibling_fail)
+///
+/// relevant_model: SQL = `SELECT col_x FROM source_model`
+///   → col_x resolves fine
+///
+/// sibling_model: SQL = `SELECT col_y FROM source_model`, YAML also has sibling_fail
+///   → col_y resolves, but sibling_fail is in YAML only → lineage error
+///
+/// When tracing source_model.col_x:
+/// - relevant_model.col_x is on path
+/// - sibling_model has no column referencing col_x → off path
+/// - sibling_model's errors (sibling_fail) should NOT appear in the report
+fn make_off_path_error_manifest() -> Manifest {
+    let mut nodes = HashMap::new();
+
+    // source_model: outputs col_x and col_y
+    let mut src_cols = HashMap::new();
+    for name in ["col_x", "col_y"] {
+        src_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    nodes.insert(
+        "model.proj.source_model".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.source_model".to_string(),
+            name: "source_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: src_cols,
+            compiled_code: Some("select col_x, col_y from raw_table".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+
+    // relevant_model: only col_x from source_model
+    let mut rel_cols = HashMap::new();
+    rel_cols.insert(
+        "col_x".to_string(),
+        ManifestColumn {
+            name: "col_x".to_string(),
+        },
+    );
+    nodes.insert(
+        "model.proj.relevant_model".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.relevant_model".to_string(),
+            name: "relevant_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec!["model.proj.source_model".to_string()],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: rel_cols,
+            compiled_code: Some("select col_x from source_model".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+
+    // sibling_model: col_y from source_model, plus sibling_fail in YAML (not in SQL)
+    let mut sib_cols = HashMap::new();
+    sib_cols.insert(
+        "col_y".to_string(),
+        ManifestColumn {
+            name: "col_y".to_string(),
+        },
+    );
+    sib_cols.insert(
+        "sibling_fail".to_string(),
+        ManifestColumn {
+            name: "sibling_fail".to_string(),
+        },
+    );
+    nodes.insert(
+        "model.proj.sibling_model".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.sibling_model".to_string(),
+            name: "sibling_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec!["model.proj.source_model".to_string()],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: sib_cols,
+            compiled_code: Some("select col_y from source_model".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+
+    Manifest {
+        nodes,
+        sources: HashMap::new(),
+        exposures: HashMap::new(),
+    }
+}
+
+#[test]
+fn test_column_impact_excludes_off_path_errors() {
+    let manifest = make_off_path_error_manifest();
+    let result = compute_column_impact(
+        &manifest,
+        "source_model",
+        "col_x",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    // relevant_model.col_x must be on the impact path
+    assert!(
+        result
+            .impacted_columns
+            .iter()
+            .any(|ic| ic.model == "relevant_model" && ic.column == "col_x"),
+        "relevant_model.col_x should be impacted, got: {:?}",
+        result.impacted_columns
+    );
+
+    // sibling_model is not on the path for col_x
+    assert!(
+        !result
+            .impacted_columns
+            .iter()
+            .any(|ic| ic.model == "sibling_model"),
+        "sibling_model should not be impacted, got: {:?}",
+        result.impacted_columns
+    );
+
+    // sibling_fail error (from off-path sibling_model) must not appear
+    let sibling_errors: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|e| e.what.contains("sibling_fail"))
+        .collect();
+    assert!(
+        sibling_errors.is_empty(),
+        "off-path errors from sibling_model should not appear in the impact report, \
+         got errors: {:?}",
+        result.errors
+    );
+}
+
+/// Downstream model with no compiled SQL: its NoCompiledCode error must appear in the
+/// impact report even though `found_on_path` is false (model-level failures are always
+/// propagated so users know the analysis is incomplete).
+#[test]
+fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream() {
+    let mut manifest = make_off_path_error_manifest();
+
+    // Add a model that depends on source_model but has no compiled_code.
+    // It references col_x (same column we track), but we can never confirm this
+    // because the model can't be analyzed.
+    let mut cols = std::collections::HashMap::new();
+    cols.insert(
+        "col_x".to_string(),
+        crate::parser::manifest::ManifestColumn {
+            name: "col_x".to_string(),
+        },
+    );
+    manifest.nodes.insert(
+        "model.proj.broken_downstream".to_string(),
+        crate::parser::manifest::ManifestNode {
+            unique_id: "model.proj.broken_downstream".to_string(),
+            name: "broken_downstream".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: vec!["model.proj.source_model".to_string()],
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: cols,
+            compiled_code: None, // no compiled SQL
+            database: None,
+            schema: None,
+        },
+    );
+
+    let result = compute_column_impact(
+        &manifest,
+        "source_model",
+        "col_x",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    // broken_downstream can't be analyzed, so its NoCompiledCode error must appear
+    let has_broken_error = result
+        .errors
+        .iter()
+        .any(|e| e.what.contains("broken_downstream"));
+    assert!(
+        has_broken_error,
+        "model-level errors from unanalyzable downstream models should appear in the report, \
+         got errors: {:?}",
+        result.errors
+    );
+    // But sibling_fail (ColumnNotFound from off-path sibling_model) must still be absent
+    let has_sibling_error = result
+        .errors
+        .iter()
+        .any(|e| e.what.contains("sibling_fail"));
+    assert!(
+        !has_sibling_error,
+        "ColumnNotFound from off-path model must not appear, got errors: {:?}",
+        result.errors
+    );
+}
+
 // --- ColumnLineageCache tests ---

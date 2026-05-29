@@ -133,11 +133,8 @@ pub fn compute_column_impact(
             let lineage = lineage_cache
                 .entry(dep_uid.clone())
                 .or_insert_with(|| compute_column_lineage(manifest, dep_uid, dialect, cache));
-            for err in &lineage.errors {
-                if !errors.contains(err) {
-                    errors.push(err.clone());
-                }
-            }
+
+            let mut found_on_path = false;
 
             for entry in &lineage.columns {
                 let target_key = (dep_uid.clone(), entry.column.clone());
@@ -152,6 +149,7 @@ pub fn compute_column_impact(
                 });
 
                 if references_source {
+                    found_on_path = true;
                     let next_path = Rc::new(PathNode {
                         hop: (
                             dep_name.clone(),
@@ -179,6 +177,18 @@ pub fn compute_column_impact(
                         Some(next_path),
                         next_visited,
                     ));
+                }
+            }
+
+            // ColumnNotFound errors are per-column noise: only include them when the model
+            // has at least one column confirmed on the impact path. Model-level failures
+            // (ParseFailure, NoCompiledCode, ColumnInferenceFailed) mean the model could
+            // not be analyzed at all, so they are always propagated — the path through
+            // that model may be incomplete and the user needs to know.
+            for err in &lineage.errors {
+                let is_column_level = err.kind == ColumnLineageErrorKind::ColumnNotFound;
+                if (!is_column_level || found_on_path) && !errors.contains(err) {
+                    errors.push(err.clone());
                 }
             }
         }
