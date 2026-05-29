@@ -560,6 +560,13 @@ fn run_impact_command(
         raw_inputs
     };
 
+    // Deduplicate while preserving order
+    let mut seen = HashSet::new();
+    let models: Vec<String> = models
+        .into_iter()
+        .filter(|m| seen.insert(m.clone()))
+        .collect();
+
     let reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
@@ -734,6 +741,13 @@ fn run_column_lineage_command(
     if models.is_empty() {
         anyhow::bail!("no model names provided (specify as arguments or via stdin)");
     }
+
+    // Deduplicate while preserving order
+    let mut seen = HashSet::new();
+    let models: Vec<String> = models
+        .into_iter()
+        .filter(|m| seen.insert(m.clone()))
+        .collect();
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()
