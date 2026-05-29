@@ -158,7 +158,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
-            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref());
+            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -328,7 +328,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
-            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref());
+            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -555,7 +555,7 @@ fn run_impact_command(
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
-            resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref());
+            resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref())?;
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -611,24 +611,37 @@ fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {
 ///
 /// In SQL mode, reuses the already-loaded `DbtProject` from `build_dag`.
 /// In manifest mode, tries to load `dbt_project.yml` for accurate path configuration,
-/// and falls back to the standard dbt directory layout when the file is absent.
+/// and falls back to the standard dbt directory layout only when the file is absent.
+/// A present-but-invalid `dbt_project.yml` is surfaced as an error.
 #[cfg(not(tarpaulin_include))]
 fn resolve_paths_for_path_input(
     source: SourceType,
     project_dir: &Path,
     project_opt: Option<&parser::project::DbtProject>,
-) -> parser::project::ResolvedPaths {
+) -> Result<parser::project::ResolvedPaths> {
     if let Some(project) = project_opt {
-        return project.resolve_paths(project_dir);
+        return Ok(project.resolve_paths(project_dir));
     }
     // project_opt is None in manifest mode (build_dag does not load DbtProject there).
-    // Try loading dbt_project.yml for accurate path config; fall back to defaults if absent.
+    // Try loading dbt_project.yml for accurate path config.
     if matches!(source, SourceType::Manifest) {
-        if let Ok(project) = parser::project::DbtProject::load(project_dir) {
-            return project.resolve_paths(project_dir);
+        match parser::project::DbtProject::load(project_dir) {
+            Ok(project) => return Ok(project.resolve_paths(project_dir)),
+            Err(e) => {
+                // Fall back to default paths only when the file is simply absent.
+                // A present-but-malformed file is a real config error: surface it.
+                let is_not_found = e
+                    .downcast_ref::<dlin_core::error::DbtLineageError>()
+                    .is_some_and(|de| {
+                        matches!(de, dlin_core::error::DbtLineageError::ProjectNotFound(_))
+                    });
+                if !is_not_found {
+                    return Err(e);
+                }
+            }
         }
     }
-    parser::project::ResolvedPaths::default_for(project_dir)
+    Ok(parser::project::ResolvedPaths::default_for(project_dir))
 }
 
 /// Validate that --source and --manifest-path flags are consistent.

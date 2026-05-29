@@ -2000,6 +2000,7 @@ mod manifest_only_mode {
     "model.test_project.stg_orders": {{
       "unique_id": "model.test_project.stg_orders",
       "name": "stg_orders",
+      "original_file_path": "models/stg_orders.sql",
       "resource_type": "model",
       "depends_on": {{"nodes": ["source.test_project.raw.orders"]}},
       "config": {{"materialized": "view", "tags": []}},
@@ -2008,6 +2009,7 @@ mod manifest_only_mode {
     "model.test_project.orders": {{
       "unique_id": "model.test_project.orders",
       "name": "orders",
+      "original_file_path": "models/orders.sql",
       "resource_type": "model",
       "depends_on": {{"nodes": ["model.test_project.stg_orders"]}},
       "config": {{"materialized": "table", "tags": []}},
@@ -2239,6 +2241,119 @@ mod manifest_only_mode {
         assert!(
             output.status.success(),
             "impact --source manifest should succeed without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("orders"),
+            "Should show downstream model 'orders': {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_graph_manifest_mode_path_like_input_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "models/stg_orders.sql",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "graph with path-like input should succeed in manifest mode without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let node_labels: Vec<&str> = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["label"].as_str())
+            .collect();
+        assert!(
+            node_labels.contains(&"stg_orders"),
+            "Should resolve models/stg_orders.sql to stg_orders node: {:?}",
+            node_labels
+        );
+    }
+
+    #[test]
+    fn test_list_manifest_mode_path_like_input_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "list",
+                "models/orders.sql",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "list with path-like input should succeed in manifest mode without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let node_labels: Vec<&str> = parsed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["label"].as_str())
+            .collect();
+        assert!(
+            node_labels.contains(&"orders"),
+            "Should resolve models/orders.sql to orders node: {:?}",
+            node_labels
+        );
+    }
+
+    #[test]
+    fn test_impact_manifest_mode_path_like_input_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "impact",
+                "models/stg_orders.sql",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "impact with path-like input should succeed in manifest mode without dbt_project.yml; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
