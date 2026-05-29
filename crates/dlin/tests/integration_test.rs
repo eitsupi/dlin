@@ -1206,6 +1206,39 @@ mod sql_mode_test_warning {
     }
 
     #[test]
+    fn test_impact_deduplicates_repeated_model_names() {
+        // When the same model name appears multiple times, the output must contain
+        // exactly one impact report per unique model name.
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "impact",
+                "customers",
+                "customers",
+                "-p",
+                fixture_dir().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "impact with duplicate model names should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            reports.len(),
+            1,
+            "duplicate model name should produce exactly one impact report; got: {:?}",
+            reports
+        );
+        assert_eq!(reports[0]["source_model"], "customers");
+    }
+
+    #[test]
     fn test_graph_warns_when_output_contains_tests() {
         // Default node types include test, so the warning should appear.
         let output = std::process::Command::new(binary_path())
@@ -1908,5 +1941,39 @@ models:
             "should have no errors for stg_accounts; got: {:?}",
             report["errors"]
         );
+    }
+
+    #[test]
+    fn test_column_upstream_deduplicates_repeated_model_names() {
+        // When the same model name appears multiple times (CLI args or stdin),
+        // the output must contain exactly one result object per unique model name.
+        let fixture = column_lineage_fixture_dir();
+        let output = std::process::Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "stg_orders",
+                "--project-dir",
+                fixture.to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "column upstream with duplicate model names should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reports: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            reports.len(),
+            1,
+            "duplicate model name should produce exactly one result; got: {:?}",
+            reports
+        );
+        assert_eq!(reports[0]["model"], "stg_orders");
     }
 }
