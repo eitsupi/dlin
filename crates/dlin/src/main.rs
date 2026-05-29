@@ -1050,8 +1050,9 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
             (name, 0, status)
         }
         SourceType::Sql => {
-            let project = project_opt
-                .ok_or_else(|| anyhow::anyhow!("internal error: DbtProject not available in sql mode"))?;
+            let project = project_opt.ok_or_else(|| {
+                anyhow::anyhow!("internal error: DbtProject not available in sql mode")
+            })?;
             let status =
                 check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
             let vars_count = project.vars.len();
