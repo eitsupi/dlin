@@ -138,6 +138,7 @@ fn make_test_manifest() -> Manifest {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -348,6 +349,7 @@ fn make_cross_model_manifest() -> Manifest {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -446,6 +448,7 @@ fn make_duplicate_name_manifest() -> Manifest {
         nodes,
         sources: HashMap::new(),
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -655,6 +658,7 @@ fn make_diamond_manifest() -> Manifest {
         nodes,
         sources: HashMap::new(),
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -808,6 +812,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 
@@ -919,6 +924,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         nodes,
         sources: HashMap::new(),
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 

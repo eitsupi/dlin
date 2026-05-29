@@ -1977,3 +1977,212 @@ models:
         assert_eq!(reports[0]["model"], "stg_orders");
     }
 }
+
+mod manifest_only_mode {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    /// Create a temp dir with only a manifest.json (no dbt_project.yml, no SQL files).
+    fn minimal_manifest_dir(project_name: Option<&str>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("target")).unwrap();
+
+        let metadata = match project_name {
+            Some(name) => format!(r#"{{"project_name": "{}"}}"#, name),
+            None => "{}".to_string(),
+        };
+
+        let manifest_json = format!(
+            r#"{{
+  "metadata": {},
+  "nodes": {{
+    "model.test_project.stg_orders": {{
+      "unique_id": "model.test_project.stg_orders",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "depends_on": {{"nodes": ["source.test_project.raw.orders"]}},
+      "config": {{"materialized": "view", "tags": []}},
+      "description": "Staged orders"
+    }},
+    "model.test_project.orders": {{
+      "unique_id": "model.test_project.orders",
+      "name": "orders",
+      "resource_type": "model",
+      "depends_on": {{"nodes": ["model.test_project.stg_orders"]}},
+      "config": {{"materialized": "table", "tags": []}},
+      "description": "Orders mart"
+    }}
+  }},
+  "sources": {{
+    "source.test_project.raw.orders": {{
+      "unique_id": "source.test_project.raw.orders",
+      "name": "orders",
+      "source_name": "raw",
+      "resource_type": "source",
+      "description": "Raw orders"
+    }}
+  }},
+  "exposures": {{}}
+}}"#,
+            metadata
+        );
+
+        fs::write(tmp.path().join("target/manifest.json"), manifest_json).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_summary_manifest_mode_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "summary --source manifest should succeed without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Source:  manifest"),
+            "Should show manifest source mode: {}",
+            stdout
+        );
+        assert!(
+            stdout.contains("model        2"),
+            "Should count 2 models: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_summary_manifest_mode_project_name_from_metadata() {
+        let tmp = minimal_manifest_dir(Some("my_dbt_project"));
+        let output = Command::new(binary_path())
+            .args([
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "summary --source manifest should succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Project: my_dbt_project"),
+            "Should read project_name from manifest metadata: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_summary_manifest_mode_unknown_project_name_when_no_metadata() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Project: (unknown)"),
+            "Should show (unknown) when metadata.project_name absent: {}",
+            stdout
+        );
+    }
+
+    #[test]
+    fn test_summary_manifest_mode_json_output() {
+        let tmp = minimal_manifest_dir(Some("json_test_project"));
+        let output = Command::new(binary_path())
+            .args([
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert_eq!(parsed["project_name"], "json_test_project");
+        assert_eq!(parsed["source_mode"], "manifest");
+        assert_eq!(parsed["node_counts"]["model"], 2);
+        assert_eq!(parsed["node_counts"]["source"], 1);
+        assert_eq!(parsed["vars_count"], 0);
+        assert!(
+            parsed["manifest_status"].is_null(),
+            "manifest mode should not check freshness"
+        );
+    }
+
+    #[test]
+    fn test_graph_manifest_mode_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "graph --source manifest should succeed without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert!(
+            parsed["nodes"].as_array().unwrap().len() >= 3,
+            "Should have at least 3 nodes (2 models + 1 source): {:?}",
+            parsed["nodes"]
+        );
+    }
+}

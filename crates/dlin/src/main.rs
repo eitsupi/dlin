@@ -976,11 +976,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let project = parser::project::DbtProject::load(&project_dir)?;
-    let vars_count = project.vars.len();
-    let project_name = project.name.clone();
-
-    let (dag, _manifest) = build_dag(
+    let (dag, manifest_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -989,12 +985,26 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
         args.refresh_cache,
     )?;
 
+    let (project_name, vars_count, manifest_status) = match args.source {
+        SourceType::Manifest => {
+            let name = manifest_opt
+                .as_ref()
+                .and_then(|m| m.metadata.project_name.clone())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            (name, 0, None)
+        }
+        SourceType::Sql => {
+            let project = parser::project::DbtProject::load(&project_dir)?;
+            let status =
+                check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
+            let vars_count = project.vars.len();
+            let name = project.name.clone();
+            (name, vars_count, status)
+        }
+    };
+
     let node_counts = render::summary::count_nodes(&dag);
     let edge_count = dag.edge_count();
-
-    // Check manifest freshness (best-effort)
-    let manifest_status =
-        check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
 
     let report = render::summary::SummaryReport {
         project_name,
