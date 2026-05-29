@@ -991,7 +991,12 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
                 .as_ref()
                 .and_then(|m| m.metadata.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            (name, 0, None)
+            let status = parser::project::DbtProject::load(&project_dir)
+                .ok()
+                .and_then(|project| {
+                    check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project)
+                });
+            (name, 0, status)
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(&project_dir)?;
