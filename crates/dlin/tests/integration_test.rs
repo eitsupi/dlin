@@ -2149,7 +2149,7 @@ mod manifest_only_mode {
         assert_eq!(parsed["vars_count"], 0);
         assert!(
             parsed["manifest_status"].is_null(),
-            "manifest mode should not check freshness"
+            "manifest_status should be null when dbt_project.yml is absent"
         );
     }
 
