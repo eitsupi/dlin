@@ -106,6 +106,24 @@ pub struct ResolvedPaths {
     pub analysis_paths: Vec<PathBuf>,
 }
 
+impl ResolvedPaths {
+    pub fn default_for(project_dir: &Path) -> Self {
+        let resolve = |dirs: &[&str]| -> Vec<PathBuf> {
+            dirs.iter()
+                .map(|d| normalize_path(&project_dir.join(d)))
+                .collect()
+        };
+        ResolvedPaths {
+            model_paths: resolve(&["models"]),
+            seed_paths: resolve(&["seeds"]),
+            snapshot_paths: resolve(&["snapshots"]),
+            test_paths: resolve(&["tests"]),
+            macro_paths: resolve(&["macros"]),
+            analysis_paths: resolve(&["analyses"]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

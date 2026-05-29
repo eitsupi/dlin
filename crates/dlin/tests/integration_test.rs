@@ -2185,4 +2185,67 @@ mod manifest_only_mode {
             parsed["nodes"]
         );
     }
+
+    #[test]
+    fn test_list_manifest_mode_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "list",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-o",
+                "json",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "list --source manifest should succeed without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        assert!(
+            parsed.as_array().unwrap().len() >= 3,
+            "Should list at least 3 nodes (2 models + 1 source): {:?}",
+            parsed
+        );
+    }
+
+    #[test]
+    fn test_impact_manifest_mode_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let output = Command::new(binary_path())
+            .args([
+                "impact",
+                "stg_orders",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "impact --source manifest should succeed without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("orders"),
+            "Should show downstream model 'orders': {}",
+            stdout
+        );
+    }
 }

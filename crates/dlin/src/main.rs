@@ -141,7 +141,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest, _) = build_dag(
+    let (dag, manifest, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -157,8 +157,8 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     let models = if input::has_path_like_input(&raw_inputs) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
-        let project = parser::project::DbtProject::load(&project_dir)?;
-        let resolved_paths = project.resolve_paths(&project_dir);
+        let resolved_paths =
+            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref());
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -311,7 +311,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest, _) = build_dag(
+    let (dag, manifest, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -327,8 +327,8 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     let models = if input::has_path_like_input(&raw_inputs) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
-        let project = parser::project::DbtProject::load(&project_dir)?;
-        let resolved_paths = project.resolve_paths(&project_dir);
+        let resolved_paths =
+            resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref());
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -541,7 +541,7 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, _manifest, _) = build_dag(
+    let (dag, _manifest, project_opt) = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -554,8 +554,8 @@ fn run_impact_command(
     let models = if input::has_path_like_input(&raw_inputs) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
-        let project = parser::project::DbtProject::load(&project_dir)?;
-        let resolved_paths = project.resolve_paths(&project_dir);
+        let resolved_paths =
+            resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref());
         input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
@@ -605,6 +605,30 @@ fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {
              Use --source manifest for exact dependency resolution"
         );
     }
+}
+
+/// Resolve dbt directory paths for file-path input resolution.
+///
+/// In SQL mode, reuses the already-loaded `DbtProject` from `build_dag`.
+/// In manifest mode, tries to load `dbt_project.yml` for accurate path configuration,
+/// and falls back to the standard dbt directory layout when the file is absent.
+#[cfg(not(tarpaulin_include))]
+fn resolve_paths_for_path_input(
+    source: SourceType,
+    project_dir: &Path,
+    project_opt: Option<&parser::project::DbtProject>,
+) -> parser::project::ResolvedPaths {
+    if let Some(project) = project_opt {
+        return project.resolve_paths(project_dir);
+    }
+    // project_opt is None in manifest mode (build_dag does not load DbtProject there).
+    // Try loading dbt_project.yml for accurate path config; fall back to defaults if absent.
+    if matches!(source, SourceType::Manifest) {
+        if let Ok(project) = parser::project::DbtProject::load(project_dir) {
+            return project.resolve_paths(project_dir);
+        }
+    }
+    parser::project::ResolvedPaths::default_for(project_dir)
 }
 
 /// Validate that --source and --manifest-path flags are consistent.
@@ -1013,7 +1037,8 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
             (name, 0, status)
         }
         SourceType::Sql => {
-            let project = project_opt.expect("DbtProject loaded in sql mode");
+            let project = project_opt
+                .ok_or_else(|| anyhow::anyhow!("internal error: DbtProject not available in sql mode"))?;
             let status =
                 check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
             let vars_count = project.vars.len();
