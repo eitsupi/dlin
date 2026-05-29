@@ -180,14 +180,16 @@ pub fn compute_column_impact(
                 }
             }
 
-            // Only propagate errors from models that are actually on the impact path.
-            // Models that are downstream in the DAG but have no column referencing the
-            // tracked source contribute noise errors unrelated to the current trace.
-            if found_on_path {
-                for err in &lineage.errors {
-                    if !errors.contains(err) {
-                        errors.push(err.clone());
-                    }
+            // ColumnNotFound errors are per-column noise: only include them when the model
+            // has at least one column confirmed on the impact path. Model-level failures
+            // (ParseFailure, NoCompiledCode, ColumnInferenceFailed) mean the model could
+            // not be analyzed at all, so they are always propagated — the path through
+            // that model may be incomplete and the user needs to know.
+            for err in &lineage.errors {
+                let is_column_level =
+                    err.kind == ColumnLineageErrorKind::ColumnNotFound;
+                if (!is_column_level || found_on_path) && !errors.contains(err) {
+                    errors.push(err.clone());
                 }
             }
         }
