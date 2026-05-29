@@ -406,6 +406,8 @@ dlin aims to work without `dbt compile` (except for column-level lineage, which 
 
 **Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
 
+Manifest mode requires only `manifest.json`; `dbt_project.yml` and SQL files are not needed. A developer can run `dbt compile` once and distribute the resulting `manifest.json` to analysts or AI agents who then query it with dlin without access to the full project.
+
 ### Limitations of SQL parse mode
 
 - `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
