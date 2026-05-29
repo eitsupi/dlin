@@ -141,7 +141,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(
+    let (dag, manifest, _) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -311,7 +311,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest) = build_dag(
+    let (dag, manifest, _) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -424,13 +424,14 @@ fn build_dag(
 ) -> Result<(
     graph::types::LineageGraph,
     Option<parser::manifest::Manifest>,
+    Option<parser::project::DbtProject>,
 )> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
             let manifest = parser::manifest::load_manifest(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-            Ok((graph, Some(manifest)))
+            Ok((graph, Some(manifest), None))
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
@@ -444,7 +445,7 @@ fn build_dag(
                 refresh_cache,
                 &project.vars,
             )?;
-            Ok((graph, None))
+            Ok((graph, None, Some(project)))
         }
     }
 }
@@ -540,7 +541,7 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, _manifest) = build_dag(
+    let (dag, _manifest, _) = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -976,7 +977,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest_opt) = build_dag(
+    let (dag, manifest_opt, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -1012,7 +1013,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
             (name, 0, status)
         }
         SourceType::Sql => {
-            let project = parser::project::DbtProject::load(&project_dir)?;
+            let project = project_opt.expect("DbtProject loaded in sql mode");
             let status =
                 check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
             let vars_count = project.vars.len();
