@@ -186,8 +186,7 @@ pub fn compute_column_impact(
             // not be analyzed at all, so they are always propagated — the path through
             // that model may be incomplete and the user needs to know.
             for err in &lineage.errors {
-                let is_column_level =
-                    err.kind == ColumnLineageErrorKind::ColumnNotFound;
+                let is_column_level = err.kind == ColumnLineageErrorKind::ColumnNotFound;
                 if (!is_column_level || found_on_path) && !errors.contains(err) {
                     errors.push(err.clone());
                 }

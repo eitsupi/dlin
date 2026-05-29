@@ -379,7 +379,12 @@ fn make_off_path_error_manifest() -> Manifest {
     // source_model: outputs col_x and col_y
     let mut src_cols = HashMap::new();
     for name in ["col_x", "col_y"] {
-        src_cols.insert(name.to_string(), ManifestColumn { name: name.to_string() });
+        src_cols.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
     }
     nodes.insert(
         "model.proj.source_model".to_string(),
@@ -401,7 +406,12 @@ fn make_off_path_error_manifest() -> Manifest {
 
     // relevant_model: only col_x from source_model
     let mut rel_cols = HashMap::new();
-    rel_cols.insert("col_x".to_string(), ManifestColumn { name: "col_x".to_string() });
+    rel_cols.insert(
+        "col_x".to_string(),
+        ManifestColumn {
+            name: "col_x".to_string(),
+        },
+    );
     nodes.insert(
         "model.proj.relevant_model".to_string(),
         ManifestNode {
@@ -424,10 +434,17 @@ fn make_off_path_error_manifest() -> Manifest {
 
     // sibling_model: col_y from source_model, plus sibling_fail in YAML (not in SQL)
     let mut sib_cols = HashMap::new();
-    sib_cols.insert("col_y".to_string(), ManifestColumn { name: "col_y".to_string() });
+    sib_cols.insert(
+        "col_y".to_string(),
+        ManifestColumn {
+            name: "col_y".to_string(),
+        },
+    );
     sib_cols.insert(
         "sibling_fail".to_string(),
-        ManifestColumn { name: "sibling_fail".to_string() },
+        ManifestColumn {
+            name: "sibling_fail".to_string(),
+        },
     );
     nodes.insert(
         "model.proj.sibling_model".to_string(),
@@ -514,7 +531,9 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
     let mut cols = std::collections::HashMap::new();
     cols.insert(
         "col_x".to_string(),
-        crate::parser::manifest::ManifestColumn { name: "col_x".to_string() },
+        crate::parser::manifest::ManifestColumn {
+            name: "col_x".to_string(),
+        },
     );
     manifest.nodes.insert(
         "model.proj.broken_downstream".to_string(),
@@ -556,7 +575,10 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
         result.errors
     );
     // But sibling_fail (ColumnNotFound from off-path sibling_model) must still be absent
-    let has_sibling_error = result.errors.iter().any(|e| e.what.contains("sibling_fail"));
+    let has_sibling_error = result
+        .errors
+        .iter()
+        .any(|e| e.what.contains("sibling_fail"));
     assert!(
         !has_sibling_error,
         "ColumnNotFound from off-path model must not appear, got errors: {:?}",
