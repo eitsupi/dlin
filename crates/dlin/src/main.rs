@@ -991,11 +991,24 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
                 .as_ref()
                 .and_then(|m| m.metadata.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            let status = parser::project::DbtProject::load(&project_dir)
-                .ok()
-                .and_then(|project| {
-                    check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project)
-                });
+            let status = if project_dir.join("dbt_project.yml").exists() {
+                match parser::project::DbtProject::load(&project_dir) {
+                    Ok(project) => check_manifest_freshness(
+                        &project_dir,
+                        args.manifest_path.as_ref(),
+                        &project,
+                    ),
+                    Err(e) => {
+                        dlin_core::warn!(
+                            "could not load dbt_project.yml for freshness check: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             (name, 0, status)
         }
         SourceType::Sql => {
