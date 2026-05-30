@@ -28,9 +28,8 @@ pub fn yaml_from_str<T: DeserializeOwned>(content: &str, location: &str) -> Resu
                     key,
                     location,
                 );
-                let options = serde_saphyr::options::Options {
-                    duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins,
-                    ..Default::default()
+                let options = serde_saphyr::options! {
+                    duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins
                 };
                 serde_saphyr::from_str_with_options(content, options)?
             } else {
