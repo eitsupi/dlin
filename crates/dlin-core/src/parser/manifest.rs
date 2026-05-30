@@ -7,9 +7,18 @@ use serde::Deserialize;
 
 use crate::graph::types::*;
 
+/// Metadata section of manifest.json
+#[derive(Debug, Default, Deserialize)]
+pub struct ManifestMetadata {
+    pub project_name: Option<String>,
+}
+
 /// Top-level manifest.json structure
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct Manifest {
+    /// Metadata about the manifest (dbt version, project name, etc.)
+    #[serde(default)]
+    pub metadata: ManifestMetadata,
     /// Nodes keyed by unique_id (models, seeds, snapshots, tests, analyses)
     #[serde(default)]
     pub nodes: HashMap<String, ManifestNode>,
@@ -554,7 +563,7 @@ mod tests {
                     identifier: None,
                 },
             )]),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -619,6 +628,7 @@ mod tests {
                     owner: None,
                 },
             )]),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -658,6 +668,7 @@ mod tests {
                     }),
                 },
             )]),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -745,7 +756,7 @@ mod tests {
                 ),
             ]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -806,7 +817,7 @@ mod tests {
                 ),
             ]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -830,7 +841,7 @@ mod tests {
         let manifest = Manifest {
             nodes: HashMap::new(),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -862,7 +873,7 @@ mod tests {
                 },
             )]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -894,7 +905,7 @@ mod tests {
                 },
             )]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -983,7 +994,7 @@ mod tests {
                 },
             )]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -1015,7 +1026,7 @@ mod tests {
                 },
             )]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -1129,7 +1140,7 @@ mod tests {
                     },
                 ),
             ]),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
@@ -1259,7 +1270,7 @@ mod tests {
                     identifier: None,
                 },
             )]),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let paths = manifest.collect_file_paths();
@@ -1310,7 +1321,7 @@ mod tests {
                     },
                 ),
             ]),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let paths = manifest.collect_file_paths();
@@ -1390,7 +1401,7 @@ mod tests {
                 ),
             ]),
             sources: HashMap::new(),
-            exposures: HashMap::new(),
+            ..Default::default()
         };
 
         let sql_contents = manifest.collect_sql_contents();

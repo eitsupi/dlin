@@ -470,6 +470,7 @@ fn make_off_path_error_manifest() -> Manifest {
         nodes,
         sources: HashMap::new(),
         exposures: HashMap::new(),
+        ..Default::default()
     }
 }
 

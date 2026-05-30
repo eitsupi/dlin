@@ -1052,6 +1052,7 @@ fn test_cte_alias_resolution() {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     };
     let result = compute_cross_model_column_lineage(
         &manifest,
@@ -1257,6 +1258,7 @@ fn test_select_star_chain_with_join() {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     };
     let result = compute_cross_model_column_lineage(
         &manifest,
@@ -1477,6 +1479,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         nodes,
         sources,
         exposures: HashMap::new(),
+        ..Default::default()
     };
     let result = compute_cross_model_column_lineage(
         &manifest,
