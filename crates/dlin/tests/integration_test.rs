@@ -2156,6 +2156,37 @@ mod manifest_only_mode {
     }
 
     #[test]
+    fn test_summary_manifest_mode_with_malformed_project_yml() {
+        let tmp = minimal_manifest_dir(Some("malformed_test"));
+        fs::write(tmp.path().join("dbt_project.yml"), "name: [\ninvalid yaml").unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "summary",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "summary should fail when dbt_project.yml is malformed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Failed to parse") && stderr.contains("dbt_project.yml"),
+            "stderr should contain a parse error referencing dbt_project.yml; got: {}",
+            stderr
+        );
+    }
+
+    #[test]
     fn test_graph_manifest_mode_without_project_yml() {
         let tmp = minimal_manifest_dir(None);
         let output = Command::new(binary_path())
