@@ -2180,8 +2180,9 @@ mod manifest_only_mode {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            !stderr.is_empty(),
-            "stderr should contain a parse error message"
+            stderr.contains("Failed to parse") && stderr.contains("dbt_project.yml"),
+            "stderr should contain a parse error referencing dbt_project.yml; got: {}",
+            stderr
         );
     }
 
