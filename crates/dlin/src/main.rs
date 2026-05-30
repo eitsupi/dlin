@@ -622,6 +622,10 @@ fn resolve_paths_for_path_input(
     if let Some(project) = project_opt {
         return Ok(project.resolve_paths(project_dir));
     }
+    // In SQL mode, build_dag always loads DbtProject — project_opt should never be None here.
+    if matches!(source, SourceType::Sql) {
+        anyhow::bail!("internal error: DbtProject not available in sql mode for path resolution");
+    }
     // project_opt is None in manifest mode (build_dag does not load DbtProject there).
     // Try loading dbt_project.yml for accurate path config.
     if matches!(source, SourceType::Manifest) {
@@ -742,8 +746,8 @@ fn run_column_lineage_command(
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
-        let project = parser::project::DbtProject::load(&project_dir)?;
-        let resolved_paths = project.resolve_paths(&project_dir);
+        let resolved_paths =
+            resolve_paths_for_path_input(SourceType::Manifest, &project_dir, None)?;
         // Snapshot all user-provided inputs (both bare names and file paths) before path
         // expansion.  Path-like strings (e.g. "models/stg.sql") are stored verbatim and
         // will never match the expanded model names produced by resolve_stdin_inputs, so

@@ -2363,4 +2363,81 @@ mod manifest_only_mode {
             stdout
         );
     }
+
+    /// Create a temp dir with manifest.json that includes compiled_code for column lineage.
+    fn minimal_manifest_dir_with_compiled_code() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("target")).unwrap();
+
+        let manifest_json = r#"{
+  "metadata": {},
+  "nodes": {
+    "model.test_project.stg_orders": {
+      "unique_id": "model.test_project.stg_orders",
+      "name": "stg_orders",
+      "original_file_path": "models/stg_orders.sql",
+      "resource_type": "model",
+      "depends_on": {"nodes": ["source.test_project.raw.orders"]},
+      "config": {"materialized": "view", "tags": []},
+      "description": "Staged orders",
+      "compiled_code": "SELECT order_id, amount FROM raw.orders"
+    },
+    "model.test_project.orders": {
+      "unique_id": "model.test_project.orders",
+      "name": "orders",
+      "original_file_path": "models/orders.sql",
+      "resource_type": "model",
+      "depends_on": {"nodes": ["model.test_project.stg_orders"]},
+      "config": {"materialized": "table", "tags": []},
+      "description": "Orders mart",
+      "compiled_code": "SELECT stg_orders.order_id, stg_orders.amount FROM stg_orders"
+    }
+  },
+  "sources": {
+    "source.test_project.raw.orders": {
+      "unique_id": "source.test_project.raw.orders",
+      "name": "orders",
+      "source_name": "raw",
+      "resource_type": "source",
+      "description": "Raw orders"
+    }
+  },
+  "exposures": {}
+}"#;
+
+        fs::write(tmp.path().join("target/manifest.json"), manifest_json).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_column_manifest_mode_path_like_input_without_project_yml() {
+        let tmp = minimal_manifest_dir_with_compiled_code();
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "models/stg_orders.sql",
+                "--column",
+                "order_id",
+                "--manifest-path",
+                tmp.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "column with path-like input should succeed in manifest mode without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("stg_orders"),
+            "Should show stg_orders in column lineage output: {}",
+            stdout
+        );
+    }
 }
