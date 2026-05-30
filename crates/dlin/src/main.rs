@@ -1033,23 +1033,21 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
                 .as_ref()
                 .and_then(|m| m.metadata.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            let status = if project_dir.join("dbt_project.yml").exists() {
-                match parser::project::DbtProject::load(&project_dir) {
-                    Ok(project) => check_manifest_freshness(
-                        &project_dir,
-                        args.manifest_path.as_ref(),
-                        &project,
-                    ),
-                    Err(e) => {
-                        dlin_core::warn!(
-                            "could not load dbt_project.yml for freshness check: {}",
-                            e
-                        );
-                        None
-                    }
+            let status = match parser::project::DbtProject::load(&project_dir) {
+                Ok(project) => {
+                    check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project)
                 }
-            } else {
-                None
+                Err(e) => {
+                    let is_not_found = e
+                        .downcast_ref::<dlin_core::error::DbtLineageError>()
+                        .is_some_and(|de| {
+                            matches!(de, dlin_core::error::DbtLineageError::ProjectNotFound(_))
+                        });
+                    if !is_not_found {
+                        return Err(e);
+                    }
+                    None
+                }
             };
             (name, 0, status)
         }

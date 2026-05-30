@@ -406,7 +406,7 @@ dlin aims to work without `dbt compile` (except for column-level lineage, which 
 
 **Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
 
-For graph, list, impact, summary, and column commands, manifest mode requires only `manifest.json`; SQL files are not needed. When inputs are model names (not file paths), `dbt_project.yml` is also not needed. A developer can run `dbt compile` once and distribute the resulting `manifest.json` to analysts or AI agents who then query it with dlin without access to the full project. (`check-manifest` always requires a full project.)
+For graph, list, impact, summary, and column commands, manifest mode requires only `manifest.json`; SQL files are not needed. When inputs are model names (not file paths), `dbt_project.yml` is also not needed; file-path inputs (e.g. `models/foo.sql`) fall back to standard dbt directory layout when `dbt_project.yml` is absent, which may not match projects with custom path configuration. A developer can run `dbt compile` once and distribute the resulting `manifest.json` to analysts or AI agents who then query it with dlin without access to the full project. (`check-manifest` always requires a full project.)
 
 ### Limitations of SQL parse mode
 
