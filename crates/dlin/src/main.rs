@@ -439,35 +439,19 @@ fn build_dag(
                 return Ok((graph.clone(), None));
             }
 
-            let before = manifest_fingerprint(&resolved);
-            let manifest = parser::manifest::load_manifest(&resolved)?;
+            let (manifest, parsed_fingerprint) = load_manifest_with_fingerprint(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-            let after = manifest_fingerprint(&resolved);
-            if let (Some(before_fp), Some(after_fp)) = (before, after) {
-                if before_fp != after_fp {
-                    dlin_core::warn!(
-                        "manifest changed during parse/build; skipping manifest graph cache write for {}",
-                        resolved.display()
-                    );
-                    return Ok((graph, None));
-                }
-                let expected = (
-                    after_fp.mtime_secs,
-                    after_fp.mtime_nanos,
-                    after_fp.size_bytes,
-                    after_fp.content_hash,
-                );
-                if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
-                    cache.save();
-                } else {
-                    dlin_core::warn!(
-                        "manifest changed after validation; skipping manifest graph cache write for {}",
-                        resolved.display()
-                    );
-                }
+            let expected = (
+                parsed_fingerprint.mtime_secs,
+                parsed_fingerprint.mtime_nanos,
+                parsed_fingerprint.size_bytes,
+                parsed_fingerprint.content_hash,
+            );
+            if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
+                cache.save();
             } else {
                 dlin_core::warn!(
-                    "manifest fingerprint unavailable; skipping manifest graph cache write for {}",
+                    "manifest changed after read/parse; skipping manifest graph cache write for {}",
                     resolved.display()
                 );
             }
@@ -499,20 +483,42 @@ struct ManifestFingerprint {
     content_hash: u64,
 }
 
-fn manifest_fingerprint(path: &Path) -> Option<ManifestFingerprint> {
-    let meta = std::fs::metadata(path).ok()?;
+fn manifest_fingerprint(meta: &std::fs::Metadata, bytes: &[u8]) -> Option<ManifestFingerprint> {
     let modified = meta
         .modified()
         .ok()?
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()?;
-    let bytes = std::fs::read(path).ok()?;
     Some(ManifestFingerprint {
         mtime_secs: modified.as_secs(),
         mtime_nanos: modified.subsec_nanos(),
         size_bytes: meta.len(),
-        content_hash: hash_bytes(&bytes),
+        content_hash: hash_bytes(bytes),
     })
+}
+
+fn load_manifest_with_fingerprint(
+    manifest_path: &Path,
+) -> Result<(parser::manifest::Manifest, ManifestFingerprint)> {
+    let meta = std::fs::metadata(manifest_path).map_err(|e| {
+        dlin_core::error::DbtLineageError::FileReadError {
+            path: manifest_path.to_path_buf(),
+            source: e,
+        }
+    })?;
+    let bytes =
+        std::fs::read(manifest_path).map_err(|e| dlin_core::error::DbtLineageError::FileReadError {
+            path: manifest_path.to_path_buf(),
+            source: e,
+        })?;
+    let manifest = parser::manifest::load_manifest_from_bytes(&bytes, manifest_path)?;
+    let fingerprint = manifest_fingerprint(&meta, &bytes).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not compute manifest fingerprint for {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok((manifest, fingerprint))
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
