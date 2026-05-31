@@ -1,11 +1,12 @@
 use petgraph::stable_graph::StableDiGraph;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// The lineage DAG type
 pub type LineageGraph = StableDiGraph<NodeData, EdgeData>;
 
 /// Types of nodes in the dbt lineage
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum NodeType {
     Model,
     Source,
@@ -44,14 +45,14 @@ impl NodeType {
 }
 
 /// Owner information for exposures
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnerInfo {
     pub name: Option<String>,
     pub email: Option<String>,
 }
 
 /// Exposure-specific metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExposureInfo {
     /// Human-readable display label
     pub label: Option<String>,
@@ -66,7 +67,7 @@ pub struct ExposureInfo {
 }
 
 /// Data associated with each node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeData {
     /// Unique identifier (e.g., "model.stg_orders" or "source.raw.orders")
     pub unique_id: String,
@@ -105,7 +106,7 @@ impl NodeData {
 /// Variant order is semantically meaningful: derived `Ord` is used to select
 /// the "most specialized" edge type along a transitive path (via `.max()`).
 /// Ref < Source < Test < Exposure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum EdgeType {
     /// ref() dependency
@@ -130,7 +131,7 @@ impl EdgeType {
 }
 
 /// Data associated with each edge
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeData {
     pub edge_type: EdgeType,
     /// Number of intermediate nodes collapsed in a transitive edge.

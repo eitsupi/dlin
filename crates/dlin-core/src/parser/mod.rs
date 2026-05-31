@@ -3,6 +3,7 @@ pub mod columns;
 pub mod discovery;
 pub mod jinja;
 pub mod manifest;
+pub mod manifest_cache;
 pub mod project;
 pub mod sql;
 #[allow(dead_code)]
