@@ -25,6 +25,7 @@ fn test_column_cache_hit() {
         "SELECT id FROM raw",
         DialectType::Generic,
         0,
+        None,
         lineage,
     );
     cache.save();
@@ -32,7 +33,13 @@ fn test_column_cache_hit() {
     // Reload from disk
     let cache2 = ColumnLineageCache::load(project_dir, None);
     let hit = cache2
-        .get("test_model", "SELECT id FROM raw", DialectType::Generic, 0)
+        .get(
+            "test_model",
+            "SELECT id FROM raw",
+            DialectType::Generic,
+            None,
+            Some(0),
+        )
         .unwrap();
     assert_eq!(hit.columns.len(), 1);
     assert_eq!(hit.columns[0].column, "id");
@@ -51,13 +58,13 @@ fn test_column_cache_miss_on_code_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
+    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 2", DialectType::Generic, 0)
+            .get("m", "SELECT 2", DialectType::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -75,13 +82,13 @@ fn test_column_cache_miss_on_dialect_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::BigQuery, 0, lineage);
+    cache.insert("m", "SELECT 1", DialectType::BigQuery, 0, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Snowflake, 0)
+            .get("m", "SELECT 1", DialectType::Snowflake, None, Some(0))
             .is_none()
     );
 }
@@ -99,20 +106,20 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 42, lineage);
+    cache.insert("m", "SELECT 1", DialectType::Generic, 42, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     // Same hash → hit
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, 42)
+            .get("m", "SELECT 1", DialectType::Generic, None, Some(42))
             .is_some()
     );
     // Different hash → miss (YAML columns changed in manifest)
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, 99)
+            .get("m", "SELECT 1", DialectType::Generic, None, Some(99))
             .is_none()
     );
 }
@@ -130,7 +137,7 @@ fn test_column_cache_version_invalidation() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
+    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
     cache.save();
 
     // Tamper with version in saved file
@@ -145,7 +152,7 @@ fn test_column_cache_version_invalidation() {
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, 0)
+            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -160,11 +167,11 @@ fn test_column_cache_disabled() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
+    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
     // Disabled cache still works in-memory (only disk persistence is disabled)
     assert!(
         cache
-            .get("m", "SELECT 1", DialectType::Generic, 0)
+            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
             .is_some()
     );
     // But save is a no-op (no cache_path)
@@ -185,14 +192,14 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, lineage);
+    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
     cache.save();
 
     // Fresh cache ignores existing entries
     let fresh = ColumnLineageCache::fresh(project_dir, None);
     assert!(
         fresh
-            .get("m", "SELECT 1", DialectType::Generic, 0)
+            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
             .is_none()
     );
 
@@ -205,13 +212,13 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    fresh.insert("m2", "SELECT 2", DialectType::Generic, 0, lineage2);
+    fresh.insert("m2", "SELECT 2", DialectType::Generic, 0, None, lineage2);
     fresh.save();
 
     let reloaded = ColumnLineageCache::load(project_dir, None);
     assert!(
         reloaded
-            .get("m2", "SELECT 2", DialectType::Generic, 0)
+            .get("m2", "SELECT 2", DialectType::Generic, None, Some(0))
             .is_some()
     );
 }

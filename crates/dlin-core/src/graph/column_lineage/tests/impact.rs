@@ -216,21 +216,21 @@ fn test_build_downstream_model_map() {
 
     // stg_orders (by unique_id) is depended on by orders
     assert!(
-        map.get("model.proj.stg_orders").map_or(false, |deps| deps
-            .contains(&"model.proj.orders".to_string())),
+        map.get("model.proj.stg_orders")
+            .is_some_and(|deps| deps.contains(&"model.proj.orders".to_string())),
         "stg_orders should have orders as downstream, got: {:?}",
         map.get("model.proj.stg_orders")
     );
     // orders (by unique_id) is depended on by customers
     assert!(
-        map.get("model.proj.orders").map_or(false, |deps| deps
-            .contains(&"model.proj.customers".to_string())),
+        map.get("model.proj.orders")
+            .is_some_and(|deps| deps.contains(&"model.proj.customers".to_string())),
         "orders should have customers as downstream, got: {:?}",
         map.get("model.proj.orders")
     );
     // customers has no downstream
     assert!(
-        map.get("model.proj.customers").is_none(),
+        !map.contains_key("model.proj.customers"),
         "customers should have no downstream"
     );
 }

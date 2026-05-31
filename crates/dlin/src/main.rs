@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use clap::Parser;
@@ -438,10 +439,19 @@ fn build_dag(
                 return Ok((graph.clone(), None));
             }
 
+            let before = manifest_fingerprint(&resolved);
             let manifest = parser::manifest::load_manifest(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-            cache.insert(&resolved, &graph);
-            cache.save();
+            let after = manifest_fingerprint(&resolved);
+            if before.is_some() && before == after {
+                cache.insert(&resolved, &graph);
+                cache.save();
+            } else {
+                dlin_core::warn!(
+                    "manifest changed during parse/build; skipping manifest graph cache write for {}",
+                    resolved.display()
+                );
+            }
 
             Ok((graph, None))
         }
@@ -460,6 +470,43 @@ fn build_dag(
             Ok((graph, Some(project)))
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestFingerprint {
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size_bytes: u64,
+    content_hash: u64,
+}
+
+fn manifest_fingerprint(path: &Path) -> Option<ManifestFingerprint> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(ManifestFingerprint {
+        mtime_secs: modified.as_secs(),
+        mtime_nanos: modified.subsec_nanos(),
+        size_bytes: meta.len(),
+        content_hash: hash_bytes(&bytes),
+    })
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    // FNV-1a 64-bit constants (offset basis + prime), used for lightweight
+    // non-cryptographic fingerprinting of manifest content.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Dispatch rendering based on output format
