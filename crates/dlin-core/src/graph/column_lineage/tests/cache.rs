@@ -277,3 +277,54 @@ fn test_column_cache_miss_on_manifest_stat_change() {
             .is_none()
     );
 }
+
+#[test]
+fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let manifest_path = project_dir.join("manifest.json");
+    std::fs::write(&manifest_path, r#"{"nodes":{}}"#).unwrap();
+
+    let manifest = make_test_manifest();
+    let model_name = "stg_orders";
+    let node = super::super::find_model_by_name(&manifest, model_name).unwrap();
+    let compiled_code = node.compiled_code.as_deref().unwrap();
+    let manifest_columns_hash =
+        super::super::schema::compute_manifest_columns_hash(&manifest, node);
+
+    let sentinel = ModelColumnLineage {
+        model: model_name.to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+
+    let mut seeded = ColumnLineageCache::load(project_dir, None);
+    seeded.insert(
+        model_name,
+        compiled_code,
+        DialectType::Generic,
+        manifest_columns_hash,
+        Some(&manifest_path),
+        sentinel,
+    );
+    seeded.save();
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&manifest_path, r#"{"nodes":{"changed":1}}"#).unwrap();
+
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    let result = compute_column_lineage_with_manifest_path(
+        &manifest,
+        model_name,
+        DialectType::Generic,
+        Some(&manifest_path),
+        &mut cache,
+    );
+
+    assert!(
+        result.total_columns > 0,
+        "should recompute, not return sentinel"
+    );
+}
