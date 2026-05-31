@@ -127,13 +127,14 @@ impl ColumnLineageCache {
         if entry.compiled_code_hash != code_hash || entry.dialect != dialect_str {
             return None;
         }
+        // Fast negative check: if manifest stat differs, this cache entry is stale.
         if let Some(path) = manifest_path
             && let Some(stat) = manifest_stat(path)
-            && entry.manifest_mtime_secs == stat.mtime_secs
-            && entry.manifest_mtime_nanos == stat.mtime_nanos
-            && entry.manifest_size_bytes == stat.size_bytes
+            && (entry.manifest_mtime_secs != stat.mtime_secs
+                || entry.manifest_mtime_nanos != stat.mtime_nanos
+                || entry.manifest_size_bytes != stat.size_bytes)
         {
-            return Some(&entry.lineage);
+            return None;
         }
         if let Some(hash) = manifest_columns_hash
             && entry.manifest_columns_hash == hash

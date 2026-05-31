@@ -17,8 +17,14 @@ struct ManifestCacheFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestCacheEntry {
+    #[serde(default)]
+    manifest_identity: String,
     mtime_secs: u64,
+    #[serde(default)]
+    mtime_nanos: u32,
     file_size: u64,
+    #[serde(default)]
+    content_hash: u64,
     graph: LineageGraph,
 }
 
@@ -75,7 +81,13 @@ impl ManifestGraphCache {
     pub fn get(&self, manifest_path: &Path) -> Option<&LineageGraph> {
         let entry = self.entry.as_ref()?;
         let stat = file_stat(manifest_path)?;
-        if entry.mtime_secs == stat.mtime_secs && entry.file_size == stat.file_size {
+        let identity = manifest_identity(manifest_path);
+        if entry.manifest_identity == identity
+            && entry.mtime_secs == stat.mtime_secs
+            && entry.mtime_nanos == stat.mtime_nanos
+            && entry.file_size == stat.file_size
+            && entry.content_hash == stat.content_hash
+        {
             Some(&entry.graph)
         } else {
             None
@@ -85,8 +97,11 @@ impl ManifestGraphCache {
     pub fn insert(&mut self, manifest_path: &Path, graph: &LineageGraph) {
         if let Some(stat) = file_stat(manifest_path) {
             self.entry = Some(ManifestCacheEntry {
+                manifest_identity: manifest_identity(manifest_path),
                 mtime_secs: stat.mtime_secs,
+                mtime_nanos: stat.mtime_nanos,
                 file_size: stat.file_size,
+                content_hash: stat.content_hash,
                 graph: graph.clone(),
             });
             self.dirty = true;
@@ -129,19 +144,48 @@ impl ManifestGraphCache {
 
 struct FileStat {
     mtime_secs: u64,
+    mtime_nanos: u32,
     file_size: u64,
+    content_hash: u64,
 }
 
 fn file_stat(path: &Path) -> Option<FileStat> {
     let meta = std::fs::metadata(path).ok()?;
+    let content = std::fs::read(path).ok()?;
     let mtime_secs = meta
         .modified()
         .ok()?
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()?
         .as_secs();
+    let mtime_nanos = meta
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .subsec_nanos();
     Some(FileStat {
         mtime_secs,
+        mtime_nanos,
         file_size: meta.len(),
+        content_hash: hash_bytes(&content),
     })
+}
+
+fn manifest_identity(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
