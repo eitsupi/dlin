@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1-rc.1] - 2026-05-31
+
+### Features
+
+- Improve manifest-mode cache behavior for column lineage to reduce unnecessary recomputation and speed up repeated analysis runs (#74)
+
+### Bug Fixes
+
+- Fix stale cache invalidation paths in manifest mode so column lineage results are recomputed when manifest file state changes (#74)
+
 ## [0.2.0] - 2026-05-30
 
 ### Features
