@@ -92,9 +92,6 @@ pub fn compute_column_lineage_with_manifest_path(
         }
     };
 
-    if let Some(cached) = cache.get(model_name, compiled_code, dialect, manifest_path, None) {
-        return cached.clone();
-    }
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
     if let Some(cached) = cache.get(
         model_name,
