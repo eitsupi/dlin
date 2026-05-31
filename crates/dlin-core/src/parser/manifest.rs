@@ -178,14 +178,17 @@ fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
 
 /// Load and parse a manifest.json file without building a graph.
 pub fn load_manifest(manifest_path: &Path) -> Result<Manifest> {
-    let content = std::fs::read_to_string(manifest_path).map_err(|e| {
-        crate::error::DbtLineageError::FileReadError {
+    let content =
+        std::fs::read(manifest_path).map_err(|e| crate::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
             source: e,
-        }
-    })?;
+        })?;
 
-    let manifest: Manifest = serde_json::from_str(&content).map_err(|e| {
+    load_manifest_from_bytes(&content, manifest_path)
+}
+
+pub fn load_manifest_from_bytes(content: &[u8], manifest_path: &Path) -> Result<Manifest> {
+    let manifest: Manifest = serde_json::from_slice(content).map_err(|e| {
         crate::error::DbtLineageError::ArtifactParseError {
             path: manifest_path.to_path_buf(),
             source: e,

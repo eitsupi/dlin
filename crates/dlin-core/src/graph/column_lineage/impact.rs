@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use polyglot_sql::DialectType;
@@ -8,7 +9,7 @@ use crate::parser::manifest::Manifest;
 
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, TransformationType,
-    compute_column_lineage, find_model_by_name,
+    find_model_by_name,
 };
 
 #[derive(Debug, Serialize)]
@@ -77,6 +78,24 @@ pub fn compute_column_impact(
     dialect: DialectType,
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
+    compute_column_impact_with_manifest_path(
+        manifest,
+        model_name,
+        column_name,
+        dialect,
+        None,
+        cache,
+    )
+}
+
+pub fn compute_column_impact_with_manifest_path(
+    manifest: &Manifest,
+    model_name: &str,
+    column_name: &str,
+    dialect: DialectType,
+    manifest_path: Option<&Path>,
+    cache: &mut ColumnLineageCache,
+) -> ColumnImpactReport {
     let initial_node = match find_model_by_name(manifest, model_name) {
         Some(n) => n,
         None => {
@@ -130,9 +149,15 @@ pub fn compute_column_impact(
             };
             let dep_name = &dep_node.name;
 
-            let lineage = lineage_cache
-                .entry(dep_uid.clone())
-                .or_insert_with(|| compute_column_lineage(manifest, dep_uid, dialect, cache));
+            let lineage = lineage_cache.entry(dep_uid.clone()).or_insert_with(|| {
+                super::compute_column_lineage_with_manifest_path(
+                    manifest,
+                    dep_uid,
+                    dialect,
+                    manifest_path,
+                    cache,
+                )
+            });
 
             let mut found_on_path = false;
 

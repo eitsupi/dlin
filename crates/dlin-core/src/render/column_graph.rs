@@ -722,10 +722,10 @@ mod tests {
         ColumnLineageEntry, ColumnSource, ImpactedColumn, ModelColumnLineage,
     };
 
-    fn make_lineage(
-        model: &str,
-        entries: Vec<(&str, TransformationType, Vec<(&str, &str)>)>,
-    ) -> ModelColumnLineage {
+    type SourceSpec<'a> = Vec<(&'a str, &'a str)>;
+    type LineageSpec<'a> = Vec<(&'a str, TransformationType, SourceSpec<'a>)>;
+
+    fn make_lineage(model: &str, entries: LineageSpec<'_>) -> ModelColumnLineage {
         let traced = entries.len();
         let total = entries.len();
         ModelColumnLineage {

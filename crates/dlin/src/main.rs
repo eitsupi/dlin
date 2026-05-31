@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use clap::Parser;
@@ -141,7 +142,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest, project_opt) = build_dag(
+    let (dag, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -246,8 +247,9 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents_for_source(
-            manifest.as_ref(),
+            &args.source,
             &project_dir,
+            args.manifest_path.as_ref(),
             &filtered,
         ))
     } else {
@@ -311,7 +313,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest, project_opt) = build_dag(
+    let (dag, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -395,8 +397,9 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     // Collect SQL contents only when sql_content field is requested
     let sql_contents = if json_fields.contains("sql_content") {
         Some(collect_sql_contents_for_source(
-            manifest.as_ref(),
+            &args.source,
             &project_dir,
+            args.manifest_path.as_ref(),
             &filtered,
         ))
     } else {
@@ -409,10 +412,6 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 }
 
 /// Build the lineage DAG from either a manifest file or by parsing SQL files.
-///
-/// Returns the graph and, in manifest mode, the parsed `Manifest` so that
-/// callers can extract additional data (e.g. `compiled_code`) without
-/// re-parsing the JSON.
 #[cfg(not(tarpaulin_include))]
 fn build_dag(
     project_dir: &Path,
@@ -423,15 +422,48 @@ fn build_dag(
     refresh_cache: bool,
 ) -> Result<(
     graph::types::LineageGraph,
-    Option<parser::manifest::Manifest>,
     Option<parser::project::DbtProject>,
 )> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
-            let manifest = parser::manifest::load_manifest(&resolved)?;
+            let mut cache = if no_cache {
+                parser::manifest_cache::ManifestGraphCache::disabled()
+            } else if refresh_cache {
+                parser::manifest_cache::ManifestGraphCache::fresh(project_dir, cache_dir)
+            } else {
+                parser::manifest_cache::ManifestGraphCache::load(project_dir, cache_dir)
+            };
+
+            if let Some(graph) = cache.get(&resolved) {
+                return Ok((graph.clone(), None));
+            }
+
+            let (manifest, parsed_fingerprint) = load_manifest_with_fingerprint(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-            Ok((graph, Some(manifest), None))
+            if let Some(parsed_fingerprint) = parsed_fingerprint {
+                let expected = (
+                    parsed_fingerprint.mtime_secs,
+                    parsed_fingerprint.mtime_nanos,
+                    parsed_fingerprint.size_bytes,
+                    parsed_fingerprint.content_hash,
+                );
+                if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
+                    cache.save();
+                } else {
+                    dlin_core::warn!(
+                        "manifest changed after read/parse; skipping manifest graph cache write for {}",
+                        resolved.display()
+                    );
+                }
+            } else {
+                dlin_core::warn!(
+                    "could not compute manifest fingerprint; skipping manifest graph cache write for {}",
+                    resolved.display()
+                );
+            }
+
+            Ok((graph, None))
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
@@ -445,9 +477,64 @@ fn build_dag(
                 refresh_cache,
                 &project.vars,
             )?;
-            Ok((graph, None, Some(project)))
+            Ok((graph, Some(project)))
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestFingerprint {
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size_bytes: u64,
+    content_hash: u64,
+}
+
+fn manifest_fingerprint(meta: &std::fs::Metadata, bytes: &[u8]) -> Option<ManifestFingerprint> {
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    Some(ManifestFingerprint {
+        mtime_secs: modified.as_secs(),
+        mtime_nanos: modified.subsec_nanos(),
+        size_bytes: meta.len(),
+        content_hash: hash_bytes(bytes),
+    })
+}
+
+fn load_manifest_with_fingerprint(
+    manifest_path: &Path,
+) -> Result<(parser::manifest::Manifest, Option<ManifestFingerprint>)> {
+    let meta = std::fs::metadata(manifest_path).map_err(|e| {
+        dlin_core::error::DbtLineageError::FileReadError {
+            path: manifest_path.to_path_buf(),
+            source: e,
+        }
+    })?;
+    let bytes = std::fs::read(manifest_path).map_err(|e| {
+        dlin_core::error::DbtLineageError::FileReadError {
+            path: manifest_path.to_path_buf(),
+            source: e,
+        }
+    })?;
+    let manifest = parser::manifest::load_manifest_from_bytes(&bytes, manifest_path)?;
+    let fingerprint = manifest_fingerprint(&meta, &bytes);
+    Ok((manifest, fingerprint))
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    // FNV-1a 64-bit constants (offset basis + prime), used for lightweight
+    // non-cryptographic fingerprinting of manifest content.
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Dispatch rendering based on output format
@@ -476,18 +563,27 @@ fn render_output(
 
 /// Collect SQL contents based on the data source.
 ///
-/// - **manifest** (`Some`): reads `compiled_code` from the already-parsed manifest.
+/// - **manifest**: reads `compiled_code` from manifest.json.
 ///   Users must run `dbt compile` beforehand so the manifest contains compiled SQL.
-/// - **sql** (`None`): reads raw SQL files from disk.
+/// - **sql**: reads raw SQL files from disk.
 #[cfg(not(tarpaulin_include))]
 fn collect_sql_contents_for_source(
-    manifest: Option<&parser::manifest::Manifest>,
+    source: &SourceType,
     project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
     graph: &graph::types::LineageGraph,
 ) -> HashMap<String, String> {
-    match manifest {
-        Some(m) => m.collect_sql_contents(),
-        None => collect_sql_contents(graph, project_dir),
+    match source {
+        SourceType::Manifest => {
+            let Ok(resolved) = resolve_manifest_path_or_default(manifest_path, project_dir) else {
+                return HashMap::new();
+            };
+            let Ok(manifest) = parser::manifest::load_manifest(&resolved) else {
+                return HashMap::new();
+            };
+            manifest.collect_sql_contents()
+        }
+        SourceType::Sql => collect_sql_contents(graph, project_dir),
     }
 }
 
@@ -541,7 +637,7 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, _manifest, project_opt) = build_dag(
+    let (dag, project_opt) = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -804,8 +900,12 @@ fn run_column_lineage_command(
     let reports: Vec<_> = models
         .iter()
         .map(|model| {
-            let mut report = graph::column_lineage::compute_cross_model_column_lineage(
-                &manifest, model, dialect, &mut cache,
+            let mut report = graph::column_lineage::compute_cross_model_column_lineage_with_manifest_path(
+                &manifest,
+                model,
+                dialect,
+                Some(&resolved_manifest_path),
+                &mut cache,
             );
             if !column_filter.is_empty() {
                 report
@@ -953,7 +1053,14 @@ fn run_column_impact_command(
     let reports: Vec<_> = columns
         .iter()
         .map(|col| {
-            graph::column_lineage::compute_column_impact(&manifest, model, col, dialect, &mut cache)
+            graph::column_lineage::compute_column_impact_with_manifest_path(
+                &manifest,
+                model,
+                col,
+                dialect,
+                Some(&resolved),
+                &mut cache,
+            )
         })
         .collect();
 
@@ -1018,7 +1125,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, manifest_opt, project_opt) = build_dag(
+    let (dag, project_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -1029,8 +1136,9 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     let (project_name, vars_count, manifest_status) = match args.source {
         SourceType::Manifest => {
-            let name = manifest_opt
-                .as_ref()
+            let name = resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)
+                .ok()
+                .and_then(|path| parser::manifest::load_manifest(&path).ok())
                 .and_then(|m| m.metadata.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
             let status = match parser::project::DbtProject::load(&project_dir) {

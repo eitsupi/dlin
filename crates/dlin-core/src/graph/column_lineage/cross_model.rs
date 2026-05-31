@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use polyglot_sql::DialectType;
 
@@ -6,7 +7,7 @@ use crate::parser::manifest::Manifest;
 
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
-    compute_column_lineage, find_model_by_name,
+    find_model_by_name,
 };
 
 pub fn compute_cross_model_column_lineage(
@@ -15,9 +16,22 @@ pub fn compute_cross_model_column_lineage(
     dialect: DialectType,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
+    compute_cross_model_column_lineage_with_manifest_path(
+        manifest, model_name, dialect, None, cache,
+    )
+}
+
+pub fn compute_cross_model_column_lineage_with_manifest_path(
+    manifest: &Manifest,
+    model_name: &str,
+    dialect: DialectType,
+    manifest_path: Option<&Path>,
+    cache: &mut ColumnLineageCache,
+) -> ModelColumnLineage {
     let mut ctx = CrossModelContext {
         manifest,
         dialect,
+        manifest_path,
         in_memory_cache: HashMap::new(),
         computing: HashSet::new(),
     };
@@ -28,6 +42,7 @@ pub fn compute_cross_model_column_lineage(
 struct CrossModelContext<'a> {
     manifest: &'a Manifest,
     dialect: DialectType,
+    manifest_path: Option<&'a Path>,
     in_memory_cache: HashMap<String, ModelColumnLineage>,
     computing: HashSet<String>,
 }
@@ -37,7 +52,13 @@ fn compute_cross_model_inner(
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
-    let mut result = compute_column_lineage(ctx.manifest, model_name, ctx.dialect, disk_cache);
+    let mut result = super::compute_column_lineage_with_manifest_path(
+        ctx.manifest,
+        model_name,
+        ctx.dialect,
+        ctx.manifest_path,
+        disk_cache,
+    );
     let upstream_models = build_upstream_model_names(ctx.manifest, model_name);
 
     for entry in &mut result.columns {
@@ -227,8 +248,9 @@ fn compute_single_column_lineage(
 ) -> Option<(Vec<ColumnSource>, TransformationType)> {
     let node = find_model_by_name(manifest, model_name)?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let ctx = super::prepare_lineage_context(compiled_code, manifest, node, dialect).ok()?;
-    super::run_column_lineage(column_name, &ctx)
+    let ctx = super::single_model::prepare_lineage_context(compiled_code, manifest, node, dialect)
+        .ok()?;
+    super::single_model::run_column_lineage(column_name, &ctx)
         .ok()
         .map(|r| (r.sources, r.transformation))
 }
