@@ -441,17 +441,24 @@ fn build_dag(
 
             let (manifest, parsed_fingerprint) = load_manifest_with_fingerprint(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-            let expected = (
-                parsed_fingerprint.mtime_secs,
-                parsed_fingerprint.mtime_nanos,
-                parsed_fingerprint.size_bytes,
-                parsed_fingerprint.content_hash,
-            );
-            if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
-                cache.save();
+            if let Some(parsed_fingerprint) = parsed_fingerprint {
+                let expected = (
+                    parsed_fingerprint.mtime_secs,
+                    parsed_fingerprint.mtime_nanos,
+                    parsed_fingerprint.size_bytes,
+                    parsed_fingerprint.content_hash,
+                );
+                if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
+                    cache.save();
+                } else {
+                    dlin_core::warn!(
+                        "manifest changed after read/parse; skipping manifest graph cache write for {}",
+                        resolved.display()
+                    );
+                }
             } else {
                 dlin_core::warn!(
-                    "manifest changed after read/parse; skipping manifest graph cache write for {}",
+                    "could not compute manifest fingerprint; skipping manifest graph cache write for {}",
                     resolved.display()
                 );
             }
@@ -499,25 +506,21 @@ fn manifest_fingerprint(meta: &std::fs::Metadata, bytes: &[u8]) -> Option<Manife
 
 fn load_manifest_with_fingerprint(
     manifest_path: &Path,
-) -> Result<(parser::manifest::Manifest, ManifestFingerprint)> {
+) -> Result<(parser::manifest::Manifest, Option<ManifestFingerprint>)> {
     let meta = std::fs::metadata(manifest_path).map_err(|e| {
         dlin_core::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
             source: e,
         }
     })?;
-    let bytes =
-        std::fs::read(manifest_path).map_err(|e| dlin_core::error::DbtLineageError::FileReadError {
+    let bytes = std::fs::read(manifest_path).map_err(|e| {
+        dlin_core::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
             source: e,
-        })?;
-    let manifest = parser::manifest::load_manifest_from_bytes(&bytes, manifest_path)?;
-    let fingerprint = manifest_fingerprint(&meta, &bytes).ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not compute manifest fingerprint for {}",
-            manifest_path.display()
-        )
+        }
     })?;
+    let manifest = parser::manifest::load_manifest_from_bytes(&bytes, manifest_path)?;
+    let fingerprint = manifest_fingerprint(&meta, &bytes);
     Ok((manifest, fingerprint))
 }
 
