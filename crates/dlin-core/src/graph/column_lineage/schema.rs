@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use polyglot_sql::{DialectType, Schema};
+use polyglot_sql::{DialectType, Expression, Schema};
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
@@ -93,7 +93,7 @@ fn resolve_node_columns(
         .as_ref()
         .map(|code| {
             let schema = build_yaml_schema_for_node(manifest, dep_node);
-            infer_output_columns(code, dialect, schema.as_ref())
+            infer_output_columns(code, dialect, schema.as_ref(), None)
         })
         .unwrap_or_default()
         .into_iter()
@@ -176,10 +176,14 @@ pub(super) fn infer_output_columns(
     sql: &str,
     dialect: DialectType,
     schema: Option<&polyglot_sql::MappingSchema>,
+    parsed_expr: Option<&Expression>,
 ) -> Vec<String> {
-    let expr = match polyglot_sql::parse_one(sql, dialect) {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let expr = match parsed_expr {
+        Some(e) => e.clone(),
+        None => match polyglot_sql::parse_one(sql, dialect) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        },
     };
     crate::parser::columns::extract_select_columns_from_expr(
         &expr,

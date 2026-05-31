@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use polyglot_sql::DialectType;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,12 @@ struct ColumnLineageCacheEntry {
     /// which effectively invalidates them since the computed hash will differ.
     #[serde(default)]
     manifest_columns_hash: u64,
+    #[serde(default)]
+    manifest_mtime_secs: u64,
+    #[serde(default)]
+    manifest_mtime_nanos: u32,
+    #[serde(default)]
+    manifest_size_bytes: u64,
     /// Cached lineage result
     lineage: ModelColumnLineage,
 }
@@ -111,19 +118,29 @@ impl ColumnLineageCache {
         model_name: &str,
         compiled_code: &str,
         dialect: DialectType,
-        manifest_columns_hash: u64,
+        manifest_path: Option<&Path>,
+        manifest_columns_hash: Option<u64>,
     ) -> Option<&ModelColumnLineage> {
         let entry = self.entries.get(model_name)?;
         let code_hash = hash_str(compiled_code);
         let dialect_str = format!("{:?}", dialect);
-        if entry.compiled_code_hash == code_hash
-            && entry.dialect == dialect_str
-            && entry.manifest_columns_hash == manifest_columns_hash
-        {
-            Some(&entry.lineage)
-        } else {
-            None
+        if entry.compiled_code_hash != code_hash || entry.dialect != dialect_str {
+            return None;
         }
+        if let Some(path) = manifest_path
+            && let Some(stat) = manifest_stat(path)
+            && entry.manifest_mtime_secs == stat.mtime_secs
+            && entry.manifest_mtime_nanos == stat.mtime_nanos
+            && entry.manifest_size_bytes == stat.size_bytes
+        {
+            return Some(&entry.lineage);
+        }
+        if let Some(hash) = manifest_columns_hash
+            && entry.manifest_columns_hash == hash
+        {
+            return Some(&entry.lineage);
+        }
+        None
     }
 
     /// Insert a lineage result into the cache.
@@ -133,14 +150,19 @@ impl ColumnLineageCache {
         compiled_code: &str,
         dialect: DialectType,
         manifest_columns_hash: u64,
+        manifest_path: Option<&Path>,
         lineage: ModelColumnLineage,
     ) {
+        let stat = manifest_path.and_then(manifest_stat);
         self.entries.insert(
             model_name.to_string(),
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
                 dialect: format!("{:?}", dialect),
                 manifest_columns_hash,
+                manifest_mtime_secs: stat.as_ref().map_or(0, |s| s.mtime_secs),
+                manifest_mtime_nanos: stat.as_ref().map_or(0, |s| s.mtime_nanos),
+                manifest_size_bytes: stat.as_ref().map_or(0, |s| s.size_bytes),
                 lineage,
             },
         );
@@ -181,4 +203,24 @@ impl ColumnLineageCache {
             }
         }
     }
+}
+
+struct ManifestStat {
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    size_bytes: u64,
+}
+
+fn manifest_stat(path: &Path) -> Option<ManifestStat> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    Some(ManifestStat {
+        mtime_secs: mtime.as_secs(),
+        mtime_nanos: mtime.subsec_nanos(),
+        size_bytes: meta.len(),
+    })
 }

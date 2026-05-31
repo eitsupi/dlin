@@ -17,7 +17,20 @@ pub(super) fn prepare_lineage_context(
     node: &crate::parser::manifest::ManifestNode,
     dialect: DialectType,
 ) -> Result<LineageContext, String> {
-    let expr = polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?;
+    prepare_lineage_context_with_expr(compiled_code, manifest, node, dialect, None)
+}
+
+pub(super) fn prepare_lineage_context_with_expr(
+    compiled_code: &str,
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+    dialect: DialectType,
+    parsed_expr: Option<&Expression>,
+) -> Result<LineageContext, String> {
+    let expr = match parsed_expr {
+        Some(e) => e.clone(),
+        None => polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?,
+    };
 
     let schema = build_schema_from_manifest(manifest, node, dialect);
 

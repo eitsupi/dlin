@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use polyglot_sql::DialectType;
 use rayon::prelude::*;
@@ -15,10 +16,15 @@ mod tests;
 mod types;
 
 pub use cache::ColumnLineageCache;
-pub use cross_model::compute_cross_model_column_lineage;
-pub use impact::{ColumnImpactReport, ImpactedColumn, compute_column_impact};
+pub use cross_model::{
+    compute_cross_model_column_lineage, compute_cross_model_column_lineage_with_manifest_path,
+};
+pub use impact::{
+    ColumnImpactReport, ImpactedColumn, compute_column_impact,
+    compute_column_impact_with_manifest_path,
+};
 use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash, infer_output_columns};
-use single_model::{has_unresolved_stars, prepare_lineage_context, run_column_lineage};
+use single_model::{has_unresolved_stars, prepare_lineage_context_with_expr, run_column_lineage};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
@@ -32,6 +38,16 @@ pub fn compute_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     dialect: DialectType,
+    cache: &mut ColumnLineageCache,
+) -> ModelColumnLineage {
+    compute_column_lineage_with_manifest_path(manifest, model_name, dialect, None, cache)
+}
+
+pub fn compute_column_lineage_with_manifest_path(
+    manifest: &Manifest,
+    model_name: &str,
+    dialect: DialectType,
+    manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     let node = find_model_by_name(manifest, model_name);
@@ -76,10 +92,21 @@ pub fn compute_column_lineage(
         }
     };
 
-    let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
-    if let Some(cached) = cache.get(model_name, compiled_code, dialect, manifest_columns_hash) {
+    if let Some(cached) = cache.get(model_name, compiled_code, dialect, manifest_path, None) {
         return cached.clone();
     }
+    let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
+    if let Some(cached) = cache.get(
+        model_name,
+        compiled_code,
+        dialect,
+        None,
+        Some(manifest_columns_hash),
+    ) {
+        return cached.clone();
+    }
+
+    let parsed_expr = polyglot_sql::parse_one(compiled_code, dialect).ok();
 
     let column_names: Vec<String> = {
         let mut names: HashSet<String> = node.columns.keys().cloned().collect();
@@ -88,6 +115,7 @@ pub fn compute_column_lineage(
             compiled_code,
             dialect,
             schema.as_ref(),
+            parsed_expr.as_ref(),
         ));
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
@@ -111,7 +139,13 @@ pub fn compute_column_lineage(
         };
     }
 
-    let ctx = match prepare_lineage_context(compiled_code, manifest, node, dialect) {
+    let ctx = match prepare_lineage_context_with_expr(
+        compiled_code,
+        manifest,
+        node,
+        dialect,
+        parsed_expr.as_ref(),
+    ) {
         Ok(ctx) => ctx,
         Err(e) => {
             return ModelColumnLineage {
@@ -180,6 +214,7 @@ pub fn compute_column_lineage(
         compiled_code,
         dialect,
         manifest_columns_hash,
+        manifest_path,
         result.clone(),
     );
 
