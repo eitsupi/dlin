@@ -222,3 +222,58 @@ fn test_column_cache_fresh() {
             .is_some()
     );
 }
+
+#[test]
+fn test_column_cache_miss_on_manifest_stat_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let manifest_path = project_dir.join("manifest.json");
+    std::fs::write(&manifest_path, r#"{"nodes":{}}"#).unwrap();
+
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    let lineage = ModelColumnLineage {
+        model: "m".to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+    cache.insert(
+        "m",
+        "SELECT 1",
+        DialectType::Generic,
+        42,
+        Some(&manifest_path),
+        lineage,
+    );
+    cache.save();
+
+    let cache2 = ColumnLineageCache::load(project_dir, None);
+    assert!(
+        cache2
+            .get(
+                "m",
+                "SELECT 1",
+                DialectType::Generic,
+                Some(&manifest_path),
+                Some(42)
+            )
+            .is_some()
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&manifest_path, r#"{"nodes":{"x":1}}"#).unwrap();
+
+    let cache3 = ColumnLineageCache::load(project_dir, None);
+    assert!(
+        cache3
+            .get(
+                "m",
+                "SELECT 1",
+                DialectType::Generic,
+                Some(&manifest_path),
+                Some(42)
+            )
+            .is_none()
+    );
+}

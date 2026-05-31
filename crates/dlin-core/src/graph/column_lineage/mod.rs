@@ -97,7 +97,7 @@ pub fn compute_column_lineage_with_manifest_path(
         model_name,
         compiled_code,
         dialect,
-        None,
+        manifest_path,
         Some(manifest_columns_hash),
     ) {
         return cached.clone();
