@@ -443,12 +443,31 @@ fn build_dag(
             let manifest = parser::manifest::load_manifest(&resolved)?;
             let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
             let after = manifest_fingerprint(&resolved);
-            if before.is_some() && before == after {
-                cache.insert(&resolved, &graph);
-                cache.save();
+            if let (Some(before_fp), Some(after_fp)) = (before, after) {
+                if before_fp != after_fp {
+                    dlin_core::warn!(
+                        "manifest changed during parse/build; skipping manifest graph cache write for {}",
+                        resolved.display()
+                    );
+                    return Ok((graph, None));
+                }
+                let expected = (
+                    after_fp.mtime_secs,
+                    after_fp.mtime_nanos,
+                    after_fp.size_bytes,
+                    after_fp.content_hash,
+                );
+                if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
+                    cache.save();
+                } else {
+                    dlin_core::warn!(
+                        "manifest changed after validation; skipping manifest graph cache write for {}",
+                        resolved.display()
+                    );
+                }
             } else {
                 dlin_core::warn!(
-                    "manifest changed during parse/build; skipping manifest graph cache write for {}",
+                    "manifest fingerprint unavailable; skipping manifest graph cache write for {}",
                     resolved.display()
                 );
             }

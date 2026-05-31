@@ -94,18 +94,34 @@ impl ManifestGraphCache {
         }
     }
 
-    pub fn insert(&mut self, manifest_path: &Path, graph: &LineageGraph) {
-        if let Some(stat) = file_stat(manifest_path) {
-            self.entry = Some(ManifestCacheEntry {
-                manifest_identity: manifest_identity(manifest_path),
-                mtime_secs: stat.mtime_secs,
-                mtime_nanos: stat.mtime_nanos,
-                file_size: stat.file_size,
-                content_hash: stat.content_hash,
-                graph: graph.clone(),
-            });
-            self.dirty = true;
+    pub fn insert_if_fingerprint_matches(
+        &mut self,
+        manifest_path: &Path,
+        graph: &LineageGraph,
+        expected: (u64, u32, u64, u64),
+    ) -> bool {
+        let Some(stat) = file_stat(manifest_path) else {
+            return false;
+        };
+        if (
+            stat.mtime_secs,
+            stat.mtime_nanos,
+            stat.file_size,
+            stat.content_hash,
+        ) != expected
+        {
+            return false;
         }
+        self.entry = Some(ManifestCacheEntry {
+            manifest_identity: manifest_identity(manifest_path),
+            mtime_secs: stat.mtime_secs,
+            mtime_nanos: stat.mtime_nanos,
+            file_size: stat.file_size,
+            content_hash: stat.content_hash,
+            graph: graph.clone(),
+        });
+        self.dirty = true;
+        true
     }
 
     pub fn save(&self) {
