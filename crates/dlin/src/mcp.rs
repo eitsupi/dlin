@@ -20,11 +20,11 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
-    #[serde(default)]
-    id: Option<Value>,
     method: String,
     #[serde(default)]
     params: Value,
+    #[serde(skip)]
+    id: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,7 +63,7 @@ pub fn run(args: McpArgs) -> Result<()> {
             continue;
         }
 
-        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+        let response = match parse_request(&line) {
             Ok(req) => handle_request(req, &state),
             Err(err) => Some(error_response(
                 Value::Null,
@@ -103,11 +103,18 @@ impl McpState {
     }
 }
 
-fn handle_request(req: JsonRpcRequest, state: &McpState) -> Option<JsonRpcResponse> {
-    if req.id.is_none() {
-        return None;
-    }
+fn parse_request(line: &str) -> serde_json::Result<JsonRpcRequest> {
+    let value: Value = serde_json::from_str(line)?;
+    let id = value
+        .as_object()
+        .and_then(|object| object.get("id").cloned());
+    let mut req: JsonRpcRequest = serde_json::from_value(value)?;
+    req.id = id;
+    Ok(req)
+}
 
+fn handle_request(req: JsonRpcRequest, state: &McpState) -> Option<JsonRpcResponse> {
+    req.id.as_ref()?;
     let id = req.id.unwrap_or(Value::Null);
     if req.jsonrpc != "2.0" {
         return Some(error_response(id, -32600, "invalid JSON-RPC version"));
@@ -403,10 +410,17 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 );
             report.columns.retain(|entry| entry.column == column);
             if report.total_columns > 0 {
+                let column_error_prefix = format!("column '{column}': ");
+                report.errors.retain(|err| {
+                    !matches!(
+                        err.kind,
+                        graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                    ) || err.what.starts_with(&column_error_prefix)
+                });
                 let has_column_error = report
                     .errors
                     .iter()
-                    .any(|err| err.what.starts_with(&format!("column '{column}': ")));
+                    .any(|err| err.what.starts_with(&column_error_prefix));
                 report.traced_columns = report.columns.len();
                 report.total_columns = 1;
                 if report.columns.is_empty() && !has_column_error {
@@ -547,5 +561,23 @@ mod tests {
 
         assert!(nodes.iter().any(|node| node["label"] == "orders"));
         assert!(!edges.is_empty());
+    }
+
+    #[test]
+    fn explicit_null_id_gets_response() {
+        let state = state();
+        let req = parse_request(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#).unwrap();
+        let response = handle_request(req, &state).unwrap();
+
+        assert_eq!(response.id, Value::Null);
+        assert_eq!(response.result, Some(json!({})));
+    }
+
+    #[test]
+    fn missing_id_is_notification() {
+        let state = state();
+        let req = parse_request(r#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap();
+
+        assert!(handle_request(req, &state).is_none());
     }
 }
