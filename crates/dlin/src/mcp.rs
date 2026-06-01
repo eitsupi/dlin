@@ -106,14 +106,14 @@ fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
     let id = value
         .as_object()
         .and_then(|object| object.get("id").cloned());
-    if let Some(ref raw_id) = id {
-        if !matches!(raw_id, Value::String(_) | Value::Number(_) | Value::Null) {
-            return Err(error_response(
-                Value::Null,
-                -32600,
-                "invalid request: id must be a string, number, or null",
-            ));
-        }
+    if let Some(ref raw_id) = id
+        && !matches!(raw_id, Value::String(_) | Value::Number(_) | Value::Null)
+    {
+        return Err(error_response(
+            Value::Null,
+            -32600,
+            "invalid request: id must be a string, number, or null",
+        ));
     }
     let id_for_error = id.clone().unwrap_or(Value::Null);
     let mut req: JsonRpcRequest = serde_json::from_value(value)
@@ -392,7 +392,7 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let filtered =
         graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
     let mut buf = Vec::new();
-    render::json::render_json_to_writer(&filtered, None, &*GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
+    render::json::render_json_to_writer(&filtered, None, &GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
     Ok(serde_json::from_slice(&buf)?)
 }
 
@@ -437,7 +437,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 // Cross-model reports also accumulate upstream-dependency errors, which
                 // are irrelevant to whether the requested column exists in `model`.
                 // All target-model errors embed the model name as `'<model>'` in `what`.
-                let model_marker = format!("'{model}'");
+                let model_marker = format!("'{}'", report.model);
                 let has_global_errors = report.errors.iter().any(|err| {
                     !matches!(
                         err.kind,
@@ -635,6 +635,38 @@ mod tests {
         assert_eq!(response.id, Value::Null);
         let err = response.error.as_ref().unwrap();
         assert_eq!(err.code, -32600);
+    }
+
+    #[test]
+    fn column_lineage_parse_failure_not_replaced_when_model_given_as_unique_id() {
+        // When the model is specified as a unique ID (e.g. "model.clp.stg_bad_sql"),
+        // report.model resolves to the short display name "stg_bad_sql". The global-error
+        // marker must use the resolved name, not the raw unique ID, to match the error's
+        // what field ("failed to parse SQL for 'stg_bad_sql'").
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "model.clp.stg_bad_sql",
+                "column": "some_col",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "expected a parse_failure error; got: {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("column_not_found")),
+            "must not synthesize column_not_found when a parse_failure is present (unique ID path); got: {errors:?}"
+        );
     }
 
     #[test]
