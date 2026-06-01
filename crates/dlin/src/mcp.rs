@@ -474,6 +474,12 @@ fn error_names_upstream_model(what: &str, upstream_models: &HashSet<String>) -> 
     upstream_models.contains(&what[start..end])
 }
 
+fn extract_column_not_found_name(what: &str) -> Option<&str> {
+    let rest = what.strip_prefix("column '")?;
+    let end = rest.find('\'')?;
+    Some(&rest[..end])
+}
+
 fn node_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
     node.label.to_lowercase().contains(query)
         || node
@@ -601,6 +607,18 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         })
                     })
                     .collect();
+                let lineage_columns: HashSet<String> = report
+                    .columns
+                    .iter()
+                    .flat_map(|entry| {
+                        std::iter::once(entry.column.clone()).chain(entry.sources.iter().flat_map(
+                            |src| {
+                                std::iter::once(src.column.clone())
+                                    .chain(src.model_path.iter().map(|(_, col, _)| col.clone()))
+                            },
+                        ))
+                    })
+                    .collect();
 
                 // Partition cross-model errors:
                 // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when
@@ -615,7 +633,10 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
                     ) {
-                        if err.what.starts_with(&column_error_prefix) {
+                        if err.what.starts_with(&column_error_prefix)
+                            || extract_column_not_found_name(&err.what)
+                                .is_some_and(|col| lineage_columns.contains(col))
+                        {
                             cross_column_errors.push(err);
                         }
                     } else if !upstream_models.is_empty()
@@ -708,7 +729,7 @@ fn normalize_manifest_unique_id(name: &str) -> Option<String> {
         "test" => {
             // dbt test unique IDs may include a trailing hash:
             // test.<project>.<test_name>.<hash> -> test.<test_name>
-            if parts.len() >= 4 {
+            if parts.len() >= 3 {
                 Some(format!("test.{}", parts[2]))
             } else {
                 None
@@ -1175,5 +1196,20 @@ mod tests {
             normalized,
             Some("test.not_null_orders_order_id".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_manifest_unique_id_supports_unhashed_test_id() {
+        let normalized = normalize_manifest_unique_id("test.simple_project.my_test_name");
+        assert_eq!(normalized, Some("test.my_test_name".to_string()));
+    }
+
+    #[test]
+    fn extract_column_not_found_name_parses_column_prefix() {
+        assert_eq!(
+            extract_column_not_found_name("column 'order_id': not found in model output"),
+            Some("order_id")
+        );
+        assert_eq!(extract_column_not_found_name("failed to parse SQL"), None);
     }
 }
