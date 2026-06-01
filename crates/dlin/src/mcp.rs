@@ -472,16 +472,26 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                     .errors
                     .iter()
                     .any(|err| err.what.starts_with(&column_error_prefix));
-                // Only treat errors for the *target* model as global blockers.
-                // Cross-model reports also accumulate upstream-dependency errors, which
-                // are irrelevant to whether the requested column exists in `model`.
-                // All target-model errors embed the model name as `'<model>'` in `what`.
-                let model_marker = format!("'{}'", report.model);
-                let has_global_errors = report.errors.iter().any(|err| {
+                // Determine whether the *target* model itself has a global error (e.g.
+                // ParseFailure, NoCompiledCode) by querying single-model lineage. The
+                // cross-model report accumulates errors from all upstream models, including
+                // those that may share the same display name in other packages, so
+                // string-matching on the display name is not reliable. The single-model
+                // result contains only errors for the target model, and the cache populated
+                // during cross-model computation makes this a cheap cache hit.
+                let target_lineage =
+                    graph::column_lineage::compute_column_lineage_with_manifest_path(
+                        &state.manifest,
+                        model,
+                        state.dialect,
+                        Some(&state.manifest_path),
+                        &mut cache,
+                    );
+                let has_global_errors = target_lineage.errors.iter().any(|err| {
                     !matches!(
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                    ) && err.what.contains(&model_marker)
+                    )
                 });
                 report.traced_columns = report.columns.len();
                 report.total_columns = 1;
