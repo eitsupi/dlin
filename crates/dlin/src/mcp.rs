@@ -56,6 +56,33 @@ struct McpState {
 
 pub fn run(args: McpArgs) -> Result<()> {
     let state = McpState::load(args)?;
+
+    let counts = render::summary::count_nodes(&state.dag);
+    let project_name = state
+        .manifest
+        .metadata
+        .project_name
+        .as_deref()
+        .unwrap_or("(unknown)");
+    eprintln!("dlin MCP server ready");
+    eprintln!("  project:  {project_name}");
+    eprintln!("  manifest: {}", state.manifest_path.display());
+    eprintln!("  dialect:  {}", state.dialect);
+    let mut parts = vec![format!("{} models", counts.model)];
+    if counts.source > 0 {
+        parts.push(format!("{} sources", counts.source));
+    }
+    if counts.seed > 0 {
+        parts.push(format!("{} seeds", counts.seed));
+    }
+    if counts.snapshot > 0 {
+        parts.push(format!("{} snapshots", counts.snapshot));
+    }
+    if counts.exposure > 0 {
+        parts.push(format!("{} exposures", counts.exposure));
+    }
+    eprintln!("  nodes:    {}", parts.join(", "));
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
