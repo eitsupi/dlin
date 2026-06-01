@@ -100,16 +100,14 @@ impl McpState {
 }
 
 fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
-    let value: Value = serde_json::from_str(line).map_err(|err| {
-        error_response(Value::Null, -32700, format!("parse error: {err}"))
-    })?;
+    let value: Value = serde_json::from_str(line)
+        .map_err(|err| error_response(Value::Null, -32700, format!("parse error: {err}")))?;
     let id = value
         .as_object()
         .and_then(|object| object.get("id").cloned());
     let id_for_error = id.clone().unwrap_or(Value::Null);
-    let mut req: JsonRpcRequest = serde_json::from_value(value).map_err(|err| {
-        error_response(id_for_error, -32600, format!("invalid request: {err}"))
-    })?;
+    let mut req: JsonRpcRequest = serde_json::from_value(value)
+        .map_err(|err| error_response(id_for_error, -32600, format!("invalid request: {err}")))?;
     req.id = id;
     Ok(req)
 }
