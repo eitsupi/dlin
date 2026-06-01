@@ -219,12 +219,12 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "get_project_summary",
-            "description": "Return a summary of the loaded dbt project: node counts by type, total edge count, and whether manifest.json is up to date with dbt_project.yml.",
+            "description": "Return a summary of the loaded dbt project: node counts by type, total edge count, and whether manifest.json reflects the latest project source files (SQL models, YAML schemas, seeds, and macros).",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
             "name": "find_nodes",
-            "description": "Search for nodes in the dbt DAG by keyword, or look up specific nodes by name. Returns metadata including type, file path, description, and columns.",
+            "description": "Search for nodes in the dbt DAG by keyword, or look up specific nodes by name. Returns metadata including type, file path, description, and tags. Column details are included only when looking up specific nodes by name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -255,7 +255,7 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Analyse the downstream impact of changing a model: returns all downstream nodes with their distance and a severity score based on type and distance.",
+            "description": "Analyse the downstream impact of changing a model: returns all downstream nodes with their distance and a severity score based on node type and materialization.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
@@ -466,11 +466,19 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
     let downstream = optional_usize(args, "downstream_depth")?.or(Some(1));
 
+    let not_found: Vec<String> = models
+        .iter()
+        .filter(|m| graph::filter::try_resolve_node_quiet(&state.dag, m).is_none())
+        .cloned()
+        .collect();
+
     let filtered =
         graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
     let mut buf = Vec::new();
     render::json::render_json_to_writer(&filtered, None, &GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
-    Ok(serde_json::from_slice(&buf)?)
+    let mut result: Value = serde_json::from_slice(&buf)?;
+    result["not_found"] = json!(not_found);
+    Ok(result)
 }
 
 fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
@@ -500,23 +508,26 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
             report.columns.retain(|entry| entry.column == column);
             if report.total_columns > 0 {
                 let column_error_prefix = format!("column '{column}': ");
-                report.errors.retain(|err| {
-                    !matches!(
-                        err.kind,
-                        graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                    ) || err.what.starts_with(&column_error_prefix)
-                });
-                let has_column_error = report
+
+                // Collect ColumnNotFound errors for the target column from the cross-model
+                // report (e.g. "column 'x': not found in upstream model foo").
+                let cross_column_errors: Vec<_> = report
                     .errors
-                    .iter()
-                    .any(|err| err.what.starts_with(&column_error_prefix));
-                // Determine whether the *target* model itself has a global error (e.g.
-                // ParseFailure, NoCompiledCode) by querying single-model lineage. The
-                // cross-model report accumulates errors from all upstream models, including
-                // those that may share the same display name in other packages, so
-                // string-matching on the display name is not reliable. The single-model
-                // result contains only errors for the target model, and the cache populated
-                // during cross-model computation makes this a cheap cache hit.
+                    .drain(..)
+                    .filter(|err| {
+                        matches!(
+                            err.kind,
+                            graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                        ) && err.what.starts_with(&column_error_prefix)
+                    })
+                    .collect();
+
+                // Query single-model lineage for global errors (ParseFailure, NoCompiledCode,
+                // etc.) that are definitively about the target model. The cross-model report
+                // accumulates errors from every upstream model visited, so using it here would
+                // include errors from upstream models whose columns are unrelated to the
+                // requested column. The cache populated during cross-model computation makes
+                // this a cheap hit.
                 let target_lineage =
                     graph::column_lineage::compute_column_lineage_with_manifest_path(
                         &state.manifest,
@@ -525,12 +536,23 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         Some(&state.manifest_path),
                         &mut cache,
                     );
-                let has_global_errors = target_lineage.errors.iter().any(|err| {
-                    !matches!(
-                        err.kind,
-                        graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                    )
-                });
+                let target_global_errors: Vec<_> = target_lineage
+                    .errors
+                    .into_iter()
+                    .filter(|err| {
+                        !matches!(
+                            err.kind,
+                            graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                        )
+                    })
+                    .collect();
+
+                let has_column_error = !cross_column_errors.is_empty();
+                let has_global_errors = !target_global_errors.is_empty();
+
+                report.errors = target_global_errors;
+                report.errors.extend(cross_column_errors);
+
                 report.traced_columns = report.columns.len();
                 report.total_columns = 1;
                 if report.columns.is_empty() && !has_column_error && !has_global_errors {
@@ -740,6 +762,20 @@ mod tests {
 
         assert!(nodes.iter().any(|node| node["label"] == "orders"));
         assert!(!edges.is_empty());
+    }
+
+    #[test]
+    fn lineage_reports_not_found_for_unknown_models() {
+        let state = state();
+        let value = get_lineage(&json!({ "models": ["orders", "no_such_model"] }), &state).unwrap();
+        let not_found = value["not_found"].as_array().unwrap();
+        assert_eq!(not_found, &[json!("no_such_model")]);
+        // known model is still returned
+        assert!(value["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["label"] == "orders"));
     }
 
     #[test]
