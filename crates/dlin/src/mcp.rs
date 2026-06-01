@@ -509,25 +509,53 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
             if report.total_columns > 0 {
                 let column_error_prefix = format!("column '{column}': ");
 
-                // Collect ColumnNotFound errors for the target column from the cross-model
-                // report (e.g. "column 'x': not found in upstream model foo").
-                let cross_column_errors: Vec<_> = report
-                    .errors
-                    .drain(..)
-                    .filter(|err| {
-                        matches!(
-                            err.kind,
-                            graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                        ) && err.what.starts_with(&column_error_prefix)
+                // Collect the short names of models on the target column's lineage path.
+                // Table names from SQL may be fully qualified (e.g. "db.schema.model"); take
+                // the last dot-separated segment and strip quotes to get the model short name.
+                let upstream_models: HashSet<String> = report
+                    .columns
+                    .iter()
+                    .flat_map(|entry| {
+                        entry.sources.iter().flat_map(|src| {
+                            let short = src
+                                .table
+                                .chars()
+                                .filter(|c| *c != '"' && *c != '`')
+                                .collect::<String>();
+                            let short = short.rsplit('.').next().unwrap_or(&short).to_string();
+                            std::iter::once(short)
+                                .chain(src.model_path.iter().map(|(m, _, _)| m.clone()))
+                        })
                     })
                     .collect();
 
-                // Query single-model lineage for global errors (ParseFailure, NoCompiledCode,
-                // etc.) that are definitively about the target model. The cross-model report
-                // accumulates errors from every upstream model visited, so using it here would
-                // include errors from upstream models whose columns are unrelated to the
-                // requested column. The cache populated during cross-model computation makes
-                // this a cheap hit.
+                // Partition cross-model errors:
+                // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when
+                //   their message references a model on the target column's lineage path.
+                //   This prevents errors from models used by *other* columns from leaking in.
+                // - ColumnNotFound errors are kept only for the specific requested column.
+                let mut cross_global_errors = Vec::new();
+                let mut cross_column_errors = Vec::new();
+                for err in report.errors.drain(..) {
+                    if matches!(
+                        err.kind,
+                        graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                    ) {
+                        if err.what.starts_with(&column_error_prefix) {
+                            cross_column_errors.push(err);
+                        }
+                    } else if !upstream_models.is_empty()
+                        && upstream_models
+                            .iter()
+                            .any(|m| err.what.contains(m.as_str()))
+                    {
+                        cross_global_errors.push(err);
+                    }
+                }
+
+                // Query single-model lineage for global errors specific to the target model
+                // itself (e.g. the target model's own ParseFailure or NoCompiledCode). The
+                // cache populated during cross-model computation makes this a cheap hit.
                 let target_lineage =
                     graph::column_lineage::compute_column_lineage_with_manifest_path(
                         &state.manifest,
@@ -548,9 +576,11 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                     .collect();
 
                 let has_column_error = !cross_column_errors.is_empty();
-                let has_global_errors = !target_global_errors.is_empty();
+                let has_global_errors =
+                    !target_global_errors.is_empty() || !cross_global_errors.is_empty();
 
                 report.errors = target_global_errors;
+                report.errors.extend(cross_global_errors);
                 report.errors.extend(cross_column_errors);
 
                 report.traced_columns = report.columns.len();
@@ -771,11 +801,13 @@ mod tests {
         let not_found = value["not_found"].as_array().unwrap();
         assert_eq!(not_found, &[json!("no_such_model")]);
         // known model is still returned
-        assert!(value["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["label"] == "orders"));
+        assert!(
+            value["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["label"] == "orders")
+        );
     }
 
     #[test]
@@ -896,6 +928,56 @@ mod tests {
                 .iter()
                 .any(|e| e["kind"].as_str() == Some("column_not_found")),
             "must synthesize column_not_found when the column is absent and the parse failure is unrelated; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_upstream_parse_failure_shown_when_column_depends_on_failing_model() {
+        // mart_unrelated_parse_fail.bad_col comes from stg_bad_sql (ParseFailure).
+        // The error must be included in the response because stg_bad_sql is on the
+        // lineage path of bad_col.
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "mart_unrelated_parse_fail",
+                "column": "bad_col",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "expected parse_failure for bad_col whose source model fails to parse; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_upstream_parse_failure_hidden_when_column_unrelated_to_failing_model() {
+        // mart_unrelated_parse_fail.order_id comes from stg_orders (parses fine).
+        // stg_bad_sql is a sibling dependency used only by bad_col, so its ParseFailure
+        // must NOT appear when querying order_id's lineage.
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "mart_unrelated_parse_fail",
+                "column": "order_id",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "must not include stg_bad_sql ParseFailure when order_id does not depend on it; got: {errors:?}"
         );
     }
 }
