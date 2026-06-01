@@ -1216,6 +1216,34 @@ mod tests {
     }
 
     #[test]
+    fn column_lineage_unrelated_column_not_found_suppressed_when_name_collides_with_lineage_path() {
+        // mart_id_name_collision.order_id traces through stg_mixed_id.order_id →
+        // stg_orders.order_id → raw.orders.id, so "id" appears as a column name on
+        // the retained path.  stg_mixed_id also references stg_orders.id directly
+        // (which stg_orders does not output), generating ColumnNotFound("id") in its
+        // per-model analysis.  Because "id" is not in lineage_model_columns for
+        // stg_mixed_id (only "order_id" is), that error must be suppressed.
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "mart_id_name_collision",
+                "column": "order_id",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("column_not_found")),
+            "ColumnNotFound(\"id\") from stg_mixed_id must be suppressed when \"id\" is not on stg_mixed_id's lineage path for order_id; got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn error_name_matching_avoids_orders_stg_orders_overlap() {
         let upstream_models = HashSet::from(["orders".to_string()]);
         assert!(error_names_upstream_model(
