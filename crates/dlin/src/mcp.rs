@@ -192,17 +192,17 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "get_project_summary",
-            "description": "Return dbt project summary, node counts, edge count, and manifest freshness.",
+            "description": "Return a summary of the loaded dbt project: node counts by type, total edge count, and whether manifest.json is up to date with dbt_project.yml.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
             "name": "find_nodes",
-            "description": "Search DAG nodes by keyword or return details for specific names. Covers all node types (models, sources, seeds, etc.).",
+            "description": "Search for nodes in the dbt DAG by keyword, or look up specific nodes by name. Returns metadata including type, file path, description, and columns.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Case-insensitive substring to match name, description, tags, or file path." },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Specific node names or unique IDs to describe." },
+                    "query": { "type": "string", "description": "Case-insensitive substring filter applied to node name, description, tags, and file path. Returns all nodes when omitted." },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up. When provided, only the listed nodes are returned." },
                     "node_types": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
@@ -214,13 +214,13 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_lineage",
-            "description": "Return model-level lineage graph as JSON for the specified focus models. Depth defaults to one hop each way.",
+            "description": "Return the lineage subgraph around a set of models as nodes and directed edges. Use upstream_depth and downstream_depth to control traversal depth.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "models": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Focus model names (at least one required)." },
-                    "upstream_depth": { "type": "integer", "minimum": 0, "default": 1 },
-                    "downstream_depth": { "type": "integer", "minimum": 0, "default": 1 }
+                    "models": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Names or unique IDs of the models to centre the lineage on. At least one is required." },
+                    "upstream_depth": { "type": "integer", "minimum": 0, "default": 1, "description": "Number of hops to traverse toward sources. Default: 1." },
+                    "downstream_depth": { "type": "integer", "minimum": 0, "default": 1, "description": "Number of hops to traverse toward exposures and consumers. Default: 1." }
                 },
                 "required": ["models"],
                 "additionalProperties": false
@@ -228,23 +228,23 @@ fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Return downstream impact analysis for a model with severity scoring.",
+            "description": "Analyse the downstream impact of changing a model: returns all downstream nodes with their distance and a severity score based on type and distance.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "model": { "type": "string" } },
+                "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
                 "required": ["model"],
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "get_column_lineage",
-            "description": "Return upstream or downstream column lineage for one model column. Requires compiled SQL in manifest.json.",
+            "description": "Trace the lineage of a single column across upstream or downstream models, following transformations. Requires compiled SQL in manifest.json.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "model": { "type": "string" },
-                    "column": { "type": "string" },
-                    "direction": { "type": "string", "enum": ["upstream", "downstream"] }
+                    "model": { "type": "string", "description": "Name or unique ID of the model containing the column." },
+                    "column": { "type": "string", "description": "Column name to trace." },
+                    "direction": { "type": "string", "enum": ["upstream", "downstream"], "description": "'upstream' traces where the column's value originates; 'downstream' traces models and columns that derive from it." }
                 },
                 "required": ["model", "column", "direction"],
                 "additionalProperties": false
