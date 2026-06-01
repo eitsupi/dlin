@@ -4,11 +4,11 @@
 [![PyPI](https://img.shields.io/pypi/v/dlin-cli)](https://pypi.org/project/dlin-cli/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eitsupi/dlin)
 
-dbt model lineage CLI that parses SQL files directly. No `dbt compile`, no Python, no `manifest.json` (for model-level lineage).
+dbt model lineage CLI. Parses SQL files directly or reads a compiled `manifest.json`. No Python required.
 
-Builds a dependency graph from `ref()` and `source()` calls in SQL. Designed for AI agents and CI pipelines.
+Works for developers navigating live SQL files, analysts exploring a shared manifest, AI agents via CLI prompt or MCP server, and CI pipelines.
 
-Experimental column-level lineage (`dlin column upstream` / `dlin column downstream`) is also available. It requires `dbt compile` and `manifest.json`.
+Column-level lineage (`dlin column upstream` / `dlin column downstream`) is also available. It requires `manifest.json`.
 
 ## Motivation
 
@@ -68,10 +68,41 @@ dlin list -o json --json-fields unique_id,file_path
 git diff --name-only main | dlin graph -o json
 ```
 
+## Source modes
+
+dlin supports two source modes for model-level commands.
+
+**SQL parse mode (default)** is for developers working with a live dbt project. dlin reads `ref()` and `source()` calls directly from SQL files without running `dbt compile`. It works immediately as you edit models, with no compilation step needed.
+
+**Manifest mode** (`--source manifest`) is for analysts or agents who have access only to a compiled `manifest.json`. A developer runs `dbt compile` once and distributes the result; anyone with that file can then explore the full project structure with dlin without needing SQL files or a Python environment.
+
+```sh
+# SQL parse mode: reads SQL files directly (default)
+dlin graph orders
+
+# Manifest mode: reads manifest.json only
+dlin graph orders --source manifest
+dlin summary --source manifest
+```
+
+For model-name inputs, `manifest.json` is the only file needed in manifest mode. File-path inputs (e.g. `models/foo.sql`) fall back to standard dbt directory layout when `dbt_project.yml` is absent, which may not match projects with custom path configuration. (`check-manifest` always requires a full project.)
+
+### Limitations of SQL parse mode
+
+- `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
+- Runtime context (`target.type`, `env_var()`) is not evaluated
+- Conditional Jinja branches use default values; non-default paths may be missed
+- Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
+
+When these limitations matter, use `--source manifest`.
+
 ## AI agent integration
 
-No MCP server or tool configuration needed.
-Just install dlin and add the following to your `AGENTS.md`, `CLAUDE.md`, or system prompt:
+### CLI approach
+
+Recommended for developers with access to a live dbt project. Works with SQL parse mode (no `dbt compile` needed) as well as manifest mode.
+
+Install dlin and add the following to your `AGENTS.md`, `CLAUDE.md`, or system prompt:
 
 ````md
 ## dbt project structure analysis
@@ -90,16 +121,32 @@ git diff --name-only main | dlin graph -q              # Lineage of changed file
 For full option reference: `dlin --help`, `dlin graph --help`, etc.
 ````
 
-The key line is **"Do NOT grep/cat/find through SQL files"** — without it, agents default to familiar tools. `dlin --help` is designed for tool discovery, so the prompt can stay minimal.
+The key line is **"Do NOT grep/cat/find through SQL files"**. Without it, agents default to familiar tools. `dlin --help` is designed for tool discovery, so the prompt can stay minimal.
+
+### MCP server (experimental)
+
+For analysts and agents who work from a distributed `manifest.json` without access to the full project. Runs in manifest mode only.
+
+`dlin mcp` exposes a stdio MCP server that AI assistants supporting MCP can connect to directly.
+
+```sh
+dlin mcp --dialect bigquery path/to/manifest.json
+```
+
+Available MCP tools: project summary, model search, lineage, impact analysis, and column-level lineage.
+
+Pass `--dialect` to match your project's SQL dialect for accurate column lineage. Requires a compiled `manifest.json` (`dbt compile`).
 
 ## Features
 
-- **No dependencies for model lineage**: single binary, no Python, no `manifest.json`
+- **SQL parse mode**: single binary, no Python, no `manifest.json` needed for model-level lineage
+- **Manifest mode**: works from `manifest.json` alone; useful for analysts or agents without a full project checkout
+- **MCP server** (experimental): `dlin mcp` serves lineage data via stdio MCP for direct AI assistant integration
 - **Recursive upstream / downstream**: `-u N` / `-d N` to control traversal depth
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
-- **Column-level lineage** (experimental): traces columns across models with transformation classification; requires `dbt compile` and `manifest.json`
+- **Column-level lineage** (experimental): traces columns across models with transformation classification; requires `manifest.json`
 
 ## Mermaid diagrams
 
@@ -110,11 +157,11 @@ dlin outputs Mermaid flowcharts that render natively on GitHub, GitLab, Notion, 
 Automatically remove intermediate nodes to see just the endpoints (nodes with no predecessors or no successors); everything in between becomes transitive "(via N)" edges:
 
 ```sh
-# Collapse intermediate models — only endpoints remain
+# Collapse intermediate models; only endpoints remain
 dlin graph --collapse -o mermaid
 
 # Focal mode: keep only sources, exposures, and specified focus models
-# (ignores BFS window pseudo-endpoints — ideal with -u/-d limits)
+# (ignores BFS window pseudo-endpoints; works best with -u/-d limits)
 dlin graph orders --collapse=focal -u 3 -o mermaid
 ```
 
@@ -196,7 +243,7 @@ flowchart LR
 
 ### Column names in nodes with `--show-columns`
 
-Add `--show-columns` to include column names inside Mermaid node labels — useful for understanding what each model produces at a glance:
+Add `--show-columns` to include column names inside Mermaid node labels, useful for understanding what each model produces at a glance:
 
 ```sh
 dlin graph orders -u 1 -d 0 --show-columns --node-type model,source -o mermaid
@@ -321,7 +368,7 @@ flowchart LR
   n1_0 -->|"aggregation"|n0_5
 ```
 
-`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (all `direct`). `lifetime_value` and `order_count` are aggregated at the `customers` model — the final edge to `customers` is labeled `aggregation`, while all upstream hops carry their actual transformation type (here `direct`, since staging and mart models pass columns through unchanged).
+`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (all `direct`). `lifetime_value` and `order_count` are aggregated at the `customers` model. The final edge to `customers` is labeled `aggregation`, while all upstream hops carry their actual transformation type (here `direct`, since staging and mart models pass columns through unchanged).
 
 Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
 
@@ -397,25 +444,6 @@ Impacted Nodes:
 dlin graph -s tag:finance,path:marts  # selector expressions (union)
 dlin graph --node-type model,source   # filter by node type
 ```
-
-## Data sources
-
-dlin aims to work without `dbt compile` (except for column-level lineage, which always requires `manifest.json`). By default it parses SQL files directly, but it can also leverage a pre-compiled `manifest.json` for additional accuracy when one is available.
-
-**SQL parsing (default)**: extracts `ref()` and `source()` from SQL via regex + Jinja template evaluation. No Python or dbt needed. Generic tests (`not_null`, `unique`, `relationships`, etc.) are inferred from YAML schema declarations.
-
-**Manifest mode** (`--source manifest`): reads a pre-compiled `manifest.json` for full accuracy with complex Jinja logic.
-
-For graph, list, impact, summary, and column commands, manifest mode requires only `manifest.json`; SQL files are not needed. When inputs are model names (not file paths), `dbt_project.yml` is also not needed; file-path inputs (e.g. `models/foo.sql`) fall back to standard dbt directory layout when `dbt_project.yml` is absent, which may not match projects with custom path configuration. A developer can run `dbt compile` once and distribute the resulting `manifest.json` to analysts or AI agents who then query it with dlin without access to the full project. (`check-manifest` always requires a full project.)
-
-### Limitations of SQL parse mode
-
-- `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
-- Runtime context (`target.type`, `env_var()`) is not evaluated
-- Conditional Jinja branches use default values; non-default paths may be missed
-- Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
-
-When these limitations matter, use `--source manifest`.
 
 ## Credits
 
