@@ -334,7 +334,9 @@
       },
       "config": {
         "materialized": "view",
-        "tags": ["staging"]
+        "tags": [
+          "staging"
+        ]
       },
       "description": "Staged accounts from Salesforce source where source_name != physical schema",
       "path": "models/staging/stg_accounts.sql",
@@ -350,6 +352,82 @@
         }
       },
       "compiled_code": "select id as account_id, name as account_name, owner_id from \"raw\".\"accounts\"",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.mart_unrelated_parse_fail": {
+      "unique_id": "model.clp.mart_unrelated_parse_fail",
+      "name": "mart_unrelated_parse_fail",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_orders",
+          "model.clp.stg_bad_sql"
+        ]
+      },
+      "config": {},
+      "description": "",
+      "path": "models/marts/mart_unrelated_parse_fail.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "bad_col": {
+          "name": "bad_col"
+        }
+      },
+      "compiled_code": "SELECT a.order_id, b.some_col AS bad_col FROM `shop`.`main`.`stg_orders` a LEFT JOIN `shop`.`main`.`stg_bad_sql` b ON a.order_id = b.some_col",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.stg_mixed_id": {
+      "unique_id": "model.clp.stg_mixed_id",
+      "name": "stg_mixed_id",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_orders"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": []
+      },
+      "description": "",
+      "path": "models/staging/stg_mixed_id.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        },
+        "id": {
+          "name": "id"
+        }
+      },
+      "compiled_code": "SELECT order_id, id FROM `shop`.`main`.`stg_orders`",
+      "database": "shop",
+      "schema": "main"
+    },
+    "model.clp.mart_id_name_collision": {
+      "unique_id": "model.clp.mart_id_name_collision",
+      "name": "mart_id_name_collision",
+      "resource_type": "model",
+      "depends_on": {
+        "nodes": [
+          "model.clp.stg_mixed_id"
+        ]
+      },
+      "config": {
+        "materialized": "view",
+        "tags": []
+      },
+      "description": "",
+      "path": "models/mart/mart_id_name_collision.sql",
+      "columns": {
+        "order_id": {
+          "name": "order_id"
+        }
+      },
+      "compiled_code": "SELECT order_id FROM `shop`.`main`.`stg_mixed_id`",
       "database": "shop",
       "schema": "main"
     }
@@ -426,7 +504,7 @@
       "name": "accounts",
       "source_name": "salesforce",
       "resource_type": "source",
-      "description": "Salesforce accounts — physical schema is 'raw', not 'salesforce'",
+      "description": "Salesforce accounts \u2014 physical schema is 'raw', not 'salesforce'",
       "path": "models/staging/schema.yml",
       "schema": "raw",
       "columns": {

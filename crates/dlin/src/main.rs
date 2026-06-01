@@ -9,10 +9,12 @@ use polyglot_sql::{DialectType, Schema as _};
 use regex::RegexBuilder;
 
 mod cli;
+#[cfg(not(tarpaulin_include))]
+mod mcp;
 
 use cli::{
     CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, ColumnOutputFormat, Command,
-    DebugCommand, DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs,
+    DebugCommand, DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, McpArgs,
     SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
@@ -90,6 +92,7 @@ fn main() {
             }
         },
         Command::Debug(args) => run_debug_command(args),
+        Command::Mcp(args) => run_mcp_command(args),
         Command::Impact {
             model,
             project_dir,
@@ -129,6 +132,12 @@ fn main() {
         eprintln!("{}", dlin_core::format_diagnostic(&diag));
         std::process::exit(1);
     }
+}
+
+#[cfg(not(tarpaulin_include))]
+fn run_mcp_command(args: McpArgs) -> Result<()> {
+    dlin_core::set_quiet(true);
+    mcp::run(args)
 }
 
 /// Run the `graph` subcommand

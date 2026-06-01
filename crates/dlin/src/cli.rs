@@ -620,6 +620,47 @@ Examples:
   dlin check-manifest --manifest-path path/to/manifest.json"
     )]
     CheckManifest(CheckManifestArgs),
+
+    /// Run an MCP server over stdio for AI agents
+    #[command(
+        long_about = "\
+Run a Model Context Protocol (MCP) server over stdio.
+
+This exposes manifest-backed dlin analysis as typed JSON-RPC tools for MCP
+clients such as Claude Desktop. The server reads one JSON-RPC message per line
+from stdin and writes one JSON-RPC response per line to stdout.
+
+MCP uses manifest mode only. Run `dbt compile` first so target/manifest.json
+exists and contains compiled SQL for column lineage tools.",
+        after_long_help = "\
+Examples:
+  dlin mcp --project-dir /path/to/dbt/project --dialect bigquery
+  dlin mcp --project-dir /path/to/dbt/project --manifest-path target/manifest.json --dialect snowflake"
+    )]
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct McpArgs {
+    /// Path to dbt project directory
+    #[arg(short = 'p', long = "project-dir", default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Path to manifest.json file or directory containing target/manifest.json
+    #[arg(long)]
+    pub manifest_path: Option<PathBuf>,
+
+    /// SQL dialect for column lineage parsing
+    #[arg(
+        long,
+        required = true,
+        long_help = "\
+SQL dialect for parsing compiled SQL in get_column_lineage.
+
+This is required because the generic parser can produce incorrect or incomplete
+column lineage for warehouse-specific SQL."
+    )]
+    pub dialect: DialectType,
 }
 
 #[derive(Debug, clap::Args)]
