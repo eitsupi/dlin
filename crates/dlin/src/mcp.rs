@@ -312,10 +312,11 @@ fn get_project_summary(state: &McpState) -> Result<Value> {
 
 fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let names = optional_string_array(args, "names")?;
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .map(|s| s.to_lowercase());
+    let query = match args.get("query") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.to_lowercase()),
+        Some(_) => anyhow::bail!("argument 'query' must be a string"),
+    };
     let type_filter: Option<HashSet<NodeType>> = match args.get("node_types") {
         None | Some(Value::Null) => None,
         Some(Value::Array(arr)) => {
@@ -690,6 +691,16 @@ mod tests {
         assert!(
             err.to_string().contains("unknown value"),
             "expected 'unknown value' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn find_nodes_rejects_non_string_query() {
+        let state = state();
+        let err = find_nodes(&json!({ "query": 123 }), &state).unwrap_err();
+        assert!(
+            err.to_string().contains("'query' must be a string"),
+            "expected type error for query: {err}"
         );
     }
 
