@@ -1,0 +1,551 @@
+use std::collections::HashSet;
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use path_slash::PathExt as _;
+use polyglot_sql::DialectType;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::cli::McpArgs;
+use crate::{check_manifest_freshness, resolve_manifest_path_or_default};
+use dlin_core::graph;
+use dlin_core::graph::types::{LineageGraph, NodeType};
+use dlin_core::parser;
+use dlin_core::render;
+
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: &'static str,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+}
+
+struct McpState {
+    project_dir: PathBuf,
+    manifest_path: PathBuf,
+    dialect: DialectType,
+    manifest: parser::manifest::Manifest,
+    dag: LineageGraph,
+}
+
+pub fn run(args: McpArgs) -> Result<()> {
+    let state = McpState::load(args)?;
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(req) => handle_request(req, &state),
+            Err(err) => Some(error_response(
+                Value::Null,
+                -32700,
+                format!("parse error: {err}"),
+            )),
+        };
+
+        if let Some(response) = response {
+            serde_json::to_writer(&mut out, &response)?;
+            writeln!(out)?;
+            out.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
+impl McpState {
+    fn load(args: McpArgs) -> Result<Self> {
+        let project_dir = args
+            .project_dir
+            .canonicalize()
+            .unwrap_or_else(|_| args.project_dir.clone());
+        let manifest_path =
+            resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
+        let manifest = parser::manifest::load_manifest(&manifest_path)?;
+        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
+
+        Ok(Self {
+            project_dir,
+            manifest_path,
+            dialect: args.dialect,
+            manifest,
+            dag,
+        })
+    }
+}
+
+fn handle_request(req: JsonRpcRequest, state: &McpState) -> Option<JsonRpcResponse> {
+    if req.id.is_none() {
+        return None;
+    }
+
+    let id = req.id.unwrap_or(Value::Null);
+    if req.jsonrpc != "2.0" {
+        return Some(error_response(id, -32600, "invalid JSON-RPC version"));
+    }
+
+    let result = match req.method.as_str() {
+        "initialize" => Ok(initialize_result(&req.params)),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/call" => call_tool(&req.params, state),
+        method => Err((-32601, format!("method not found: {method}"))),
+    };
+
+    Some(match result {
+        Ok(result) => JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        },
+        Err((code, message)) => error_response(id, code, message),
+    })
+}
+
+fn error_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+        }),
+    }
+}
+
+fn initialize_result(params: &Value) -> Value {
+    let protocol_version = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or(MCP_PROTOCOL_VERSION);
+    let protocol_version = if protocol_version <= MCP_PROTOCOL_VERSION {
+        protocol_version
+    } else {
+        MCP_PROTOCOL_VERSION
+    };
+
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {
+            "tools": { "listChanged": false }
+        },
+        "serverInfo": {
+            "name": "dlin",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+fn tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "get_project_summary",
+            "description": "Return dbt project summary, node counts, edge count, and manifest freshness.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "find_models",
+            "description": "List models, search models by keyword, or return details for specific model names.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Case-insensitive substring to match model name, description, tags, or file path." },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Specific model names to describe." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_lineage",
+            "description": "Return model-level lineage graph as JSON. Depth defaults to one hop each way when models are provided.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Focus model names. Omit for the full graph." },
+                    "upstream_depth": { "type": "integer", "minimum": 0, "default": 1 },
+                    "downstream_depth": { "type": "integer", "minimum": 0, "default": 1 }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_impact",
+            "description": "Return downstream impact analysis for a model with severity scoring.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "model": { "type": "string" } },
+                "required": ["model"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "get_column_lineage",
+            "description": "Return upstream or downstream column lineage for one model column. Requires compiled SQL in manifest.json.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": { "type": "string" },
+                    "column": { "type": "string" },
+                    "direction": { "type": "string", "enum": ["upstream", "downstream"] }
+                },
+                "required": ["model", "column", "direction"],
+                "additionalProperties": false
+            }
+        }),
+    ]
+}
+
+fn call_tool(params: &Value, state: &McpState) -> std::result::Result<Value, (i32, String)> {
+    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
+        (
+            -32602,
+            "tools/call params.name must be a string".to_string(),
+        )
+    })?;
+    let args = params.get("arguments").unwrap_or(&Value::Null);
+
+    let result = match name {
+        "get_project_summary" => get_project_summary(state),
+        "find_models" => find_models(args, state),
+        "get_lineage" => get_lineage(args, state),
+        "get_impact" => get_impact(args, state),
+        "get_column_lineage" => get_column_lineage(args, state),
+        _ => return Err((-32602, format!("unknown tool: {name}"))),
+    };
+
+    Ok(match result {
+        Ok(value) => tool_result(value, false),
+        Err(err) => tool_result(json!({ "error": err.to_string() }), true),
+    })
+}
+
+fn tool_result(value: Value, is_error: bool) -> Value {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": value,
+        "isError": is_error
+    })
+}
+
+fn get_project_summary(state: &McpState) -> Result<Value> {
+    let project_name = state
+        .manifest
+        .metadata
+        .project_name
+        .clone()
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let manifest_status = match parser::project::DbtProject::load(&state.project_dir) {
+        Ok(project) => {
+            check_manifest_freshness(&state.project_dir, Some(&state.manifest_path), &project)
+        }
+        Err(_) => None,
+    };
+    let report = render::summary::SummaryReport {
+        project_name,
+        source_mode: "manifest".to_string(),
+        node_counts: render::summary::count_nodes(&state.dag),
+        edge_count: state.dag.edge_count(),
+        vars_count: 0,
+        manifest_status,
+    };
+    Ok(serde_json::to_value(report)?)
+}
+
+fn find_models(args: &Value, state: &McpState) -> Result<Value> {
+    let names = optional_string_array(args, "names")?;
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .map(|s| s.to_lowercase());
+
+    let mut models = Vec::new();
+    let mut not_found = Vec::new();
+
+    if let Some(names) = names {
+        for name in names {
+            match graph::filter::try_resolve_node_quiet(&state.dag, &name) {
+                Some(idx) if state.dag[idx].node_type == NodeType::Model => {
+                    models.push(model_value(&state.dag[idx], true));
+                }
+                _ => not_found.push(name),
+            }
+        }
+    } else {
+        for idx in state.dag.node_indices() {
+            let node = &state.dag[idx];
+            if node.node_type != NodeType::Model {
+                continue;
+            }
+            if let Some(query) = query.as_deref()
+                && !model_matches_query(node, query)
+            {
+                continue;
+            }
+            models.push(model_value(node, false));
+        }
+        models.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    }
+
+    Ok(json!({
+        "models": models,
+        "count": models.len(),
+        "not_found": not_found
+    }))
+}
+
+fn model_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
+    node.label.to_lowercase().contains(query)
+        || node
+            .description
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains(query))
+        || node
+            .tags
+            .iter()
+            .any(|tag| tag.to_lowercase().contains(query))
+        || node
+            .file_path
+            .as_ref()
+            .is_some_and(|p| p.to_slash_lossy().to_lowercase().contains(query))
+}
+
+fn model_value(node: &graph::types::NodeData, detailed: bool) -> Value {
+    let mut value = json!({
+        "unique_id": node.unique_id,
+        "name": node.label,
+        "file_path": node.file_path.as_ref().map(|p| p.to_slash_lossy().into_owned()),
+        "description": node.description,
+        "materialization": node.materialization,
+        "tags": node.tags
+    });
+    if detailed {
+        value["columns"] = json!(node.columns);
+    }
+    value
+}
+
+fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
+    let models = optional_string_array(args, "models")?.unwrap_or_default();
+    let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
+    let downstream = optional_usize(args, "downstream_depth")?.or(Some(1));
+    let (upstream, downstream) = if models.is_empty() {
+        (None, None)
+    } else {
+        (upstream, downstream)
+    };
+
+    let filtered =
+        graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
+    let fields: HashSet<String> = render::json::GRAPH_NODE_FIELDS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect();
+    let mut buf = Vec::new();
+    render::json::render_json_to_writer(&filtered, None, &fields, &mut buf, false)?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
+fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
+    let model = required_string(args, "model")?;
+    let idx = graph::filter::try_resolve_node_quiet(&state.dag, model)
+        .with_context(|| format!("model not found: {model}"))?;
+    let report = graph::impact::compute_impact(&state.dag, idx);
+    Ok(serde_json::to_value(report)?)
+}
+
+fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
+    let model = required_string(args, "model")?;
+    let column = required_string(args, "column")?;
+    let direction = required_string(args, "direction")?;
+    let mut cache = graph::column_lineage::ColumnLineageCache::disabled();
+
+    match direction {
+        "upstream" => {
+            let mut report =
+                graph::column_lineage::compute_cross_model_column_lineage_with_manifest_path(
+                    &state.manifest,
+                    model,
+                    state.dialect,
+                    Some(&state.manifest_path),
+                    &mut cache,
+                );
+            report.columns.retain(|entry| entry.column == column);
+            if report.total_columns > 0 {
+                let has_column_error = report
+                    .errors
+                    .iter()
+                    .any(|err| err.what.starts_with(&format!("column '{column}': ")));
+                report.traced_columns = report.columns.len();
+                report.total_columns = 1;
+                if report.columns.is_empty() && !has_column_error {
+                    report
+                        .errors
+                        .push(graph::column_lineage::ColumnLineageError {
+                            kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                            what: format!("column '{column}': not found in model output"),
+                            why: None,
+                            hint: None,
+                        });
+                }
+            }
+            Ok(serde_json::to_value(report)?)
+        }
+        "downstream" => {
+            let report = graph::column_lineage::compute_column_impact_with_manifest_path(
+                &state.manifest,
+                model,
+                column,
+                state.dialect,
+                Some(&state.manifest_path),
+                &mut cache,
+            );
+            Ok(serde_json::to_value(report)?)
+        }
+        _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),
+    }
+}
+
+fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .with_context(|| format!("argument '{key}' is required and must be a string"))
+}
+
+fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .map(|n| n as usize)
+            .with_context(|| format!("argument '{key}' must be a non-negative integer"))
+            .map(Some),
+    }
+}
+
+fn optional_string_array(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .with_context(|| format!("argument '{key}' must contain only strings"))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(_) => anyhow::bail!("argument '{key}' must be an array of strings"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_project_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("simple_project")
+    }
+
+    fn state() -> McpState {
+        McpState::load(McpArgs {
+            project_dir: fixture_project_dir(),
+            manifest_path: None,
+            dialect: DialectType::Generic,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn tools_list_exposes_expected_tools() {
+        let names: Vec<String> = tools()
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "get_project_summary",
+                "find_models",
+                "get_lineage",
+                "get_impact",
+                "get_column_lineage"
+            ]
+        );
+    }
+
+    #[test]
+    fn find_models_returns_structured_tool_result() {
+        let state = state();
+        let result = call_tool(
+            &json!({
+                "name": "find_models",
+                "arguments": { "names": ["orders"] }
+            }),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"]["count"], 1);
+        assert_eq!(
+            result["structuredContent"]["models"][0]["name"],
+            Value::String("orders".to_string())
+        );
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("orders")
+        );
+    }
+
+    #[test]
+    fn lineage_defaults_to_one_hop_for_focused_models() {
+        let state = state();
+        let value = get_lineage(&json!({ "models": ["orders"] }), &state).unwrap();
+        let nodes = value["nodes"].as_array().unwrap();
+        let edges = value["edges"].as_array().unwrap();
+
+        assert!(nodes.iter().any(|node| node["label"] == "orders"));
+        assert!(!edges.is_empty());
+    }
+}
