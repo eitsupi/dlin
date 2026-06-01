@@ -532,6 +532,13 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
         .map(|(original, _)| original.clone())
         .collect();
     let resolved_models: Vec<String> = normalized_models.into_iter().flatten().collect();
+    if resolved_models.is_empty() {
+        return Ok(json!({
+            "nodes": [],
+            "edges": [],
+            "not_found": not_found
+        }));
+    }
 
     let filtered = graph::filter::filter_graph(
         &state.dag,
@@ -602,15 +609,15 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 // - ColumnNotFound errors are kept only for the specific requested column.
                 let mut cross_global_errors = Vec::new();
                 let mut cross_column_errors = Vec::new();
+                let column_error_prefix = format!("column '{column}':");
                 for err in report.errors.drain(..) {
                     if matches!(
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
                     ) {
-                        // Preserve all ColumnNotFound diagnostics from cross-model traversal.
-                        // Filtering only by the requested column can hide relevant upstream
-                        // failures on the traced lineage path.
-                        cross_column_errors.push(err);
+                        if err.what.starts_with(&column_error_prefix) {
+                            cross_column_errors.push(err);
+                        }
                     } else if !upstream_models.is_empty()
                         && error_names_upstream_model(&err.what, &upstream_models)
                     {
@@ -698,7 +705,16 @@ fn normalize_manifest_unique_id(name: &str) -> Option<String> {
             parts.remove(1);
             Some(parts.join("."))
         }
-        "model" | "seed" | "snapshot" | "test" | "exposure" => {
+        "test" => {
+            // dbt test unique IDs may include a trailing hash:
+            // test.<project>.<test_name>.<hash> -> test.<test_name>
+            if parts.len() >= 4 {
+                Some(format!("test.{}", parts[2]))
+            } else {
+                None
+            }
+        }
+        "model" | "seed" | "snapshot" | "exposure" => {
             parts.remove(1);
             Some(parts.join("."))
         }
@@ -934,6 +950,15 @@ mod tests {
     }
 
     #[test]
+    fn lineage_returns_empty_when_all_models_unresolved() {
+        let state = state();
+        let value = get_lineage(&json!({ "models": ["no_such_model"] }), &state).unwrap();
+        assert_eq!(value["nodes"], json!([]));
+        assert_eq!(value["edges"], json!([]));
+        assert_eq!(value["not_found"], json!(["no_such_model"]));
+    }
+
+    #[test]
     fn lineage_resolves_manifest_unique_id() {
         let state = state();
         let value = get_lineage(
@@ -1140,5 +1165,15 @@ mod tests {
             "failed to parse SQL for 'stg_orders'",
             &upstream_models
         ));
+    }
+
+    #[test]
+    fn normalize_manifest_unique_id_strips_test_hash_suffix() {
+        let normalized =
+            normalize_manifest_unique_id("test.simple_project.not_null_orders_order_id.cf6c17daed");
+        assert_eq!(
+            normalized,
+            Some("test.not_null_orders_order_id".to_string())
+        );
     }
 }
