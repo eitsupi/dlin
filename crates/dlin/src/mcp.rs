@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ struct McpState {
     dialect: DialectType,
     manifest: parser::manifest::Manifest,
     dag: LineageGraph,
+    column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
 }
 
 pub fn run(args: McpArgs) -> Result<()> {
@@ -96,6 +98,9 @@ impl McpState {
             dialect: args.dialect,
             manifest,
             dag,
+            column_lineage_cache: RefCell::new(
+                graph::column_lineage::ColumnLineageCache::disabled(),
+            ),
         })
     }
 }
@@ -191,27 +196,33 @@ fn tools() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
-            "name": "find_models",
-            "description": "List models, search models by keyword, or return details for specific model names.",
+            "name": "find_nodes",
+            "description": "Search DAG nodes by keyword or return details for specific names. Covers all node types (models, sources, seeds, etc.).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Case-insensitive substring to match model name, description, tags, or file path." },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Specific model names to describe." }
+                    "query": { "type": "string", "description": "Case-insensitive substring to match name, description, tags, or file path." },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Specific node names or unique IDs to describe." },
+                    "node_types": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "description": "Node types to include. Defaults to all types when omitted."
+                    }
                 },
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "get_lineage",
-            "description": "Return model-level lineage graph as JSON. Depth defaults to one hop each way when models are provided.",
+            "description": "Return model-level lineage graph as JSON for the specified focus models. Depth defaults to one hop each way.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "models": { "type": "array", "items": { "type": "string" }, "description": "Focus model names. Omit for the full graph." },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Focus model names." },
                     "upstream_depth": { "type": "integer", "minimum": 0, "default": 1 },
                     "downstream_depth": { "type": "integer", "minimum": 0, "default": 1 }
                 },
+                "required": ["models"],
                 "additionalProperties": false
             }
         }),
@@ -253,7 +264,7 @@ fn call_tool(params: &Value, state: &McpState) -> std::result::Result<Value, (i3
 
     let result = match name {
         "get_project_summary" => get_project_summary(state),
-        "find_models" => find_models(args, state),
+        "find_nodes" => find_nodes(args, state),
         "get_lineage" => get_lineage(args, state),
         "get_impact" => get_impact(args, state),
         "get_column_lineage" => get_column_lineage(args, state),
@@ -299,49 +310,81 @@ fn get_project_summary(state: &McpState) -> Result<Value> {
     Ok(serde_json::to_value(report)?)
 }
 
-fn find_models(args: &Value, state: &McpState) -> Result<Value> {
+fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let names = optional_string_array(args, "names")?;
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .map(|s| s.to_lowercase());
+    let type_filter: Option<HashSet<NodeType>> =
+        args.get("node_types").and_then(Value::as_array).map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(node_type_from_str)
+                .collect()
+        });
 
-    let mut models = Vec::new();
+    let mut nodes = Vec::new();
     let mut not_found = Vec::new();
 
     if let Some(names) = names {
         for name in names {
             match graph::filter::try_resolve_node_quiet(&state.dag, &name) {
-                Some(idx) if state.dag[idx].node_type == NodeType::Model => {
-                    models.push(model_value(&state.dag[idx], true));
+                Some(idx) => {
+                    let node = &state.dag[idx];
+                    if type_filter
+                        .as_ref()
+                        .is_none_or(|f| f.contains(&node.node_type))
+                    {
+                        nodes.push(node_value(node, true));
+                    } else {
+                        not_found.push(name);
+                    }
                 }
-                _ => not_found.push(name),
+                None => not_found.push(name),
             }
         }
     } else {
         for idx in state.dag.node_indices() {
             let node = &state.dag[idx];
-            if node.node_type != NodeType::Model {
+            if node.node_type == NodeType::Phantom {
                 continue;
             }
-            if let Some(query) = query.as_deref()
-                && !model_matches_query(node, query)
+            if let Some(ref filter) = type_filter
+                && !filter.contains(&node.node_type)
             {
                 continue;
             }
-            models.push(model_value(node, false));
+            if let Some(query) = query.as_deref()
+                && !node_matches_query(node, query)
+            {
+                continue;
+            }
+            nodes.push(node_value(node, false));
         }
-        models.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        nodes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     }
 
     Ok(json!({
-        "models": models,
-        "count": models.len(),
+        "nodes": nodes,
+        "count": nodes.len(),
         "not_found": not_found
     }))
 }
 
-fn model_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
+fn node_type_from_str(s: &str) -> Option<NodeType> {
+    match s {
+        "model" => Some(NodeType::Model),
+        "source" => Some(NodeType::Source),
+        "seed" => Some(NodeType::Seed),
+        "snapshot" => Some(NodeType::Snapshot),
+        "test" => Some(NodeType::Test),
+        "exposure" => Some(NodeType::Exposure),
+        _ => None,
+    }
+}
+
+fn node_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
     node.label.to_lowercase().contains(query)
         || node
             .description
@@ -357,10 +400,11 @@ fn model_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
             .is_some_and(|p| p.to_slash_lossy().to_lowercase().contains(query))
 }
 
-fn model_value(node: &graph::types::NodeData, detailed: bool) -> Value {
+fn node_value(node: &graph::types::NodeData, detailed: bool) -> Value {
     let mut value = json!({
         "unique_id": node.unique_id,
         "name": node.label,
+        "node_type": node.node_type.label(),
         "file_path": node.file_path.as_ref().map(|p| p.to_slash_lossy().into_owned()),
         "description": node.description,
         "materialization": node.materialization,
@@ -380,14 +424,9 @@ static GRAPH_NODE_FIELDS_SET: LazyLock<HashSet<String>> = LazyLock::new(|| {
 });
 
 fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
-    let models = optional_string_array(args, "models")?.unwrap_or_default();
+    let models = required_string_array(args, "models")?;
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
     let downstream = optional_usize(args, "downstream_depth")?.or(Some(1));
-    let (upstream, downstream) = if models.is_empty() {
-        (None, None)
-    } else {
-        (upstream, downstream)
-    };
 
     let filtered =
         graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
@@ -408,7 +447,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let model = required_string(args, "model")?;
     let column = required_string(args, "column")?;
     let direction = required_string(args, "direction")?;
-    let mut cache = graph::column_lineage::ColumnLineageCache::disabled();
+    let mut cache = state.column_lineage_cache.borrow_mut();
 
     match direction {
         "upstream" => {
@@ -494,6 +533,21 @@ fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
     }
 }
 
+fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
+    match args.get(key) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .with_context(|| format!("argument '{key}' must contain only strings"))
+            })
+            .collect(),
+        _ => anyhow::bail!("argument '{key}' is required and must be an array of strings"),
+    }
+}
+
 fn optional_string_array(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -562,7 +616,7 @@ mod tests {
             names,
             vec![
                 "get_project_summary",
-                "find_models",
+                "find_nodes",
                 "get_lineage",
                 "get_impact",
                 "get_column_lineage"
@@ -571,11 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn find_models_returns_structured_tool_result() {
+    fn find_nodes_returns_structured_tool_result() {
         let state = state();
         let result = call_tool(
             &json!({
-                "name": "find_models",
+                "name": "find_nodes",
                 "arguments": { "names": ["orders"] }
             }),
             &state,
@@ -585,7 +639,7 @@ mod tests {
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["count"], 1);
         assert_eq!(
-            result["structuredContent"]["models"][0]["name"],
+            result["structuredContent"]["nodes"][0]["name"],
             Value::String("orders".to_string())
         );
         assert!(
