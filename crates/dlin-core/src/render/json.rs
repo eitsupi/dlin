@@ -198,6 +198,7 @@ pub fn render_json(
     ));
 }
 
+/// Render the lineage graph as JSON to the given writer.
 pub fn render_json_to_writer<W: Write>(
     graph: &LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,

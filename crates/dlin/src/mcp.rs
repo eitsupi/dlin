@@ -65,11 +65,7 @@ pub fn run(args: McpArgs) -> Result<()> {
 
         let response = match parse_request(&line) {
             Ok(req) => handle_request(req, &state),
-            Err(err) => Some(error_response(
-                Value::Null,
-                -32700,
-                format!("parse error: {err}"),
-            )),
+            Err(err_response) => Some(err_response),
         };
 
         if let Some(response) = response {
@@ -103,12 +99,17 @@ impl McpState {
     }
 }
 
-fn parse_request(line: &str) -> serde_json::Result<JsonRpcRequest> {
-    let value: Value = serde_json::from_str(line)?;
+fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
+    let value: Value = serde_json::from_str(line).map_err(|err| {
+        error_response(Value::Null, -32700, format!("parse error: {err}"))
+    })?;
     let id = value
         .as_object()
         .and_then(|object| object.get("id").cloned());
-    let mut req: JsonRpcRequest = serde_json::from_value(value)?;
+    let id_for_error = id.clone().unwrap_or(Value::Null);
+    let mut req: JsonRpcRequest = serde_json::from_value(value).map_err(|err| {
+        error_response(id_for_error, -32600, format!("invalid request: {err}"))
+    })?;
     req.id = id;
     Ok(req)
 }
@@ -460,11 +461,14 @@ fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_u64()
-            .map(|n| n as usize)
-            .with_context(|| format!("argument '{key}' must be a non-negative integer"))
-            .map(Some),
+        Some(value) => {
+            let n = value
+                .as_u64()
+                .with_context(|| format!("argument '{key}' must be a non-negative integer"))?;
+            let n = usize::try_from(n)
+                .with_context(|| format!("argument '{key}' value is out of range"))?;
+            Ok(Some(n))
+        }
     }
 }
 
