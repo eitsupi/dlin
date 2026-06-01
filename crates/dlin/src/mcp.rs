@@ -641,19 +641,6 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         }
                     }
                 }
-                let lineage_columns: HashSet<String> = report
-                    .columns
-                    .iter()
-                    .flat_map(|entry| {
-                        std::iter::once(entry.column.clone()).chain(entry.sources.iter().flat_map(
-                            |src| {
-                                std::iter::once(src.column.clone())
-                                    .chain(src.model_path.iter().map(|(_, col, _)| col.clone()))
-                            },
-                        ))
-                    })
-                    .collect();
-
                 // Partition cross-model errors:
                 // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when
                 //   their message references a model on the target column's lineage path.
@@ -689,9 +676,9 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         if matches!(
                             err.kind,
                             graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                        ) && extract_column_not_found_name(&err.what).is_some_and(|name| {
-                            cols.contains(name) || lineage_columns.contains(name)
-                        }) && !cross_column_errors.contains(&err)
+                        ) && extract_column_not_found_name(&err.what)
+                            .is_some_and(|name| cols.contains(name))
+                            && !cross_column_errors.contains(&err)
                         {
                             cross_column_errors.push(err);
                         }
