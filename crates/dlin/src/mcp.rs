@@ -427,11 +427,16 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                     .errors
                     .iter()
                     .any(|err| err.what.starts_with(&column_error_prefix));
+                // Only treat errors for the *target* model as global blockers.
+                // Cross-model reports also accumulate upstream-dependency errors, which
+                // are irrelevant to whether the requested column exists in `model`.
+                // All target-model errors embed the model name as `'<model>'` in `what`.
+                let model_marker = format!("'{model}'");
                 let has_global_errors = report.errors.iter().any(|err| {
                     !matches!(
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
-                    )
+                    ) && err.what.contains(&model_marker)
                 });
                 report.traced_columns = report.columns.len();
                 report.total_columns = 1;
@@ -653,6 +658,33 @@ mod tests {
                 .iter()
                 .any(|e| e["kind"].as_str() == Some("column_not_found")),
             "must not synthesize column_not_found when a parse_failure is present; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_unrelated_upstream_parse_failure_does_not_suppress_column_not_found() {
+        // mart_unrelated_parse_fail references both stg_orders (parses fine) and
+        // stg_bad_sql (ParseFailure). When we query a column that does not exist in
+        // the target model, ColumnNotFound must still be synthesized — the upstream
+        // ParseFailure belongs to an unrelated column and must not suppress the
+        // diagnostic for the missing column.
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "mart_unrelated_parse_fail",
+                "column": "nonexistent_col",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("column_not_found")),
+            "must synthesize column_not_found when the column is absent and the parse failure is unrelated; got: {errors:?}"
         );
     }
 }
