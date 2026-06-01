@@ -422,6 +422,25 @@ fn node_type_from_str(s: &str) -> Option<NodeType> {
     }
 }
 
+/// Extract the first single-quoted token from an error `what` string and check
+/// whether it exactly matches one of the given model names.
+///
+/// Global error messages use the format "... for 'model_name'" or
+/// "'model_name': ...". Exact matching avoids false positives that substring
+/// matching produces when one model name is a suffix of another (e.g. `orders`
+/// matching `stg_orders`).
+fn error_names_upstream_model(what: &str, upstream_models: &HashSet<String>) -> bool {
+    let start = match what.find('\'') {
+        Some(i) => i + 1,
+        None => return false,
+    };
+    let end = match what[start..].find('\'') {
+        Some(i) => start + i,
+        None => return false,
+    };
+    upstream_models.contains(&what[start..end])
+}
+
 fn node_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
     node.label.to_lowercase().contains(query)
         || node
@@ -545,9 +564,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                             cross_column_errors.push(err);
                         }
                     } else if !upstream_models.is_empty()
-                        && upstream_models
-                            .iter()
-                            .any(|m| err.what.contains(m.as_str()))
+                        && error_names_upstream_model(&err.what, &upstream_models)
                     {
                         cross_global_errors.push(err);
                     }
