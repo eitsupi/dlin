@@ -427,9 +427,15 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                     .errors
                     .iter()
                     .any(|err| err.what.starts_with(&column_error_prefix));
+                let has_global_errors = report.errors.iter().any(|err| {
+                    !matches!(
+                        err.kind,
+                        graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                    )
+                });
                 report.traced_columns = report.columns.len();
                 report.total_columns = 1;
-                if report.columns.is_empty() && !has_column_error {
+                if report.columns.is_empty() && !has_column_error && !has_global_errors {
                     report
                         .errors
                         .push(graph::column_lineage::ColumnLineageError {
@@ -507,9 +513,27 @@ mod tests {
             .join("simple_project")
     }
 
+    fn column_lineage_fixture_project_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("column_lineage_project")
+    }
+
     fn state() -> McpState {
         McpState::load(McpArgs {
             project_dir: fixture_project_dir(),
+            manifest_path: None,
+            dialect: DialectType::Generic,
+        })
+        .unwrap()
+    }
+
+    fn column_lineage_state() -> McpState {
+        McpState::load(McpArgs {
+            project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
             dialect: DialectType::Generic,
         })
@@ -598,5 +622,37 @@ mod tests {
 
         assert_eq!(response.id, Value::Null);
         assert!(response.error.is_some());
+    }
+
+    #[test]
+    fn column_lineage_parse_failure_not_replaced_by_column_not_found() {
+        // stg_bad_sql has valid YAML columns (total_columns > 0) but unparseable SQL,
+        // so analysis returns a global ParseFailure error. A ColumnNotFound error must
+        // NOT be synthesized on top of it, because the column may well exist — we just
+        // cannot confirm it due to the SQL failure.
+        let state = column_lineage_state();
+        let result = get_column_lineage(
+            &json!({
+                "model": "stg_bad_sql",
+                "column": "some_col",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("parse_failure")),
+            "expected a parse_failure error; got: {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("column_not_found")),
+            "must not synthesize column_not_found when a parse_failure is present; got: {errors:?}"
+        );
     }
 }
