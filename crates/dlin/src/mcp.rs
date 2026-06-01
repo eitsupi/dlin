@@ -218,7 +218,7 @@ fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "models": { "type": "array", "items": { "type": "string" }, "description": "Focus model names." },
+                    "models": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Focus model names (at least one required)." },
                     "upstream_depth": { "type": "integer", "minimum": 0, "default": 1 },
                     "downstream_depth": { "type": "integer", "minimum": 0, "default": 1 }
                 },
@@ -316,13 +316,23 @@ fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
         .get("query")
         .and_then(Value::as_str)
         .map(|s| s.to_lowercase());
-    let type_filter: Option<HashSet<NodeType>> =
-        args.get("node_types").and_then(Value::as_array).map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .filter_map(node_type_from_str)
-                .collect()
-        });
+    let type_filter: Option<HashSet<NodeType>> = match args.get("node_types") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(arr)) => {
+            let mut set = HashSet::new();
+            for v in arr {
+                let s = v
+                    .as_str()
+                    .with_context(|| "argument 'node_types' must contain only strings")?;
+                let nt = node_type_from_str(s).with_context(|| {
+                    format!("argument 'node_types' contains unknown value: '{s}'")
+                })?;
+                set.insert(nt);
+            }
+            Some(set)
+        }
+        Some(_) => anyhow::bail!("argument 'node_types' must be an array"),
+    };
 
     let mut nodes = Vec::new();
     let mut not_found = Vec::new();
@@ -545,7 +555,7 @@ fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
 
 fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
     match args.get(key) {
-        Some(Value::Array(values)) => values
+        Some(Value::Array(values)) if !values.is_empty() => values
             .iter()
             .map(|value| {
                 value
@@ -554,7 +564,10 @@ fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
                     .with_context(|| format!("argument '{key}' must contain only strings"))
             })
             .collect(),
-        _ => anyhow::bail!("argument '{key}' is required and must be an array of strings"),
+        Some(Value::Array(_)) => {
+            anyhow::bail!("argument '{key}' must contain at least one element")
+        }
+        _ => anyhow::bail!("argument '{key}' is required and must be a non-empty array of strings"),
     }
 }
 
@@ -657,6 +670,26 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("orders")
+        );
+    }
+
+    #[test]
+    fn lineage_rejects_empty_models_array() {
+        let state = state();
+        let err = get_lineage(&json!({ "models": [] }), &state).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one"),
+            "expected 'at least one' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn find_nodes_rejects_unknown_node_type() {
+        let state = state();
+        let err = find_nodes(&json!({ "node_types": ["models"] }), &state).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown value"),
+            "expected 'unknown value' in error: {err}"
         );
     }
 
