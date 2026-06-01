@@ -1,9 +1,10 @@
 # Changelog
 
-## [0.2.1-rc.1] - 2026-05-31
+## [0.2.1] - 2026-06-01
 
 ### Features
 
+- Experimental MCP stdio server: new `dlin mcp` subcommand exposes project summary, model search, lineage, impact, and column lineage as MCP tools for use with AI assistants; requires `--dialect` and a `manifest.json` (#76)
 - Improve manifest-mode cache behavior for column lineage to reduce unnecessary recomputation and speed up repeated analysis runs (#74)
 
 ### Bug Fixes
