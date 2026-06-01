@@ -589,4 +589,14 @@ mod tests {
 
         assert!(handle_request(req, &state).is_none());
     }
+
+    #[test]
+    fn invalid_id_type_is_normalized_to_null() {
+        let state = state();
+        let req = parse_request(r#"{"jsonrpc":"2.0","method":"unknown","id":{}}"#).unwrap();
+        let response = handle_request(req, &state).unwrap();
+
+        assert_eq!(response.id, Value::Null);
+        assert!(response.error.is_some());
+    }
 }
