@@ -223,19 +223,35 @@ fn tools() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
-            "name": "find_nodes",
-            "description": "Search for nodes in the dbt DAG by keyword, or look up specific nodes by name. Returns metadata including type, file path, description, and tags. Column details are included only when looking up specific nodes by name.",
+            "name": "list_nodes",
+            "description": "Search and list nodes in the dbt DAG. Returns lightweight metadata (name, type, description, tags, file path) without SQL content. Use find_nodes to retrieve full details for specific nodes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Case-insensitive substring filter applied to node name, description, tags, and file path. Returns all nodes when omitted." },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up. When provided, only the listed nodes are returned." },
                     "node_types": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
                         "description": "Node types to include. Defaults to all types when omitted."
                     }
                 },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "find_nodes",
+            "description": "Look up one or more dbt nodes by name or unique ID. Returns full details including compiled SQL, column list, description, tags, file path, and materialization.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up." },
+                    "node_types": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "description": "Restrict results to these node types. Nodes whose type does not match are reported in not_found."
+                    }
+                },
+                "required": ["names"],
                 "additionalProperties": false
             }
         }),
@@ -291,6 +307,7 @@ fn call_tool(params: &Value, state: &McpState) -> std::result::Result<Value, (i3
 
     let result = match name {
         "get_project_summary" => get_project_summary(state),
+        "list_nodes" => list_nodes(args, state),
         "find_nodes" => find_nodes(args, state),
         "get_lineage" => get_lineage(args, state),
         "get_impact" => get_impact(args, state),
@@ -337,15 +354,79 @@ fn get_project_summary(state: &McpState) -> Result<Value> {
     Ok(serde_json::to_value(report)?)
 }
 
-fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
-    let names = optional_string_array(args, "names")?;
+fn list_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let query = match args.get("query") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.to_lowercase()),
         Some(_) => anyhow::bail!("argument 'query' must be a string"),
     };
-    let type_filter: Option<HashSet<NodeType>> = match args.get("node_types") {
-        None | Some(Value::Null) => None,
+    let type_filter = parse_node_type_filter(args)?;
+
+    let mut nodes = Vec::new();
+    for idx in state.dag.node_indices() {
+        let node = &state.dag[idx];
+        if node.node_type == NodeType::Phantom {
+            continue;
+        }
+        if let Some(ref filter) = type_filter
+            && !filter.contains(&node.node_type)
+        {
+            continue;
+        }
+        if let Some(query) = query.as_deref()
+            && !node_matches_query(node, query)
+        {
+            continue;
+        }
+        nodes.push(node_summary(node));
+    }
+    nodes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+    Ok(json!({
+        "nodes": nodes,
+        "count": nodes.len()
+    }))
+}
+
+fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
+    let names = required_string_array(args, "names")?;
+    let type_filter = parse_node_type_filter(args)?;
+
+    let mut nodes = Vec::new();
+    let mut not_found = Vec::new();
+
+    for name in names {
+        match graph::filter::try_resolve_node_quiet(&state.dag, &name) {
+            Some(idx) => {
+                let node = &state.dag[idx];
+                if type_filter
+                    .as_ref()
+                    .is_none_or(|f| f.contains(&node.node_type))
+                {
+                    let compiled_sql = state
+                        .manifest
+                        .nodes
+                        .get(&node.unique_id)
+                        .and_then(|n| n.compiled_code.as_deref());
+                    nodes.push(node_detail(node, compiled_sql));
+                } else {
+                    not_found.push(name);
+                }
+            }
+            None => not_found.push(name),
+        }
+    }
+
+    Ok(json!({
+        "nodes": nodes,
+        "count": nodes.len(),
+        "not_found": not_found
+    }))
+}
+
+fn parse_node_type_filter(args: &Value) -> Result<Option<HashSet<NodeType>>> {
+    match args.get("node_types") {
+        None | Some(Value::Null) => Ok(None),
         Some(Value::Array(arr)) => {
             let mut set = HashSet::new();
             for v in arr {
@@ -357,57 +438,10 @@ fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
                 })?;
                 set.insert(nt);
             }
-            Some(set)
+            Ok(Some(set))
         }
         Some(_) => anyhow::bail!("argument 'node_types' must be an array"),
-    };
-
-    let mut nodes = Vec::new();
-    let mut not_found = Vec::new();
-
-    if let Some(names) = names {
-        for name in names {
-            match graph::filter::try_resolve_node_quiet(&state.dag, &name) {
-                Some(idx) => {
-                    let node = &state.dag[idx];
-                    if type_filter
-                        .as_ref()
-                        .is_none_or(|f| f.contains(&node.node_type))
-                    {
-                        nodes.push(node_value(node, true));
-                    } else {
-                        not_found.push(name);
-                    }
-                }
-                None => not_found.push(name),
-            }
-        }
-    } else {
-        for idx in state.dag.node_indices() {
-            let node = &state.dag[idx];
-            if node.node_type == NodeType::Phantom {
-                continue;
-            }
-            if let Some(ref filter) = type_filter
-                && !filter.contains(&node.node_type)
-            {
-                continue;
-            }
-            if let Some(query) = query.as_deref()
-                && !node_matches_query(node, query)
-            {
-                continue;
-            }
-            nodes.push(node_value(node, false));
-        }
-        nodes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     }
-
-    Ok(json!({
-        "nodes": nodes,
-        "count": nodes.len(),
-        "not_found": not_found
-    }))
 }
 
 fn node_type_from_str(s: &str) -> Option<NodeType> {
@@ -457,8 +491,8 @@ fn node_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
             .is_some_and(|p| p.to_slash_lossy().to_lowercase().contains(query))
 }
 
-fn node_value(node: &graph::types::NodeData, detailed: bool) -> Value {
-    let mut value = json!({
+fn node_summary(node: &graph::types::NodeData) -> Value {
+    json!({
         "unique_id": node.unique_id,
         "name": node.label,
         "node_type": node.node_type.label(),
@@ -466,10 +500,13 @@ fn node_value(node: &graph::types::NodeData, detailed: bool) -> Value {
         "description": node.description,
         "materialization": node.materialization,
         "tags": node.tags
-    });
-    if detailed {
-        value["columns"] = json!(node.columns);
-    }
+    })
+}
+
+fn node_detail(node: &graph::types::NodeData, compiled_sql: Option<&str>) -> Value {
+    let mut value = node_summary(node);
+    value["columns"] = json!(node.columns);
+    value["compiled_sql"] = json!(compiled_sql);
     value
 }
 
@@ -668,22 +705,7 @@ fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
     }
 }
 
-fn optional_string_array(args: &Value, key: &str) -> Result<Option<Vec<String>>> {
-    match args.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(ToOwned::to_owned)
-                    .with_context(|| format!("argument '{key}' must contain only strings"))
-            })
-            .collect::<Result<Vec<_>>>()
-            .map(Some),
-        Some(_) => anyhow::bail!("argument '{key}' must be an array of strings"),
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -736,6 +758,7 @@ mod tests {
             names,
             vec![
                 "get_project_summary",
+                "list_nodes",
                 "find_nodes",
                 "get_lineage",
                 "get_impact",
@@ -745,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn find_nodes_returns_structured_tool_result() {
+    fn find_nodes_returns_full_details_including_compiled_sql() {
         let state = state();
         let result = call_tool(
             &json!({
@@ -758,15 +781,43 @@ mod tests {
 
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["count"], 1);
-        assert_eq!(
-            result["structuredContent"]["nodes"][0]["name"],
-            Value::String("orders".to_string())
+        let node = &result["structuredContent"]["nodes"][0];
+        assert_eq!(node["name"], Value::String("orders".to_string()));
+        assert!(
+            node.get("compiled_sql").is_some(),
+            "compiled_sql field must be present"
         );
         assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("orders")
+            node.get("columns").is_some(),
+            "columns field must be present"
+        );
+    }
+
+    #[test]
+    fn list_nodes_returns_nodes_without_compiled_sql() {
+        let state = state();
+        let result = list_nodes(&json!({}), &state).unwrap();
+        let nodes = result["nodes"].as_array().unwrap();
+        assert!(!nodes.is_empty());
+        for node in nodes {
+            assert!(
+                node.get("compiled_sql").is_none(),
+                "list_nodes must not include compiled_sql"
+            );
+            assert!(
+                node.get("columns").is_none(),
+                "list_nodes must not include columns"
+            );
+        }
+    }
+
+    #[test]
+    fn list_nodes_rejects_non_string_query() {
+        let state = state();
+        let err = list_nodes(&json!({ "query": 123 }), &state).unwrap_err();
+        assert!(
+            err.to_string().contains("'query' must be a string"),
+            "expected type error for query: {err}"
         );
     }
 
@@ -783,7 +834,11 @@ mod tests {
     #[test]
     fn find_nodes_rejects_unknown_node_type() {
         let state = state();
-        let err = find_nodes(&json!({ "node_types": ["models"] }), &state).unwrap_err();
+        let err = find_nodes(
+            &json!({ "names": ["orders"], "node_types": ["models"] }),
+            &state,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("unknown value"),
             "expected 'unknown value' in error: {err}"
@@ -791,12 +846,12 @@ mod tests {
     }
 
     #[test]
-    fn find_nodes_rejects_non_string_query() {
+    fn find_nodes_requires_names() {
         let state = state();
-        let err = find_nodes(&json!({ "query": 123 }), &state).unwrap_err();
+        let err = find_nodes(&json!({}), &state).unwrap_err();
         assert!(
-            err.to_string().contains("'query' must be a string"),
-            "expected type error for query: {err}"
+            err.to_string().contains("'names' is required"),
+            "expected required error for names: {err}"
         );
     }
 
