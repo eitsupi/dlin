@@ -99,9 +99,9 @@ impl McpState {
     }
 }
 
-fn normalize_id(id: Option<Value>) -> Value {
+fn normalize_id(id: Value) -> Value {
     match id {
-        Some(v @ (Value::String(_) | Value::Number(_) | Value::Null)) => v,
+        v @ (Value::String(_) | Value::Number(_) | Value::Null) => v,
         _ => Value::Null,
     }
 }
@@ -112,10 +112,10 @@ fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
     let id = value
         .as_object()
         .and_then(|object| object.get("id").cloned());
-    let id_for_error = normalize_id(id.clone());
+    let id_for_error = normalize_id(id.clone().unwrap_or(Value::Null));
     let mut req: JsonRpcRequest = serde_json::from_value(value)
         .map_err(|err| error_response(id_for_error, -32600, format!("invalid request: {err}")))?;
-    req.id = id;
+    req.id = id.map(normalize_id);
     Ok(req)
 }
 
