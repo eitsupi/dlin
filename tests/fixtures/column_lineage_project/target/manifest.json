@@ -399,11 +399,11 @@
         "order_id": {
           "name": "order_id"
         },
-        "raw_id": {
-          "name": "raw_id"
+        "id": {
+          "name": "id"
         }
       },
-      "compiled_code": "SELECT order_id, id AS raw_id FROM `shop`.`main`.`stg_orders`",
+      "compiled_code": "SELECT order_id, id FROM `shop`.`main`.`stg_orders`",
       "database": "shop",
       "schema": "main"
     },

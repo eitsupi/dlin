@@ -1219,10 +1219,11 @@ mod tests {
     fn column_lineage_unrelated_column_not_found_suppressed_when_name_collides_with_lineage_path() {
         // mart_id_name_collision.order_id traces through stg_mixed_id.order_id →
         // stg_orders.order_id → raw.orders.id, so "id" appears as a column name on
-        // the retained path.  stg_mixed_id also references stg_orders.id directly
-        // (which stg_orders does not output), generating ColumnNotFound("id") in its
-        // per-model analysis.  Because "id" is not in lineage_model_columns for
-        // stg_mixed_id (only "order_id" is), that error must be suppressed.
+        // the retained path.  stg_mixed_id also selects an output column named "id"
+        // directly from stg_orders (which does not expose "id" — it renames it to
+        // order_id), producing ColumnNotFound("id") in per-model analysis.
+        // Because "id" is not in lineage_model_columns for stg_mixed_id (only
+        // "order_id" is on the retained path), that error must be suppressed.
         let state = column_lineage_state();
         let result = get_column_lineage(
             &json!({
