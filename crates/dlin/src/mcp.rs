@@ -530,6 +530,7 @@ fn node_detail(node: &graph::types::NodeData, compiled_sql: Option<&str>) -> Val
 static GRAPH_NODE_FIELDS_SET: LazyLock<HashSet<String>> = LazyLock::new(|| {
     render::json::GRAPH_NODE_FIELDS
         .iter()
+        .filter(|&&f| f != "sql_content")
         .map(|field| (*field).to_string())
         .collect()
 });
@@ -608,13 +609,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                     .iter()
                     .flat_map(|entry| {
                         entry.sources.iter().flat_map(|src| {
-                            let short = src
-                                .table
-                                .chars()
-                                .filter(|c| *c != '"' && *c != '`')
-                                .collect::<String>();
-                            let short = short.rsplit('.').next().unwrap_or(&short).to_string();
-                            std::iter::once(short)
+                            std::iter::once(normalize_table_short_name(&src.table))
                                 .chain(src.model_path.iter().map(|(m, _, _)| m.clone()))
                         })
                     })

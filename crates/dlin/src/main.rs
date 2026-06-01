@@ -9,6 +9,7 @@ use polyglot_sql::{DialectType, Schema as _};
 use regex::RegexBuilder;
 
 mod cli;
+#[cfg(not(tarpaulin_include))]
 mod mcp;
 
 use cli::{
