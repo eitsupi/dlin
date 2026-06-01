@@ -391,23 +391,22 @@ fn list_nodes(args: &Value, state: &McpState) -> Result<Value> {
 fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let names = required_string_array(args, "names")?;
     let type_filter = parse_node_type_filter(args)?;
+    let sql_contents = state.manifest.collect_sql_contents();
 
     let mut nodes = Vec::new();
     let mut not_found = Vec::new();
 
     for name in names {
-        match graph::filter::try_resolve_node_quiet(&state.dag, &name) {
+        match resolve_node_unique_id(state, &name)
+            .and_then(|id| graph::filter::try_resolve_node_quiet(&state.dag, &id))
+        {
             Some(idx) => {
                 let node = &state.dag[idx];
                 if type_filter
                     .as_ref()
                     .is_none_or(|f| f.contains(&node.node_type))
                 {
-                    let compiled_sql = state
-                        .manifest
-                        .nodes
-                        .get(&node.unique_id)
-                        .and_then(|n| n.compiled_code.as_deref());
+                    let compiled_sql = sql_contents.get(&node.unique_id).map(String::as_str);
                     nodes.push(node_detail(node, compiled_sql));
                 } else {
                     not_found.push(name);
@@ -522,14 +521,26 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
     let downstream = optional_usize(args, "downstream_depth")?.or(Some(1));
 
+    let normalized_models: Vec<Option<String>> = models
+        .iter()
+        .map(|model| resolve_node_unique_id(state, model))
+        .collect();
     let not_found: Vec<String> = models
         .iter()
-        .filter(|m| graph::filter::try_resolve_node_quiet(&state.dag, m).is_none())
-        .cloned()
+        .zip(normalized_models.iter())
+        .filter(|(_, normalized)| normalized.is_none())
+        .map(|(original, _)| original.clone())
         .collect();
+    let resolved_models: Vec<String> = normalized_models.into_iter().flatten().collect();
 
-    let filtered =
-        graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
+    let filtered = graph::filter::filter_graph(
+        &state.dag,
+        &resolved_models,
+        upstream,
+        downstream,
+        &[],
+        true,
+    )?;
     let mut buf = Vec::new();
     render::json::render_json_to_writer(&filtered, None, &GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
     let mut result: Value = serde_json::from_slice(&buf)?;
@@ -539,7 +550,8 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
 
 fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let model = required_string(args, "model")?;
-    let idx = graph::filter::try_resolve_node_quiet(&state.dag, model)
+    let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
+    let idx = graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
         .with_context(|| format!("model not found: {model}"))?;
     let report = graph::impact::compute_impact(&state.dag, idx);
     Ok(serde_json::to_value(report)?)
@@ -563,8 +575,6 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 );
             report.columns.retain(|entry| entry.column == column);
             if report.total_columns > 0 {
-                let column_error_prefix = format!("column '{column}': ");
-
                 // Collect the short names of models on the target column's lineage path.
                 // Table names from SQL may be fully qualified (e.g. "db.schema.model"); take
                 // the last dot-separated segment and strip quotes to get the model short name.
@@ -597,9 +607,10 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
                     ) {
-                        if err.what.starts_with(&column_error_prefix) {
-                            cross_column_errors.push(err);
-                        }
+                        // Preserve all ColumnNotFound diagnostics from cross-model traversal.
+                        // Filtering only by the requested column can hide relevant upstream
+                        // failures on the traced lineage path.
+                        cross_column_errors.push(err);
                     } else if !upstream_models.is_empty()
                         && error_names_upstream_model(&err.what, &upstream_models)
                     {
@@ -667,6 +678,34 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
     }
 }
 
+fn resolve_node_unique_id(state: &McpState, name: &str) -> Option<String> {
+    if let Some(idx) = graph::filter::try_resolve_node_quiet(&state.dag, name) {
+        return Some(state.dag[idx].unique_id.clone());
+    }
+    let normalized = normalize_manifest_unique_id(name)?;
+    graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
+        .map(|idx| state.dag[idx].unique_id.clone())
+}
+
+fn normalize_manifest_unique_id(name: &str) -> Option<String> {
+    let mut parts = name.split('.').collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    let resource_type = parts[0];
+    match resource_type {
+        "source" if parts.len() >= 4 => {
+            parts.remove(1);
+            Some(parts.join("."))
+        }
+        "model" | "seed" | "snapshot" | "test" | "exposure" => {
+            parts.remove(1);
+            Some(parts.join("."))
+        }
+        _ => None,
+    }
+}
+
 fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -704,8 +743,6 @@ fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
         _ => anyhow::bail!("argument '{key}' is required and must be a non-empty array of strings"),
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -769,11 +806,11 @@ mod tests {
 
     #[test]
     fn find_nodes_returns_full_details_including_compiled_sql() {
-        let state = state();
+        let state = column_lineage_state();
         let result = call_tool(
             &json!({
                 "name": "find_nodes",
-                "arguments": { "names": ["orders"] }
+                "arguments": { "names": ["stg_orders"] }
             }),
             &state,
         )
@@ -782,15 +819,29 @@ mod tests {
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["count"], 1);
         let node = &result["structuredContent"]["nodes"][0];
-        assert_eq!(node["name"], Value::String("orders".to_string()));
+        assert_eq!(node["name"], Value::String("stg_orders".to_string()));
         assert!(
             node.get("compiled_sql").is_some(),
             "compiled_sql field must be present"
         );
         assert!(
+            node["compiled_sql"].is_string(),
+            "compiled_sql must be non-null string when manifest has compiled SQL"
+        );
+        assert!(
             node.get("columns").is_some(),
             "columns field must be present"
         );
+    }
+
+    #[test]
+    fn find_nodes_resolves_manifest_unique_id() {
+        let state = column_lineage_state();
+        let result = find_nodes(&json!({ "names": ["model.clp.stg_orders"] }), &state).unwrap();
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["not_found"], json!([]));
+        assert_eq!(result["nodes"][0]["name"], json!("stg_orders"));
+        assert!(result["nodes"][0]["compiled_sql"].is_string());
     }
 
     #[test]
@@ -880,6 +931,31 @@ mod tests {
                 .iter()
                 .any(|n| n["label"] == "orders")
         );
+    }
+
+    #[test]
+    fn lineage_resolves_manifest_unique_id() {
+        let state = state();
+        let value = get_lineage(
+            &json!({ "models": ["model.simple_project.orders"] }),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(value["not_found"], json!([]));
+        assert!(
+            value["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n["label"] == "orders")
+        );
+    }
+
+    #[test]
+    fn impact_resolves_manifest_unique_id() {
+        let state = state();
+        let value = get_impact(&json!({ "model": "model.simple_project.orders" }), &state).unwrap();
+        assert_eq!(value["source_model"], json!("orders"));
     }
 
     #[test]
@@ -1051,5 +1127,18 @@ mod tests {
                 .any(|e| e["kind"].as_str() == Some("parse_failure")),
             "must not include stg_bad_sql ParseFailure when order_id does not depend on it; got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn error_name_matching_avoids_orders_stg_orders_overlap() {
+        let upstream_models = HashSet::from(["orders".to_string()]);
+        assert!(error_names_upstream_model(
+            "failed to parse SQL for 'orders'",
+            &upstream_models
+        ));
+        assert!(!error_names_upstream_model(
+            "failed to parse SQL for 'stg_orders'",
+            &upstream_models
+        ));
     }
 }
