@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use path_slash::PathExt as _;
@@ -99,23 +100,25 @@ impl McpState {
     }
 }
 
-fn normalize_id(id: Value) -> Value {
-    match id {
-        v @ (Value::String(_) | Value::Number(_) | Value::Null) => v,
-        _ => Value::Null,
-    }
-}
-
 fn parse_request(line: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
     let value: Value = serde_json::from_str(line)
         .map_err(|err| error_response(Value::Null, -32700, format!("parse error: {err}")))?;
     let id = value
         .as_object()
         .and_then(|object| object.get("id").cloned());
-    let id_for_error = normalize_id(id.clone().unwrap_or(Value::Null));
+    if let Some(ref raw_id) = id {
+        if !matches!(raw_id, Value::String(_) | Value::Number(_) | Value::Null) {
+            return Err(error_response(
+                Value::Null,
+                -32600,
+                "invalid request: id must be a string, number, or null",
+            ));
+        }
+    }
+    let id_for_error = id.clone().unwrap_or(Value::Null);
     let mut req: JsonRpcRequest = serde_json::from_value(value)
         .map_err(|err| error_response(id_for_error, -32600, format!("invalid request: {err}")))?;
-    req.id = id.map(normalize_id);
+    req.id = id;
     Ok(req)
 }
 
@@ -369,6 +372,13 @@ fn model_value(node: &graph::types::NodeData, detailed: bool) -> Value {
     value
 }
 
+static GRAPH_NODE_FIELDS_SET: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    render::json::GRAPH_NODE_FIELDS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect()
+});
+
 fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let models = optional_string_array(args, "models")?.unwrap_or_default();
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
@@ -381,12 +391,8 @@ fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
 
     let filtered =
         graph::filter::filter_graph(&state.dag, &models, upstream, downstream, &[], true)?;
-    let fields: HashSet<String> = render::json::GRAPH_NODE_FIELDS
-        .iter()
-        .map(|field| (*field).to_string())
-        .collect();
     let mut buf = Vec::new();
-    render::json::render_json_to_writer(&filtered, None, &fields, &mut buf, false)?;
+    render::json::render_json_to_writer(&filtered, None, &*GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
     Ok(serde_json::from_slice(&buf)?)
 }
 
@@ -620,13 +626,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_id_type_is_normalized_to_null() {
-        let state = state();
-        let req = parse_request(r#"{"jsonrpc":"2.0","method":"unknown","id":{}}"#).unwrap();
-        let response = handle_request(req, &state).unwrap();
+    fn invalid_id_type_returns_invalid_request_error() {
+        // JSON-RPC 2.0 requires id to be a string, number, or null.
+        // Requests with any other id type (e.g. object, array) must be rejected
+        // with -32600 without invoking the method handler.
+        let response = parse_request(r#"{"jsonrpc":"2.0","method":"ping","id":{}}"#).unwrap_err();
 
         assert_eq!(response.id, Value::Null);
-        assert!(response.error.is_some());
+        let err = response.error.as_ref().unwrap();
+        assert_eq!(err.code, -32600);
     }
 
     #[test]
