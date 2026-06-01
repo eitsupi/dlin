@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -480,6 +480,18 @@ fn extract_column_not_found_name(what: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+fn normalize_table_short_name(table: &str) -> String {
+    let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
+    stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
+}
+
+fn manifest_has_model_named(manifest: &parser::manifest::Manifest, name: &str) -> bool {
+    manifest
+        .nodes
+        .values()
+        .any(|n| n.resource_type == "model" && n.name == name)
+}
+
 fn node_matches_query(node: &graph::types::NodeData, query: &str) -> bool {
     node.label.to_lowercase().contains(query)
         || node
@@ -607,6 +619,28 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         })
                     })
                     .collect();
+                let mut lineage_model_columns: HashMap<String, HashSet<String>> = HashMap::new();
+                lineage_model_columns
+                    .entry(report.model.clone())
+                    .or_default()
+                    .insert(column.to_string());
+                for entry in &report.columns {
+                    for src in &entry.sources {
+                        for (m, col, _) in &src.model_path {
+                            lineage_model_columns
+                                .entry(m.clone())
+                                .or_default()
+                                .insert(col.clone());
+                        }
+                        let leaf_model = normalize_table_short_name(&src.table);
+                        if manifest_has_model_named(&state.manifest, &leaf_model) {
+                            lineage_model_columns
+                                .entry(leaf_model)
+                                .or_default()
+                                .insert(src.column.clone());
+                        }
+                    }
+                }
                 let lineage_columns: HashSet<String> = report
                     .columns
                     .iter()
@@ -624,27 +658,46 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when
                 //   their message references a model on the target column's lineage path.
                 //   This prevents errors from models used by *other* columns from leaking in.
-                // - ColumnNotFound errors are kept only for the specific requested column.
+                // - ColumnNotFound errors are kept only if they belong to a (model, column)
+                //   pair on the retained lineage path.
                 let mut cross_global_errors = Vec::new();
                 let mut cross_column_errors = Vec::new();
-                let column_error_prefix = format!("column '{column}':");
                 for err in report.errors.drain(..) {
                     if matches!(
                         err.kind,
                         graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
                     ) {
-                        if err.what.starts_with(&column_error_prefix)
-                            || extract_column_not_found_name(&err.what)
-                                .is_some_and(|col| lineage_columns.contains(col))
-                        {
-                            cross_column_errors.push(err);
-                        }
+                        // Re-evaluate ColumnNotFound with model context below.
+                        let _ = err;
                     } else if !upstream_models.is_empty()
                         && error_names_upstream_model(&err.what, &upstream_models)
                     {
                         cross_global_errors.push(err);
                     }
                 }
+
+                for (lineage_model, cols) in &lineage_model_columns {
+                    let model_report =
+                        graph::column_lineage::compute_column_lineage_with_manifest_path(
+                            &state.manifest,
+                            lineage_model,
+                            state.dialect,
+                            Some(&state.manifest_path),
+                            &mut cache,
+                        );
+                    for err in model_report.errors {
+                        if matches!(
+                            err.kind,
+                            graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound
+                        ) && extract_column_not_found_name(&err.what).is_some_and(|name| {
+                            cols.contains(name) || lineage_columns.contains(name)
+                        }) && !cross_column_errors.contains(&err)
+                        {
+                            cross_column_errors.push(err);
+                        }
+                    }
+                }
+                cross_column_errors.sort_by(|a, b| a.what.cmp(&b.what));
 
                 // Query single-model lineage for global errors specific to the target model
                 // itself (e.g. the target model's own ParseFailure or NoCompiledCode). The
@@ -1211,5 +1264,15 @@ mod tests {
             Some("order_id")
         );
         assert_eq!(extract_column_not_found_name("failed to parse SQL"), None);
+    }
+
+    #[test]
+    fn normalize_table_short_name_extracts_leaf_name() {
+        assert_eq!(normalize_table_short_name("db.schema.orders"), "orders");
+        assert_eq!(
+            normalize_table_short_name("\"db\".\"schema\".\"orders\""),
+            "orders"
+        );
+        assert_eq!(normalize_table_short_name("orders"), "orders");
     }
 }
