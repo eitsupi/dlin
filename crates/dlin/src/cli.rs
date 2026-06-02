@@ -953,7 +953,9 @@ pub struct ColumnGraphArgs {
     #[arg(short = 'o', long, default_value = "json")]
     pub output: ColumnOutputFormat,
 
-    /// SQL dialect for parsing (default: generic).
+    /// SQL dialect for parsing compiled SQL.
+    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
+    /// does not declare an adapter_type.
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long)]
     pub dialect: Option<DialectType>,
@@ -996,7 +998,9 @@ pub struct ColumnImpactArgs {
     #[arg(short = 'o', long, default_value = "json")]
     pub output: ColumnOutputFormat,
 
-    /// SQL dialect for parsing (default: generic).
+    /// SQL dialect for parsing compiled SQL.
+    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
+    /// does not declare an adapter_type.
     /// [possible values: bigquery, snowflake, postgres, redshift, databricks, spark, trino, duckdb, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long)]
     pub dialect: Option<DialectType>,

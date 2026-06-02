@@ -822,15 +822,17 @@ fn resolve_dialect(
     if let Some(d) = cli_dialect {
         return Ok(d);
     }
-    match &manifest.metadata.adapter_type {
-        Some(adapter) => adapter.parse::<DialectType>().map_err(|_| {
-            anyhow::anyhow!(
-                "manifest adapter_type '{}' has no matching SQL dialect; \
-                 use --dialect to specify one explicitly (e.g. --dialect postgres)",
-                adapter
-            )
-        }),
-        None => anyhow::bail!(
+    match manifest.metadata.adapter_type.as_deref() {
+        Some(adapter) if !adapter.trim().is_empty() => {
+            adapter.trim().parse::<DialectType>().map_err(|_| {
+                anyhow::anyhow!(
+                    "manifest adapter_type '{}' has no matching SQL dialect; \
+                     use --dialect to specify one explicitly (e.g. --dialect postgres)",
+                    adapter.trim()
+                )
+            })
+        }
+        _ => anyhow::bail!(
             "manifest does not specify an adapter_type; \
              use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
         ),
