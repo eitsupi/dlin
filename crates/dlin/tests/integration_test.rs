@@ -2567,7 +2567,10 @@ mod manifest_only_mode {
         // An unrecognised adapter_type in the manifest must produce a clear error
         // telling the user to pass --dialect explicitly.
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("unknown_warehouse")));
+        write_manifest(
+            tmp.path(),
+            &manifest_json_with_adapter(Some("unknown_warehouse")),
+        );
 
         let output = Command::new(binary_path())
             .args([
@@ -2644,6 +2647,66 @@ mod manifest_only_mode {
         assert!(
             !output.status.success(),
             "column downstream should also fail without adapter_type and --dialect"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("adapter_type") || stderr.contains("--dialect"),
+            "error message should mention adapter_type or --dialect: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_errors_on_empty_adapter_type() {
+        // An empty string adapter_type must not silently fall back to Generic.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "empty adapter_type should fail rather than silently using Generic"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("adapter_type") || stderr.contains("--dialect"),
+            "error message should mention adapter_type or --dialect: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_errors_on_whitespace_only_adapter_type() {
+        // A whitespace-only adapter_type must not silently fall back to Generic.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("   ")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "whitespace-only adapter_type should fail rather than silently using Generic"
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
