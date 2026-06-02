@@ -2401,7 +2401,7 @@ mod manifest_only_mode {
         fs::create_dir_all(tmp.path().join("target")).unwrap();
 
         let manifest_json = r#"{
-  "metadata": {},
+  "metadata": {"adapter_type": "postgres"},
   "nodes": {
     "model.test_project.stg_orders": {
       "unique_id": "model.test_project.stg_orders",
@@ -2469,6 +2469,187 @@ mod manifest_only_mode {
             stdout.contains("stg_orders"),
             "Should show stg_orders in column lineage output: {}",
             stdout
+        );
+    }
+
+    /// Build a manifest JSON string with the given adapter_type value (or none).
+    fn manifest_json_with_adapter(adapter_type: Option<&str>) -> String {
+        let metadata = match adapter_type {
+            Some(a) => format!(r#"{{"adapter_type": "{}"}}"#, a),
+            None => "{}".to_string(),
+        };
+        format!(
+            r#"{{
+  "metadata": {},
+  "nodes": {{
+    "model.test_project.stg_orders": {{
+      "unique_id": "model.test_project.stg_orders",
+      "name": "stg_orders",
+      "original_file_path": "models/stg_orders.sql",
+      "resource_type": "model",
+      "depends_on": {{"nodes": []}},
+      "config": {{"materialized": "view", "tags": []}},
+      "description": "",
+      "compiled_code": "SELECT order_id FROM raw.orders",
+      "columns": {{"order_id": {{"name": "order_id", "description": ""}}}}
+    }}
+  }},
+  "sources": {{}},
+  "exposures": {{}}
+}}"#,
+            metadata
+        )
+    }
+
+    fn write_manifest(dir: &std::path::Path, json: &str) {
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::write(dir.join("target/manifest.json"), json).unwrap();
+    }
+
+    #[test]
+    fn test_column_upstream_auto_detects_dialect_from_manifest_adapter_type() {
+        // When --dialect is omitted but manifest has adapter_type, dialect is auto-detected.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "should succeed with auto-detected dialect from adapter_type; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_errors_when_no_adapter_type_and_no_dialect_flag() {
+        // When both --dialect and manifest adapter_type are absent, the command must fail
+        // with an actionable error rather than silently using Generic.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(None));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "should fail when adapter_type is absent and --dialect is not given"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("adapter_type") || stderr.contains("--dialect"),
+            "error message should mention adapter_type or --dialect: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_errors_on_unknown_adapter_type() {
+        // An unrecognised adapter_type in the manifest must produce a clear error
+        // telling the user to pass --dialect explicitly.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("unknown_warehouse")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "should fail when adapter_type is not a known dialect"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unknown_warehouse") && stderr.contains("--dialect"),
+            "error should name the unknown adapter and suggest --dialect: {}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_dialect_flag_overrides_manifest_adapter_type() {
+        // --dialect takes precedence over whatever adapter_type the manifest declares.
+        let tmp = tempfile::tempdir().unwrap();
+        // adapter_type is deliberately wrong (trino); --dialect postgres should win.
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("trino")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--dialect",
+                "postgres",
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "--dialect flag should override adapter_type in manifest; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_column_downstream_errors_when_no_adapter_type_and_no_dialect_flag() {
+        // Same error behaviour for the impact (downstream) subcommand.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(None));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "downstream",
+                "stg_orders",
+                "--column",
+                "order_id",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            !output.status.success(),
+            "column downstream should also fail without adapter_type and --dialect"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("adapter_type") || stderr.contains("--dialect"),
+            "error message should mention adapter_type or --dialect: {}",
+            stderr
         );
     }
 }

@@ -810,6 +810,33 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Resolve the SQL dialect to use for column lineage.
+///
+/// Precedence: CLI flag > manifest adapter_type > error.
+/// Avoids silent fallback to Generic, which produces incorrect results for
+/// warehouse-specific SQL (e.g. BigQuery backtick quoting, Snowflake QUALIFY).
+fn resolve_dialect(
+    cli_dialect: Option<DialectType>,
+    manifest: &parser::manifest::Manifest,
+) -> Result<DialectType> {
+    if let Some(d) = cli_dialect {
+        return Ok(d);
+    }
+    match &manifest.metadata.adapter_type {
+        Some(adapter) => adapter.parse::<DialectType>().map_err(|_| {
+            anyhow::anyhow!(
+                "manifest adapter_type '{}' has no matching SQL dialect; \
+                 use --dialect to specify one explicitly (e.g. --dialect postgres)",
+                adapter
+            )
+        }),
+        None => anyhow::bail!(
+            "manifest does not specify an adapter_type; \
+             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+        ),
+    }
+}
+
 /// Run the `column-lineage` subcommand
 #[cfg(not(tarpaulin_include))]
 #[allow(clippy::too_many_arguments)]
@@ -824,8 +851,6 @@ fn run_column_lineage_command(
     no_cache: bool,
     refresh_cache: bool,
 ) -> Result<()> {
-    let dialect = dialect.unwrap_or(DialectType::Generic);
-
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
@@ -846,6 +871,8 @@ fn run_column_lineage_command(
     // Load manifest once — reused for both path resolution and column lineage analysis.
     let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
+
+    let dialect = resolve_dialect(dialect, &manifest)?;
 
     let models = if input::has_path_like_input(&raw_inputs) {
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
@@ -1038,8 +1065,6 @@ fn run_column_impact_command(
     no_cache: bool,
     refresh_cache: bool,
 ) -> Result<()> {
-    let dialect = dialect.unwrap_or(DialectType::Generic);
-
     if columns.is_empty() {
         anyhow::bail!("no columns specified (use --column)");
     }
@@ -1050,6 +1075,8 @@ fn run_column_impact_command(
 
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
+
+    let dialect = resolve_dialect(dialect, &manifest)?;
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()

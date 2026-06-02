@@ -520,5 +520,8 @@
       }
     }
   },
-  "exposures": {}
+  "exposures": {},
+  "metadata": {
+    "adapter_type": "postgres"
+  }
 }
