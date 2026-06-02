@@ -2556,8 +2556,8 @@ mod manifest_only_mode {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("adapter_type") || stderr.contains("--dialect"),
-            "error message should mention adapter_type or --dialect: {}",
+            stderr.contains("does not specify an adapter_type"),
+            "error message should say 'does not specify an adapter_type': {}",
             stderr
         );
     }
@@ -2650,8 +2650,8 @@ mod manifest_only_mode {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("adapter_type") || stderr.contains("--dialect"),
-            "error message should mention adapter_type or --dialect: {}",
+            stderr.contains("does not specify an adapter_type"),
+            "error message should say 'does not specify an adapter_type': {}",
             stderr
         );
     }
@@ -2680,8 +2680,8 @@ mod manifest_only_mode {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("adapter_type") || stderr.contains("--dialect"),
-            "error message should mention adapter_type or --dialect: {}",
+            stderr.contains("adapter_type is empty"),
+            "error message should say 'adapter_type is empty': {}",
             stderr
         );
     }
@@ -2710,8 +2710,8 @@ mod manifest_only_mode {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("adapter_type") || stderr.contains("--dialect"),
-            "error message should mention adapter_type or --dialect: {}",
+            stderr.contains("adapter_type is empty"),
+            "error message should say 'adapter_type is empty': {}",
             stderr
         );
     }
