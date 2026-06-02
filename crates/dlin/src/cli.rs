@@ -956,6 +956,7 @@ pub struct ColumnGraphArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
+    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long)]
     pub dialect: Option<DialectType>,
 
@@ -1000,6 +1001,7 @@ pub struct ColumnImpactArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
+    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long)]
     pub dialect: Option<DialectType>,
 
