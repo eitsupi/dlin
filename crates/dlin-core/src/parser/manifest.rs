@@ -11,6 +11,8 @@ use crate::graph::types::*;
 #[derive(Debug, Default, Deserialize)]
 pub struct ManifestMetadata {
     pub project_name: Option<String>,
+    /// dbt adapter type (e.g. "postgres", "bigquery", "snowflake") — present in dbt >=1.x manifests.
+    pub adapter_type: Option<String>,
 }
 
 /// Top-level manifest.json structure
