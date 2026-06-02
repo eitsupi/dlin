@@ -832,7 +832,11 @@ fn resolve_dialect(
                 )
             })
         }
-        _ => anyhow::bail!(
+        Some(_) => anyhow::bail!(
+            "manifest adapter_type is empty; \
+             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+        ),
+        None => anyhow::bail!(
             "manifest does not specify an adapter_type; \
              use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
         ),
