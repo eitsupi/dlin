@@ -32,7 +32,10 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
         let node = &graph[idx];
         node.label == name
             || node.unique_id == name
-            || node.aliases.iter().any(|a| a == name || a == &name_prefixed)
+            || node
+                .aliases
+                .iter()
+                .any(|a| a == name || a == &name_prefixed)
     });
     if let Some(idx) = exact {
         return NodeLookupResult::Found(idx);
@@ -210,7 +213,15 @@ fn node_matches_any_selector(node: &NodeData, selectors: &[Selector]) -> bool {
             .as_ref()
             .map(|fp| pat.matches(&fp.to_string_lossy()))
             .unwrap_or(false),
-        Selector::ModelName(pat) => pat.matches(&node.label),
+        Selector::ModelName(pat) => {
+            pat.matches(&node.label)
+                || pat.matches(&node.unique_id)
+                || node.aliases.iter().any(|a| {
+                    pat.matches(a)
+                        || a.strip_prefix("model.")
+                            .is_some_and(|bare| pat.matches(bare))
+                })
+        }
     })
 }
 
@@ -2501,5 +2512,59 @@ mod tests {
 
         let idx = resolve_node_by_name(&g, "my_model").unwrap();
         assert_eq!(g[idx].unique_id, "model.my_model.v2");
+    }
+
+    #[test]
+    fn test_selector_model_name_matches_versioned_base_name() {
+        // Selector "my_model" should match only the latest-version node (v2) via its
+        // "model.my_model" alias, not the older v1 node.
+        let mut g = LineageGraph::new();
+        let v1 = g.add_node(make_node(
+            "model.my_model.v1",
+            "my_model.v1",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let v2 = g.add_node(make_node(
+            "model.my_model.v2",
+            "my_model.v2",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g[v2].aliases.push("model.my_model".to_string());
+
+        let selectors = parse_selectors("my_model");
+        let matched = apply_selectors(&g, &selectors);
+        assert_eq!(matched.len(), 1, "exactly the latest version should match");
+        assert!(matched.contains(&v2), "v2 should match via alias");
+        assert!(!matched.contains(&v1), "v1 should not match");
+    }
+
+    #[test]
+    fn test_selector_model_name_matches_qualified_alias() {
+        // Selector "model.my_model" (fully-qualified alias form) should also find the latest node.
+        let mut g = LineageGraph::new();
+        g.add_node(make_node(
+            "model.my_model.v1",
+            "my_model.v1",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let v2 = g.add_node(make_node(
+            "model.my_model.v2",
+            "my_model.v2",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g[v2].aliases.push("model.my_model".to_string());
+
+        let selectors = parse_selectors("model.my_model");
+        let matched = apply_selectors(&g, &selectors);
+        assert_eq!(matched.len(), 1);
+        assert!(matched.contains(&v2));
     }
 }
