@@ -80,6 +80,43 @@ impl TestDefinition {
     }
 }
 
+/// A single entry in the `versions:` list of a model definition.
+#[derive(Debug, Deserialize, Clone)]
+pub struct VersionSpec {
+    pub v: serde_json::Value,
+    /// SQL file stem override (defaults to `{model_name}_v{v}`)
+    #[serde(default)]
+    pub defined_in: Option<String>,
+}
+
+impl VersionSpec {
+    /// Return the version number formatted as a string (e.g. `"1"`, `"2"`).
+    pub fn v_str(&self) -> String {
+        if let Some(n) = self.v.as_i64() {
+            return n.to_string();
+        }
+        if let Some(f) = self.v.as_f64() {
+            return if f.fract() == 0.0 {
+                (f as i64).to_string()
+            } else {
+                f.to_string()
+            };
+        }
+        if let Some(s) = self.v.as_str() {
+            return s.to_string();
+        }
+        self.v.to_string()
+    }
+
+    /// Return the SQL file stem for this version.
+    /// Falls back to `{model_name}_v{v}` when `defined_in` is not set.
+    pub fn sql_stem(&self, model_name: &str) -> String {
+        self.defined_in
+            .clone()
+            .unwrap_or_else(|| format!("{}_v{}", model_name, self.v_str()))
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelDefinition {
     pub name: String,
@@ -94,6 +131,33 @@ pub struct ModelDefinition {
     /// Model-level tests (not attached to a specific column)
     #[serde(default, alias = "data_tests")]
     pub tests: Vec<TestDefinition>,
+    /// Versioned model definitions (dbt v1.5+)
+    #[serde(default)]
+    pub versions: Vec<VersionSpec>,
+    /// Latest version used when ref('name') is called without version= kwarg
+    #[serde(default)]
+    pub latest_version: Option<serde_json::Value>,
+}
+
+impl ModelDefinition {
+    /// Return the version string used for `latest_version`, or derive it from
+    /// the highest `v` in the `versions` list when `latest_version` is unset.
+    pub fn resolved_latest_version_str(&self) -> Option<String> {
+        if let Some(lv) = &self.latest_version {
+            let s = if let Some(n) = lv.as_i64() {
+                n.to_string()
+            } else if let Some(f) = lv.as_f64() {
+                if f.fract() == 0.0 { (f as i64).to_string() } else { f.to_string() }
+            } else if let Some(s) = lv.as_str() {
+                s.to_string()
+            } else {
+                lv.to_string()
+            };
+            return Some(s);
+        }
+        // Infer from max numeric version
+        self.versions.iter().filter_map(|v| v.v.as_i64()).max().map(|n| n.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -315,6 +379,59 @@ sources:
         assert!(schema.sources.is_empty());
         assert!(schema.models.is_empty());
         assert!(schema.exposures.is_empty());
+    }
+
+    #[test]
+    fn test_parse_versioned_model() {
+        let yaml = r#"
+models:
+  - name: my_model
+    description: A versioned model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+        defined_in: my_model_custom
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.models.len(), 1);
+        let m = &schema.models[0];
+        assert_eq!(m.name, "my_model");
+        assert_eq!(m.versions.len(), 2);
+        assert_eq!(m.versions[0].v_str(), "1");
+        assert_eq!(m.versions[0].sql_stem("my_model"), "my_model_v1");
+        assert_eq!(m.versions[1].v_str(), "2");
+        assert_eq!(m.versions[1].sql_stem("my_model"), "my_model_custom");
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_versioned_model_infers_latest_from_max_v() {
+        let yaml = r#"
+models:
+  - name: orders
+    versions:
+      - v: 1
+      - v: 3
+      - v: 2
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_unversioned_model_has_empty_versions() {
+        let yaml = r#"
+models:
+  - name: plain_model
+    description: Not versioned
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert!(m.versions.is_empty());
+        assert!(m.latest_version.is_none());
+        assert!(m.resolved_latest_version_str().is_none());
     }
 
     #[test]

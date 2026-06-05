@@ -8,6 +8,9 @@ pub struct RefCall {
     pub package: Option<String>,
     /// Model name
     pub name: String,
+    /// Version number from ref('name', version=N)
+    #[serde(default)]
+    pub version: Option<i64>,
 }
 
 /// A reference to a dbt source via source()
@@ -21,8 +24,13 @@ pub struct SourceCall {
 
 static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
 
-// Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name")
-// Handles {{ ref(...) }} and {{- ref(...) -}} whitespace control
+// Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
+// and ref('name', version=N).
+// Handles {{ ref(...) }} and {{- ref(...) -}} whitespace control.
+// Capture groups:
+//   1, 2 → pkg, name  (two-positional-arg form)
+//   3, 4 → name, version  (single-arg + version=N kwarg form)
+//   5    → name  (single-arg form)
 static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
@@ -31,6 +39,9 @@ static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
         (?:
             # Two-argument form: ref('pkg', 'name') or ref("pkg", "name")
             (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"])
+            |
+            # Single-arg + version kwarg: ref('name', version=N)
+            (?:['"]([^'"]+)['"]\s*,\s*version\s*=\s*(-?\d+))
             |
             # Single-argument form: ref('name') or ref("name")
             ['"]([^'"]+)['"]
@@ -124,14 +135,25 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
 
     for cap in REF_PATTERN.captures_iter(&cleaned) {
         if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
+            // Two-positional-arg form: ref('pkg', 'name')
             refs.push(RefCall {
                 package: Some(pkg.as_str().to_string()),
                 name: name.as_str().to_string(),
+                version: None,
             });
-        } else if let Some(name) = cap.get(3) {
+        } else if let (Some(name), Some(ver)) = (cap.get(3), cap.get(4)) {
+            // Single-arg + version kwarg: ref('name', version=N)
             refs.push(RefCall {
                 package: None,
                 name: name.as_str().to_string(),
+                version: ver.as_str().parse::<i64>().ok(),
+            });
+        } else if let Some(name) = cap.get(5) {
+            // Single-arg form: ref('name')
+            refs.push(RefCall {
+                package: None,
+                name: name.as_str().to_string(),
+                version: None,
             });
         }
     }
@@ -326,6 +348,54 @@ mod tests {
         let refs = extract_refs(sql);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "stg_orders");
+    }
+
+    #[test]
+    fn test_ref_with_version_kwarg() {
+        let sql = "SELECT * FROM {{ ref('my_model', version=2) }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, Some(2));
+        assert!(refs[0].package.is_none());
+    }
+
+    #[test]
+    fn test_ref_with_version_kwarg_spaced() {
+        let sql = "SELECT * FROM {{ ref('my_model', version = 3) }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, Some(3));
+    }
+
+    #[test]
+    fn test_ref_without_version_has_none() {
+        let sql = "SELECT * FROM {{ ref('my_model') }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].version, None);
+    }
+
+    #[test]
+    fn test_ref_two_arg_has_no_version() {
+        let sql = "SELECT * FROM {{ ref('pkg', 'my_model') }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].package.as_deref(), Some("pkg"));
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, None);
+    }
+
+    #[test]
+    fn test_version_does_not_conflict_with_two_arg_form() {
+        // ref('pkg', 'name') must NOT match the version=N branch
+        let sql = "SELECT * FROM {{ ref('mypkg', 'model_a') }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
+        assert_eq!(refs[0].name, "model_a");
+        assert_eq!(refs[0].version, None);
     }
 
     // ─── Config extraction tests ───

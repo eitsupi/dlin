@@ -14,7 +14,7 @@ use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
 };
-use crate::parser::yaml_schema::{ExposureDefinition, SchemaFile, parse_schema_file};
+use crate::parser::yaml_schema::{ExposureDefinition, ModelDefinition, SchemaFile, parse_schema_file};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -57,17 +57,48 @@ impl GraphBuilder {
         idx
     }
 
-    /// Get or create a phantom ref node, returning its index
-    fn get_or_create_phantom_ref(&mut self, ref_name: &str, sql_path: &Path) -> NodeIndex {
-        let dep_id = resolve_ref(ref_name, &self.node_map);
+    /// Register a node_map alias: `from` → same NodeIndex as `to` (if `to` exists).
+    fn add_alias(&mut self, from: String, to: &str) {
+        if let Some(&idx) = self.node_map.get(to) {
+            self.node_map.entry(from).or_insert(idx);
+        }
+    }
+
+    /// Get or create a phantom ref node, returning its index.
+    /// When `version` is `Some(N)`, first tries `model.{name}.v{N}` before falling
+    /// back to the unversioned resolution.
+    fn get_or_create_phantom_ref(
+        &mut self,
+        ref_name: &str,
+        version: Option<i64>,
+        sql_path: &Path,
+    ) -> NodeIndex {
+        // When a version is specified, first try the versioned node directly.
+        let dep_id = if let Some(v) = version {
+            let versioned_id = format!("model.{}.v{}", ref_name, v);
+            if self.node_map.contains_key(&versioned_id) {
+                versioned_id
+            } else {
+                resolve_ref(ref_name, &self.node_map)
+            }
+        } else {
+            resolve_ref(ref_name, &self.node_map)
+        };
         if let Some(&idx) = self.node_map.get(&dep_id) {
             return idx;
         }
-        crate::warn!("unresolved ref '{}' in {}", ref_name, sql_path.display());
-        let phantom_id = format!("model.{}", ref_name);
+        let display_name = match version {
+            Some(v) => format!("{}.v{}", ref_name, v),
+            None => ref_name.to_string(),
+        };
+        crate::warn!("unresolved ref '{}' in {}", display_name, sql_path.display());
+        let phantom_id = match version {
+            Some(v) => format!("model.{}.v{}", ref_name, v),
+            None => format!("model.{}", ref_name),
+        };
         self.add_node(NodeData {
             unique_id: phantom_id,
-            label: ref_name.to_string(),
+            label: display_name,
             node_type: NodeType::Phantom,
             file_path: None,
             description: None,
@@ -174,11 +205,41 @@ struct YamlModelMeta {
 /// Result of parsing YAML schema files.
 /// The third element pairs each `SchemaFile` with the relative path of the
 /// YAML file it was parsed from (used to populate `file_path` on test nodes).
+/// The fourth element maps SQL file stems to versioned unique IDs
+/// (e.g. `"my_model_v2"` → `"model.my_model.v2"`).
+/// The fifth element maps unversioned model IDs to the latest-version unique ID
+/// (e.g. `"model.my_model"` → `"model.my_model.v2"`), used as node_map aliases.
 type YamlResult = (
     HashMap<String, YamlModelMeta>,
     Vec<ExposureDefinition>,
     Vec<(SchemaFile, PathBuf)>,
+    HashMap<String, (String, String)>,  // stem → (versioned_unique_id, base_model_name)
+    HashMap<String, String>,            // unversioned_id → latest_versioned_id
 );
+
+/// Build version maps for a single versioned model definition.
+/// Returns entries to add to `stem_to_versioned` and `version_aliases`.
+fn build_version_maps(
+    model_def: &ModelDefinition,
+) -> (Vec<(String, (String, String))>, Option<(String, String)>) {
+    if model_def.versions.is_empty() {
+        return (vec![], None);
+    }
+    let name = &model_def.name;
+    let mut stem_entries: Vec<(String, (String, String))> = Vec::new();
+    for vspec in &model_def.versions {
+        let v_str = vspec.v_str();
+        let stem = vspec.sql_stem(name);
+        let unique_id = format!("model.{}.v{}", name, v_str);
+        stem_entries.push((stem, (unique_id, name.clone())));
+    }
+    let alias = model_def.resolved_latest_version_str().map(|lv_str| {
+        let unversioned_id = format!("model.{}", name);
+        let latest_versioned_id = format!("model.{}.v{}", name, lv_str);
+        (unversioned_id, latest_versioned_id)
+    });
+    (stem_entries, alias)
+}
 
 /// Parse YAML schema files: create source nodes, collect model metadata, exposures,
 /// and parsed schemas (for generic test extraction).
@@ -190,6 +251,8 @@ fn process_yaml_files(
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
     let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
+    let mut stem_to_versioned: HashMap<String, (String, String)> = HashMap::new();
+    let mut version_aliases: HashMap<String, String> = HashMap::new();
 
     // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
     // deterministic across filesystems/OSes.
@@ -221,6 +284,13 @@ fn process_yaml_files(
             tags.dedup();
             meta.tags = tags;
             model_meta.insert(model_def.name.clone(), meta);
+
+            // Collect versioned model maps
+            let (stem_entries, alias) = build_version_maps(model_def);
+            stem_to_versioned.extend(stem_entries);
+            if let Some((unversioned_id, latest_versioned_id)) = alias {
+                version_aliases.insert(unversioned_id, latest_versioned_id);
+            }
         }
 
         exposures.extend(schema.exposures.iter().cloned());
@@ -231,7 +301,7 @@ fn process_yaml_files(
         schemas.push((schema, relative_path));
     }
 
-    Ok((model_meta, exposures, schemas))
+    Ok((model_meta, exposures, schemas, stem_to_versioned, version_aliases))
 }
 
 /// Cached extraction result for a model SQL file (refs and sources).
@@ -251,6 +321,11 @@ struct ModelExtraction {
 /// Create nodes for model SQL files (with duplicate detection).
 /// Returns an in-memory cache of refs/sources (for `process_sql_edges`)
 /// and updates the disk cache with newly extracted results.
+///
+/// `stem_to_versioned` maps SQL file stems to `(versioned_unique_id, base_model_name)`.
+/// When a file stem is present in this map, the node is registered under the
+/// versioned unique_id (e.g. `model.my_model.v2`) and model metadata is looked up
+/// under the base name.
 fn process_model_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
@@ -259,6 +334,7 @@ fn process_model_files(
     macro_prefix: &str,
     disk_cache: &mut cache::ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
+    stem_to_versioned: &HashMap<String, (String, String)>,
 ) -> ExtractionCache {
     // Parallel phase: read files and run minijinja extraction concurrently.
     // Uses disk cache (immutable borrow) to skip rendering for unchanged files.
@@ -337,7 +413,24 @@ fn process_model_files(
             mem_cache.insert(me.sql_path.clone(), rs);
         }
 
-        let yaml_meta = model_meta.get(&me.model_name);
+        // Resolve versioned unique_id and base model name for YAML metadata lookup.
+        let (unique_id, label, meta_key) =
+            if let Some((versioned_id, base_name)) = stem_to_versioned.get(&me.model_name) {
+                (
+                    versioned_id.clone(),
+                    // label: e.g. "my_model.v2"
+                    versioned_id
+                        .strip_prefix("model.")
+                        .unwrap_or(versioned_id)
+                        .to_string(),
+                    base_name.as_str(),
+                )
+            } else {
+                let uid = format!("model.{}", me.model_name);
+                (uid, me.model_name.clone(), me.model_name.as_str())
+            };
+
+        let yaml_meta = model_meta.get(meta_key);
 
         let materialization = sql_config
             .materialized
@@ -350,7 +443,6 @@ fn process_model_files(
         tags.sort();
         tags.dedup();
 
-        let unique_id = format!("model.{}", me.model_name);
         let relative_path = me
             .sql_path
             .strip_prefix(project_dir)
@@ -365,7 +457,7 @@ fn process_model_files(
 
         gb.add_node(NodeData {
             unique_id,
-            label: me.model_name,
+            label,
             node_type: NodeType::Model,
             file_path: Some(relative_path),
             description: yaml_meta.and_then(|m| m.description.clone()),
@@ -468,7 +560,8 @@ fn process_sql_edges(
         let is_test = *file_type == "test";
 
         for ref_call in refs {
-            let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, sql_path);
+            let dep_idx =
+                gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version, sql_path);
             let edge_type = if is_test {
                 EdgeType::Test
             } else {
@@ -585,7 +678,9 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
     for (schema, yaml_path) in schemas {
         let file_path = Some(yaml_path.clone());
 
-        // Model-level generic tests
+        // Model-level generic tests.
+        // For versioned models, `model.{name}` is an alias to the latest version node,
+        // so the lookup still works without special-casing.
         for model_def in &schema.models {
             let parent_id = format!("model.{}", model_def.name);
             let parent_idx = match gb.node_map.get(&parent_id) {
@@ -684,7 +779,8 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let (model_meta, exposures, schemas) = process_yaml_files(&mut gb, files, project_dir)?;
+    let (model_meta, exposures, schemas, stem_to_versioned, version_aliases) =
+        process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
         &mut gb,
         files,
@@ -693,7 +789,13 @@ pub fn build_graph(
         &macro_prefix,
         &mut disk_cache,
         vars,
+        &stem_to_versioned,
     );
+    // Register "model.name" aliases to the latest versioned node so that
+    // unversioned ref('name') calls resolve correctly.
+    for (unversioned_id, latest_versioned_id) in &version_aliases {
+        gb.add_alias(unversioned_id.clone(), latest_versioned_id);
+    }
     process_simple_nodes(
         &mut gb,
         &files.seed_files,
@@ -1610,5 +1712,223 @@ models:
         assert_eq!(ids_fwd.len(), 2);
         assert!(ids_fwd.contains(&"test.not_null.orders.order_id".to_string()));
         assert!(ids_fwd.contains(&"test.not_null.orders.order_id_2".to_string()));
+    }
+
+    // ─── Model versioning tests ───
+
+    #[test]
+    fn test_build_graph_versioned_model_creates_version_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // v1 and v2 SQL files (default naming: {name}_v{v}.sql)
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1 as id").unwrap();
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2 as id").unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // Two version nodes: my_model.v1 and my_model.v2
+        assert_eq!(graph.node_count(), 2);
+        let labels: Vec<&str> = graph
+            .node_indices()
+            .map(|i| graph[i].label.as_str())
+            .collect();
+        assert!(labels.contains(&"my_model.v1"));
+        assert!(labels.contains(&"my_model.v2"));
+
+        // unique_ids should use dotted form
+        let ids: Vec<&str> = graph
+            .node_indices()
+            .map(|i| graph[i].unique_id.as_str())
+            .collect();
+        assert!(ids.contains(&"model.my_model.v1"));
+        assert!(ids.contains(&"model.my_model.v2"));
+    }
+
+    #[test]
+    fn test_build_graph_versioned_ref_without_version_kwarg_resolves_to_latest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
+        // downstream refs 'my_model' without version → should go to v2 (latest)
+        fs::write(
+            models_dir.join("downstream.sql"),
+            "SELECT * FROM {{ ref('my_model') }}",
+        )
+        .unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+                project_dir.join("models/downstream.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // 3 nodes (v1, v2, downstream) — no phantom
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 1);
+
+        // The single edge should be my_model.v2 → downstream
+        let downstream_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "downstream")
+            .unwrap();
+        let v2_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v2")
+            .unwrap();
+        assert!(graph.contains_edge(v2_idx, downstream_idx));
+    }
+
+    #[test]
+    fn test_build_graph_versioned_ref_with_version_kwarg_resolves_to_correct_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
+        // downstream explicitly refs version=1
+        fs::write(
+            models_dir.join("downstream.sql"),
+            "SELECT * FROM {{ ref('my_model', version=1) }}",
+        )
+        .unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+                project_dir.join("models/downstream.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // 3 nodes (v1, v2, downstream) — no phantom
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 1);
+
+        // The single edge should be my_model.v1 → downstream
+        let downstream_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "downstream")
+            .unwrap();
+        let v1_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v1")
+            .unwrap();
+        assert!(graph.contains_edge(v1_idx, downstream_idx));
+    }
+
+    #[test]
+    fn test_build_graph_versioned_model_custom_defined_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // v1 uses default stem, v2 uses custom stem via defined_in
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("custom_v2_file.sql"), "SELECT 2").unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+        defined_in: custom_v2_file
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/custom_v2_file.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        assert_eq!(graph.node_count(), 2);
+        let ids: Vec<&str> = graph
+            .node_indices()
+            .map(|i| graph[i].unique_id.as_str())
+            .collect();
+        assert!(ids.contains(&"model.my_model.v1"));
+        assert!(ids.contains(&"model.my_model.v2"));
     }
 }

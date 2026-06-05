@@ -272,6 +272,7 @@ mod tests {
             refs: vec![RefCall {
                 package: None,
                 name: "orders".to_string(),
+                version: None,
             }],
             sources: vec![],
             config: SqlConfig::default(),
@@ -480,6 +481,7 @@ mod tests {
             refs: vec![RefCall {
                 package: None,
                 name: "fresh_ref".to_string(),
+                version: None,
             }],
             sources: vec![],
             config: SqlConfig::default(),

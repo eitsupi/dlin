@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use minijinja::value::Kwargs;
+use minijinja::value::{from_args, Kwargs};
 use minijinja::{Environment, ErrorKind, Value};
 
 use super::sql::{RefCall, SourceCall, SqlConfig};
@@ -106,33 +106,41 @@ fn render_with_incremental(
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
 
-    // ref('name') or ref('package', 'name')
+    // ref('name'), ref('package', 'name'), or ref('name', version=N)
+    // kwargs (e.g. version=2) are appended by minijinja as the last element of args.
+    // from_args splits positional args from kwargs so we can extract version.
     let ext = extraction.clone();
     env.add_function(
         "ref",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
             let mut ext = ext.lock().unwrap();
-            match args.len() {
+            let (positional, kwargs): (&[Value], Kwargs) = from_args(args).map_err(|e| {
+                minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string())
+            })?;
+            let version: Option<i64> = kwargs.peek::<i64>("version").ok();
+            match positional.len() {
                 1 => {
-                    let name = args[0].to_string();
+                    let name = positional[0].to_string();
                     ext.refs.push(RefCall {
                         package: None,
                         name: name.clone(),
+                        version,
                     });
                     Ok(Value::from(format!("__dbt_ref_{}__", name)))
                 }
                 2 => {
-                    let pkg = args[0].to_string();
-                    let name = args[1].to_string();
+                    let pkg = positional[0].to_string();
+                    let name = positional[1].to_string();
                     ext.refs.push(RefCall {
                         package: Some(pkg),
                         name: name.clone(),
+                        version,
                     });
                     Ok(Value::from(format!("__dbt_ref_{}__", name)))
                 }
                 _ => Err(minijinja::Error::new(
                     ErrorKind::TooManyArguments,
-                    "ref() takes 1 or 2 arguments",
+                    "ref() takes 1 or 2 positional arguments",
                 )),
             }
         },
@@ -477,6 +485,33 @@ mod tests {
         let ext = extract_via_jinja(sql, "").unwrap();
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly"]);
+    }
+
+    #[test]
+    fn test_ref_with_version_kwarg() {
+        let sql = "SELECT * FROM {{ ref('my_model', version=2) }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "my_model");
+        assert_eq!(ext.refs[0].version, Some(2));
+        assert!(ext.refs[0].package.is_none());
+    }
+
+    #[test]
+    fn test_ref_with_version_kwarg_and_package() {
+        let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', version=3) }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
+        assert_eq!(ext.refs[0].name, "my_model");
+        assert_eq!(ext.refs[0].version, Some(3));
+    }
+
+    #[test]
+    fn test_ref_without_version_has_none() {
+        let sql = "SELECT * FROM {{ ref('my_model') }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs[0].version, None);
     }
 
     #[test]
