@@ -14,7 +14,9 @@ use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
 };
-use crate::parser::yaml_schema::{ExposureDefinition, ModelDefinition, SchemaFile, parse_schema_file};
+use crate::parser::yaml_schema::{
+    ExposureDefinition, ModelDefinition, SchemaFile, parse_schema_file,
+};
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
 /// pre-built prefix string for prepending to model templates.
@@ -65,22 +67,17 @@ impl GraphBuilder {
     }
 
     /// Get or create a phantom ref node, returning its index.
-    /// When `version` is `Some(N)`, first tries `model.{name}.v{N}` before falling
-    /// back to the unversioned resolution.
+    /// When `version` is `Some(N)`, resolves only `model.{name}.v{N}` — never
+    /// falls back to the unversioned alias so that version-pinned refs don't
+    /// silently link to the wrong version.
     fn get_or_create_phantom_ref(
         &mut self,
         ref_name: &str,
         version: Option<i64>,
         sql_path: &Path,
     ) -> NodeIndex {
-        // When a version is specified, first try the versioned node directly.
         let dep_id = if let Some(v) = version {
-            let versioned_id = format!("model.{}.v{}", ref_name, v);
-            if self.node_map.contains_key(&versioned_id) {
-                versioned_id
-            } else {
-                resolve_ref(ref_name, &self.node_map)
-            }
+            format!("model.{}.v{}", ref_name, v)
         } else {
             resolve_ref(ref_name, &self.node_map)
         };
@@ -91,7 +88,11 @@ impl GraphBuilder {
             Some(v) => format!("{}.v{}", ref_name, v),
             None => ref_name.to_string(),
         };
-        crate::warn!("unresolved ref '{}' in {}", display_name, sql_path.display());
+        crate::warn!(
+            "unresolved ref '{}' in {}",
+            display_name,
+            sql_path.display()
+        );
         let phantom_id = match version {
             Some(v) => format!("model.{}.v{}", ref_name, v),
             None => format!("model.{}", ref_name),
@@ -213,12 +214,13 @@ type YamlResult = (
     HashMap<String, YamlModelMeta>,
     Vec<ExposureDefinition>,
     Vec<(SchemaFile, PathBuf)>,
-    HashMap<String, (String, String)>,  // stem → (versioned_unique_id, base_model_name)
-    HashMap<String, String>,            // unversioned_id → latest_versioned_id
+    HashMap<String, (String, String)>, // stem → (versioned_unique_id, base_model_name)
+    HashMap<String, String>,           // unversioned_id → latest_versioned_id
 );
 
 /// Build version maps for a single versioned model definition.
 /// Returns entries to add to `stem_to_versioned` and `version_aliases`.
+#[allow(clippy::type_complexity)]
 fn build_version_maps(
     model_def: &ModelDefinition,
 ) -> (Vec<(String, (String, String))>, Option<(String, String)>) {
@@ -301,7 +303,13 @@ fn process_yaml_files(
         schemas.push((schema, relative_path));
     }
 
-    Ok((model_meta, exposures, schemas, stem_to_versioned, version_aliases))
+    Ok((
+        model_meta,
+        exposures,
+        schemas,
+        stem_to_versioned,
+        version_aliases,
+    ))
 }
 
 /// Cached extraction result for a model SQL file (refs and sources).
@@ -326,6 +334,7 @@ struct ModelExtraction {
 /// When a file stem is present in this map, the node is registered under the
 /// versioned unique_id (e.g. `model.my_model.v2`) and model metadata is looked up
 /// under the base name.
+#[allow(clippy::too_many_arguments)]
 fn process_model_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
@@ -560,8 +569,7 @@ fn process_sql_edges(
         let is_test = *file_type == "test";
 
         for ref_call in refs {
-            let dep_idx =
-                gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version, sql_path);
+            let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version, sql_path);
             let edge_type = if is_test {
                 EdgeType::Test
             } else {
@@ -795,6 +803,11 @@ pub fn build_graph(
     // unversioned ref('name') calls resolve correctly.
     for (unversioned_id, latest_versioned_id) in &version_aliases {
         gb.add_alias(unversioned_id.clone(), latest_versioned_id);
+    }
+    // Register stem-based aliases (e.g. "model.my_model_v1" → "model.my_model.v1")
+    // so that process_sql_edges can locate versioned model nodes by their SQL file stem.
+    for (stem, (versioned_id, _)) in &stem_to_versioned {
+        gb.add_alias(format!("model.{}", stem), versioned_id);
     }
     process_simple_nodes(
         &mut gb,
@@ -1884,6 +1897,151 @@ models:
             .find(|&i| graph[i].unique_id == "model.my_model.v1")
             .unwrap();
         assert!(graph.contains_edge(v1_idx, downstream_idx));
+    }
+
+    #[test]
+    fn test_build_graph_versioned_model_sql_edges_processed() {
+        // Regression: versioned SQL files must have their ref()/source() edges processed.
+        // Earlier, process_sql_edges looked up "model.my_model_v1" (no dot) but nodes
+        // were registered as "model.my_model.v1" (with dot), causing all edges to be skipped.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // v1 refs a source; v2 refs v1
+        fs::write(
+            models_dir.join("my_model_v1.sql"),
+            "SELECT * FROM {{ source('raw', 'events') }}",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("my_model_v2.sql"),
+            "SELECT * FROM {{ ref('my_model', version=1) }}",
+        )
+        .unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+sources:
+  - name: raw
+    tables:
+      - name: events
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // source + v1 + v2 = 3 nodes, no phantoms
+        assert_eq!(graph.node_count(), 3);
+        // source→v1 and v1→v2 = 2 edges
+        assert_eq!(graph.edge_count(), 2);
+
+        let v1_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v1")
+            .expect("v1 node must exist");
+        let v2_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v2")
+            .expect("v2 node must exist");
+        let src_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "source.raw.events")
+            .expect("source node must exist");
+
+        assert!(
+            graph.contains_edge(src_idx, v1_idx),
+            "source→v1 edge missing"
+        );
+        assert!(graph.contains_edge(v1_idx, v2_idx), "v1→v2 edge missing");
+    }
+
+    #[test]
+    fn test_build_graph_versioned_phantom_for_missing_version() {
+        // Regression: ref('name', version=N) when version N does not exist must
+        // create a phantom model.name.vN, not link to the latest-version alias.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // Only v2 exists; downstream refs version=1 which is absent
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
+        fs::write(
+            models_dir.join("downstream.sql"),
+            "SELECT * FROM {{ ref('my_model', version=1) }}",
+        )
+        .unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v2.sql"),
+                project_dir.join("models/downstream.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // v2 + downstream + phantom(v1) = 3 nodes
+        assert_eq!(graph.node_count(), 3);
+
+        let phantom = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Phantom)
+            .expect("phantom v1 node must exist");
+        assert_eq!(graph[phantom].unique_id, "model.my_model.v1");
+
+        // Edge must be phantom_v1 → downstream, NOT v2 → downstream
+        let downstream_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "downstream")
+            .unwrap();
+        assert!(
+            graph.contains_edge(phantom, downstream_idx),
+            "phantom.v1 → downstream edge missing"
+        );
+        let v2_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v2")
+            .unwrap();
+        assert!(
+            !graph.contains_edge(v2_idx, downstream_idx),
+            "v2 → downstream edge must not exist"
+        );
     }
 
     #[test]

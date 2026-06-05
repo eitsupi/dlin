@@ -25,20 +25,21 @@ pub struct SourceCall {
 static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
 
 // Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
-// and ref('name', version=N).
+// ref('name', version=N), and ref('pkg', 'name', version=N).
 // Handles {{ ref(...) }} and {{- ref(...) -}} whitespace control.
 // Capture groups:
-//   1, 2 → pkg, name  (two-positional-arg form)
-//   3, 4 → name, version  (single-arg + version=N kwarg form)
-//   5    → name  (single-arg form)
+//   1, 2 → pkg, name      (two-positional-arg form)
+//   3    → version        (optional version=N kwarg in two-arg form)
+//   4, 5 → name, version  (single-arg + version=N kwarg form)
+//   6    → name           (single-arg form)
 static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
         \{\{-?\s*
         ref\s*\(\s*
         (?:
-            # Two-argument form: ref('pkg', 'name') or ref("pkg", "name")
-            (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"])
+            # Two-argument form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
+            (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*(?:,\s*version\s*=\s*(-?\d+))?)
             |
             # Single-arg + version kwarg: ref('name', version=N)
             (?:['"]([^'"]+)['"]\s*,\s*version\s*=\s*(-?\d+))
@@ -135,20 +136,20 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
 
     for cap in REF_PATTERN.captures_iter(&cleaned) {
         if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
-            // Two-positional-arg form: ref('pkg', 'name')
+            // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
             refs.push(RefCall {
                 package: Some(pkg.as_str().to_string()),
                 name: name.as_str().to_string(),
-                version: None,
+                version: cap.get(3).and_then(|v| v.as_str().parse::<i64>().ok()),
             });
-        } else if let (Some(name), Some(ver)) = (cap.get(3), cap.get(4)) {
+        } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
             // Single-arg + version kwarg: ref('name', version=N)
             refs.push(RefCall {
                 package: None,
                 name: name.as_str().to_string(),
                 version: ver.as_str().parse::<i64>().ok(),
             });
-        } else if let Some(name) = cap.get(5) {
+        } else if let Some(name) = cap.get(6) {
             // Single-arg form: ref('name')
             refs.push(RefCall {
                 package: None,
@@ -396,6 +397,16 @@ mod tests {
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "model_a");
         assert_eq!(refs[0].version, None);
+    }
+
+    #[test]
+    fn test_two_arg_ref_with_version_kwarg() {
+        let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', version=3) }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, Some(3));
     }
 
     // ─── Config extraction tests ───
