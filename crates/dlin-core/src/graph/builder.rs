@@ -880,14 +880,19 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
 }
 
 /// Parse a ref('name') or ref('name', version=N) string from exposure depends_on.
-/// Returns (model_name, optional_version). Source refs return None.
+/// Returns (model_name, optional_version). Source refs and package-qualified refs
+/// (cross-package) return None — cross-package exposure links are not yet supported.
 fn parse_exposure_ref(dep: &str) -> Option<(String, Option<i64>)> {
     let dep = dep.trim();
     if dep.starts_with("ref(") {
         // Wrap in {{ }} so we can reuse the SQL regex extractor.
         let wrapped = format!("{{{{ {} }}}}", dep);
         let refs = crate::parser::sql::extract_refs(&wrapped);
-        refs.into_iter().next().map(|r| (r.name, r.version))
+        // Skip package-qualified refs — cross-package resolution is not supported here.
+        refs.into_iter()
+            .next()
+            .filter(|r| r.package.is_none())
+            .map(|r| (r.name, r.version))
     } else {
         // source() and other strings: no edge
         None
@@ -988,6 +993,8 @@ mod tests {
             parse_exposure_ref("ref('my_model', v=3)"),
             Some(("my_model".to_string(), Some(3)))
         );
+        // Package-qualified refs are not supported and return None
+        assert_eq!(parse_exposure_ref("ref('other_pkg', 'orders')"), None);
         assert_eq!(parse_exposure_ref("source('raw', 'orders')"), None);
         assert_eq!(parse_exposure_ref("something_else"), None);
     }
