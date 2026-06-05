@@ -510,6 +510,9 @@ fn process_simple_nodes(
 /// Parse SQL files for ref()/source() calls and add edges.
 /// `extraction_cache` contains pre-extracted refs/sources for model files
 /// (from `process_model_files`) to avoid redundant minijinja renders.
+/// `stem_to_versioned` is used to locate versioned model nodes by SQL file
+/// stem without relying on node_map aliases (which may point to a different
+/// version when `defined_in` uses a base-model name).
 fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
@@ -517,6 +520,7 @@ fn process_sql_edges(
     macro_prefix: &str,
     extraction_cache: &ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
+    stem_to_versioned: &HashMap<String, (String, String)>,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -538,7 +542,7 @@ fn process_sql_edges(
                 .to_path_buf();
             gb.add_node(NodeData {
                 unique_id: node_unique_id.clone(),
-                label: node_name,
+                label: node_name.clone(),
                 node_type: NodeType::Test,
                 file_path: Some(relative_path),
                 description: None,
@@ -549,9 +553,23 @@ fn process_sql_edges(
             });
         }
 
-        let current_idx = match gb.node_map.get(&node_unique_id) {
-            Some(&idx) => idx,
-            None => continue,
+        // For model files, resolve via stem_to_versioned to get the exact versioned
+        // node ID. This avoids the collision where node_map["model.my_model"] already
+        // points to the latest-version alias rather than the file being processed.
+        let current_idx = if *file_type == "model" {
+            let lookup_id = stem_to_versioned
+                .get(&node_name)
+                .map(|(versioned_id, _)| versioned_id.as_str())
+                .unwrap_or(&node_unique_id);
+            match gb.node_map.get(lookup_id) {
+                Some(&idx) => idx,
+                None => continue,
+            }
+        } else {
+            match gb.node_map.get(&node_unique_id) {
+                Some(&idx) => idx,
+                None => continue,
+            }
         };
 
         // Use cached extraction for model files; extract fresh for others
@@ -804,11 +822,6 @@ pub fn build_graph(
     for (unversioned_id, latest_versioned_id) in &version_aliases {
         gb.add_alias(unversioned_id.clone(), latest_versioned_id);
     }
-    // Register stem-based aliases (e.g. "model.my_model_v1" → "model.my_model.v1")
-    // so that process_sql_edges can locate versioned model nodes by their SQL file stem.
-    for (stem, (versioned_id, _)) in &stem_to_versioned {
-        gb.add_alias(format!("model.{}", stem), versioned_id);
-    }
     process_simple_nodes(
         &mut gb,
         &files.seed_files,
@@ -830,6 +843,7 @@ pub fn build_graph(
         &macro_prefix,
         &extraction_cache,
         vars,
+        &stem_to_versioned,
     )?;
     process_exposures(&mut gb, &exposures);
     process_generic_tests(&mut gb, &schemas);
@@ -2088,5 +2102,81 @@ models:
             .collect();
         assert!(ids.contains(&"model.my_model.v1"));
         assert!(ids.contains(&"model.my_model.v2"));
+    }
+
+    #[test]
+    fn test_build_graph_versioned_defined_in_base_name_edges_correct_version() {
+        // Regression: when defined_in equals the base model name (e.g. v1 lives in
+        // my_model.sql), process_sql_edges must attach edges to the v1 node, not to
+        // the latest-version alias (model.my_model → v2).
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // v1 is in my_model.sql (defined_in: my_model), v2 is in my_model_v2.sql
+        fs::write(
+            models_dir.join("my_model.sql"),
+            "SELECT * FROM {{ source('raw', 'events') }}",
+        )
+        .unwrap();
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+sources:
+  - name: raw
+    tables:
+      - name: events
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+        defined_in: my_model
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // source + v1 + v2 = 3 nodes, no phantoms
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 1);
+
+        let v1_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v1")
+            .expect("v1 node must exist");
+        let src_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "source.raw.events")
+            .expect("source node must exist");
+        let v2_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v2")
+            .expect("v2 node must exist");
+
+        // Edge must be source → v1 (not source → v2)
+        assert!(
+            graph.contains_edge(src_idx, v1_idx),
+            "source→v1 edge missing: edges in my_model.sql must attach to v1"
+        );
+        assert!(
+            !graph.contains_edge(src_idx, v2_idx),
+            "source→v2 edge must not exist"
+        );
     }
 }
