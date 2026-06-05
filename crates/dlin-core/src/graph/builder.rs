@@ -64,8 +64,7 @@ impl GraphBuilder {
     /// survives after `build_graph` discards the node_map.
     fn add_alias(&mut self, from: String, to: &str) {
         if let Some(&idx) = self.node_map.get(to)
-            && let std::collections::hash_map::Entry::Vacant(e) =
-                self.node_map.entry(from.clone())
+            && let std::collections::hash_map::Entry::Vacant(e) = self.node_map.entry(from.clone())
         {
             e.insert(idx);
             self.graph[idx].aliases.push(from);
