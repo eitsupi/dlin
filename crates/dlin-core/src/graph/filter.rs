@@ -19,44 +19,32 @@ enum NodeLookupResult {
     Ambiguous(NodeIndex, Vec<String>),
 }
 
-/// Find a node by name, using a three-pass approach:
-/// 1. Exact match on label or unique_id
-/// 2. Unversioned model alias: "my_model" or "model.my_model" resolves to the
-///    highest-versioned node model.my_model.vN (mirrors internal latest-version alias)
-/// 3. Suffix match on unique_id (`.{name}`)
+/// Find a node by name, using a two-pass approach:
+/// 1. Exact match on label, unique_id, or recorded aliases (set by build_graph)
+/// 2. Suffix match on unique_id (`.{name}`) — excludes Phantom nodes so that a
+///    phantom created for a missing versioned ref does not shadow real nodes
 fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
-    // Pass 1: exact label or unique_id
+    // Pass 1: exact label, unique_id, or alias.
+    // Aliases hold fully-qualified IDs like "model.my_model" set by build_graph.
+    // Also match the bare name: "my_model" is treated as equivalent to "model.my_model".
+    let name_prefixed = format!("model.{}", name);
     let exact = graph.node_indices().find(|&idx| {
         let node = &graph[idx];
-        node.label == name || node.unique_id == name
+        node.label == name
+            || node.unique_id == name
+            || node.aliases.iter().any(|a| a == name || a == &name_prefixed)
     });
     if let Some(idx) = exact {
         return NodeLookupResult::Found(idx);
     }
 
-    // Pass 2: unversioned model alias — "my_model" or "model.my_model" finds
-    // the latest (highest) versioned node model.my_model.vN.
-    let base = name.strip_prefix("model.").unwrap_or(name);
-    let version_prefix = format!("model.{}.v", base);
-    let mut versioned: Vec<(i64, NodeIndex)> = graph
-        .node_indices()
-        .filter_map(|idx| {
-            let uid = &graph[idx].unique_id;
-            let v_str = uid.strip_prefix(&version_prefix)?;
-            let v: i64 = v_str.parse().ok()?;
-            Some((v, idx))
-        })
-        .collect();
-    if !versioned.is_empty() {
-        versioned.sort_by_key(|(v, _)| *v);
-        return NodeLookupResult::Found(versioned.last().unwrap().1);
-    }
-
-    // Pass 3: suffix match
+    // Pass 2: suffix match — skip Phantom nodes
     let suffix = format!(".{}", name);
     let matches: Vec<NodeIndex> = graph
         .node_indices()
-        .filter(|&idx| graph[idx].unique_id.ends_with(&suffix))
+        .filter(|&idx| {
+            graph[idx].node_type != NodeType::Phantom && graph[idx].unique_id.ends_with(&suffix)
+        })
         .collect();
 
     match matches.len() {
@@ -609,6 +597,7 @@ mod tests {
             tags,
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         }
     }
 
@@ -2289,6 +2278,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         }
     }
 
@@ -2416,10 +2406,59 @@ mod tests {
 
     // -- versioned model lookup tests -----------------------------------------
 
+    /// Build a graph that mimics what build_graph produces for a versioned model
+    /// with latest_version=2. The v2 node carries the "model.my_model" alias as
+    /// build_graph would register via add_alias.
     fn make_versioned_graph() -> LineageGraph {
         let mut g = LineageGraph::new();
-        // Versioned model nodes: label is "my_model.v1" / "my_model.v2"
         g.add_node(make_node(
+            "model.my_model.v1",
+            "my_model.v1",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        let v2 = g.add_node(make_node(
+            "model.my_model.v2",
+            "my_model.v2",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        // Simulate the latest-version alias registered by build_graph
+        g[v2].aliases.push("model.my_model".to_string());
+        g
+    }
+
+    #[test]
+    fn test_find_versioned_model_by_base_name() {
+        let g = make_versioned_graph();
+        // "my_model" matches the alias on v2 → resolves to v2
+        let idx = resolve_node_by_name(&g, "my_model").unwrap();
+        assert_eq!(g[idx].unique_id, "model.my_model.v2");
+    }
+
+    #[test]
+    fn test_find_versioned_model_by_unversioned_unique_id() {
+        let g = make_versioned_graph();
+        // "model.my_model" is the alias on v2
+        let idx = resolve_node_by_name(&g, "model.my_model").unwrap();
+        assert_eq!(g[idx].unique_id, "model.my_model.v2");
+    }
+
+    #[test]
+    fn test_find_versioned_model_by_explicit_version_label() {
+        let g = make_versioned_graph();
+        // "my_model.v1" exact label match → v1
+        let idx = resolve_node_by_name(&g, "my_model.v1").unwrap();
+        assert_eq!(g[idx].unique_id, "model.my_model.v1");
+    }
+
+    #[test]
+    fn test_find_versioned_model_respects_explicit_latest_version() {
+        // latest_version=1 even though v2 also exists: "my_model" should resolve to v1
+        let mut g = LineageGraph::new();
+        let v1 = g.add_node(make_node(
             "model.my_model.v1",
             "my_model.v1",
             NodeType::Model,
@@ -2433,30 +2472,34 @@ mod tests {
             None,
             vec![],
         ));
-        g
+        // Alias points to v1, not the numerically highest v2
+        g[v1].aliases.push("model.my_model".to_string());
+
+        let idx = resolve_node_by_name(&g, "my_model").unwrap();
+        assert_eq!(g[idx].unique_id, "model.my_model.v1");
     }
 
     #[test]
-    fn test_find_versioned_model_by_base_name() {
-        let g = make_versioned_graph();
-        // "my_model" should resolve to the highest version (v2)
+    fn test_find_versioned_model_phantom_not_selected() {
+        // A phantom for model.my_model.v99 must not be chosen over the real v2
+        let mut g = LineageGraph::new();
+        g.add_node(make_node(
+            "model.my_model.v99",
+            "?:my_model.v99",
+            NodeType::Phantom,
+            None,
+            vec![],
+        ));
+        let v2 = g.add_node(make_node(
+            "model.my_model.v2",
+            "my_model.v2",
+            NodeType::Model,
+            None,
+            vec![],
+        ));
+        g[v2].aliases.push("model.my_model".to_string());
+
         let idx = resolve_node_by_name(&g, "my_model").unwrap();
         assert_eq!(g[idx].unique_id, "model.my_model.v2");
-    }
-
-    #[test]
-    fn test_find_versioned_model_by_unversioned_unique_id() {
-        let g = make_versioned_graph();
-        // "model.my_model" should resolve to the highest version (v2)
-        let idx = resolve_node_by_name(&g, "model.my_model").unwrap();
-        assert_eq!(g[idx].unique_id, "model.my_model.v2");
-    }
-
-    #[test]
-    fn test_find_versioned_model_by_explicit_version_label() {
-        let g = make_versioned_graph();
-        // "my_model.v1" exact label match → v1
-        let idx = resolve_node_by_name(&g, "my_model.v1").unwrap();
-        assert_eq!(g[idx].unique_id, "model.my_model.v1");
     }
 }

@@ -297,6 +297,7 @@ fn add_source_nodes(
                 cols
             },
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         // Also index by simplified id for edge resolution
@@ -331,6 +332,7 @@ fn add_regular_nodes(
                 cols
             },
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -364,6 +366,7 @@ fn add_exposure_nodes(
                     email: non_empty_string(&o.email),
                 }),
             }),
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);

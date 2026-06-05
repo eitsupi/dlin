@@ -60,9 +60,15 @@ impl GraphBuilder {
     }
 
     /// Register a node_map alias: `from` → same NodeIndex as `to` (if `to` exists).
+    /// Also records `from` in the target node's `aliases` list so that the alias
+    /// survives after `build_graph` discards the node_map.
     fn add_alias(&mut self, from: String, to: &str) {
-        if let Some(&idx) = self.node_map.get(to) {
-            self.node_map.entry(from).or_insert(idx);
+        if let Some(&idx) = self.node_map.get(to)
+            && let std::collections::hash_map::Entry::Vacant(e) =
+                self.node_map.entry(from.clone())
+        {
+            e.insert(idx);
+            self.graph[idx].aliases.push(from);
         }
     }
 
@@ -107,6 +113,7 @@ impl GraphBuilder {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         })
     }
 
@@ -138,6 +145,7 @@ impl GraphBuilder {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         })
     }
 }
@@ -189,6 +197,7 @@ fn add_source_nodes(
                 tags: vec![],
                 columns: vec![],
                 exposure: None,
+                aliases: vec![],
             });
         }
     }
@@ -474,6 +483,7 @@ fn process_model_files(
             tags,
             columns,
             exposure: None,
+            aliases: vec![],
         });
     }
 
@@ -503,6 +513,7 @@ fn process_simple_nodes(
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
     }
 }
@@ -550,6 +561,7 @@ fn process_sql_edges(
                 tags: vec![],
                 columns: vec![],
                 exposure: None,
+                aliases: vec![],
             });
         }
 
@@ -639,6 +651,7 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
                     email: o.email.as_ref().filter(|s| !s.trim().is_empty()).cloned(),
                 }),
             }),
+            aliases: vec![],
         });
 
         for dep in &exposure.depends_on {
@@ -697,6 +710,7 @@ fn add_generic_test_node(
         tags: vec![],
         columns: vec![],
         exposure: None,
+        aliases: vec![],
     });
     gb.graph
         .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
@@ -920,6 +934,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert("model.orders".to_string(), idx);
 
@@ -940,6 +955,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert("seed.countries".to_string(), idx);
 
@@ -960,6 +976,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert("snapshot.snap_orders".to_string(), idx);
 

@@ -236,6 +236,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         }
     }
 

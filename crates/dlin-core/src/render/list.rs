@@ -198,6 +198,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         let mut buf = Vec::new();
         render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();

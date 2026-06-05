@@ -87,6 +87,10 @@ pub struct NodeData {
     pub columns: Vec<String>,
     /// Exposure-specific metadata (only set for exposure nodes)
     pub exposure: Option<ExposureInfo>,
+    /// Alternate IDs this node is reachable under (e.g. unversioned "model.my_model"
+    /// for the latest-version node). Populated by build_graph; used for name lookup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 impl NodeData {
@@ -195,6 +199,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         };
         assert_eq!(node.display_name(), "orders");
     }
@@ -211,6 +216,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         };
         assert_eq!(node.display_name(), "src:raw.orders");
     }
@@ -235,6 +241,7 @@ mod tests {
                 tags: vec![],
                 columns: vec![],
                 exposure: None,
+                aliases: vec![],
             };
             assert_eq!(node.display_name(), expected, "Failed for {:?}", nt);
         }
