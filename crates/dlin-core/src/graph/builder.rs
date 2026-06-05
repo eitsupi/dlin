@@ -642,8 +642,12 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
         });
 
         for dep in &exposure.depends_on {
-            if let Some(model_name) = parse_exposure_ref(dep) {
-                let dep_id = resolve_ref(&model_name, &gb.node_map);
+            if let Some((model_name, version)) = parse_exposure_ref(dep) {
+                let dep_id = if let Some(v) = version {
+                    format!("model.{}.v{}", model_name, v)
+                } else {
+                    resolve_ref(&model_name, &gb.node_map)
+                };
                 if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
                     gb.graph
                         .add_edge(dep_idx, idx, EdgeData::direct(EdgeType::Exposure));
@@ -875,18 +879,17 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
     model_id
 }
 
-/// Parse a ref('name') or source('src', 'table') string from exposure depends_on
-fn parse_exposure_ref(dep: &str) -> Option<String> {
+/// Parse a ref('name') or ref('name', version=N) string from exposure depends_on.
+/// Returns (model_name, optional_version). Source refs return None.
+fn parse_exposure_ref(dep: &str) -> Option<(String, Option<i64>)> {
     let dep = dep.trim();
     if dep.starts_with("ref(") {
-        // Extract name from ref('name')
-        let inner = dep.trim_start_matches("ref(").trim_end_matches(')');
-        let name = inner.trim().trim_matches('\'').trim_matches('"');
-        Some(name.to_string())
-    } else if dep.starts_with("source(") {
-        // For sources in exposures, we won't create edges here for simplicity
-        None
+        // Wrap in {{ }} so we can reuse the SQL regex extractor.
+        let wrapped = format!("{{{{ {} }}}}", dep);
+        let refs = crate::parser::sql::extract_refs(&wrapped);
+        refs.into_iter().next().map(|r| (r.name, r.version))
     } else {
+        // source() and other strings: no edge
         None
     }
 }
@@ -971,11 +974,19 @@ mod tests {
     fn test_parse_exposure_ref() {
         assert_eq!(
             parse_exposure_ref("ref('orders')"),
-            Some("orders".to_string())
+            Some(("orders".to_string(), None))
         );
         assert_eq!(
             parse_exposure_ref("ref(\"orders\")"),
-            Some("orders".to_string())
+            Some(("orders".to_string(), None))
+        );
+        assert_eq!(
+            parse_exposure_ref("ref('my_model', version=2)"),
+            Some(("my_model".to_string(), Some(2)))
+        );
+        assert_eq!(
+            parse_exposure_ref("ref('my_model', v=3)"),
+            Some(("my_model".to_string(), Some(3)))
         );
         assert_eq!(parse_exposure_ref("source('raw', 'orders')"), None);
         assert_eq!(parse_exposure_ref("something_else"), None);
@@ -1161,6 +1172,63 @@ exposures:
         assert_eq!(graph.node_count(), 2);
         // exposure edge: orders → weekly_report
         assert_eq!(graph.edge_count(), 1);
+    }
+
+    #[test]
+    fn test_build_graph_exposure_versioned_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+exposures:
+  - name: pinned_report
+    depends_on:
+      - ref('my_model', version=1)
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/my_model_v2.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+        // v1 + v2 + exposure = 3 nodes
+        assert_eq!(graph.node_count(), 3);
+        // Only one edge: my_model.v1 → pinned_report
+        assert_eq!(graph.edge_count(), 1);
+
+        // Confirm the edge is from v1, not v2
+        let v1_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.my_model.v1")
+            .expect("model.my_model.v1 should exist");
+        let exposure_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "exposure.pinned_report")
+            .expect("exposure.pinned_report should exist");
+        assert!(
+            graph.contains_edge(v1_idx, exposure_idx),
+            "exposure edge should be from v1"
+        );
     }
 
     #[test]
