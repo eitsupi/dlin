@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use minijinja::value::{from_args, Kwargs};
+use minijinja::value::{Kwargs, from_args};
 use minijinja::{Environment, ErrorKind, Value};
 
 use super::sql::{RefCall, SourceCall, SqlConfig};
@@ -114,10 +114,11 @@ fn render_with_incremental(
         "ref",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
             let mut ext = ext.lock().unwrap();
-            let (positional, kwargs): (&[Value], Kwargs) = from_args(args).map_err(|e| {
-                minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string())
-            })?;
-            let version: Option<i64> = kwargs.peek::<i64>("version").ok();
+            let (positional, kwargs): (&[Value], Kwargs) = from_args(args)
+                .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string()))?;
+            // dbt accepts both `version=N` and `v=N` as shorthand
+            let version: Option<i64> =
+                kwargs.peek::<i64>("version").ok().or_else(|| kwargs.peek::<i64>("v").ok());
             match positional.len() {
                 1 => {
                     let name = positional[0].to_string();
@@ -512,6 +513,26 @@ mod tests {
         let sql = "SELECT * FROM {{ ref('my_model') }}";
         let ext = extract_via_jinja(sql, "").unwrap();
         assert_eq!(ext.refs[0].version, None);
+    }
+
+    #[test]
+    fn test_ref_with_v_shorthand_kwarg() {
+        let sql = "SELECT * FROM {{ ref('my_model', v=2) }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].name, "my_model");
+        assert_eq!(ext.refs[0].version, Some(2));
+        assert!(ext.refs[0].package.is_none());
+    }
+
+    #[test]
+    fn test_ref_with_v_shorthand_kwarg_and_package() {
+        let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', v=3) }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs.len(), 1);
+        assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
+        assert_eq!(ext.refs[0].name, "my_model");
+        assert_eq!(ext.refs[0].version, Some(3));
     }
 
     #[test]
