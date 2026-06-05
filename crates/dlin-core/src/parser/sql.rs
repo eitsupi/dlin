@@ -246,6 +246,9 @@ fn extract_config_regex(sql: &str) -> SqlConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Access private fallback directly so the regex path is covered independently
+    // of the Jinja extractor (which normally runs first in extract_refs).
+    use super::extract_refs_regex;
 
     #[test]
     fn test_single_ref() {
@@ -424,6 +427,27 @@ mod tests {
     fn test_two_arg_ref_with_v_shorthand_kwarg() {
         let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', v=3) }}";
         let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, Some(3));
+    }
+
+    // These tests call the regex fallback directly to confirm `v=` support
+    // in that path, independent of the Jinja extractor.
+
+    #[test]
+    fn test_regex_fallback_v_shorthand_kwarg() {
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', v=2) }}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version, Some(2));
+        assert!(refs[0].package.is_none());
+    }
+
+    #[test]
+    fn test_regex_fallback_two_arg_v_shorthand_kwarg() {
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('mypkg', 'my_model', v=3) }}");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "my_model");

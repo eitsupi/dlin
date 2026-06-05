@@ -147,7 +147,11 @@ impl ModelDefinition {
             let s = if let Some(n) = lv.as_i64() {
                 n.to_string()
             } else if let Some(f) = lv.as_f64() {
-                if f.fract() == 0.0 { (f as i64).to_string() } else { f.to_string() }
+                if f.fract() == 0.0 {
+                    (f as i64).to_string()
+                } else {
+                    f.to_string()
+                }
             } else if let Some(s) = lv.as_str() {
                 s.to_string()
             } else {
@@ -156,7 +160,11 @@ impl ModelDefinition {
             return Some(s);
         }
         // Infer from max numeric version
-        self.versions.iter().filter_map(|v| v.v.as_i64()).max().map(|n| n.to_string())
+        self.versions
+            .iter()
+            .filter_map(|v| v.v.as_i64())
+            .max()
+            .map(|n| n.to_string())
     }
 }
 

@@ -117,8 +117,10 @@ fn render_with_incremental(
             let (positional, kwargs): (&[Value], Kwargs) = from_args(args)
                 .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string()))?;
             // dbt accepts both `version=N` and `v=N` as shorthand
-            let version: Option<i64> =
-                kwargs.peek::<i64>("version").ok().or_else(|| kwargs.peek::<i64>("v").ok());
+            let version: Option<i64> = kwargs
+                .peek::<i64>("version")
+                .ok()
+                .or_else(|| kwargs.peek::<i64>("v").ok());
             match positional.len() {
                 1 => {
                     let name = positional[0].to_string();
