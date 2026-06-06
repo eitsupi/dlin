@@ -976,8 +976,7 @@ fn process_semantic_layer(
         if let Some(model_ref) = &sm.model
             && let Some((model_name, version)) = parse_exposure_ref(model_ref)
         {
-            let dep_idx =
-                gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
             gb.graph
                 .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
         }
