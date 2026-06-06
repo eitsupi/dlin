@@ -86,6 +86,9 @@ pub(crate) fn dot_escape(s: &str) -> String {
         match ch {
             '\\' => out.push_str(r"\\"),
             '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
             _ => out.push(ch),
         }
     }
@@ -226,6 +229,13 @@ mod tests {
     #[test]
     fn test_dot_escape_both() {
         assert_eq!(dot_escape(r#"a\"b"#), r#"a\\\"b"#);
+    }
+
+    #[test]
+    fn test_dot_escape_control_chars() {
+        assert_eq!(dot_escape("a\nb"), r"a\nb");
+        assert_eq!(dot_escape("a\rb"), r"a\rb");
+        assert_eq!(dot_escape("a\tb"), r"a\tb");
     }
 
     #[test]
