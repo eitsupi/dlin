@@ -867,7 +867,7 @@ fn process_yaml_snapshot_nodes(
     // Pass 2: resolve upstream edges now that all snapshot nodes exist.
     for (snap_def, yaml_path) in snapshot_defs {
         let unique_id = format!("snapshot.{}", snap_def.name);
-        if !yaml_registered.contains(&unique_id) {
+        if !yaml_registered.remove(&unique_id) {
             continue;
         }
         let Some(&snap_idx) = gb.node_map.get(&unique_id) else {
