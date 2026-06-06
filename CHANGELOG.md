@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2] - 2026-06-06
+
+### Features
+
+- Auto-detect SQL dialect from manifest `adapter_type` in column lineage commands, so `--dialect` is no longer required when using a manifest (#78)
+- Support dbt Semantic Layer nodes (metrics, semantic models, saved queries, etc.) in both SQL mode and manifest mode (#85)
+- Filter Virtual lineage nodes from output (#86)
+
+### Bug Fixes
+
+- Support dbt model versioning and `ref()` `version=` argument (#81)
+- Support YAML-only snapshots introduced in dbt v1.9+ (#83)
+- Fix forward reference resolution between YAML-only snapshots (#84)
+
 ## [0.2.1] - 2026-06-01
 
 ### Features
