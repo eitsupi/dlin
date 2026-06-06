@@ -19,6 +19,9 @@ fn node_fill(node_type: NodeType) -> &'static str {
         NodeType::Snapshot => "#8E44AD",
         NodeType::Test => "#1ABC9C",
         NodeType::Exposure => "#E74C3C",
+        NodeType::SemanticModel => "#16A085",
+        NodeType::Metric => "#D35400",
+        NodeType::SavedQuery => "#2980B9",
         NodeType::Phantom => "#BDC3C7",
     }
 }

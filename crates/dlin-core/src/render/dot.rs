@@ -162,6 +162,9 @@ fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
         NodeType::Snapshot => ("#8E44AD", "white"),
         NodeType::Test => ("#1ABC9C", "white"),
         NodeType::Exposure => ("#E74C3C", "white"),
+        NodeType::SemanticModel => ("#16A085", "white"),
+        NodeType::Metric => ("#D35400", "white"),
+        NodeType::SavedQuery => ("#2980B9", "white"),
         NodeType::Phantom => ("#BDC3C7", "black"),
     }
 }

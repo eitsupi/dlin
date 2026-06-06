@@ -175,6 +175,9 @@ fn colorize_node(text: &str, node_type: NodeType) -> String {
         NodeType::Snapshot => text.magenta().to_string(),
         NodeType::Test => text.cyan().to_string(),
         NodeType::Exposure => text.red().to_string(),
+        NodeType::SemanticModel => text.green().bold().to_string(),
+        NodeType::Metric => text.yellow().bold().to_string(),
+        NodeType::SavedQuery => text.blue().to_string(),
         NodeType::Phantom => text.white().dimmed().to_string(),
     }
 }

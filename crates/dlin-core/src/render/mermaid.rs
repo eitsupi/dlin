@@ -210,6 +210,9 @@ fn node_shape(node: &NodeData, show_columns: bool) -> String {
         NodeType::Snapshot => format!(r#"{id}{{{{"{label}"}}}}"#),
         NodeType::Test => format!(r#"{id}{{"{label}"}}"#),
         NodeType::Exposure => format!(r#"{id}>"{label}"]"#),
+        NodeType::SemanticModel | NodeType::Metric | NodeType::SavedQuery => {
+            format!(r#"{id}["{label}"]"#)
+        }
         NodeType::Phantom => format!(r#"{id}("{label}")"#),
     }
 }

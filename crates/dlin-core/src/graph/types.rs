@@ -14,6 +14,9 @@ pub enum NodeType {
     Snapshot,
     Test,
     Exposure,
+    SemanticModel,
+    Metric,
+    SavedQuery,
     /// Unresolved reference (phantom node)
     Phantom,
 }
@@ -27,6 +30,9 @@ impl NodeType {
             NodeType::Snapshot => "snap:",
             NodeType::Test => "test:",
             NodeType::Exposure => "exp:",
+            NodeType::SemanticModel => "sem:",
+            NodeType::Metric => "metric:",
+            NodeType::SavedQuery => "sq:",
             NodeType::Phantom => "?:",
         }
     }
@@ -39,6 +45,9 @@ impl NodeType {
             NodeType::Snapshot => "snapshot",
             NodeType::Test => "test",
             NodeType::Exposure => "exposure",
+            NodeType::SemanticModel => "semantic_model",
+            NodeType::Metric => "metric",
+            NodeType::SavedQuery => "saved_query",
             NodeType::Phantom => "phantom",
         }
     }
