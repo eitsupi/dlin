@@ -75,7 +75,9 @@ fn render_dot_to_writer<W: Write>(
             Some(n) => format!("{} (via {})", edge_type.label(), n),
             None => edge_type.label().to_string(),
         };
-        writeln!(w, r#"  "{src_id}" -> "{tgt_id}" [label="{label}"{style}];"#,)?;
+        let src = super::dot_escape(src_id);
+        let tgt = super::dot_escape(tgt_id);
+        writeln!(w, r#"  "{src}" -> "{tgt}" [label="{label}"{style}];"#,)?;
     }
 
     writeln!(w, "}}")?;
@@ -146,11 +148,11 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -
 /// Write a single node definition
 fn write_node<W: Write>(w: &mut W, node: &NodeData, indent: &str) -> io::Result<()> {
     let (color, fontcolor) = node_colors(node.node_type);
-    let label = node.display_name();
+    let id = super::dot_escape(&node.unique_id);
+    let label = super::dot_escape(&node.display_name());
     writeln!(
         w,
-        r#"{indent}"{}" [label="{label}", fillcolor="{color}", fontcolor="{fontcolor}"];"#,
-        node.unique_id,
+        r#"{indent}"{id}" [label="{label}", fillcolor="{color}", fontcolor="{fontcolor}"];"#,
     )
 }
 
@@ -496,6 +498,31 @@ mod tests {
         render_dot_to_writer(&graph, &mut buf, None, Direction::TB).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_label_with_quotes_and_backslash_is_escaped() {
+        let mut graph = LineageGraph::new();
+        let mut node = make_node(
+            r#"metric.revenue_"net""#,
+            r#"Revenue "Net" (100%\off)"#,
+            NodeType::Metric,
+        );
+        // unique_id also contains a special char to exercise edge escaping
+        node.unique_id = r#"metric.revenue_"net""#.into();
+        graph.add_node(node);
+        let output = render_to_string(&graph);
+        // display_name() prepends the node-type prefix, e.g. "metric:Revenue ..."
+        // Both " and \ must be backslash-escaped inside the DOT attribute value.
+        assert!(
+            output.contains(r#"label="metric:Revenue \"Net\" (100%\\off)""#),
+            "label not escaped:\n{output}"
+        );
+        // The node identifier in DOT must also be escaped
+        assert!(
+            output.contains(r#""metric.revenue_\"net\"""#),
+            "unique_id not escaped:\n{output}"
+        );
     }
 
     #[test]
