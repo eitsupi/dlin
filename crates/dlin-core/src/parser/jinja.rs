@@ -570,10 +570,10 @@ mod tests {
 
     #[test]
     fn test_ref_with_decimal_version_kwarg() {
-        // version='2.0' (string kwarg) must normalize to "2"
+        // version='2.0' stays as "2.0" — matching YAML `v: "2.0"` which also keeps "2.0".
         let sql = "SELECT * FROM {{ ref('my_model', version='2.0') }}";
         let ext = extract_via_jinja(sql, "").unwrap();
-        assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
+        assert_eq!(ext.refs[0].version.as_deref(), Some("2.0"));
     }
 
     #[test]

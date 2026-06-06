@@ -145,21 +145,15 @@ fn strip_version_quotes(s: &str) -> String {
     }
 }
 
-/// Normalize a version string to a canonical integer form where possible.
-/// Matches the normalization applied to YAML version values so that
-/// ref(version='02') and ref(version='2.0') resolve to the same node as
-/// a YAML `v: 2` entry.
-/// - Integer strings (including zero-padded): "02" → "2"
-/// - Whole-number decimal strings: "2.0" → "2"
-/// - Non-numeric strings: returned as-is
+/// Normalize a version string to a canonical form, matching the normalization
+/// applied to YAML string version values in version_value_to_str().
+/// Integer strings (including zero-padded) are normalized: "02" → "2".
+/// Non-integer strings (including "2.0") are returned as-is.
+/// Using i64 only (no f64 fallback) keeps this consistent with the YAML string
+/// path so that ref(version='2.0') resolves to the same ID as `v: "2.0"`.
 pub(super) fn normalize_version_str(s: &str) -> String {
     if let Ok(n) = s.parse::<i64>() {
         return n.to_string();
-    }
-    if let Ok(f) = s.parse::<f64>()
-        && f.fract() == 0.0
-    {
-        return (f as i64).to_string();
     }
     s.to_string()
 }
@@ -496,10 +490,11 @@ mod tests {
 
     #[test]
     fn test_ref_with_decimal_version_kwarg() {
-        // version='2.0' must normalize to "2" to match YAML v: 2 → version_value_to_str → "2"
+        // version='2.0' stays as "2.0" — matching YAML `v: "2.0"` which also keeps "2.0".
+        // Both use i64-only normalization so non-integer numeric strings are not rewritten.
         let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='2.0') }}");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].version.as_deref(), Some("2"));
+        assert_eq!(refs[0].version.as_deref(), Some("2.0"));
     }
 
     // These tests call the regex fallback directly to confirm `v=` support
