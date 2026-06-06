@@ -26,7 +26,7 @@ const LEGEND_TYPES: &[(&str, &str)] = &[
 ];
 
 fn legend_min_width() -> f64 {
-    PADDING + LEGEND_TYPES.len() as f64 * LEGEND_ENTRY_SPACING
+    PADDING * 2.0 + LEGEND_TYPES.len() as f64 * LEGEND_ENTRY_SPACING
 }
 
 fn node_fill(node_type: NodeType) -> &'static str {
