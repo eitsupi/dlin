@@ -13,6 +13,7 @@ use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
+    extract_sources,
 };
 use crate::parser::yaml_schema::{
     ExposureDefinition, ModelDefinition, SchemaFile, SnapshotDefinition, parse_schema_file,
@@ -853,17 +854,38 @@ fn process_yaml_snapshot_nodes(
             exposure: None,
             aliases: vec![],
         });
-        if let Some(relation) = &snap_def.relation
-            && let Some((model_name, version)) = parse_exposure_ref(relation)
-        {
-            let dep_id = if let Some(ref v) = version {
-                format!("model.{}.v{}", model_name, v)
-            } else {
-                resolve_ref(&model_name, &gb.node_map)
-            };
-            if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
+        if let Some(relation) = &snap_def.relation {
+            if let Some((source_name, table_name)) = parse_relation_source(relation) {
+                let source_id = format!("source.{}.{}", source_name, table_name);
+                let dep_idx = if let Some(&idx) = gb.node_map.get(&source_id) {
+                    idx
+                } else {
+                    let label = format!("{}.{}", source_name, table_name);
+                    gb.add_node(NodeData {
+                        unique_id: source_id,
+                        label,
+                        node_type: NodeType::Phantom,
+                        file_path: None,
+                        description: None,
+                        materialization: None,
+                        tags: vec![],
+                        columns: vec![],
+                        exposure: None,
+                        aliases: vec![],
+                    })
+                };
                 gb.graph
-                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
+                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Source));
+            } else if let Some((model_name, version)) = parse_exposure_ref(relation) {
+                let dep_id = if let Some(ref v) = version {
+                    format!("model.{}.v{}", model_name, v)
+                } else {
+                    resolve_ref(&model_name, &gb.node_map)
+                };
+                if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
+                    gb.graph
+                        .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
+                }
             }
         }
     }
@@ -962,6 +984,16 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
 
     // Default to model
     model_id
+}
+
+/// Parse a source('schema', 'table') string (no Jinja delimiters).
+/// Returns (source_name, table_name), or None if the string is not a source() call.
+fn parse_relation_source(relation: &str) -> Option<(String, String)> {
+    let wrapped = format!("{{{{ {} }}}}", relation.trim());
+    extract_sources(&wrapped)
+        .into_iter()
+        .next()
+        .map(|s| (s.source_name, s.table_name))
 }
 
 /// Parse a ref('name') or ref('name', version=N) string from exposure depends_on.

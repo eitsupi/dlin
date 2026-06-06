@@ -700,3 +700,102 @@ snapshots:
     // Edge comes from SQL file's ref() call
     assert_eq!(graph.edge_count(), 1);
 }
+
+#[test]
+fn test_build_graph_yaml_only_snapshot_source_relation() {
+    // YAML-only snapshot with relation: source('schema', 'table') should create
+    // a Source edge to the matching source node (or a phantom if undefined).
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    fs::write(
+        models_dir.join("snap_schema.yml"),
+        r#"
+version: 2
+sources:
+  - name: raw
+    tables:
+      - name: orders
+snapshots:
+  - name: snap_raw_orders
+    description: Raw orders snapshot
+    relation: source('raw', 'orders')
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        yaml_files: vec![project_dir.join("models/snap_schema.yml")],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    // 1 source + 1 snapshot = 2 nodes
+    assert_eq!(graph.node_count(), 2);
+
+    let source_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].node_type == NodeType::Source)
+        .unwrap();
+    let snap_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].node_type == NodeType::Snapshot)
+        .unwrap();
+
+    assert_eq!(graph[snap_idx].label, "snap_raw_orders");
+    assert_eq!(
+        graph[snap_idx].description.as_deref(),
+        Some("Raw orders snapshot")
+    );
+
+    // Source edge: source.raw.orders → snap_raw_orders
+    assert_eq!(graph.edge_count(), 1);
+    assert!(graph.contains_edge(source_idx, snap_idx));
+
+    use petgraph::visit::IntoEdgeReferences;
+    let edge = graph.edge_references().next().unwrap();
+    assert_eq!(edge.weight().edge_type, EdgeType::Source);
+}
+
+#[test]
+fn test_build_graph_yaml_only_snapshot_phantom_source_relation() {
+    // When source('schema', 'table') references an undefined source, a phantom
+    // node is created and a Source edge is still added.
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    fs::write(
+        models_dir.join("snap_schema.yml"),
+        r#"
+version: 2
+snapshots:
+  - name: snap_unknown
+    relation: source('undefined_schema', 'undefined_table')
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        yaml_files: vec![project_dir.join("models/snap_schema.yml")],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    // 1 phantom source + 1 snapshot = 2 nodes
+    assert_eq!(graph.node_count(), 2);
+
+    let phantom_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].node_type == NodeType::Phantom)
+        .unwrap();
+    let snap_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].node_type == NodeType::Snapshot)
+        .unwrap();
+
+    assert_eq!(graph[phantom_idx].label, "undefined_schema.undefined_table");
+    assert_eq!(graph.edge_count(), 1);
+    assert!(graph.contains_edge(phantom_idx, snap_idx));
+}
