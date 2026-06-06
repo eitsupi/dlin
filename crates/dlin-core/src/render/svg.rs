@@ -213,6 +213,9 @@ fn render_svg_legend<W: Write>(w: &mut W, total_height: f64) -> std::io::Result<
         ("snapshot", "#8E44AD"),
         ("test", "#1ABC9C"),
         ("exposure", "#E74C3C"),
+        ("semantic_model", "#16A085"),
+        ("metric", "#D35400"),
+        ("saved_query", "#2980B9"),
         ("phantom", "#BDC3C7"),
     ];
 
@@ -291,11 +294,14 @@ mod tests {
             NodeType::Snapshot,
             NodeType::Test,
             NodeType::Exposure,
+            NodeType::SemanticModel,
+            NodeType::Metric,
+            NodeType::SavedQuery,
             NodeType::Phantom,
         ];
         for nt in types {
             let fill = node_fill(nt);
-            assert!(fill.starts_with('#'));
+            assert!(fill.starts_with('#'), "node_fill failed for {:?}", nt);
         }
     }
 
@@ -313,6 +319,31 @@ mod tests {
         let output = render_to_string(&graph);
         assert!(output.contains(">model</text>"));
         assert!(output.contains(">source</text>"));
+    }
+
+    #[test]
+    fn test_legend_includes_semantic_layer_types() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let output = render_to_string(&graph);
+        assert!(
+            output.contains(">semantic_model</text>"),
+            "legend missing semantic_model"
+        );
+        assert!(output.contains(">metric</text>"), "legend missing metric");
+        assert!(
+            output.contains(">saved_query</text>"),
+            "legend missing saved_query"
+        );
+        assert!(
+            output.contains("#16A085"),
+            "legend missing semantic_model color"
+        );
+        assert!(output.contains("#D35400"), "legend missing metric color");
+        assert!(
+            output.contains("#2980B9"),
+            "legend missing saved_query color"
+        );
     }
 
     #[test]

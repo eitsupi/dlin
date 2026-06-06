@@ -186,13 +186,16 @@ fn print_legend_to_writer<W: Write>(w: &mut W) -> io::Result<()> {
     writeln!(w, "{}", "Legend:".bold())?;
     writeln!(
         w,
-        "  {} {} {} {} {} {} {}",
+        "  {} {} {} {} {} {} {} {} {} {}",
         "model".blue().bold(),
         "source".green(),
         "seed".yellow(),
         "snapshot".magenta(),
         "test".cyan(),
         "exposure".red(),
+        "semantic_model".green().bold(),
+        "metric".yellow().bold(),
+        "saved_query".blue(),
         "phantom".dimmed(),
     )?;
     Ok(())
@@ -302,13 +305,28 @@ mod tests {
             NodeType::Snapshot,
             NodeType::Test,
             NodeType::Exposure,
+            NodeType::SemanticModel,
+            NodeType::Metric,
+            NodeType::SavedQuery,
             NodeType::Phantom,
         ];
         for nt in types {
             let result = colorize_node("test", nt);
-            // colorize_node always returns a non-empty string
             assert!(!result.is_empty(), "colorize_node failed for {:?}", nt);
         }
+    }
+
+    #[test]
+    fn test_legend_includes_semantic_layer_types() {
+        let mut buf = Vec::new();
+        print_legend_to_writer(&mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("semantic_model"),
+            "legend missing semantic_model"
+        );
+        assert!(output.contains("metric"), "legend missing metric");
+        assert!(output.contains("saved_query"), "legend missing saved_query");
     }
 
     #[test]
