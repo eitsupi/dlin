@@ -81,9 +81,11 @@ impl TestDefinition {
 }
 
 /// Normalize a serde_json::Value version field to a canonical string.
-/// Numeric JSON values and string values that parse as numbers are formatted
-/// without trailing fractional parts (2.0 → "2"), matching how dbt-core
-/// renders version numbers from both YAML integers and YAML strings.
+/// JSON integer and float values are normalized without trailing fractional
+/// parts (2.0 → "2"). String values are parsed as i64 when possible (so
+/// "2" normalizes to "2" consistently with a YAML integer `2`); otherwise
+/// the string is returned as-is. This matches dbt-core's int-or-string
+/// version semantics and avoids f64 precision loss on large integers.
 fn version_value_to_str(v: &serde_json::Value) -> String {
     if let Some(n) = v.as_i64() {
         return n.to_string();
@@ -96,12 +98,8 @@ fn version_value_to_str(v: &serde_json::Value) -> String {
         };
     }
     if let Some(s) = v.as_str() {
-        if let Ok(f) = s.parse::<f64>() {
-            return if f.fract() == 0.0 {
-                (f as i64).to_string()
-            } else {
-                f.to_string()
-            };
+        if let Ok(n) = s.parse::<i64>() {
+            return n.to_string();
         }
         return s.to_string();
     }
@@ -168,18 +166,12 @@ impl ModelDefinition {
             return None;
         }
         let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
-        let numerics: Vec<f64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
+        let numerics: Vec<i64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
         if numerics.len() == strs.len() {
-            // Matches dbt-core: convert the max f64 back to a string.
-            // version_value_to_str() normalizes all numeric forms (v_str, latest_version),
-            // so this always returns the same string used to build the node unique_id.
-            numerics.into_iter().reduce(f64::max).map(|n| {
-                if n.fract() == 0.0 {
-                    (n as i64).to_string()
-                } else {
-                    n.to_string()
-                }
-            })
+            // All versions are integers: return the largest as a string.
+            // Uses i64 to match dbt-core's int-or-string semantics and avoid
+            // f64 precision loss on large version numbers.
+            numerics.into_iter().max().map(|n| n.to_string())
         } else {
             strs.into_iter().max()
         }
@@ -484,6 +476,14 @@ models:
             defined_in: None,
         };
         assert_eq!(non_numeric.v_str(), "alpha");
+
+        // Large integer string must not lose precision through f64 conversion
+        // (9007199254740993 = 2^53 + 1, which f64 cannot represent exactly)
+        let large_int = VersionSpec {
+            v: serde_json::Value::String("9007199254740993".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(large_int.v_str(), "9007199254740993");
     }
 
     #[test]

@@ -59,13 +59,31 @@ impl GraphBuilder {
         idx
     }
 
-    /// Register a node_map alias: `from` → same NodeIndex as `to` (if `to` exists).
+    /// Register a node_map alias: `from` → same NodeIndex as `to`.
+    /// When `to` is not yet in the map (e.g. its SQL file is missing), a Phantom
+    /// node is created for `to` so that unversioned lookups still resolve to the
+    /// intended versioned unique_id rather than falling back to a generic phantom.
     /// Also records `from` in the target node's `aliases` list so that the alias
     /// survives after `build_graph` discards the node_map.
     fn add_alias(&mut self, from: String, to: &str) {
-        if let Some(&idx) = self.node_map.get(to)
-            && let std::collections::hash_map::Entry::Vacant(e) = self.node_map.entry(from.clone())
-        {
+        let idx = if let Some(&existing) = self.node_map.get(to) {
+            existing
+        } else {
+            let label = to.strip_prefix("model.").unwrap_or(to).to_string();
+            self.add_node(NodeData {
+                unique_id: to.to_string(),
+                label,
+                node_type: NodeType::Phantom,
+                file_path: None,
+                description: None,
+                materialization: None,
+                tags: vec![],
+                columns: vec![],
+                exposure: None,
+                aliases: vec![],
+            })
+        };
+        if let std::collections::hash_map::Entry::Vacant(e) = self.node_map.entry(from.clone()) {
             e.insert(idx);
             self.graph[idx].aliases.push(from);
         }
@@ -2271,6 +2289,69 @@ models:
         assert!(
             !graph.contains_edge(src_idx, v2_idx),
             "source→v2 edge must not exist"
+        );
+    }
+
+    #[test]
+    fn test_build_graph_unversioned_ref_resolves_to_versioned_phantom_when_sql_missing() {
+        // When the latest_version SQL file is absent, ref('name') (no version kwarg)
+        // should resolve to a versioned phantom (model.name.vN), not an unversioned
+        // phantom (model.name).
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // Only v1 SQL exists; latest_version=2 is declared but its SQL is absent.
+        fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+        fs::write(
+            models_dir.join("downstream.sql"),
+            "SELECT * FROM {{ ref('my_model') }}",
+        )
+        .unwrap();
+
+        fs::write(
+            models_dir.join("schema.yml"),
+            r#"
+version: 2
+models:
+  - name: my_model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+"#,
+        )
+        .unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/my_model_v1.sql"),
+                project_dir.join("models/downstream.sql"),
+            ],
+            yaml_files: vec![project_dir.join("models/schema.yml")],
+            ..Default::default()
+        };
+
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+        // v1 + downstream + phantom(v2) = 3 nodes
+        assert_eq!(graph.node_count(), 3);
+
+        let phantom = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Phantom)
+            .expect("phantom v2 node must exist");
+        // Phantom must be the versioned ID, not the unversioned fallback
+        assert_eq!(graph[phantom].unique_id, "model.my_model.v2");
+
+        let downstream_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "downstream")
+            .unwrap();
+        assert!(
+            graph.contains_edge(phantom, downstream_idx),
+            "phantom.v2 → downstream edge missing"
         );
     }
 
