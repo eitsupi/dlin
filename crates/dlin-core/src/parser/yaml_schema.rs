@@ -159,6 +159,10 @@ impl ModelDefinition {
         let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
         let numerics: Vec<f64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
         if numerics.len() == strs.len() {
+            // Intentionally matches dbt-core's behavior: convert the max f64 back to
+            // a string via to_string() rather than returning the original v_str().
+            // dbt-core does the same (resolve_properties.rs: `n.to_string()` on f32 max).
+            // In practice v must be an integer, so this is always a no-op difference.
             numerics
                 .into_iter()
                 .reduce(f64::max)
@@ -442,6 +446,23 @@ models:
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.models[0];
         assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_versioned_model_decimal_v_str_normalized_by_f64() {
+        // `v: "1.0"` is not valid in dbt (versions must be integers), but demonstrates
+        // that our inference matches dbt-core: the max f64 is converted via to_string(),
+        // so "1.0" → 1.0_f64 → "1".  dbt-core exhibits the same behavior.
+        let yaml = r#"
+models:
+  - name: orders
+    versions:
+      - v: "1.0"
+      - v: "2.0"
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("2"));
     }
 
     #[test]
