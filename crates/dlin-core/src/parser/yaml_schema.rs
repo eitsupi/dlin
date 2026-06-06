@@ -80,6 +80,34 @@ impl TestDefinition {
     }
 }
 
+/// Normalize a serde_json::Value version field to a canonical string.
+/// Numeric JSON values and string values that parse as numbers are formatted
+/// without trailing fractional parts (2.0 → "2"), matching how dbt-core
+/// renders version numbers from both YAML integers and YAML strings.
+fn version_value_to_str(v: &serde_json::Value) -> String {
+    if let Some(n) = v.as_i64() {
+        return n.to_string();
+    }
+    if let Some(f) = v.as_f64() {
+        return if f.fract() == 0.0 {
+            (f as i64).to_string()
+        } else {
+            f.to_string()
+        };
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(f) = s.parse::<f64>() {
+            return if f.fract() == 0.0 {
+                (f as i64).to_string()
+            } else {
+                f.to_string()
+            };
+        }
+        return s.to_string();
+    }
+    v.to_string()
+}
+
 /// A single entry in the `versions:` list of a model definition.
 #[derive(Debug, Deserialize, Clone)]
 pub struct VersionSpec {
@@ -92,29 +120,7 @@ pub struct VersionSpec {
 impl VersionSpec {
     /// Return the version number formatted as a string (e.g. `"1"`, `"2"`).
     pub fn v_str(&self) -> String {
-        if let Some(n) = self.v.as_i64() {
-            return n.to_string();
-        }
-        if let Some(f) = self.v.as_f64() {
-            return if f.fract() == 0.0 {
-                (f as i64).to_string()
-            } else {
-                f.to_string()
-            };
-        }
-        if let Some(s) = self.v.as_str() {
-            // Normalize quoted numeric strings the same way as YAML numeric values
-            // so that v: "2" produces the same ID as v: 2 (both → "2").
-            if let Ok(f) = s.parse::<f64>() {
-                return if f.fract() == 0.0 {
-                    (f as i64).to_string()
-                } else {
-                    f.to_string()
-                };
-            }
-            return s.to_string();
-        }
-        self.v.to_string()
+        version_value_to_str(&self.v)
     }
 
     /// Return the SQL file stem for this version.
@@ -156,11 +162,7 @@ impl ModelDefinition {
     /// largest; otherwise fall back to the lexicographically greatest string.
     pub fn resolved_latest_version_str(&self) -> Option<String> {
         if let Some(lv) = &self.latest_version {
-            let s = lv
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| lv.to_string());
-            return Some(s);
+            return Some(version_value_to_str(lv));
         }
         if self.versions.is_empty() {
             return None;
@@ -168,10 +170,16 @@ impl ModelDefinition {
         let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
         let numerics: Vec<f64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
         if numerics.len() == strs.len() {
-            // Matches dbt-core: convert the max f64 back to a string via to_string().
-            // v_str() normalizes all numeric forms first, so this always returns the
-            // same string that was used to build the node unique_id.
-            numerics.into_iter().reduce(f64::max).map(|n| n.to_string())
+            // Matches dbt-core: convert the max f64 back to a string.
+            // version_value_to_str() normalizes all numeric forms (v_str, latest_version),
+            // so this always returns the same string used to build the node unique_id.
+            numerics.into_iter().reduce(f64::max).map(|n| {
+                if n.fract() == 0.0 {
+                    (n as i64).to_string()
+                } else {
+                    n.to_string()
+                }
+            })
         } else {
             strs.into_iter().max()
         }

@@ -116,11 +116,16 @@ fn render_with_incremental(
             let mut ext = ext.lock().unwrap();
             let (positional, kwargs): (&[Value], Kwargs) = from_args(args)
                 .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string()))?;
-            // dbt accepts both `version=N` and `v=N` as shorthand
-            let version: Option<i64> = kwargs
+            // dbt accepts both `version=N` and `v=N` as shorthand.
+            // The value may be an integer (version=2) or a quoted string (version='alpha'),
+            // matching dbt-core which uses StringOrInteger for version kwargs.
+            let version: Option<String> = kwargs
                 .peek::<i64>("version")
                 .ok()
-                .or_else(|| kwargs.peek::<i64>("v").ok());
+                .map(|n| n.to_string())
+                .or_else(|| kwargs.peek::<String>("version").ok())
+                .or_else(|| kwargs.peek::<i64>("v").ok().map(|n| n.to_string()))
+                .or_else(|| kwargs.peek::<String>("v").ok());
             match positional.len() {
                 1 => {
                     let name = positional[0].to_string();
@@ -496,7 +501,7 @@ mod tests {
         let ext = extract_via_jinja(sql, "").unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "my_model");
-        assert_eq!(ext.refs[0].version, Some(2));
+        assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
         assert!(ext.refs[0].package.is_none());
     }
 
@@ -507,7 +512,7 @@ mod tests {
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(ext.refs[0].name, "my_model");
-        assert_eq!(ext.refs[0].version, Some(3));
+        assert_eq!(ext.refs[0].version.as_deref(), Some("3"));
     }
 
     #[test]
@@ -523,7 +528,7 @@ mod tests {
         let ext = extract_via_jinja(sql, "").unwrap();
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "my_model");
-        assert_eq!(ext.refs[0].version, Some(2));
+        assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
         assert!(ext.refs[0].package.is_none());
     }
 
@@ -534,7 +539,7 @@ mod tests {
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(ext.refs[0].name, "my_model");
-        assert_eq!(ext.refs[0].version, Some(3));
+        assert_eq!(ext.refs[0].version.as_deref(), Some("3"));
     }
 
     #[test]

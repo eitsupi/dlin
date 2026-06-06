@@ -8,9 +8,10 @@ pub struct RefCall {
     pub package: Option<String>,
     /// Model name
     pub name: String,
-    /// Version number from ref('name', version=N)
+    /// Version from ref('name', version=N) or ref('name', version='alpha').
+    /// Stored as a string to support both integer and non-integer versions.
     #[serde(default)]
-    pub version: Option<i64>,
+    pub version: Option<String>,
 }
 
 /// A reference to a dbt source via source()
@@ -27,6 +28,7 @@ static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*
 // Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
 // ref('name', version=N), ref('name', v=N), and the pkg variants.
 // Both `version=` and `v=` are accepted per dbt-core v2.
+// Version values may be bare integers (version=2) or quoted strings (version='alpha').
 // Handles {{ ref(...) }} and {{- ref(...) -}} whitespace control.
 // Capture groups:
 //   1, 2 → pkg, name      (two-positional-arg form)
@@ -40,10 +42,10 @@ static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
         ref\s*\(\s*
         (?:
             # Two-argument form: ref('pkg', 'name') or ref('pkg', 'name', version=N) or ref('pkg', 'name', v=N)
-            (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*(?:,\s*(?:version|v)\s*=\s*(-?\d+))?)
+            (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*(?:,\s*(?:version|v)\s*=\s*(-?\d+|'[^']*'|"[^"]*"))?)
             |
             # Single-arg + version kwarg: ref('name', version=N) or ref('name', v=N)
-            (?:['"]([^'"]+)['"]\s*,\s*(?:version|v)\s*=\s*(-?\d+))
+            (?:['"]([^'"]+)['"]\s*,\s*(?:version|v)\s*=\s*(-?\d+|'[^']*'|"[^"]*"))
             |
             # Single-argument form: ref('name') or ref("name")
             ['"]([^'"]+)['"]
@@ -130,6 +132,19 @@ pub fn extract_sources(sql: &str) -> Vec<SourceCall> {
     extract_refs_and_sources(sql, "").1
 }
 
+/// Strip surrounding single or double quotes from a version kwarg capture.
+/// Bare integers are returned unchanged; quoted strings have their delimiters removed.
+fn strip_version_quotes(s: &str) -> String {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
+    {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Regex fallback for extracting ref() calls
 fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     let cleaned = strip_jinja_comments(sql);
@@ -141,14 +156,14 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
             refs.push(RefCall {
                 package: Some(pkg.as_str().to_string()),
                 name: name.as_str().to_string(),
-                version: cap.get(3).and_then(|v| v.as_str().parse::<i64>().ok()),
+                version: cap.get(3).map(|v| strip_version_quotes(v.as_str())),
             });
         } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
-            // Single-arg + version kwarg: ref('name', version=N)
+            // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
             refs.push(RefCall {
                 package: None,
                 name: name.as_str().to_string(),
-                version: ver.as_str().parse::<i64>().ok(),
+                version: Some(strip_version_quotes(ver.as_str())),
             });
         } else if let Some(name) = cap.get(6) {
             // Single-arg form: ref('name')
@@ -361,7 +376,7 @@ mod tests {
         let refs = extract_refs(sql);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(2));
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
         assert!(refs[0].package.is_none());
     }
 
@@ -371,7 +386,7 @@ mod tests {
         let refs = extract_refs(sql);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(3));
+        assert_eq!(refs[0].version.as_deref(), Some("3"));
     }
 
     #[test]
@@ -410,7 +425,7 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(3));
+        assert_eq!(refs[0].version.as_deref(), Some("3"));
     }
 
     #[test]
@@ -419,7 +434,7 @@ mod tests {
         let refs = extract_refs(sql);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(2));
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
         assert!(refs[0].package.is_none());
     }
 
@@ -430,7 +445,24 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(3));
+        assert_eq!(refs[0].version.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_ref_with_string_version_kwarg() {
+        // dbt-core accepts version='alpha' for non-integer version strings
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='alpha') }}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "my_model");
+        assert_eq!(refs[0].version.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn test_ref_with_quoted_integer_version_kwarg() {
+        // version='2' (quoted) must resolve identically to version=2 (bare integer)
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='2') }}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
     }
 
     // These tests call the regex fallback directly to confirm `v=` support
@@ -441,7 +473,7 @@ mod tests {
         let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', v=2) }}");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(2));
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
         assert!(refs[0].package.is_none());
     }
 
@@ -451,7 +483,7 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "my_model");
-        assert_eq!(refs[0].version, Some(3));
+        assert_eq!(refs[0].version.as_deref(), Some("3"));
     }
 
     // ─── Config extraction tests ───

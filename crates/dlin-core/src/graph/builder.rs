@@ -78,10 +78,10 @@ impl GraphBuilder {
     fn get_or_create_phantom_ref(
         &mut self,
         ref_name: &str,
-        version: Option<i64>,
+        version: Option<String>,
         sql_path: &Path,
     ) -> NodeIndex {
-        let dep_id = if let Some(v) = version {
+        let dep_id = if let Some(ref v) = version {
             format!("model.{}.v{}", ref_name, v)
         } else {
             resolve_ref(ref_name, &self.node_map)
@@ -89,7 +89,7 @@ impl GraphBuilder {
         if let Some(&idx) = self.node_map.get(&dep_id) {
             return idx;
         }
-        let display_name = match version {
+        let display_name = match version.as_deref() {
             Some(v) => format!("{}.v{}", ref_name, v),
             None => ref_name.to_string(),
         };
@@ -98,7 +98,7 @@ impl GraphBuilder {
             display_name,
             sql_path.display()
         );
-        let phantom_id = match version {
+        let phantom_id = match version.as_deref() {
             Some(v) => format!("model.{}.v{}", ref_name, v),
             None => format!("model.{}", ref_name),
         };
@@ -600,7 +600,8 @@ fn process_sql_edges(
         let is_test = *file_type == "test";
 
         for ref_call in refs {
-            let dep_idx = gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version, sql_path);
+            let dep_idx =
+                gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version.clone(), sql_path);
             let edge_type = if is_test {
                 EdgeType::Test
             } else {
@@ -657,7 +658,7 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
 
         for dep in &exposure.depends_on {
             if let Some((model_name, version)) = parse_exposure_ref(dep) {
-                let dep_id = if let Some(v) = version {
+                let dep_id = if let Some(ref v) = version {
                     format!("model.{}.v{}", model_name, v)
                 } else {
                     resolve_ref(&model_name, &gb.node_map)
@@ -897,7 +898,7 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
 /// Parse a ref('name') or ref('name', version=N) string from exposure depends_on.
 /// Returns (model_name, optional_version). Source refs and package-qualified refs
 /// (cross-package) return None — cross-package exposure links are not yet supported.
-fn parse_exposure_ref(dep: &str) -> Option<(String, Option<i64>)> {
+fn parse_exposure_ref(dep: &str) -> Option<(String, Option<String>)> {
     let dep = dep.trim();
     if dep.starts_with("ref(") {
         // Wrap in {{ }} so we can reuse the SQL regex extractor.
@@ -1005,11 +1006,11 @@ mod tests {
         );
         assert_eq!(
             parse_exposure_ref("ref('my_model', version=2)"),
-            Some(("my_model".to_string(), Some(2)))
+            Some(("my_model".to_string(), Some("2".to_string())))
         );
         assert_eq!(
             parse_exposure_ref("ref('my_model', v=3)"),
-            Some(("my_model".to_string(), Some(3)))
+            Some(("my_model".to_string(), Some("3".to_string())))
         );
         // Package-qualified refs are not supported and return None
         assert_eq!(parse_exposure_ref("ref('other_pkg', 'orders')"), None);
