@@ -12,10 +12,10 @@ use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
-    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
+    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
 };
 use crate::parser::yaml_schema::{
-    ExposureDefinition, ModelDefinition, SchemaFile, parse_schema_file,
+    ExposureDefinition, ModelDefinition, SchemaFile, SnapshotDefinition, parse_schema_file,
 };
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -236,12 +236,14 @@ struct YamlModelMeta {
 /// (e.g. `"my_model_v2"` → `"model.my_model.v2"`).
 /// The fifth element maps unversioned model IDs to the latest-version unique ID
 /// (e.g. `"model.my_model"` → `"model.my_model.v2"`), used as node_map aliases.
+/// The sixth element lists YAML-only snapshot definitions with their YAML file path.
 type YamlResult = (
     HashMap<String, YamlModelMeta>,
     Vec<ExposureDefinition>,
     Vec<(SchemaFile, PathBuf)>,
     HashMap<String, (String, String)>, // stem → (versioned_unique_id, base_model_name)
     HashMap<String, String>,           // unversioned_id → latest_versioned_id
+    Vec<(SnapshotDefinition, PathBuf)>, // snapshot defs with their yaml file (relative) path
 );
 
 /// Build version maps for a single versioned model definition.
@@ -281,6 +283,7 @@ fn process_yaml_files(
     let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
     let mut stem_to_versioned: HashMap<String, (String, String)> = HashMap::new();
     let mut version_aliases: HashMap<String, String> = HashMap::new();
+    let mut snapshot_defs: Vec<(SnapshotDefinition, PathBuf)> = Vec::new();
 
     // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
     // deterministic across filesystems/OSes.
@@ -330,6 +333,9 @@ fn process_yaml_files(
             .strip_prefix(project_dir)
             .unwrap_or(yaml_path)
             .to_path_buf();
+        for snap_def in &schema.snapshots {
+            snapshot_defs.push((snap_def.clone(), relative_path.clone()));
+        }
         schemas.push((schema, relative_path));
     }
 
@@ -339,6 +345,7 @@ fn process_yaml_files(
         schemas,
         stem_to_versioned,
         version_aliases,
+        snapshot_defs,
     ))
 }
 
@@ -821,6 +828,47 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
     }
 }
 
+/// Register YAML-only snapshot nodes (dbt v1.9+) and add their upstream edges.
+/// Snapshots already registered from a SQL file are skipped; for those without a
+/// matching SQL file the node is created here and linked to the upstream model via
+/// the `relation: ref('...')` field.
+fn process_yaml_snapshot_nodes(
+    gb: &mut GraphBuilder,
+    snapshot_defs: &[(SnapshotDefinition, PathBuf)],
+) {
+    for (snap_def, yaml_path) in snapshot_defs {
+        let unique_id = format!("snapshot.{}", snap_def.name);
+        if gb.node_map.contains_key(&unique_id) {
+            continue; // registered from SQL file; edges handled by process_sql_edges
+        }
+        let snap_idx = gb.add_node(NodeData {
+            unique_id,
+            label: snap_def.name.clone(),
+            node_type: NodeType::Snapshot,
+            file_path: Some(yaml_path.clone()),
+            description: snap_def.description.clone(),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+        if let Some(relation) = &snap_def.relation {
+            if let Some((source_name, table_name)) = parse_relation_source(relation) {
+                let dep_idx =
+                    gb.get_or_create_phantom_source(&source_name, &table_name, yaml_path.as_path());
+                gb.graph
+                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Source));
+            } else if let Some((model_name, version)) = parse_exposure_ref(relation) {
+                let dep_idx =
+                    gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+                gb.graph
+                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
+            }
+        }
+    }
+}
+
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
@@ -845,7 +893,7 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let (model_meta, exposures, schemas, stem_to_versioned, version_aliases) =
+    let (model_meta, exposures, schemas, stem_to_versioned, version_aliases, snapshot_defs) =
         process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
         &mut gb,
@@ -876,6 +924,7 @@ pub fn build_graph(
         "snapshot",
         NodeType::Snapshot,
     );
+    process_yaml_snapshot_nodes(&mut gb, &snapshot_defs);
     process_sql_edges(
         &mut gb,
         files,
@@ -913,6 +962,16 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
 
     // Default to model
     model_id
+}
+
+/// Parse a source('schema', 'table') string (no Jinja delimiters).
+/// Returns (source_name, table_name), or None if the string is not a source() call.
+fn parse_relation_source(relation: &str) -> Option<(String, String)> {
+    let wrapped = format!("{{{{ {} }}}}", relation.trim());
+    extract_sources(&wrapped)
+        .into_iter()
+        .next()
+        .map(|s| (s.source_name, s.table_name))
 }
 
 /// Parse a ref('name') or ref('name', version=N) string from exposure depends_on.

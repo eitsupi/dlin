@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-/// Top-level schema YAML file (can contain sources, models, exposures)
+/// Top-level schema YAML file (can contain sources, models, snapshots, exposures)
 #[derive(Debug, Deserialize, Default)]
 pub struct SchemaFile {
     #[serde(default)]
@@ -8,6 +8,9 @@ pub struct SchemaFile {
 
     #[serde(default)]
     pub models: Vec<ModelDefinition>,
+
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotDefinition>,
 
     #[serde(default)]
     pub exposures: Vec<ExposureDefinition>,
@@ -192,6 +195,18 @@ pub struct ModelConfig {
     pub materialized: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// YAML-only snapshot definition (dbt v1.9+).
+/// When no `.sql` file exists for the snapshot, the graph node is built from this.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SnapshotDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Upstream relation, e.g. `ref('model_name')`.
+    #[serde(default)]
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -404,7 +419,39 @@ sources:
         let schema = parse_schema_file(yaml, None).unwrap();
         assert!(schema.sources.is_empty());
         assert!(schema.models.is_empty());
+        assert!(schema.snapshots.is_empty());
         assert!(schema.exposures.is_empty());
+    }
+
+    #[test]
+    fn test_parse_yaml_only_snapshots() {
+        let yaml = r#"
+snapshots:
+  - name: snap_orders
+    description: Orders snapshot
+    relation: ref('stg_orders')
+  - name: snap_customers
+    relation: ref('stg_customers', version=2)
+  - name: snap_no_relation
+    description: Snapshot without upstream relation
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.snapshots.len(), 3);
+        assert_eq!(schema.snapshots[0].name, "snap_orders");
+        assert_eq!(
+            schema.snapshots[0].description.as_deref(),
+            Some("Orders snapshot")
+        );
+        assert_eq!(
+            schema.snapshots[0].relation.as_deref(),
+            Some("ref('stg_orders')")
+        );
+        assert_eq!(schema.snapshots[1].name, "snap_customers");
+        assert_eq!(
+            schema.snapshots[1].relation.as_deref(),
+            Some("ref('stg_customers', version=2)")
+        );
+        assert!(schema.snapshots[2].relation.is_none());
     }
 
     #[test]
