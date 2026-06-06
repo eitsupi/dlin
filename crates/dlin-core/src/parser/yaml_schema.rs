@@ -163,10 +163,7 @@ impl ModelDefinition {
             // a string via to_string() rather than returning the original v_str().
             // dbt-core does the same (resolve_properties.rs: `n.to_string()` on f32 max).
             // In practice v must be an integer, so this is always a no-op difference.
-            numerics
-                .into_iter()
-                .reduce(f64::max)
-                .map(|n| n.to_string())
+            numerics.into_iter().reduce(f64::max).map(|n| n.to_string())
         } else {
             strs.into_iter().max()
         }
