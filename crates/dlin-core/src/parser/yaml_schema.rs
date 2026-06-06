@@ -286,12 +286,24 @@ impl MetricDefinition {
             .or_else(|| value.get("name").and_then(|n| n.as_str()))
     }
 
-    /// Extract the measure name this metric references (Simple metrics only).
-    pub fn measure_ref(&self) -> Option<&str> {
-        self.type_params
-            .as_ref()
-            .and_then(|p| p.get("measure"))
-            .and_then(Self::name_ref)
+    /// Extract all measure names this metric references.
+    ///
+    /// Covers all metric types that reference measures directly:
+    /// - Simple: `type_params.measure`
+    /// - Conversion: `type_params.base_measure`, `type_params.conversion_measure`
+    pub fn measure_refs(&self) -> Vec<&str> {
+        let Some(p) = &self.type_params else {
+            return vec![];
+        };
+        let mut refs = vec![];
+        for field in &["measure", "base_measure", "conversion_measure"] {
+            if let Some(v) = p.get(field)
+                && let Some(name) = Self::name_ref(v)
+            {
+                refs.push(name);
+            }
+        }
+        refs
     }
 
     /// Extract metric names this metric depends on (Ratio/Derived/Conversion/Cumulative).
@@ -746,7 +758,7 @@ metrics:
         let m = &schema.metrics[0];
         assert_eq!(m.name, "order_total");
         assert_eq!(m.label.as_deref(), Some("Order Total"));
-        assert_eq!(m.measure_ref(), Some("order_total"));
+        assert_eq!(m.measure_refs(), vec!["order_total"]);
         assert!(m.metric_refs().is_empty());
     }
 
@@ -763,7 +775,7 @@ metrics:
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.metrics[0];
-        assert_eq!(m.measure_ref(), Some("order_total"));
+        assert_eq!(m.measure_refs(), vec!["order_total"]);
         assert!(m.metric_refs().is_empty());
     }
 
@@ -779,7 +791,7 @@ metrics:
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.metrics[0];
-        assert_eq!(m.measure_ref(), None);
+        assert!(m.measure_refs().is_empty());
         let refs = m.metric_refs();
         assert!(refs.contains(&"revenue"));
         assert!(refs.contains(&"orders"));
@@ -801,12 +813,39 @@ metrics:
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.metrics[0];
-        assert_eq!(m.measure_ref(), None);
+        assert!(m.measure_refs().is_empty());
         let refs = m.metric_refs();
         assert!(refs.contains(&"revenue"));
         assert!(refs.contains(&"orders"));
         assert!(refs.contains(&"margin"));
         assert!(refs.contains(&"customer_count"));
+    }
+
+    #[test]
+    fn test_parse_metrics_conversion() {
+        let yaml = r#"
+metrics:
+  - name: visitors_who_bought
+    type: conversion
+    type_params:
+      base_measure:
+        name: visitors
+      conversion_measure:
+        name: buyers
+      entity: user
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        let refs = m.measure_refs();
+        assert!(
+            refs.contains(&"visitors"),
+            "base_measure should be included"
+        );
+        assert!(
+            refs.contains(&"buyers"),
+            "conversion_measure should be included"
+        );
+        assert!(m.metric_refs().is_empty());
     }
 
     #[test]

@@ -1019,14 +1019,14 @@ fn process_semantic_layer(
         let Some(&metric_idx) = gb.node_map.get(&metric_id) else {
             continue;
         };
-        // Simple metric: link via measure lookup
-        if let Some(measure_name) = metric.measure_ref()
-            && let Some(sem_name) = measure_to_sem.get(measure_name)
-        {
-            let sem_id = format!("semantic_model.{}", sem_name);
-            if let Some(&sem_idx) = gb.node_map.get(&sem_id) {
-                gb.graph
-                    .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+        // Link to semantic models via measure references (Simple, Conversion, …)
+        for measure_name in metric.measure_refs() {
+            if let Some(sem_name) = measure_to_sem.get(measure_name) {
+                let sem_id = format!("semantic_model.{}", sem_name);
+                if let Some(&sem_idx) = gb.node_map.get(&sem_id) {
+                    gb.graph
+                        .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+                }
             }
         }
         // Ratio/Derived/Conversion/Cumulative: link to upstream metrics
