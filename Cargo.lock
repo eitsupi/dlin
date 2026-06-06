@@ -597,9 +597,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "polyglot-sql"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae6c74c8eb93747568a81656dba005972a9e38a02917259257001d4f533561c"
+checksum = "b0d5ea9283f03d3b6c32a230e60e7c6bc854e5bec83c399c75cad02bf46e9622"
 dependencies = [
  "serde",
  "serde_json",

@@ -183,6 +183,9 @@ fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLine
 
 fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<ColumnSource>) {
     if node.downstream.is_empty() {
+        if node.source_kind == polyglot_sql::scope::SourceKind::Virtual {
+            return;
+        }
         let name = &node.name;
         if let Some((alias, column)) = name.rsplit_once('.') {
             // polyglot-sql puts the SQL alias in node.name (e.g. "c.customer_id") and the

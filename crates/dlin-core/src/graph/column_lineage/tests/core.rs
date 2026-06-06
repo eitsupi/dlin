@@ -1644,3 +1644,65 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
     assert_eq!(src.table, "raw.payments");
     assert_eq!(src.column, "amount");
 }
+
+#[test]
+fn test_bigquery_unnest_virtual_source_excluded() {
+    // BigQuery UNNEST produces a Virtual source node. Before the fix, collect_leaves
+    // would include it as a leaf with an empty/synthetic table name. After the fix,
+    // Virtual leaf nodes are skipped so only real table sources survive.
+    let mut nodes = HashMap::new();
+    let mut columns = HashMap::new();
+    for name in ["week_start"] {
+        columns.insert(
+            name.to_string(),
+            ManifestColumn {
+                name: name.to_string(),
+            },
+        );
+    }
+    nodes.insert(
+        "model.proj.unnest_model".to_string(),
+        ManifestNode {
+            unique_id: "model.proj.unnest_model".to_string(),
+            name: "unnest_model".to_string(),
+            resource_type: "model".to_string(),
+            depends_on: DependsOn { nodes: vec![] },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns,
+            compiled_code: Some(
+                "SELECT date_val AS week_start FROM UNNEST(GENERATE_DATE_ARRAY('2024-01-01', '2024-12-31', INTERVAL 1 WEEK)) AS date_val".to_string(),
+            ),
+            database: None,
+            schema: None,
+        },
+    );
+    let manifest = Manifest {
+        nodes,
+        sources: HashMap::new(),
+        exposures: HashMap::new(),
+        ..Default::default()
+    };
+    let result = compute_column_lineage(
+        &manifest,
+        "unnest_model",
+        DialectType::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    // week_start derives from UNNEST — a Virtual source with no physical table.
+    // collect_leaves must skip Virtual nodes, so sources should be empty.
+    let week_start = result.columns.iter().find(|c| c.column == "week_start");
+    if let Some(entry) = week_start {
+        for src in &entry.sources {
+            assert!(
+                !src.table.is_empty(),
+                "Virtual UNNEST source should not appear as leaf: got table='{}', column='{}'",
+                src.table,
+                src.column
+            );
+        }
+    }
+}
