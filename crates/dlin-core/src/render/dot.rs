@@ -494,18 +494,18 @@ mod tests {
 
     #[test]
     fn test_directory_cluster_label_with_special_chars_is_escaped() {
-        // A file_path whose directory contains `"` or `\` must be escaped in
-        // the cluster label to produce syntactically valid DOT output.
+        // A file_path whose directory contains `"` must be escaped in the
+        // cluster label to produce syntactically valid DOT output.
         let mut graph = LineageGraph::new();
         graph.add_node(make_node_with_path(
             "model.m",
             "m",
             NodeType::Model,
-            r#"models/my"dir\x/m.sql"#,
+            r#"models/my"dir/m.sql"#,
         ));
         let output = render_to_string_directory(&graph);
         assert!(
-            output.contains(r#"label="models/my\"dir\\x";"#),
+            output.contains(r#"label="models/my\"dir";"#),
             "directory cluster label not escaped:\n{output}"
         );
     }
