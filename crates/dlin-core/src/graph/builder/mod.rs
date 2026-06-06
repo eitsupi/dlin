@@ -839,22 +839,18 @@ fn process_yaml_snapshot_nodes(
     gb: &mut GraphBuilder,
     snapshot_defs: &[(SnapshotDefinition, PathBuf)],
 ) {
-    // Collect the unique_ids that are already registered from SQL files so that
-    // Pass 2 can skip them (their edges are handled by process_sql_edges).
-    let sql_registered: std::collections::HashSet<String> = snapshot_defs
-        .iter()
-        .map(|(d, _)| format!("snapshot.{}", d.name))
-        .filter(|id| gb.node_map.contains_key(id.as_str()))
-        .collect();
-
     // Pass 1: register all YAML-only snapshot nodes.
+    // `gb.node_map.contains_key` guards against both SQL-registered nodes (already
+    // present before this pass) and duplicate YAML definitions (added earlier in
+    // this same pass), so each unique_id is added at most once.
+    let mut yaml_registered = std::collections::HashSet::<String>::new();
     for (snap_def, yaml_path) in snapshot_defs {
         let unique_id = format!("snapshot.{}", snap_def.name);
-        if sql_registered.contains(&unique_id) {
+        if gb.node_map.contains_key(&unique_id) {
             continue;
         }
         gb.add_node(NodeData {
-            unique_id,
+            unique_id: unique_id.clone(),
             label: snap_def.name.clone(),
             node_type: NodeType::Snapshot,
             file_path: Some(yaml_path.clone()),
@@ -865,12 +861,13 @@ fn process_yaml_snapshot_nodes(
             exposure: None,
             aliases: vec![],
         });
+        yaml_registered.insert(unique_id);
     }
 
     // Pass 2: resolve upstream edges now that all snapshot nodes exist.
     for (snap_def, yaml_path) in snapshot_defs {
         let unique_id = format!("snapshot.{}", snap_def.name);
-        if sql_registered.contains(&unique_id) {
+        if !yaml_registered.contains(&unique_id) {
             continue;
         }
         let Some(&snap_idx) = gb.node_map.get(&unique_id) else {
