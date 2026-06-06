@@ -1330,20 +1330,23 @@ mod tests {
             "all full unique IDs should resolve"
         );
         assert_eq!(result["count"], 3);
-        let names: Vec<&str> = result["nodes"]
+        let unique_ids: Vec<&str> = result["nodes"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|n| n["name"].as_str().unwrap())
+            .map(|n| n["unique_id"].as_str().unwrap())
             .collect();
         assert!(
-            names.contains(&"supplies"),
-            "semantic_model node should resolve"
+            unique_ids.contains(&"semantic_model.supplies"),
+            "semantic_model node should resolve to correct type"
         );
-        assert!(names.contains(&"revenue"), "metric node should resolve");
         assert!(
-            names.contains(&"revenue_metrics"),
-            "saved_query node should resolve"
+            unique_ids.contains(&"metric.revenue"),
+            "metric node should resolve to correct type"
+        );
+        assert!(
+            unique_ids.contains(&"saved_query.revenue_metrics"),
+            "saved_query node should resolve to correct type"
         );
     }
 
