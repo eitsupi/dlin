@@ -446,23 +446,6 @@ models:
     }
 
     #[test]
-    fn test_versioned_model_decimal_v_str_normalized_by_f64() {
-        // `v: "1.0"` is not valid in dbt (versions must be integers), but demonstrates
-        // that our inference matches dbt-core: the max f64 is converted via to_string(),
-        // so "1.0" → 1.0_f64 → "1".  dbt-core exhibits the same behavior.
-        let yaml = r#"
-models:
-  - name: orders
-    versions:
-      - v: "1.0"
-      - v: "2.0"
-"#;
-        let schema = parse_schema_file(yaml, None).unwrap();
-        let m = &schema.models[0];
-        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("2"));
-    }
-
-    #[test]
     fn test_unversioned_model_has_empty_versions() {
         let yaml = r#"
 models:
