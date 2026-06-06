@@ -855,11 +855,8 @@ fn process_yaml_snapshot_nodes(
         });
         if let Some(relation) = &snap_def.relation {
             if let Some((source_name, table_name)) = parse_relation_source(relation) {
-                let dep_idx = gb.get_or_create_phantom_source(
-                    &source_name,
-                    &table_name,
-                    yaml_path.as_path(),
-                );
+                let dep_idx =
+                    gb.get_or_create_phantom_source(&source_name, &table_name, yaml_path.as_path());
                 gb.graph
                     .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Source));
             } else if let Some((model_name, version)) = parse_exposure_ref(relation) {
