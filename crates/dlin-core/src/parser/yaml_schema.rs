@@ -141,30 +141,31 @@ pub struct ModelDefinition {
 
 impl ModelDefinition {
     /// Return the version string used for `latest_version`, or derive it from
-    /// the highest `v` in the `versions` list when `latest_version` is unset.
+    /// the `versions` list when `latest_version` is unset.
+    ///
+    /// Inference mirrors dbt-core: if all versions parse as numbers, use the
+    /// largest; otherwise fall back to the lexicographically greatest string.
     pub fn resolved_latest_version_str(&self) -> Option<String> {
         if let Some(lv) = &self.latest_version {
-            let s = if let Some(n) = lv.as_i64() {
-                n.to_string()
-            } else if let Some(f) = lv.as_f64() {
-                if f.fract() == 0.0 {
-                    (f as i64).to_string()
-                } else {
-                    f.to_string()
-                }
-            } else if let Some(s) = lv.as_str() {
-                s.to_string()
-            } else {
-                lv.to_string()
-            };
+            let s = lv
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| lv.to_string());
             return Some(s);
         }
-        // Infer from max numeric version
-        self.versions
-            .iter()
-            .filter_map(|v| v.v.as_i64())
-            .max()
-            .map(|n| n.to_string())
+        if self.versions.is_empty() {
+            return None;
+        }
+        let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
+        let numerics: Vec<f64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
+        if numerics.len() == strs.len() {
+            numerics
+                .into_iter()
+                .reduce(f64::max)
+                .map(|n| n.to_string())
+        } else {
+            strs.into_iter().max()
+        }
     }
 }
 
@@ -422,6 +423,21 @@ models:
       - v: 1
       - v: 3
       - v: 2
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_versioned_model_infers_latest_from_quoted_v() {
+        let yaml = r#"
+models:
+  - name: orders
+    versions:
+      - v: "1"
+      - v: "3"
+      - v: "2"
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.models[0];
