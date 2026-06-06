@@ -94,6 +94,10 @@ fn version_value_to_str(v: &serde_json::Value) -> String {
         return n.to_string();
     }
     if let Some(f) = v.as_f64() {
+        // Reached only for JSON floats; serde_json stores integers as i64/u64
+        // (handled above), so NaN/Inf cannot arise from valid JSON input.
+        // dbt-core uses f32 for version comparison, so f64 is already more
+        // precise than the reference implementation.
         return if f.fract() == 0.0 {
             (f as i64).to_string()
         } else {
@@ -171,9 +175,10 @@ impl ModelDefinition {
         let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
         let numerics: Vec<i64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
         if numerics.len() == strs.len() {
-            // All versions are integers: return the largest as a string.
-            // Uses i64 to match dbt-core's int-or-string semantics and avoid
-            // f64 precision loss on large version numbers.
+            // All versions are integers: use the largest. i64 is intentionally
+            // used here — dbt-core itself compares via f32 (losing precision
+            // above 2^24 ≈ 16.7M), so i64 is already far more robust than the
+            // reference implementation.
             numerics.into_iter().max().map(|n| n.to_string())
         } else {
             strs.into_iter().max()
