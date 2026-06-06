@@ -855,36 +855,18 @@ fn process_yaml_snapshot_nodes(
         });
         if let Some(relation) = &snap_def.relation {
             if let Some((source_name, table_name)) = parse_relation_source(relation) {
-                let source_id = format!("source.{}.{}", source_name, table_name);
-                let dep_idx = if let Some(&idx) = gb.node_map.get(&source_id) {
-                    idx
-                } else {
-                    let label = format!("{}.{}", source_name, table_name);
-                    gb.add_node(NodeData {
-                        unique_id: source_id,
-                        label,
-                        node_type: NodeType::Phantom,
-                        file_path: None,
-                        description: None,
-                        materialization: None,
-                        tags: vec![],
-                        columns: vec![],
-                        exposure: None,
-                        aliases: vec![],
-                    })
-                };
+                let dep_idx = gb.get_or_create_phantom_source(
+                    &source_name,
+                    &table_name,
+                    yaml_path.as_path(),
+                );
                 gb.graph
                     .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Source));
             } else if let Some((model_name, version)) = parse_exposure_ref(relation) {
-                let dep_id = if let Some(ref v) = version {
-                    format!("model.{}.v{}", model_name, v)
-                } else {
-                    resolve_ref(&model_name, &gb.node_map)
-                };
-                if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                    gb.graph
-                        .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
-                }
+                let dep_idx =
+                    gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+                gb.graph
+                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
             }
         }
     }
