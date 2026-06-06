@@ -231,7 +231,7 @@ fn tools() -> Vec<Value> {
                     "query": { "type": "string", "description": "Case-insensitive substring filter applied to node name, description, tags, and file path. Returns all nodes when omitted." },
                     "node_types": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure", "semantic_model", "metric", "saved_query"] },
                         "description": "Node types to include. Defaults to all types when omitted."
                     }
                 },
@@ -247,7 +247,7 @@ fn tools() -> Vec<Value> {
                     "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up." },
                     "node_types": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure", "semantic_model", "metric", "saved_query"] },
                         "description": "Restrict results to these node types. Nodes whose type does not match are reported in not_found."
                     }
                 },
@@ -451,6 +451,9 @@ fn node_type_from_str(s: &str) -> Option<NodeType> {
         "snapshot" => Some(NodeType::Snapshot),
         "test" => Some(NodeType::Test),
         "exposure" => Some(NodeType::Exposure),
+        "semantic_model" => Some(NodeType::SemanticModel),
+        "metric" => Some(NodeType::Metric),
+        "saved_query" => Some(NodeType::SavedQuery),
         _ => None,
     }
 }

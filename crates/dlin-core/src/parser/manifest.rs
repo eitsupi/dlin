@@ -281,6 +281,24 @@ impl Manifest {
                 paths.insert(p.clone());
             }
         }
+        for sm in self.semantic_models.values() {
+            let p = sm.original_file_path.as_ref().or(sm.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
+        for metric in self.metrics.values() {
+            let p = metric.original_file_path.as_ref().or(metric.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
+        for sq in self.saved_queries.values() {
+            let p = sq.original_file_path.as_ref().or(sq.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
         paths
     }
 }
