@@ -90,6 +90,9 @@ fn version_value_to_str(v: &serde_json::Value) -> String {
     if let Some(n) = v.as_i64() {
         return n.to_string();
     }
+    if let Some(n) = v.as_u64() {
+        return n.to_string();
+    }
     if let Some(f) = v.as_f64() {
         return if f.fract() == 0.0 {
             (f as i64).to_string()
@@ -484,6 +487,13 @@ models:
             defined_in: None,
         };
         assert_eq!(large_int.v_str(), "9007199254740993");
+
+        // JSON Number stored as u64 (> i64::MAX) must not lose precision via f64
+        let u64_num = VersionSpec {
+            v: serde_json::Value::Number(serde_json::Number::from(i64::MAX as u64 + 1)),
+            defined_in: None,
+        };
+        assert_eq!(u64_num.v_str(), (i64::MAX as u64 + 1).to_string());
     }
 
     #[test]
