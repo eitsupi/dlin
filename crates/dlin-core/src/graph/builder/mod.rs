@@ -12,8 +12,7 @@ use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
 use crate::parser::sql::{
-    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars,
-    extract_sources,
+    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
 };
 use crate::parser::yaml_schema::{
     ExposureDefinition, ModelDefinition, SchemaFile, SnapshotDefinition, parse_schema_file,
