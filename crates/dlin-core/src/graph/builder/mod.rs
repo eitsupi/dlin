@@ -832,17 +832,25 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
 /// Snapshots already registered from a SQL file are skipped; for those without a
 /// matching SQL file the node is created here and linked to the upstream model via
 /// the `relation: ref('...')` field.
+///
+/// Two-pass approach: first register all nodes so that forward references between
+/// YAML-only snapshots resolve correctly, then add edges.
 fn process_yaml_snapshot_nodes(
     gb: &mut GraphBuilder,
     snapshot_defs: &[(SnapshotDefinition, PathBuf)],
 ) {
+    // Pass 1: register all YAML-only snapshot nodes.
+    // `gb.node_map.contains_key` guards against both SQL-registered nodes (already
+    // present before this pass) and duplicate YAML definitions (added earlier in
+    // this same pass), so each unique_id is added at most once.
+    let mut yaml_registered = std::collections::HashSet::<String>::new();
     for (snap_def, yaml_path) in snapshot_defs {
         let unique_id = format!("snapshot.{}", snap_def.name);
         if gb.node_map.contains_key(&unique_id) {
-            continue; // registered from SQL file; edges handled by process_sql_edges
+            continue;
         }
-        let snap_idx = gb.add_node(NodeData {
-            unique_id,
+        gb.add_node(NodeData {
+            unique_id: unique_id.clone(),
             label: snap_def.name.clone(),
             node_type: NodeType::Snapshot,
             file_path: Some(yaml_path.clone()),
@@ -853,6 +861,18 @@ fn process_yaml_snapshot_nodes(
             exposure: None,
             aliases: vec![],
         });
+        yaml_registered.insert(unique_id);
+    }
+
+    // Pass 2: resolve upstream edges now that all snapshot nodes exist.
+    for (snap_def, yaml_path) in snapshot_defs {
+        let unique_id = format!("snapshot.{}", snap_def.name);
+        if !yaml_registered.remove(&unique_id) {
+            continue;
+        }
+        let Some(&snap_idx) = gb.node_map.get(&unique_id) else {
+            continue;
+        };
         if let Some(relation) = &snap_def.relation {
             if let Some((source_name, table_name)) = parse_relation_source(relation) {
                 let dep_idx =
