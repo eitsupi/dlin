@@ -280,12 +280,18 @@ pub struct MetricDefinition {
 }
 
 impl MetricDefinition {
+    fn name_ref(value: &serde_json::Value) -> Option<&str> {
+        value
+            .as_str()
+            .or_else(|| value.get("name").and_then(|n| n.as_str()))
+    }
+
     /// Extract the measure name this metric references (Simple metrics only).
     pub fn measure_ref(&self) -> Option<&str> {
         self.type_params
             .as_ref()
             .and_then(|p| p.get("measure"))
-            .and_then(|m| m.as_str())
+            .and_then(Self::name_ref)
     }
 
     /// Extract metric names this metric depends on (Ratio/Derived/Conversion/Cumulative).
@@ -295,22 +301,26 @@ impl MetricDefinition {
         };
         let mut refs = vec![];
         // Ratio: numerator / denominator (string or {name: ...})
-        for field in &["numerator", "denominator", "input_metric", "base_metric", "conversion_metric"] {
-            if let Some(v) = p.get(field) {
-                if let Some(s) = v.as_str() {
-                    refs.push(s);
-                } else if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-                    refs.push(name);
-                }
+        for field in &[
+            "numerator",
+            "denominator",
+            "input_metric",
+            "base_metric",
+            "conversion_metric",
+        ] {
+            if let Some(v) = p.get(field)
+                && let Some(name) = Self::name_ref(v)
+            {
+                refs.push(name);
             }
         }
-        // Derived: input_metrics: [{name: ...}, ...]
-        if let Some(arr) = p.get("input_metrics").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(s) = item.as_str() {
-                    refs.push(s);
-                } else if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                    refs.push(name);
+        // Derived: input_metrics/metrics: [{name: ...}, ...] or strings
+        for field in &["input_metrics", "metrics"] {
+            if let Some(arr) = p.get(field).and_then(|v| v.as_array()) {
+                for item in arr {
+                    if let Some(name) = Self::name_ref(item) {
+                        refs.push(name);
+                    }
                 }
             }
         }
@@ -741,6 +751,23 @@ metrics:
     }
 
     #[test]
+    fn test_parse_metrics_simple_with_object_measure() {
+        let yaml = r#"
+metrics:
+  - name: order_total
+    type: simple
+    type_params:
+      measure:
+        name: order_total
+        fill_nulls_with: 0
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert_eq!(m.measure_ref(), Some("order_total"));
+        assert!(m.metric_refs().is_empty());
+    }
+
+    #[test]
     fn test_parse_metrics_ratio() {
         let yaml = r#"
 metrics:
@@ -759,7 +786,7 @@ metrics:
     }
 
     #[test]
-    fn test_parse_metrics_derived_with_input_metrics() {
+    fn test_parse_metrics_derived_with_input_metrics_and_metrics() {
         let yaml = r#"
 metrics:
   - name: pct_change
@@ -767,7 +794,10 @@ metrics:
     type_params:
       input_metrics:
         - name: revenue
-        - name: orders
+        - orders
+      metrics:
+        - name: margin
+        - customer_count
 "#;
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.metrics[0];
@@ -775,6 +805,8 @@ metrics:
         let refs = m.metric_refs();
         assert!(refs.contains(&"revenue"));
         assert!(refs.contains(&"orders"));
+        assert!(refs.contains(&"margin"));
+        assert!(refs.contains(&"customer_count"));
     }
 
     #[test]

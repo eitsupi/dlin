@@ -990,3 +990,88 @@ saved_queries:
         "metric.revenue_per_order → saved_query.order_kpis edge missing"
     );
 }
+
+#[test]
+fn test_build_graph_semantic_layer_metric_reference_shapes() {
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    fs::write(
+        models_dir.join("semantic_refs.yml"),
+        r#"
+semantic_models:
+  - name: orders
+    model: ref('orders')
+    measures:
+      - name: order_total
+      - name: order_count
+      - name: customer_count
+
+metrics:
+  - name: order_total
+    type: simple
+    type_params:
+      measure:
+        name: order_total
+        fill_nulls_with: 0
+  - name: orders
+    type: simple
+    type_params:
+      measure: order_count
+  - name: customers
+    type: simple
+    type_params:
+      measure: customer_count
+  - name: derived_kpi
+    type: derived
+    type_params:
+      metrics:
+        - name: order_total
+        - orders
+        - customers
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        model_sql_files: vec![
+            project_dir.join("models/stg_orders.sql"),
+            project_dir.join("models/orders.sql"),
+        ],
+        yaml_files: vec![
+            project_dir.join("models/schema.yml"),
+            project_dir.join("models/semantic_refs.yml"),
+        ],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    let sem_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].unique_id == "semantic_model.orders")
+        .expect("semantic_model.orders not found");
+    let metric_total_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].unique_id == "metric.order_total")
+        .expect("metric.order_total not found");
+    assert!(
+        graph.contains_edge(sem_idx, metric_total_idx),
+        "semantic_model.orders → metric.order_total edge missing"
+    );
+
+    let derived_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].unique_id == "metric.derived_kpi")
+        .expect("metric.derived_kpi not found");
+    for metric_id in ["metric.order_total", "metric.orders", "metric.customers"] {
+        let metric_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == metric_id)
+            .unwrap_or_else(|| panic!("{metric_id} not found"));
+        assert!(
+            graph.contains_edge(metric_idx, derived_idx),
+            "{metric_id} → metric.derived_kpi edge missing"
+        );
+    }
+}

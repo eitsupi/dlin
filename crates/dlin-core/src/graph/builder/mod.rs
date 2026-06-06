@@ -15,8 +15,8 @@ use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
 };
 use crate::parser::yaml_schema::{
-    ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition,
-    SchemaFile, SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
+    ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
+    SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
 };
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -952,17 +952,17 @@ fn process_semantic_layer(
                 .or_insert_with(|| sm.name.clone());
         }
         // Add edge: model_node → semantic_model_node
-        if let Some(model_ref) = &sm.model {
-            if let Some((model_name, version)) = parse_exposure_ref(model_ref) {
-                let dep_id = if let Some(ref v) = version {
-                    format!("model.{}.v{}", model_name, v)
-                } else {
-                    resolve_ref(&model_name, &gb.node_map)
-                };
-                if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                    gb.graph
-                        .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
-                }
+        if let Some(model_ref) = &sm.model
+            && let Some((model_name, version)) = parse_exposure_ref(model_ref)
+        {
+            let dep_id = if let Some(ref v) = version {
+                format!("model.{}.v{}", model_name, v)
+            } else {
+                resolve_ref(&model_name, &gb.node_map)
+            };
+            if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
+                gb.graph
+                    .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
             }
         }
     }
@@ -994,13 +994,13 @@ fn process_semantic_layer(
             continue;
         };
         // Simple metric: link via measure lookup
-        if let Some(measure_name) = metric.measure_ref() {
-            if let Some(sem_name) = measure_to_sem.get(measure_name) {
-                let sem_id = format!("semantic_model.{}", sem_name);
-                if let Some(&sem_idx) = gb.node_map.get(&sem_id) {
-                    gb.graph
-                        .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
-                }
+        if let Some(measure_name) = metric.measure_ref()
+            && let Some(sem_name) = measure_to_sem.get(measure_name)
+        {
+            let sem_id = format!("semantic_model.{}", sem_name);
+            if let Some(&sem_idx) = gb.node_map.get(&sem_id) {
+                gb.graph
+                    .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
             }
         }
         // Ratio/Derived/Conversion/Cumulative: link to upstream metrics
