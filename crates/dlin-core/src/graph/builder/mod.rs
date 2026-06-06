@@ -1035,10 +1035,13 @@ fn process_semantic_layer(
             gb.graph
                 .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
         }
-        // Ratio/Derived/Conversion/Cumulative: link to upstream metrics (deduplicated)
-        let dep_metric_names: std::collections::HashSet<&str> =
-            metric.metric_refs().into_iter().collect();
-        for dep_metric_name in dep_metric_names {
+        // Ratio/Derived/Conversion/Cumulative: link to upstream metrics (deduplicated,
+        // preserving original order so graph insertion is deterministic)
+        let mut seen_metric_refs = std::collections::HashSet::new();
+        for dep_metric_name in metric.metric_refs() {
+            if !seen_metric_refs.insert(dep_metric_name) {
+                continue;
+            }
             let dep_id = format!("metric.{}", dep_metric_name);
             let dep_idx = if let Some(&idx) = gb.node_map.get(&dep_id) {
                 idx

@@ -10,7 +10,7 @@ const NODE_HEIGHT: f64 = 40.0;
 const LAYER_SPACING: f64 = 220.0;
 const NODE_SPACING: f64 = 60.0;
 const PADDING: f64 = 40.0;
-const LEGEND_ENTRY_SPACING: f64 = 80.0;
+const LEGEND_ENTRY_SPACING: f64 = 110.0;
 
 const LEGEND_TYPES: &[(&str, &str)] = &[
     ("model", "#4A90D9"),
