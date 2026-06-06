@@ -72,8 +72,16 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
         }
     }
 
-    let total =
-        model + source + seed + snapshot + test + exposure + semantic_model + metric + saved_query + phantom;
+    let total = model
+        + source
+        + seed
+        + snapshot
+        + test
+        + exposure
+        + semantic_model
+        + metric
+        + saved_query
+        + phantom;
     NodeCounts {
         model,
         source,
