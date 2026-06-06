@@ -599,6 +599,8 @@ fn test_build_graph_yaml_only_snapshot() {
     let (_tmp, project_dir) = setup_temp_project();
 
     let models_dir = project_dir.join("models");
+    // Use a simple SQL file with no source refs to keep node count predictable
+    fs::write(models_dir.join("stg_orders.sql"), "SELECT 1").unwrap();
     fs::write(
         models_dir.join("snap_schema.yml"),
         r#"
@@ -656,6 +658,10 @@ fn test_build_graph_yaml_snapshot_sql_takes_precedence() {
     // When both a SQL file and YAML definition exist for the same snapshot name,
     // the SQL file registers the node; the YAML definition is skipped (no duplicate).
     let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    // Use a simple SQL file with no source refs to keep node count predictable
+    fs::write(models_dir.join("stg_orders.sql"), "SELECT 1").unwrap();
 
     let snap_dir = project_dir.join("snapshots");
     fs::create_dir_all(&snap_dir).unwrap();

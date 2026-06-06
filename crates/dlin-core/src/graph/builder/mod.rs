@@ -853,17 +853,17 @@ fn process_yaml_snapshot_nodes(
             exposure: None,
             aliases: vec![],
         });
-        if let Some(relation) = &snap_def.relation {
-            if let Some((model_name, version)) = parse_exposure_ref(relation) {
-                let dep_id = if let Some(ref v) = version {
-                    format!("model.{}.v{}", model_name, v)
-                } else {
-                    resolve_ref(&model_name, &gb.node_map)
-                };
-                if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                    gb.graph
-                        .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
-                }
+        if let Some(relation) = &snap_def.relation
+            && let Some((model_name, version)) = parse_exposure_ref(relation)
+        {
+            let dep_id = if let Some(ref v) = version {
+                format!("model.{}.v{}", model_name, v)
+            } else {
+                resolve_ref(&model_name, &gb.node_map)
+            };
+            if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
+                gb.graph
+                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
             }
         }
     }
