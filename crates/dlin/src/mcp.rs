@@ -773,7 +773,8 @@ fn normalize_manifest_unique_id(name: &str) -> Option<String> {
                 None
             }
         }
-        "model" | "seed" | "snapshot" | "exposure" => {
+        "model" | "seed" | "snapshot" | "exposure" | "semantic_model" | "metric"
+        | "saved_query" => {
             parts.remove(1);
             Some(parts.join("."))
         }
@@ -1269,6 +1270,22 @@ mod tests {
     fn normalize_manifest_unique_id_supports_unhashed_test_id() {
         let normalized = normalize_manifest_unique_id("test.simple_project.my_test_name");
         assert_eq!(normalized, Some("test.my_test_name".to_string()));
+    }
+
+    #[test]
+    fn normalize_manifest_unique_id_supports_semantic_layer_types() {
+        assert_eq!(
+            normalize_manifest_unique_id("semantic_model.my_project.orders"),
+            Some("semantic_model.orders".to_string())
+        );
+        assert_eq!(
+            normalize_manifest_unique_id("metric.my_project.revenue"),
+            Some("metric.revenue".to_string())
+        );
+        assert_eq!(
+            normalize_manifest_unique_id("saved_query.my_project.revenue_metrics"),
+            Some("saved_query.revenue_metrics".to_string())
+        );
     }
 
     #[test]
