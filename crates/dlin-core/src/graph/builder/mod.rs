@@ -242,9 +242,10 @@ struct YamlParseResult {
     version_aliases: HashMap<String, String>,
     /// YAML-only snapshot defs with their yaml file (relative) path.
     snapshot_defs: Vec<(SnapshotDefinition, PathBuf)>,
-    semantic_models: Vec<SemanticModelDefinition>,
-    metrics: Vec<MetricDefinition>,
-    saved_queries: Vec<SavedQueryDefinition>,
+    /// Semantic layer defs paired with the relative YAML path they came from.
+    semantic_models: Vec<(SemanticModelDefinition, PathBuf)>,
+    metrics: Vec<(MetricDefinition, PathBuf)>,
+    saved_queries: Vec<(SavedQueryDefinition, PathBuf)>,
 }
 
 /// Build version maps for a single versioned model definition.
@@ -285,9 +286,9 @@ fn process_yaml_files(
     let mut stem_to_versioned: HashMap<String, (String, String)> = HashMap::new();
     let mut version_aliases: HashMap<String, String> = HashMap::new();
     let mut snapshot_defs: Vec<(SnapshotDefinition, PathBuf)> = Vec::new();
-    let mut semantic_models: Vec<SemanticModelDefinition> = Vec::new();
-    let mut metrics: Vec<MetricDefinition> = Vec::new();
-    let mut saved_queries: Vec<SavedQueryDefinition> = Vec::new();
+    let mut semantic_models: Vec<(SemanticModelDefinition, PathBuf)> = Vec::new();
+    let mut metrics: Vec<(MetricDefinition, PathBuf)> = Vec::new();
+    let mut saved_queries: Vec<(SavedQueryDefinition, PathBuf)> = Vec::new();
 
     // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
     // deterministic across filesystems/OSes.
@@ -333,14 +334,34 @@ fn process_yaml_files(
         }
 
         exposures.extend(schema.exposures.iter().cloned());
-        semantic_models.extend(schema.semantic_models.iter().cloned());
-        metrics.extend(schema.metrics.iter().cloned());
-        saved_queries.extend(schema.saved_queries.iter().cloned());
 
         let relative_path = yaml_path
             .strip_prefix(project_dir)
             .unwrap_or(yaml_path)
             .to_path_buf();
+
+        semantic_models.extend(
+            schema
+                .semantic_models
+                .iter()
+                .cloned()
+                .map(|sm| (sm, relative_path.clone())),
+        );
+        metrics.extend(
+            schema
+                .metrics
+                .iter()
+                .cloned()
+                .map(|m| (m, relative_path.clone())),
+        );
+        saved_queries.extend(
+            schema
+                .saved_queries
+                .iter()
+                .cloned()
+                .map(|sq| (sq, relative_path.clone())),
+        );
+
         for snap_def in &schema.snapshots {
             snapshot_defs.push((snap_def.clone(), relative_path.clone()));
         }
@@ -902,6 +923,9 @@ fn process_yaml_snapshot_nodes(
 
 /// Build and connect semantic layer nodes (semantic_models, metrics, saved_queries).
 ///
+/// Each definition is paired with the relative path of the YAML file it came from,
+/// which is stored on the node for debuggability (consistent with other YAML-derived nodes).
+///
 /// Pass ordering:
 ///   1. Register all semantic_model nodes (enables forward references between metrics).
 ///   2. Build measure → semantic_model_name map.
@@ -912,15 +936,12 @@ fn process_yaml_snapshot_nodes(
 ///   7. Register all saved_query nodes and add metric → saved_query edges.
 fn process_semantic_layer(
     gb: &mut GraphBuilder,
-    semantic_models: &[SemanticModelDefinition],
-    metrics: &[MetricDefinition],
-    saved_queries: &[SavedQueryDefinition],
+    semantic_models: &[(SemanticModelDefinition, PathBuf)],
+    metrics: &[(MetricDefinition, PathBuf)],
+    saved_queries: &[(SavedQueryDefinition, PathBuf)],
 ) {
-    // Dummy path for phantom-node warnings from parse_exposure_ref
-    let dummy_path = std::path::Path::new("<semantic_layer>");
-
     // Pass 1: register semantic_model nodes
-    for sm in semantic_models {
+    for (sm, yaml_path) in semantic_models {
         let unique_id = format!("semantic_model.{}", sm.name);
         if gb.node_map.contains_key(&unique_id) {
             continue;
@@ -929,7 +950,7 @@ fn process_semantic_layer(
             unique_id,
             label: sm.name.clone(),
             node_type: NodeType::SemanticModel,
-            file_path: None,
+            file_path: Some(yaml_path.clone()),
             description: sm.description.clone(),
             materialization: None,
             tags: vec![],
@@ -941,7 +962,7 @@ fn process_semantic_layer(
 
     // Pass 2: build measure_name → semantic_model_name map and add model edges
     let mut measure_to_sem: HashMap<String, String> = HashMap::new();
-    for sm in semantic_models {
+    for (sm, yaml_path) in semantic_models {
         let sem_id = format!("semantic_model.{}", sm.name);
         let Some(&sem_idx) = gb.node_map.get(&sem_id) else {
             continue;
@@ -955,20 +976,15 @@ fn process_semantic_layer(
         if let Some(model_ref) = &sm.model
             && let Some((model_name, version)) = parse_exposure_ref(model_ref)
         {
-            let dep_id = if let Some(ref v) = version {
-                format!("model.{}.v{}", model_name, v)
-            } else {
-                resolve_ref(&model_name, &gb.node_map)
-            };
-            if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                gb.graph
-                    .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
-            }
+            let dep_idx =
+                gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+            gb.graph
+                .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
         }
     }
 
     // Pass 3: register metric nodes
-    for metric in metrics {
+    for (metric, yaml_path) in metrics {
         let unique_id = format!("metric.{}", metric.name);
         if gb.node_map.contains_key(&unique_id) {
             continue;
@@ -977,7 +993,7 @@ fn process_semantic_layer(
             unique_id,
             label: metric.name.clone(),
             node_type: NodeType::Metric,
-            file_path: None,
+            file_path: Some(yaml_path.clone()),
             description: metric.description.clone(),
             materialization: None,
             tags: vec![],
@@ -988,7 +1004,7 @@ fn process_semantic_layer(
     }
 
     // Pass 4: add semantic_model → metric and metric → metric edges
-    for metric in metrics {
+    for (metric, yaml_path) in metrics {
         let metric_id = format!("metric.{}", metric.name);
         let Some(&metric_idx) = gb.node_map.get(&metric_id) else {
             continue;
@@ -1018,7 +1034,7 @@ fn process_semantic_layer(
                     unique_id: dep_id,
                     label: dep_metric_name.to_string(),
                     node_type: NodeType::Phantom,
-                    file_path: None,
+                    file_path: Some(yaml_path.clone()),
                     description: None,
                     materialization: None,
                     tags: vec![],
@@ -1033,7 +1049,7 @@ fn process_semantic_layer(
     }
 
     // Pass 5: register saved_query nodes and add metric → saved_query edges
-    for sq in saved_queries {
+    for (sq, yaml_path) in saved_queries {
         let sq_id = format!("saved_query.{}", sq.name);
         if gb.node_map.contains_key(&sq_id) {
             continue;
@@ -1042,7 +1058,7 @@ fn process_semantic_layer(
             unique_id: sq_id.clone(),
             label: sq.name.clone(),
             node_type: NodeType::SavedQuery,
-            file_path: None,
+            file_path: Some(yaml_path.clone()),
             description: sq.description.clone(),
             materialization: None,
             tags: vec![],
@@ -1065,7 +1081,7 @@ fn process_semantic_layer(
                         unique_id: metric_dep_id,
                         label: metric_name.clone(),
                         node_type: NodeType::Phantom,
-                        file_path: None,
+                        file_path: Some(yaml_path.clone()),
                         description: None,
                         materialization: None,
                         tags: vec![],
@@ -1079,9 +1095,6 @@ fn process_semantic_layer(
             }
         }
     }
-
-    // Suppress unused variable warning for dummy_path (it's a sentinel for future use)
-    let _ = dummy_path;
 }
 
 /// Build the lineage graph from discovered files.
