@@ -340,19 +340,9 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     add_exposure_edges(&mut graph, &node_map, &manifest.exposures);
 
     // 7. Add edges from depends_on for semantic layer nodes
-    add_depends_on_edges(
-        &mut graph,
-        &node_map,
-        &manifest.semantic_models,
-        EdgeType::Ref,
-    );
-    add_depends_on_edges(&mut graph, &node_map, &manifest.metrics, EdgeType::Ref);
-    add_depends_on_edges(
-        &mut graph,
-        &node_map,
-        &manifest.saved_queries,
-        EdgeType::Ref,
-    );
+    add_depends_on_edges(&mut graph, &node_map, &manifest.semantic_models);
+    add_depends_on_edges(&mut graph, &node_map, &manifest.metrics);
+    add_depends_on_edges(&mut graph, &node_map, &manifest.saved_queries);
 
     Ok(graph)
 }
@@ -624,7 +614,6 @@ fn add_depends_on_edges<T: HasSemanticLayerFields>(
     graph: &mut LineageGraph,
     node_map: &HashMap<String, NodeIndex>,
     items: &HashMap<String, T>,
-    edge_type: EdgeType,
 ) {
     for (orig_id, item) in items {
         let Some(&current_idx) = node_map.get(orig_id) else {
@@ -632,7 +621,11 @@ fn add_depends_on_edges<T: HasSemanticLayerFields>(
         };
         for dep_id in item.depends_on_nodes() {
             if let Some(&dep_idx) = node_map.get(dep_id) {
-                graph.add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
+                graph.add_edge(
+                    dep_idx,
+                    current_idx,
+                    EdgeData::direct(infer_edge_type(dep_id)),
+                );
             }
         }
     }

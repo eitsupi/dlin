@@ -277,6 +277,15 @@ pub struct MetricDefinition {
     /// without needing to model the full metric type hierarchy.
     #[serde(default)]
     pub type_params: Option<serde_json::Value>,
+    /// Conversion metric: the base metric to track (top-level field, not inside type_params).
+    #[serde(default)]
+    pub base_metric: Option<serde_json::Value>,
+    /// Conversion metric: the conversion event metric (top-level field, not inside type_params).
+    #[serde(default)]
+    pub conversion_metric: Option<serde_json::Value>,
+    /// Cumulative metric: the input metric to accumulate (top-level field, not inside type_params).
+    #[serde(default)]
+    pub input_metric: Option<serde_json::Value>,
 }
 
 impl MetricDefinition {
@@ -308,33 +317,41 @@ impl MetricDefinition {
 
     /// Extract metric names this metric depends on (Ratio/Derived/Conversion/Cumulative).
     pub fn metric_refs(&self) -> Vec<&str> {
-        let Some(p) = &self.type_params else {
-            return vec![];
-        };
         let mut refs = vec![];
-        // Ratio: numerator / denominator (string or {name: ...})
-        for field in &[
-            "numerator",
-            "denominator",
-            "input_metric",
-            "base_metric",
-            "conversion_metric",
-        ] {
-            if let Some(v) = p.get(field)
-                && let Some(name) = Self::name_ref(v)
-            {
-                refs.push(name);
+        // Ratio: numerator / denominator are inside type_params
+        if let Some(p) = &self.type_params {
+            for field in &["numerator", "denominator"] {
+                if let Some(v) = p.get(field)
+                    && let Some(name) = Self::name_ref(v)
+                {
+                    refs.push(name);
+                }
             }
-        }
-        // Derived: input_metrics/metrics: [{name: ...}, ...] or strings
-        for field in &["input_metrics", "metrics"] {
-            if let Some(arr) = p.get(field).and_then(|v| v.as_array()) {
-                for item in arr {
-                    if let Some(name) = Self::name_ref(item) {
-                        refs.push(name);
+            // Derived: input_metrics/metrics: [{name: ...}, ...] or strings
+            for field in &["input_metrics", "metrics"] {
+                if let Some(arr) = p.get(field).and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(name) = Self::name_ref(item) {
+                            refs.push(name);
+                        }
                     }
                 }
             }
+        }
+        // Conversion: base_metric / conversion_metric are top-level metric fields
+        for v in [&self.base_metric, &self.conversion_metric]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = Self::name_ref(v) {
+                refs.push(name);
+            }
+        }
+        // Cumulative: input_metric is a top-level metric field
+        if let Some(v) = &self.input_metric
+            && let Some(name) = Self::name_ref(v)
+        {
+            refs.push(name);
         }
         refs
     }
@@ -822,7 +839,7 @@ metrics:
     }
 
     #[test]
-    fn test_parse_metrics_conversion() {
+    fn test_parse_metrics_conversion_measure() {
         let yaml = r#"
 metrics:
   - name: visitors_who_bought
@@ -846,6 +863,52 @@ metrics:
             "conversion_measure should be included"
         );
         assert!(m.metric_refs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_metrics_conversion_metric() {
+        let yaml = r#"
+metrics:
+  - name: visit_to_purchase
+    type: conversion
+    base_metric: visits
+    conversion_metric:
+      name: purchases
+      filter: "{{ Dimension('user__country') }} = 'US'"
+    entity: user
+    window: 7 days
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(
+            refs.contains(&"visits"),
+            "base_metric (string) should be in metric_refs"
+        );
+        assert!(
+            refs.contains(&"purchases"),
+            "conversion_metric (object) should be in metric_refs"
+        );
+    }
+
+    #[test]
+    fn test_parse_metrics_cumulative_input_metric() {
+        let yaml = r#"
+metrics:
+  - name: cumulative_revenue
+    type: cumulative
+    input_metric: revenue
+    window: 1 month
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(
+            refs.contains(&"revenue"),
+            "input_metric should be in metric_refs"
+        );
     }
 
     #[test]
