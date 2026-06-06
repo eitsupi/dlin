@@ -133,8 +133,9 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -
     for (dir, mut group_nodes) in groups {
         group_nodes.sort_by_key(|n| &n.unique_id);
         let cluster_id = super::sanitize_id(&dir);
+        let dir_label = super::dot_escape(&dir);
         writeln!(w, r#"  subgraph cluster_{cluster_id} {{"#)?;
-        writeln!(w, r#"    label="{dir}";"#)?;
+        writeln!(w, r#"    label="{dir_label}";"#)?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for node in &group_nodes {
@@ -489,6 +490,24 @@ mod tests {
 
         let output = render_to_string_directory(&graph);
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_directory_cluster_label_with_special_chars_is_escaped() {
+        // A file_path whose directory contains `"` or `\` must be escaped in
+        // the cluster label to produce syntactically valid DOT output.
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_path(
+            "model.m",
+            "m",
+            NodeType::Model,
+            r#"models/my"dir\x/m.sql"#,
+        ));
+        let output = render_to_string_directory(&graph);
+        assert!(
+            output.contains(r#"label="models/my\"dir\\x";"#),
+            "directory cluster label not escaped:\n{output}"
+        );
     }
 
     #[test]
