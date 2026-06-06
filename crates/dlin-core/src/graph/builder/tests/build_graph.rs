@@ -593,3 +593,104 @@ fn test_var_list_expansion_resolves_refs() {
     assert!(graph.contains_edge(electronics, combined));
     assert!(graph.contains_edge(clothing, combined));
 }
+
+#[test]
+fn test_build_graph_yaml_only_snapshot() {
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    fs::write(
+        models_dir.join("snap_schema.yml"),
+        r#"
+version: 2
+snapshots:
+  - name: snap_orders
+    description: Orders snapshot
+    relation: ref('stg_orders')
+  - name: snap_no_relation
+    description: Snapshot without upstream
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        model_sql_files: vec![project_dir.join("models/stg_orders.sql")],
+        yaml_files: vec![project_dir.join("models/snap_schema.yml")],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    // 1 model + 2 snapshots = 3 nodes
+    assert_eq!(graph.node_count(), 3);
+
+    let snap_orders_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "snap_orders")
+        .unwrap();
+    let snap_no_rel_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "snap_no_relation")
+        .unwrap();
+    let model_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "stg_orders")
+        .unwrap();
+
+    assert_eq!(graph[snap_orders_idx].node_type, NodeType::Snapshot);
+    assert_eq!(
+        graph[snap_orders_idx].description.as_deref(),
+        Some("Orders snapshot")
+    );
+    assert_eq!(graph[snap_no_rel_idx].node_type, NodeType::Snapshot);
+
+    // snap_orders gets an edge from the upstream model via relation
+    assert_eq!(graph.edge_count(), 1);
+    assert!(graph.contains_edge(model_idx, snap_orders_idx));
+    // snap_no_relation has no edge
+    assert!(!graph.contains_edge(model_idx, snap_no_rel_idx));
+}
+
+#[test]
+fn test_build_graph_yaml_snapshot_sql_takes_precedence() {
+    // When both a SQL file and YAML definition exist for the same snapshot name,
+    // the SQL file registers the node; the YAML definition is skipped (no duplicate).
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let snap_dir = project_dir.join("snapshots");
+    fs::create_dir_all(&snap_dir).unwrap();
+    fs::write(
+        snap_dir.join("snap_orders.sql"),
+        "SELECT * FROM {{ ref('stg_orders') }}",
+    )
+    .unwrap();
+    fs::write(
+        snap_dir.join("snap_schema.yml"),
+        r#"
+version: 2
+snapshots:
+  - name: snap_orders
+    relation: ref('stg_orders')
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        model_sql_files: vec![project_dir.join("models/stg_orders.sql")],
+        snapshot_sql_files: vec![project_dir.join("snapshots/snap_orders.sql")],
+        yaml_files: vec![project_dir.join("snapshots/snap_schema.yml")],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    // 1 model + 1 snapshot = 2 nodes (no duplicate snapshot node)
+    let snap_count = graph
+        .node_indices()
+        .filter(|&i| graph[i].node_type == NodeType::Snapshot)
+        .count();
+    assert_eq!(snap_count, 1);
+
+    // Edge comes from SQL file's ref() call
+    assert_eq!(graph.edge_count(), 1);
+}
