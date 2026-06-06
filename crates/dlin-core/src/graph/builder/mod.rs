@@ -1019,15 +1019,21 @@ fn process_semantic_layer(
         let Some(&metric_idx) = gb.node_map.get(&metric_id) else {
             continue;
         };
-        // Link to semantic models via measure references (Simple, Conversion, …)
-        for measure_name in metric.measure_refs() {
-            if let Some(sem_name) = measure_to_sem.get(measure_name) {
+        // Link to semantic models via measure references (Simple, Conversion, …).
+        // Deduplicate: a conversion metric's base_measure and conversion_measure may
+        // both belong to the same semantic model, which would otherwise add the edge twice.
+        let sem_indices: std::collections::HashSet<_> = metric
+            .measure_refs()
+            .into_iter()
+            .filter_map(|measure_name| measure_to_sem.get(measure_name))
+            .filter_map(|sem_name| {
                 let sem_id = format!("semantic_model.{}", sem_name);
-                if let Some(&sem_idx) = gb.node_map.get(&sem_id) {
-                    gb.graph
-                        .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
-                }
-            }
+                gb.node_map.get(&sem_id).copied()
+            })
+            .collect();
+        for sem_idx in sem_indices {
+            gb.graph
+                .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
         }
         // Ratio/Derived/Conversion/Cumulative: link to upstream metrics
         for dep_metric_name in metric.metric_refs() {
