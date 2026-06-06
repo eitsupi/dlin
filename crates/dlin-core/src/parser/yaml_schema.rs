@@ -103,6 +103,15 @@ impl VersionSpec {
             };
         }
         if let Some(s) = self.v.as_str() {
+            // Normalize quoted numeric strings the same way as YAML numeric values
+            // so that v: "2" produces the same ID as v: 2 (both → "2").
+            if let Ok(f) = s.parse::<f64>() {
+                return if f.fract() == 0.0 {
+                    (f as i64).to_string()
+                } else {
+                    f.to_string()
+                };
+            }
             return s.to_string();
         }
         self.v.to_string()
@@ -159,10 +168,9 @@ impl ModelDefinition {
         let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
         let numerics: Vec<f64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
         if numerics.len() == strs.len() {
-            // Intentionally matches dbt-core's behavior: convert the max f64 back to
-            // a string via to_string() rather than returning the original v_str().
-            // dbt-core does the same (resolve_properties.rs: `n.to_string()` on f32 max).
-            // In practice v must be an integer, so this is always a no-op difference.
+            // Matches dbt-core: convert the max f64 back to a string via to_string().
+            // v_str() normalizes all numeric forms first, so this always returns the
+            // same string that was used to build the node unique_id.
             numerics.into_iter().reduce(f64::max).map(|n| n.to_string())
         } else {
             strs.into_iter().max()
@@ -443,6 +451,31 @@ models:
         let schema = parse_schema_file(yaml, None).unwrap();
         let m = &schema.models[0];
         assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_v_str_normalizes_quoted_numeric() {
+        // v: "2" (quoted string) must produce the same ID as v: 2 (YAML integer)
+        // so that v_str() and resolved_latest_version_str() stay consistent.
+        let quoted = VersionSpec {
+            v: serde_json::Value::String("2".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(quoted.v_str(), "2");
+
+        // Quoted integer larger than 1 also normalizes correctly
+        let quoted_large = VersionSpec {
+            v: serde_json::Value::String("10".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(quoted_large.v_str(), "10");
+
+        // Non-numeric string is returned as-is
+        let non_numeric = VersionSpec {
+            v: serde_json::Value::String("alpha".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(non_numeric.v_str(), "alpha");
     }
 
     #[test]

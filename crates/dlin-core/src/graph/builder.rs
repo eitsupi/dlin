@@ -297,7 +297,9 @@ fn process_yaml_files(
 
             // Collect versioned model maps
             let (stem_entries, alias) = build_version_maps(model_def);
-            stem_to_versioned.extend(stem_entries);
+            for (stem, entry) in stem_entries {
+                stem_to_versioned.entry(stem).or_insert(entry);
+            }
             if let Some((unversioned_id, latest_versioned_id)) = alias {
                 version_aliases.insert(unversioned_id, latest_versioned_id);
             }
@@ -2268,6 +2270,64 @@ models:
         assert!(
             !graph.contains_edge(src_idx, v2_idx),
             "source→v2 edge must not exist"
+        );
+    }
+
+    #[test]
+    fn test_stem_to_versioned_no_duplicate_overwrite() {
+        // When two YAML files define the same model, the first file's mapping
+        // must not be overwritten (entry().or_insert() semantics).
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().to_path_buf();
+
+        let models_dir = project_dir.join("models");
+        fs::create_dir_all(&models_dir).unwrap();
+
+        // Same versioned model declared in two YAML files
+        let yaml_a = r#"
+models:
+  - name: orders
+    versions:
+      - v: 1
+      - v: 2
+    latest_version: 2
+"#;
+        let yaml_b = r#"
+models:
+  - name: orders
+    versions:
+      - v: 1
+      - v: 2
+    latest_version: 1
+"#;
+        // SQL stubs so the model files exist
+        fs::write(models_dir.join("orders_v1.sql"), "SELECT 1").unwrap();
+        fs::write(models_dir.join("orders_v2.sql"), "SELECT 2").unwrap();
+
+        fs::write(models_dir.join("schema_a.yml"), yaml_a).unwrap();
+        fs::write(models_dir.join("schema_b.yml"), yaml_b).unwrap();
+
+        let files = DiscoveredFiles {
+            model_sql_files: vec![
+                project_dir.join("models/orders_v1.sql"),
+                project_dir.join("models/orders_v2.sql"),
+            ],
+            yaml_files: vec![
+                project_dir.join("models/schema_a.yml"),
+                project_dir.join("models/schema_b.yml"),
+            ],
+            ..Default::default()
+        };
+
+        // Should not panic and should produce a valid graph
+        let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+        // Two versioned nodes
+        assert_eq!(
+            graph
+                .node_indices()
+                .filter(|&i| matches!(graph[i].node_type, NodeType::Model))
+                .count(),
+            2
         );
     }
 }
