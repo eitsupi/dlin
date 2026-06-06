@@ -948,7 +948,7 @@ fn process_semantic_layer(
         }
         gb.add_node(NodeData {
             unique_id,
-            label: sm.name.clone(),
+            label: sm.label.as_deref().unwrap_or(&sm.name).to_string(),
             node_type: NodeType::SemanticModel,
             file_path: Some(yaml_path.clone()),
             description: sm.description.clone(),
@@ -968,9 +968,20 @@ fn process_semantic_layer(
             continue;
         };
         for measure in &sm.measures {
-            measure_to_sem
-                .entry(measure.name.clone())
-                .or_insert_with(|| sm.name.clone());
+            if let Some(existing) = measure_to_sem.get(&measure.name) {
+                if existing != &sm.name {
+                    crate::warn!(
+                        "measure '{}' defined in both semantic_model '{}' and '{}'; \
+                         linking metrics to '{}'",
+                        measure.name,
+                        existing,
+                        sm.name,
+                        existing
+                    );
+                }
+            } else {
+                measure_to_sem.insert(measure.name.clone(), sm.name.clone());
+            }
         }
         // Add edge: model_node → semantic_model_node
         if let Some(model_ref) = &sm.model
@@ -990,7 +1001,7 @@ fn process_semantic_layer(
         }
         gb.add_node(NodeData {
             unique_id,
-            label: metric.name.clone(),
+            label: metric.label.as_deref().unwrap_or(&metric.name).to_string(),
             node_type: NodeType::Metric,
             file_path: Some(yaml_path.clone()),
             description: metric.description.clone(),
@@ -1055,7 +1066,7 @@ fn process_semantic_layer(
         }
         let sq_idx = gb.add_node(NodeData {
             unique_id: sq_id.clone(),
-            label: sq.name.clone(),
+            label: sq.label.as_deref().unwrap_or(&sq.name).to_string(),
             node_type: NodeType::SavedQuery,
             file_path: Some(yaml_path.clone()),
             description: sq.description.clone(),
