@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn test_legend_within_viewbox() {
         // A one-layer graph would normally produce total_width=300, but the legend
-        // requires ~840px. The SVG must be at least as wide as the legend.
+        // requires at least legend_min_width(). The SVG must be at least as wide as the legend.
         let mut graph = LineageGraph::new();
         graph.add_node(make_node("model.a", "a", NodeType::Model));
         let output = render_to_string(&graph);
