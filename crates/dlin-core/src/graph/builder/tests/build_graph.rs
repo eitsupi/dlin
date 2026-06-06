@@ -799,3 +799,53 @@ snapshots:
     assert_eq!(graph.edge_count(), 1);
     assert!(graph.contains_edge(phantom_idx, snap_idx));
 }
+
+#[test]
+fn test_build_graph_yaml_only_snapshot_ref_forward_declaration() {
+    // A YAML-only snapshot whose relation: ref(...) points to another YAML-only
+    // snapshot declared *later* in the same file must resolve to snapshot.<name>,
+    // not create a phantom model.<name> node.
+    let (_tmp, project_dir) = setup_temp_project();
+
+    let models_dir = project_dir.join("models");
+    fs::write(
+        models_dir.join("snap_schema.yml"),
+        r#"
+version: 2
+snapshots:
+  - name: snap_downstream
+    description: References snap_upstream which is declared after this
+    relation: ref('snap_upstream')
+  - name: snap_upstream
+    description: The upstream snapshot
+"#,
+    )
+    .unwrap();
+
+    let files = DiscoveredFiles {
+        yaml_files: vec![project_dir.join("models/snap_schema.yml")],
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    // 2 snapshots, no phantom nodes
+    assert_eq!(graph.node_count(), 2);
+    assert!(
+        graph
+            .node_indices()
+            .all(|i| graph[i].node_type == NodeType::Snapshot)
+    );
+
+    let upstream_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "snap_upstream")
+        .unwrap();
+    let downstream_idx = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "snap_downstream")
+        .unwrap();
+
+    assert_eq!(graph.edge_count(), 1);
+    assert!(graph.contains_edge(upstream_idx, downstream_idx));
+}
