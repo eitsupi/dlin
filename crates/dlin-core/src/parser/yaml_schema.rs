@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
-/// Top-level schema YAML file (can contain sources, models, snapshots, exposures)
+/// Top-level schema YAML file (can contain sources, models, snapshots, exposures,
+/// semantic_models, metrics, saved_queries)
 #[derive(Debug, Deserialize, Default)]
 pub struct SchemaFile {
     #[serde(default)]
@@ -14,6 +15,15 @@ pub struct SchemaFile {
 
     #[serde(default)]
     pub exposures: Vec<ExposureDefinition>,
+
+    #[serde(default)]
+    pub semantic_models: Vec<SemanticModelDefinition>,
+
+    #[serde(default)]
+    pub metrics: Vec<MetricDefinition>,
+
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQueryDefinition>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -232,6 +242,137 @@ pub struct ExposureDefinition {
 pub struct ExposureOwner {
     pub name: Option<String>,
     pub email: Option<String>,
+}
+
+/// A semantic model definition (dbt Semantic Layer)
+#[derive(Debug, Deserialize, Clone)]
+pub struct SemanticModelDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The upstream dbt model as a ref() string, e.g. "ref('orders')"
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Measure names defined by this semantic model (used to resolve metric edges)
+    #[serde(default)]
+    pub measures: Vec<MeasureDefinition>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MeasureDefinition {
+    pub name: String,
+}
+
+/// A metric definition (dbt Semantic Layer)
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Raw type_params blob — used to extract measure/metric references
+    /// without needing to model the full metric type hierarchy.
+    #[serde(default)]
+    pub type_params: Option<serde_json::Value>,
+    /// Conversion metric: the base metric to track (top-level field, not inside type_params).
+    #[serde(default)]
+    pub base_metric: Option<serde_json::Value>,
+    /// Conversion metric: the conversion event metric (top-level field, not inside type_params).
+    #[serde(default)]
+    pub conversion_metric: Option<serde_json::Value>,
+    /// Cumulative metric: the input metric to accumulate (top-level field, not inside type_params).
+    #[serde(default)]
+    pub input_metric: Option<serde_json::Value>,
+}
+
+impl MetricDefinition {
+    fn name_ref(value: &serde_json::Value) -> Option<&str> {
+        value
+            .as_str()
+            .or_else(|| value.get("name").and_then(|n| n.as_str()))
+    }
+
+    /// Extract all measure names this metric references.
+    ///
+    /// Covers all metric types that reference measures directly:
+    /// - Simple: `type_params.measure`
+    /// - Conversion: `type_params.base_measure`, `type_params.conversion_measure`
+    pub fn measure_refs(&self) -> Vec<&str> {
+        let Some(p) = &self.type_params else {
+            return vec![];
+        };
+        let mut refs = vec![];
+        for field in &["measure", "base_measure", "conversion_measure"] {
+            if let Some(v) = p.get(field)
+                && let Some(name) = Self::name_ref(v)
+            {
+                refs.push(name);
+            }
+        }
+        refs
+    }
+
+    /// Extract metric names this metric depends on (Ratio/Derived/Conversion/Cumulative).
+    pub fn metric_refs(&self) -> Vec<&str> {
+        let mut refs = vec![];
+        // Ratio: numerator / denominator are inside type_params
+        if let Some(p) = &self.type_params {
+            for field in &["numerator", "denominator"] {
+                if let Some(v) = p.get(field)
+                    && let Some(name) = Self::name_ref(v)
+                {
+                    refs.push(name);
+                }
+            }
+            // Derived: input_metrics/metrics: [{name: ...}, ...] or strings
+            for field in &["input_metrics", "metrics"] {
+                if let Some(arr) = p.get(field).and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(name) = Self::name_ref(item) {
+                            refs.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        // Conversion: base_metric / conversion_metric are top-level metric fields
+        for v in [&self.base_metric, &self.conversion_metric]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = Self::name_ref(v) {
+                refs.push(name);
+            }
+        }
+        // Cumulative: input_metric is a top-level metric field
+        if let Some(v) = &self.input_metric
+            && let Some(name) = Self::name_ref(v)
+        {
+            refs.push(name);
+        }
+        refs
+    }
+}
+
+/// A saved query definition (dbt Semantic Layer)
+#[derive(Debug, Deserialize, Clone)]
+pub struct SavedQueryDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub query_params: Option<SavedQueryQueryParams>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SavedQueryQueryParams {
+    #[serde(default)]
+    pub metrics: Vec<String>,
 }
 
 /// Parse a schema YAML file
@@ -591,5 +732,251 @@ models:
         // Edge case: {"name": "something"} without test_name should return None
         let name_only = TestDefinition::Complex(serde_json::json!({"name": "something"}));
         assert_eq!(name_only.test_name(), None);
+    }
+
+    #[test]
+    fn test_parse_semantic_models() {
+        let yaml = r#"
+semantic_models:
+  - name: orders
+    description: Order semantic model
+    model: ref('orders')
+    measures:
+      - name: order_total
+      - name: order_count
+    dimensions:
+      - name: ordered_at
+        type: time
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.semantic_models.len(), 1);
+        let sm = &schema.semantic_models[0];
+        assert_eq!(sm.name, "orders");
+        assert_eq!(sm.description.as_deref(), Some("Order semantic model"));
+        assert_eq!(sm.model.as_deref(), Some("ref('orders')"));
+        assert_eq!(sm.measures.len(), 2);
+        assert_eq!(sm.measures[0].name, "order_total");
+        assert_eq!(sm.measures[1].name, "order_count");
+    }
+
+    #[test]
+    fn test_parse_metrics_simple() {
+        let yaml = r#"
+metrics:
+  - name: order_total
+    label: Order Total
+    description: Sum of orders
+    type: simple
+    type_params:
+      measure: order_total
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.metrics.len(), 1);
+        let m = &schema.metrics[0];
+        assert_eq!(m.name, "order_total");
+        assert_eq!(m.label.as_deref(), Some("Order Total"));
+        assert_eq!(m.measure_refs(), vec!["order_total"]);
+        assert!(m.metric_refs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_metrics_simple_with_object_measure() {
+        let yaml = r#"
+metrics:
+  - name: order_total
+    type: simple
+    type_params:
+      measure:
+        name: order_total
+        fill_nulls_with: 0
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert_eq!(m.measure_refs(), vec!["order_total"]);
+        assert!(m.metric_refs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_metrics_ratio() {
+        let yaml = r#"
+metrics:
+  - name: revenue_per_order
+    type: ratio
+    type_params:
+      numerator: revenue
+      denominator: orders
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(refs.contains(&"revenue"));
+        assert!(refs.contains(&"orders"));
+    }
+
+    #[test]
+    fn test_parse_metrics_derived_with_input_metrics_and_metrics() {
+        let yaml = r#"
+metrics:
+  - name: pct_change
+    type: derived
+    type_params:
+      input_metrics:
+        - name: revenue
+        - orders
+      metrics:
+        - name: margin
+        - customer_count
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(refs.contains(&"revenue"));
+        assert!(refs.contains(&"orders"));
+        assert!(refs.contains(&"margin"));
+        assert!(refs.contains(&"customer_count"));
+    }
+
+    #[test]
+    fn test_parse_metrics_conversion_measure() {
+        let yaml = r#"
+metrics:
+  - name: visitors_who_bought
+    type: conversion
+    type_params:
+      base_measure:
+        name: visitors
+      conversion_measure:
+        name: buyers
+      entity: user
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        let refs = m.measure_refs();
+        assert!(
+            refs.contains(&"visitors"),
+            "base_measure should be included"
+        );
+        assert!(
+            refs.contains(&"buyers"),
+            "conversion_measure should be included"
+        );
+        assert!(m.metric_refs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_metrics_conversion_metric() {
+        let yaml = r#"
+metrics:
+  - name: visit_to_purchase
+    type: conversion
+    base_metric: visits
+    conversion_metric:
+      name: purchases
+      filter: "{{ Dimension('user__country') }} = 'US'"
+    entity: user
+    window: 7 days
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(
+            refs.contains(&"visits"),
+            "base_metric (string) should be in metric_refs"
+        );
+        assert!(
+            refs.contains(&"purchases"),
+            "conversion_metric (object) should be in metric_refs"
+        );
+    }
+
+    #[test]
+    fn test_parse_metrics_cumulative_input_metric() {
+        let yaml = r#"
+metrics:
+  - name: cumulative_revenue
+    type: cumulative
+    input_metric: revenue
+    window: 1 month
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.metrics[0];
+        assert!(m.measure_refs().is_empty());
+        let refs = m.metric_refs();
+        assert!(
+            refs.contains(&"revenue"),
+            "input_metric should be in metric_refs"
+        );
+    }
+
+    #[test]
+    fn test_parse_saved_queries() {
+        let yaml = r#"
+saved_queries:
+  - name: order_metrics
+    description: Key order metrics
+    query_params:
+      metrics:
+        - orders
+        - order_total
+        - food_orders
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.saved_queries.len(), 1);
+        let sq = &schema.saved_queries[0];
+        assert_eq!(sq.name, "order_metrics");
+        assert_eq!(sq.description.as_deref(), Some("Key order metrics"));
+        let metrics = sq.query_params.as_ref().unwrap().metrics.as_slice();
+        assert_eq!(metrics, &["orders", "order_total", "food_orders"]);
+    }
+
+    #[test]
+    fn test_parse_full_semantic_layer_yaml() {
+        // Simulates a real jaffle-shop style YAML with all three semantic layer blocks
+        let yaml = r#"
+models:
+  - name: orders
+    description: Orders table
+
+semantic_models:
+  - name: orders
+    model: ref('orders')
+    measures:
+      - name: order_count
+      - name: order_total
+
+metrics:
+  - name: orders
+    type: simple
+    type_params:
+      measure: order_count
+  - name: order_total
+    type: simple
+    type_params:
+      measure: order_total
+
+saved_queries:
+  - name: order_kpis
+    query_params:
+      metrics:
+        - orders
+        - order_total
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.models.len(), 1);
+        assert_eq!(schema.semantic_models.len(), 1);
+        assert_eq!(schema.metrics.len(), 2);
+        assert_eq!(schema.saved_queries.len(), 1);
+        assert_eq!(
+            schema.saved_queries[0]
+                .query_params
+                .as_ref()
+                .unwrap()
+                .metrics
+                .len(),
+            2
+        );
     }
 }

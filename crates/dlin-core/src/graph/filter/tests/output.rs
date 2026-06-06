@@ -101,6 +101,9 @@ fn test_known_node_type_labels_matches_node_type_variants() {
         NodeType::Snapshot,
         NodeType::Test,
         NodeType::Exposure,
+        NodeType::SemanticModel,
+        NodeType::Metric,
+        NodeType::SavedQuery,
     ];
     for nt in &all_types {
         assert!(

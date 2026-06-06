@@ -646,22 +646,7 @@ fn transformation_color(t: Option<&TransformationType>) -> &'static str {
     }
 }
 
-/// Escape characters that are special inside DOT double-quoted strings.
-///
-/// DOT requires `\` and `"` to be backslash-escaped inside double-quoted
-/// strings. Without this, model or column names containing these characters
-/// would produce syntactically invalid DOT output.
-fn dot_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str(r"\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+use super::dot_escape;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

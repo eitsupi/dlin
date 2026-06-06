@@ -75,6 +75,26 @@ pub(crate) fn mermaid_escape(s: &str) -> String {
     out
 }
 
+/// Escape characters that are special inside DOT double-quoted strings.
+///
+/// DOT requires `\` and `"` to be backslash-escaped inside double-quoted
+/// strings. Without this, user-provided text (e.g. YAML `label:` values)
+/// containing these characters would produce syntactically invalid DOT output.
+pub(crate) fn dot_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Sanitize a string into a valid identifier for DOT/Mermaid (only `[A-Za-z0-9_]`).
 pub(crate) fn sanitize_id(s: &str) -> String {
     s.chars()
@@ -190,6 +210,33 @@ pub(crate) mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dot_escape_plain() {
+        assert_eq!(dot_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn test_dot_escape_double_quote() {
+        assert_eq!(dot_escape(r#"a "b" c"#), r#"a \"b\" c"#);
+    }
+
+    #[test]
+    fn test_dot_escape_backslash() {
+        assert_eq!(dot_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn test_dot_escape_both() {
+        assert_eq!(dot_escape(r#"a\"b"#), r#"a\\\"b"#);
+    }
+
+    #[test]
+    fn test_dot_escape_control_chars() {
+        assert_eq!(dot_escape("a\nb"), r"a\nb");
+        assert_eq!(dot_escape("a\rb"), r"a\rb");
+        assert_eq!(dot_escape("a\tb"), r"a\tb");
+    }
 
     #[test]
     fn test_sanitize_id_directory_with_hyphens() {

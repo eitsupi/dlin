@@ -24,6 +24,9 @@ pub struct NodeCounts {
     pub snapshot: usize,
     pub test: usize,
     pub exposure: usize,
+    pub semantic_model: usize,
+    pub metric: usize,
+    pub saved_query: usize,
     pub phantom: usize,
     pub total: usize,
 }
@@ -49,6 +52,9 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
     let mut snapshot = 0;
     let mut test = 0;
     let mut exposure = 0;
+    let mut semantic_model = 0;
+    let mut metric = 0;
+    let mut saved_query = 0;
     let mut phantom = 0;
 
     for idx in graph.node_indices() {
@@ -59,11 +65,23 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
             NodeType::Snapshot => snapshot += 1,
             NodeType::Test => test += 1,
             NodeType::Exposure => exposure += 1,
+            NodeType::SemanticModel => semantic_model += 1,
+            NodeType::Metric => metric += 1,
+            NodeType::SavedQuery => saved_query += 1,
             NodeType::Phantom => phantom += 1,
         }
     }
 
-    let total = model + source + seed + snapshot + test + exposure + phantom;
+    let total = model
+        + source
+        + seed
+        + snapshot
+        + test
+        + exposure
+        + semantic_model
+        + metric
+        + saved_query
+        + phantom;
     NodeCounts {
         model,
         source,
@@ -71,6 +89,9 @@ pub fn count_nodes(graph: &LineageGraph) -> NodeCounts {
         snapshot,
         test,
         exposure,
+        semantic_model,
+        metric,
+        saved_query,
         phantom,
         total,
     }
@@ -124,6 +145,9 @@ pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::R
             "snapshot" => report.node_counts.snapshot,
             "test" => report.node_counts.test,
             "exposure" => report.node_counts.exposure,
+            "semantic_model" => report.node_counts.semantic_model,
+            "metric" => report.node_counts.metric,
+            "saved_query" => report.node_counts.saved_query,
             _ => 0,
         };
         if count > 0 {
@@ -197,6 +221,9 @@ mod tests {
                 snapshot: 0,
                 test: 3,
                 exposure: 1,
+                semantic_model: 0,
+                metric: 0,
+                saved_query: 0,
                 phantom: 0,
                 total: 12,
             },

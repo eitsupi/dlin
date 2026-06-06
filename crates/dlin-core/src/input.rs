@@ -279,6 +279,15 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     for model in &schema.models {
         names.push(model.name.clone());
     }
+    for sm in &schema.semantic_models {
+        names.push(format!("semantic_model.{}", sm.name));
+    }
+    for metric in &schema.metrics {
+        names.push(format!("metric.{}", metric.name));
+    }
+    for sq in &schema.saved_queries {
+        names.push(format!("saved_query.{}", sq.name));
+    }
     names
 }
 
@@ -582,6 +591,45 @@ models:
 
         let names = expand_yaml_names(&yaml_path);
         assert_eq!(names, vec!["raw.orders", "stg_orders"]);
+    }
+
+    #[test]
+    fn test_expand_yaml_semantic_layer_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        let yaml_path = tmp.path().join("semantic.yml");
+        fs::write(
+            &yaml_path,
+            r#"
+semantic_models:
+  - name: orders_sm
+    model: ref('orders')
+metrics:
+  - name: revenue
+    type: simple
+    type_params:
+      measure: total_revenue
+saved_queries:
+  - name: revenue_by_month
+"#,
+        )
+        .unwrap();
+
+        let names = expand_yaml_names(&yaml_path);
+        assert!(
+            names.contains(&"semantic_model.orders_sm".to_string()),
+            "missing semantic_model.orders_sm in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"metric.revenue".to_string()),
+            "missing metric.revenue in {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"saved_query.revenue_by_month".to_string()),
+            "missing saved_query.revenue_by_month in {:?}",
+            names
+        );
     }
 
     #[test]

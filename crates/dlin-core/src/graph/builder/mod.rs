@@ -15,7 +15,8 @@ use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
 };
 use crate::parser::yaml_schema::{
-    ExposureDefinition, ModelDefinition, SchemaFile, SnapshotDefinition, parse_schema_file,
+    ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
+    SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
 };
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
@@ -230,21 +231,22 @@ struct YamlModelMeta {
 }
 
 /// Result of parsing YAML schema files.
-/// The third element pairs each `SchemaFile` with the relative path of the
-/// YAML file it was parsed from (used to populate `file_path` on test nodes).
-/// The fourth element maps SQL file stems to versioned unique IDs
-/// (e.g. `"my_model_v2"` → `"model.my_model.v2"`).
-/// The fifth element maps unversioned model IDs to the latest-version unique ID
-/// (e.g. `"model.my_model"` → `"model.my_model.v2"`), used as node_map aliases.
-/// The sixth element lists YAML-only snapshot definitions with their YAML file path.
-type YamlResult = (
-    HashMap<String, YamlModelMeta>,
-    Vec<ExposureDefinition>,
-    Vec<(SchemaFile, PathBuf)>,
-    HashMap<String, (String, String)>, // stem → (versioned_unique_id, base_model_name)
-    HashMap<String, String>,           // unversioned_id → latest_versioned_id
-    Vec<(SnapshotDefinition, PathBuf)>, // snapshot defs with their yaml file (relative) path
-);
+struct YamlParseResult {
+    model_meta: HashMap<String, YamlModelMeta>,
+    exposures: Vec<ExposureDefinition>,
+    /// Each SchemaFile paired with its YAML file relative path (for test node file_path).
+    schemas: Vec<(SchemaFile, PathBuf)>,
+    /// Maps SQL file stems to (versioned_unique_id, base_model_name).
+    stem_to_versioned: HashMap<String, (String, String)>,
+    /// Maps unversioned model IDs to the latest-version unique ID.
+    version_aliases: HashMap<String, String>,
+    /// YAML-only snapshot defs with their yaml file (relative) path.
+    snapshot_defs: Vec<(SnapshotDefinition, PathBuf)>,
+    /// Semantic layer defs paired with the relative YAML path they came from.
+    semantic_models: Vec<(SemanticModelDefinition, PathBuf)>,
+    metrics: Vec<(MetricDefinition, PathBuf)>,
+    saved_queries: Vec<(SavedQueryDefinition, PathBuf)>,
+}
 
 /// Build version maps for a single versioned model definition.
 /// Returns entries to add to `stem_to_versioned` and `version_aliases`.
@@ -277,13 +279,16 @@ fn process_yaml_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-) -> Result<YamlResult> {
+) -> Result<YamlParseResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
     let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
     let mut stem_to_versioned: HashMap<String, (String, String)> = HashMap::new();
     let mut version_aliases: HashMap<String, String> = HashMap::new();
     let mut snapshot_defs: Vec<(SnapshotDefinition, PathBuf)> = Vec::new();
+    let mut semantic_models: Vec<(SemanticModelDefinition, PathBuf)> = Vec::new();
+    let mut metrics: Vec<(MetricDefinition, PathBuf)> = Vec::new();
+    let mut saved_queries: Vec<(SavedQueryDefinition, PathBuf)> = Vec::new();
 
     // Sort YAML paths so that duplicate-test-ID suffixes (_2, _3, …) are
     // deterministic across filesystems/OSes.
@@ -329,24 +334,51 @@ fn process_yaml_files(
         }
 
         exposures.extend(schema.exposures.iter().cloned());
+
         let relative_path = yaml_path
             .strip_prefix(project_dir)
             .unwrap_or(yaml_path)
             .to_path_buf();
+
+        semantic_models.extend(
+            schema
+                .semantic_models
+                .iter()
+                .cloned()
+                .map(|sm| (sm, relative_path.clone())),
+        );
+        metrics.extend(
+            schema
+                .metrics
+                .iter()
+                .cloned()
+                .map(|m| (m, relative_path.clone())),
+        );
+        saved_queries.extend(
+            schema
+                .saved_queries
+                .iter()
+                .cloned()
+                .map(|sq| (sq, relative_path.clone())),
+        );
+
         for snap_def in &schema.snapshots {
             snapshot_defs.push((snap_def.clone(), relative_path.clone()));
         }
         schemas.push((schema, relative_path));
     }
 
-    Ok((
+    Ok(YamlParseResult {
         model_meta,
         exposures,
         schemas,
         stem_to_versioned,
         version_aliases,
         snapshot_defs,
-    ))
+        semantic_models,
+        metrics,
+        saved_queries,
+    })
 }
 
 /// Cached extraction result for a model SQL file (refs and sources).
@@ -889,6 +921,205 @@ fn process_yaml_snapshot_nodes(
     }
 }
 
+/// Build and connect semantic layer nodes (semantic_models, metrics, saved_queries).
+///
+/// Each definition is paired with the relative path of the YAML file it came from,
+/// which is stored on the node for debuggability (consistent with other YAML-derived nodes).
+///
+/// Pass ordering:
+///   1. Register all semantic_model nodes (enables forward references between metrics).
+///   2. Build measure → semantic_model_name map.
+///   3. Add model → semantic_model edges via `model: ref('...')`.
+///   4. Register all metric nodes.
+///   5. Add semantic_model → metric edges (Simple metrics via measure lookup).
+///   6. Add metric → metric edges (Ratio/Derived/Conversion/Cumulative).
+///   7. Register all saved_query nodes and add metric → saved_query edges.
+fn process_semantic_layer(
+    gb: &mut GraphBuilder,
+    semantic_models: &[(SemanticModelDefinition, PathBuf)],
+    metrics: &[(MetricDefinition, PathBuf)],
+    saved_queries: &[(SavedQueryDefinition, PathBuf)],
+) {
+    // Pass 1: register semantic_model nodes
+    for (sm, yaml_path) in semantic_models {
+        let unique_id = format!("semantic_model.{}", sm.name);
+        if gb.node_map.contains_key(&unique_id) {
+            continue;
+        }
+        gb.add_node(NodeData {
+            unique_id,
+            label: sm.label.as_deref().unwrap_or(&sm.name).to_string(),
+            node_type: NodeType::SemanticModel,
+            file_path: Some(yaml_path.clone()),
+            description: sm.description.clone(),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+    }
+
+    // Pass 2: build measure_name → semantic_model_name map and add model edges
+    let mut measure_to_sem: HashMap<String, String> = HashMap::new();
+    for (sm, yaml_path) in semantic_models {
+        let sem_id = format!("semantic_model.{}", sm.name);
+        let Some(&sem_idx) = gb.node_map.get(&sem_id) else {
+            continue;
+        };
+        for measure in &sm.measures {
+            if let Some(existing) = measure_to_sem.get(&measure.name) {
+                if existing != &sm.name {
+                    crate::warn!(
+                        "measure '{}' defined in both semantic_model '{}' and '{}'; \
+                         linking metrics to '{}'",
+                        measure.name,
+                        existing,
+                        sm.name,
+                        existing
+                    );
+                }
+            } else {
+                measure_to_sem.insert(measure.name.clone(), sm.name.clone());
+            }
+        }
+        // Add edge: model_node → semantic_model_node
+        if let Some(model_ref) = &sm.model
+            && let Some((model_name, version)) = parse_exposure_ref(model_ref)
+        {
+            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+            gb.graph
+                .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
+        }
+    }
+
+    // Pass 3: register metric nodes
+    for (metric, yaml_path) in metrics {
+        let unique_id = format!("metric.{}", metric.name);
+        if gb.node_map.contains_key(&unique_id) {
+            continue;
+        }
+        gb.add_node(NodeData {
+            unique_id,
+            label: metric.label.as_deref().unwrap_or(&metric.name).to_string(),
+            node_type: NodeType::Metric,
+            file_path: Some(yaml_path.clone()),
+            description: metric.description.clone(),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+    }
+
+    // Pass 4: add semantic_model → metric and metric → metric edges
+    for (metric, yaml_path) in metrics {
+        let metric_id = format!("metric.{}", metric.name);
+        let Some(&metric_idx) = gb.node_map.get(&metric_id) else {
+            continue;
+        };
+        // Link to semantic models via measure references (Simple, Conversion, …).
+        // Deduplicate: a conversion metric's base_measure and conversion_measure may
+        // both belong to the same semantic model, which would otherwise add the edge twice.
+        // Use seen-set + ordered iteration to keep insertion order deterministic.
+        let mut seen_sem_indices = std::collections::HashSet::new();
+        for measure_name in metric.measure_refs() {
+            let Some(sem_name) = measure_to_sem.get(measure_name) else {
+                continue;
+            };
+            let sem_id = format!("semantic_model.{}", sem_name);
+            let Some(&sem_idx) = gb.node_map.get(&sem_id) else {
+                continue;
+            };
+            if seen_sem_indices.insert(sem_idx) {
+                gb.graph
+                    .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+            }
+        }
+        // Ratio/Derived/Conversion/Cumulative: link to upstream metrics (deduplicated,
+        // preserving original order so graph insertion is deterministic)
+        let mut seen_metric_refs = std::collections::HashSet::new();
+        for dep_metric_name in metric.metric_refs() {
+            if !seen_metric_refs.insert(dep_metric_name) {
+                continue;
+            }
+            let dep_id = format!("metric.{}", dep_metric_name);
+            let dep_idx = if let Some(&idx) = gb.node_map.get(&dep_id) {
+                idx
+            } else {
+                crate::warn!(
+                    "unresolved metric ref '{}' from metric '{}'",
+                    dep_metric_name,
+                    metric.name
+                );
+                gb.add_node(NodeData {
+                    unique_id: dep_id,
+                    label: dep_metric_name.to_string(),
+                    node_type: NodeType::Phantom,
+                    file_path: Some(yaml_path.clone()),
+                    description: None,
+                    materialization: None,
+                    tags: vec![],
+                    columns: vec![],
+                    exposure: None,
+                    aliases: vec![],
+                })
+            };
+            gb.graph
+                .add_edge(dep_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+        }
+    }
+
+    // Pass 5: register saved_query nodes and add metric → saved_query edges
+    for (sq, yaml_path) in saved_queries {
+        let sq_id = format!("saved_query.{}", sq.name);
+        if gb.node_map.contains_key(&sq_id) {
+            continue;
+        }
+        let sq_idx = gb.add_node(NodeData {
+            unique_id: sq_id.clone(),
+            label: sq.label.as_deref().unwrap_or(&sq.name).to_string(),
+            node_type: NodeType::SavedQuery,
+            file_path: Some(yaml_path.clone()),
+            description: sq.description.clone(),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+        if let Some(qp) = &sq.query_params {
+            for metric_name in &qp.metrics {
+                let metric_dep_id = format!("metric.{}", metric_name);
+                let dep_idx = if let Some(&idx) = gb.node_map.get(&metric_dep_id) {
+                    idx
+                } else {
+                    crate::warn!(
+                        "unresolved metric ref '{}' in saved_query '{}'",
+                        metric_name,
+                        sq.name
+                    );
+                    gb.add_node(NodeData {
+                        unique_id: metric_dep_id,
+                        label: metric_name.clone(),
+                        node_type: NodeType::Phantom,
+                        file_path: Some(yaml_path.clone()),
+                        description: None,
+                        materialization: None,
+                        tags: vec![],
+                        columns: vec![],
+                        exposure: None,
+                        aliases: vec![],
+                    })
+                };
+                gb.graph
+                    .add_edge(dep_idx, sq_idx, EdgeData::direct(EdgeType::Ref));
+            }
+        }
+    }
+}
+
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
@@ -913,21 +1144,20 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let (model_meta, exposures, schemas, stem_to_versioned, version_aliases, snapshot_defs) =
-        process_yaml_files(&mut gb, files, project_dir)?;
+    let yaml_result = process_yaml_files(&mut gb, files, project_dir)?;
     let extraction_cache = process_model_files(
         &mut gb,
         files,
         project_dir,
-        &model_meta,
+        &yaml_result.model_meta,
         &macro_prefix,
         &mut disk_cache,
         vars,
-        &stem_to_versioned,
+        &yaml_result.stem_to_versioned,
     );
     // Register "model.name" aliases to the latest versioned node so that
     // unversioned ref('name') calls resolve correctly.
-    for (unversioned_id, latest_versioned_id) in &version_aliases {
+    for (unversioned_id, latest_versioned_id) in &yaml_result.version_aliases {
         gb.add_alias(unversioned_id.clone(), latest_versioned_id);
     }
     process_simple_nodes(
@@ -944,7 +1174,7 @@ pub fn build_graph(
         "snapshot",
         NodeType::Snapshot,
     );
-    process_yaml_snapshot_nodes(&mut gb, &snapshot_defs);
+    process_yaml_snapshot_nodes(&mut gb, &yaml_result.snapshot_defs);
     process_sql_edges(
         &mut gb,
         files,
@@ -952,10 +1182,16 @@ pub fn build_graph(
         &macro_prefix,
         &extraction_cache,
         vars,
-        &stem_to_versioned,
+        &yaml_result.stem_to_versioned,
     )?;
-    process_exposures(&mut gb, &exposures);
-    process_generic_tests(&mut gb, &schemas);
+    process_exposures(&mut gb, &yaml_result.exposures);
+    process_generic_tests(&mut gb, &yaml_result.schemas);
+    process_semantic_layer(
+        &mut gb,
+        &yaml_result.semantic_models,
+        &yaml_result.metrics,
+        &yaml_result.saved_queries,
+    );
 
     disk_cache.save();
 

@@ -10,6 +10,24 @@ const NODE_HEIGHT: f64 = 40.0;
 const LAYER_SPACING: f64 = 220.0;
 const NODE_SPACING: f64 = 60.0;
 const PADDING: f64 = 40.0;
+const LEGEND_ENTRY_SPACING: f64 = 110.0;
+
+const LEGEND_TYPES: &[(&str, &str)] = &[
+    ("model", "#4A90D9"),
+    ("source", "#27AE60"),
+    ("seed", "#F39C12"),
+    ("snapshot", "#8E44AD"),
+    ("test", "#1ABC9C"),
+    ("exposure", "#E74C3C"),
+    ("semantic_model", "#16A085"),
+    ("metric", "#D35400"),
+    ("saved_query", "#2980B9"),
+    ("phantom", "#BDC3C7"),
+];
+
+fn legend_min_width() -> f64 {
+    PADDING * 2.0 + LEGEND_TYPES.len() as f64 * LEGEND_ENTRY_SPACING
+}
 
 fn node_fill(node_type: NodeType) -> &'static str {
     match node_type {
@@ -19,6 +37,9 @@ fn node_fill(node_type: NodeType) -> &'static str {
         NodeType::Snapshot => "#8E44AD",
         NodeType::Test => "#1ABC9C",
         NodeType::Exposure => "#E74C3C",
+        NodeType::SemanticModel => "#16A085",
+        NodeType::Metric => "#D35400",
+        NodeType::SavedQuery => "#2980B9",
         NodeType::Phantom => "#BDC3C7",
     }
 }
@@ -68,11 +89,12 @@ pub fn render_svg_to_string(graph: &LineageGraph) -> String {
 pub fn render_svg_to_writer<W: Write>(graph: &LineageGraph, w: &mut W) -> std::io::Result<()> {
     let layout = sugiyama_layout(graph);
 
-    let total_width = if layout.num_layers == 0 {
+    let graph_width = if layout.num_layers == 0 {
         200.0
     } else {
         PADDING * 2.0 + layout.num_layers as f64 * LAYER_SPACING
     };
+    let total_width = graph_width.max(legend_min_width());
     let total_height = if layout.max_layer_width == 0 {
         100.0
     } else {
@@ -203,18 +225,8 @@ fn render_svg_nodes<W: Write>(
 
 fn render_svg_legend<W: Write>(w: &mut W, total_height: f64) -> std::io::Result<()> {
     let legend_y = total_height - 30.0;
-    let types: &[(&str, &str)] = &[
-        ("model", "#4A90D9"),
-        ("source", "#27AE60"),
-        ("seed", "#F39C12"),
-        ("snapshot", "#8E44AD"),
-        ("test", "#1ABC9C"),
-        ("exposure", "#E74C3C"),
-        ("phantom", "#BDC3C7"),
-    ];
-
     let mut x = PADDING;
-    for (label, color) in types {
+    for (label, color) in LEGEND_TYPES {
         writeln!(
             w,
             r#"  <rect x="{}" y="{}" width="12" height="12" rx="2" fill="{}" />"#,
@@ -227,7 +239,7 @@ fn render_svg_legend<W: Write>(w: &mut W, total_height: f64) -> std::io::Result<
             legend_y + 10.0,
             label
         )?;
-        x += 80.0;
+        x += LEGEND_ENTRY_SPACING;
     }
     Ok(())
 }
@@ -288,11 +300,14 @@ mod tests {
             NodeType::Snapshot,
             NodeType::Test,
             NodeType::Exposure,
+            NodeType::SemanticModel,
+            NodeType::Metric,
+            NodeType::SavedQuery,
             NodeType::Phantom,
         ];
         for nt in types {
             let fill = node_fill(nt);
-            assert!(fill.starts_with('#'));
+            assert!(fill.starts_with('#'), "node_fill failed for {:?}", nt);
         }
     }
 
@@ -310,6 +325,54 @@ mod tests {
         let output = render_to_string(&graph);
         assert!(output.contains(">model</text>"));
         assert!(output.contains(">source</text>"));
+    }
+
+    #[test]
+    fn test_legend_includes_semantic_layer_types() {
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let output = render_to_string(&graph);
+        assert!(
+            output.contains(">semantic_model</text>"),
+            "legend missing semantic_model"
+        );
+        assert!(output.contains(">metric</text>"), "legend missing metric");
+        assert!(
+            output.contains(">saved_query</text>"),
+            "legend missing saved_query"
+        );
+        assert!(
+            output.contains("#16A085"),
+            "legend missing semantic_model color"
+        );
+        assert!(output.contains("#D35400"), "legend missing metric color");
+        assert!(
+            output.contains("#2980B9"),
+            "legend missing saved_query color"
+        );
+    }
+
+    #[test]
+    fn test_legend_within_viewbox() {
+        // A one-layer graph would normally produce total_width=300, but the legend
+        // requires at least legend_min_width(). The SVG must be at least as wide as the legend.
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node("model.a", "a", NodeType::Model));
+        let output = render_to_string(&graph);
+
+        // Extract viewBox width: viewBox="0 0 {width} {height}"
+        let marker = "viewBox=\"0 0 ";
+        let start = output.find(marker).unwrap() + marker.len();
+        let width_str = output[start..].split(' ').next().unwrap();
+        let svg_width: f64 = width_str.parse().unwrap();
+
+        let expected_min = legend_min_width();
+        assert!(
+            svg_width >= expected_min,
+            "SVG width {} < legend min width {}",
+            svg_width,
+            expected_min
+        );
     }
 
     #[test]

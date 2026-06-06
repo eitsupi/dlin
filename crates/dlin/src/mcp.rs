@@ -231,7 +231,7 @@ fn tools() -> Vec<Value> {
                     "query": { "type": "string", "description": "Case-insensitive substring filter applied to node name, description, tags, and file path. Returns all nodes when omitted." },
                     "node_types": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure", "semantic_model", "metric", "saved_query"] },
                         "description": "Node types to include. Defaults to all types when omitted."
                     }
                 },
@@ -247,7 +247,7 @@ fn tools() -> Vec<Value> {
                     "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up." },
                     "node_types": {
                         "type": "array",
-                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure"] },
+                        "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure", "semantic_model", "metric", "saved_query"] },
                         "description": "Restrict results to these node types. Nodes whose type does not match are reported in not_found."
                     }
                 },
@@ -451,6 +451,9 @@ fn node_type_from_str(s: &str) -> Option<NodeType> {
         "snapshot" => Some(NodeType::Snapshot),
         "test" => Some(NodeType::Test),
         "exposure" => Some(NodeType::Exposure),
+        "semantic_model" => Some(NodeType::SemanticModel),
+        "metric" => Some(NodeType::Metric),
+        "saved_query" => Some(NodeType::SavedQuery),
         _ => None,
     }
 }
@@ -770,7 +773,8 @@ fn normalize_manifest_unique_id(name: &str) -> Option<String> {
                 None
             }
         }
-        "model" | "seed" | "snapshot" | "exposure" => {
+        "model" | "seed" | "snapshot" | "exposure" | "semantic_model" | "metric"
+        | "saved_query" => {
             parts.remove(1);
             Some(parts.join("."))
         }
@@ -1266,6 +1270,87 @@ mod tests {
     fn normalize_manifest_unique_id_supports_unhashed_test_id() {
         let normalized = normalize_manifest_unique_id("test.simple_project.my_test_name");
         assert_eq!(normalized, Some("test.my_test_name".to_string()));
+    }
+
+    #[test]
+    fn normalize_manifest_unique_id_supports_semantic_layer_types() {
+        assert_eq!(
+            normalize_manifest_unique_id("semantic_model.my_project.orders"),
+            Some("semantic_model.orders".to_string())
+        );
+        assert_eq!(
+            normalize_manifest_unique_id("metric.my_project.revenue"),
+            Some("metric.revenue".to_string())
+        );
+        assert_eq!(
+            normalize_manifest_unique_id("saved_query.my_project.revenue_metrics"),
+            Some("saved_query.revenue_metrics".to_string())
+        );
+    }
+
+    #[test]
+    fn find_nodes_resolves_semantic_layer_full_unique_ids() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("refs")
+            .join("jaffle-shop")
+            .join("target")
+            .join("manifest.json");
+        if !manifest_path.exists() {
+            eprintln!(
+                "SKIP: jaffle-shop fixture not found at {manifest_path:?}; run `make fixtures` to enable this test"
+            );
+            return;
+        }
+        let state = McpState::load(McpArgs {
+            project_dir: manifest_path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+            manifest_path: Some(manifest_path),
+            dialect: DialectType::Generic,
+        })
+        .unwrap();
+
+        let result = find_nodes(
+            &json!({
+                "names": [
+                    "semantic_model.jaffle_shop.supplies",
+                    "metric.jaffle_shop.revenue",
+                    "saved_query.jaffle_shop.revenue_metrics"
+                ]
+            }),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["not_found"],
+            json!([]),
+            "all full unique IDs should resolve"
+        );
+        assert_eq!(result["count"], 3);
+        let unique_ids: Vec<&str> = result["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["unique_id"].as_str().unwrap())
+            .collect();
+        assert!(
+            unique_ids.contains(&"semantic_model.supplies"),
+            "semantic_model node should resolve to correct type"
+        );
+        assert!(
+            unique_ids.contains(&"metric.revenue"),
+            "metric node should resolve to correct type"
+        );
+        assert!(
+            unique_ids.contains(&"saved_query.revenue_metrics"),
+            "saved_query node should resolve to correct type"
+        );
     }
 
     #[test]

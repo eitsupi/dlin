@@ -75,7 +75,9 @@ fn render_dot_to_writer<W: Write>(
             Some(n) => format!("{} (via {})", edge_type.label(), n),
             None => edge_type.label().to_string(),
         };
-        writeln!(w, r#"  "{src_id}" -> "{tgt_id}" [label="{label}"{style}];"#,)?;
+        let src = super::dot_escape(src_id);
+        let tgt = super::dot_escape(tgt_id);
+        writeln!(w, r#"  "{src}" -> "{tgt}" [label="{label}"{style}];"#,)?;
     }
 
     writeln!(w, "}}")?;
@@ -131,8 +133,9 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -
     for (dir, mut group_nodes) in groups {
         group_nodes.sort_by_key(|n| &n.unique_id);
         let cluster_id = super::sanitize_id(&dir);
+        let dir_label = super::dot_escape(&dir);
         writeln!(w, r#"  subgraph cluster_{cluster_id} {{"#)?;
-        writeln!(w, r#"    label="{dir}";"#)?;
+        writeln!(w, r#"    label="{dir_label}";"#)?;
         writeln!(w, "    style=rounded;")?;
         writeln!(w)?;
         for node in &group_nodes {
@@ -146,11 +149,11 @@ fn write_nodes_grouped_by_directory<W: Write>(w: &mut W, graph: &LineageGraph) -
 /// Write a single node definition
 fn write_node<W: Write>(w: &mut W, node: &NodeData, indent: &str) -> io::Result<()> {
     let (color, fontcolor) = node_colors(node.node_type);
-    let label = node.display_name();
+    let id = super::dot_escape(&node.unique_id);
+    let label = super::dot_escape(&node.display_name());
     writeln!(
         w,
-        r#"{indent}"{}" [label="{label}", fillcolor="{color}", fontcolor="{fontcolor}"];"#,
-        node.unique_id,
+        r#"{indent}"{id}" [label="{label}", fillcolor="{color}", fontcolor="{fontcolor}"];"#,
     )
 }
 
@@ -162,6 +165,9 @@ fn node_colors(node_type: NodeType) -> (&'static str, &'static str) {
         NodeType::Snapshot => ("#8E44AD", "white"),
         NodeType::Test => ("#1ABC9C", "white"),
         NodeType::Exposure => ("#E74C3C", "white"),
+        NodeType::SemanticModel => ("#16A085", "white"),
+        NodeType::Metric => ("#D35400", "white"),
+        NodeType::SavedQuery => ("#2980B9", "white"),
         NodeType::Phantom => ("#BDC3C7", "black"),
     }
 }
@@ -487,12 +493,55 @@ mod tests {
     }
 
     #[test]
+    fn test_directory_cluster_label_with_special_chars_is_escaped() {
+        // A file_path whose directory contains `"` must be escaped in the
+        // cluster label to produce syntactically valid DOT output.
+        let mut graph = LineageGraph::new();
+        graph.add_node(make_node_with_path(
+            "model.m",
+            "m",
+            NodeType::Model,
+            r#"models/my"dir/m.sql"#,
+        ));
+        let output = render_to_string_directory(&graph);
+        assert!(
+            output.contains(r#"label="models/my\"dir";"#),
+            "directory cluster label not escaped:\n{output}"
+        );
+    }
+
+    #[test]
     fn test_snapshot_direction_tb() {
         let graph = crate::render::test_helpers::make_sample_lineage_graph();
         let mut buf = Vec::new();
         render_dot_to_writer(&graph, &mut buf, None, Direction::TB).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn test_label_with_quotes_and_backslash_is_escaped() {
+        let mut graph = LineageGraph::new();
+        let mut node = make_node(
+            r#"metric.revenue_"net""#,
+            r#"Revenue "Net" (100%\off)"#,
+            NodeType::Metric,
+        );
+        // unique_id also contains a special char to exercise edge escaping
+        node.unique_id = r#"metric.revenue_"net""#.into();
+        graph.add_node(node);
+        let output = render_to_string(&graph);
+        // display_name() prepends the node-type prefix, e.g. "metric:Revenue ..."
+        // Both " and \ must be backslash-escaped inside the DOT attribute value.
+        assert!(
+            output.contains(r#"label="metric:Revenue \"Net\" (100%\\off)""#),
+            "label not escaped:\n{output}"
+        );
+        // The node identifier in DOT must also be escaped
+        assert!(
+            output.contains(r#""metric.revenue_\"net\"""#),
+            "unique_id not escaped:\n{output}"
+        );
     }
 
     #[test]

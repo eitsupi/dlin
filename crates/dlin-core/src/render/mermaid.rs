@@ -102,6 +102,9 @@ pub(crate) fn render_mermaid_to_writer<W: Write>(
         ("snapshot", "fill:#8E44AD,stroke:#333,color:#fff"),
         ("test", "fill:#1ABC9C,stroke:#333,color:#fff"),
         ("exposure", "fill:#E74C3C,stroke:#333,color:#fff"),
+        ("semantic_model", "fill:#16A085,stroke:#333,color:#fff"),
+        ("metric", "fill:#D35400,stroke:#333,color:#fff"),
+        ("saved_query", "fill:#2980B9,stroke:#333,color:#fff"),
         ("phantom", "fill:#BDC3C7,stroke:#333,color:#000"),
     ];
     for (name, style) in &class_defs {
@@ -210,6 +213,9 @@ fn node_shape(node: &NodeData, show_columns: bool) -> String {
         NodeType::Snapshot => format!(r#"{id}{{{{"{label}"}}}}"#),
         NodeType::Test => format!(r#"{id}{{"{label}"}}"#),
         NodeType::Exposure => format!(r#"{id}>"{label}"]"#),
+        NodeType::SemanticModel | NodeType::Metric | NodeType::SavedQuery => {
+            format!(r#"{id}["{label}"]"#)
+        }
         NodeType::Phantom => format!(r#"{id}("{label}")"#),
     }
 }

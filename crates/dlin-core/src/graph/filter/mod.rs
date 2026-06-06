@@ -421,8 +421,17 @@ fn build_subgraph_with_transitive(
 }
 
 /// Known node type labels for validation.
-pub const KNOWN_NODE_TYPE_LABELS: &[&str] =
-    &["model", "source", "seed", "snapshot", "test", "exposure"];
+pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &[
+    "model",
+    "source",
+    "seed",
+    "snapshot",
+    "test",
+    "exposure",
+    "semantic_model",
+    "metric",
+    "saved_query",
+];
 
 /// Resolve the effective node type names from CLI arguments.
 ///

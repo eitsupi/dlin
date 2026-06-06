@@ -30,6 +30,15 @@ pub struct Manifest {
     /// Exposures keyed by unique_id
     #[serde(default)]
     pub exposures: HashMap<String, ManifestExposure>,
+    /// Semantic models keyed by unique_id (dbt Semantic Layer)
+    #[serde(default)]
+    pub semantic_models: HashMap<String, ManifestSemanticModel>,
+    /// Metrics keyed by unique_id (dbt Semantic Layer)
+    #[serde(default)]
+    pub metrics: HashMap<String, ManifestMetric>,
+    /// Saved queries keyed by unique_id (dbt Semantic Layer)
+    #[serde(default)]
+    pub saved_queries: HashMap<String, ManifestSavedQuery>,
 }
 
 /// A node entry in the manifest (model, seed, snapshot, test, analysis)
@@ -113,6 +122,45 @@ pub struct ManifestExposure {
 pub struct ManifestExposureOwner {
     pub name: Option<String>,
     pub email: Option<String>,
+}
+
+/// A semantic model entry in the manifest (dbt Semantic Layer)
+#[derive(Debug, Deserialize)]
+pub struct ManifestSemanticModel {
+    pub unique_id: String,
+    pub name: String,
+    pub label: Option<String>,
+    #[serde(default)]
+    pub depends_on: DependsOn,
+    pub description: Option<String>,
+    pub path: Option<String>,
+    pub original_file_path: Option<String>,
+}
+
+/// A metric entry in the manifest (dbt Semantic Layer)
+#[derive(Debug, Deserialize)]
+pub struct ManifestMetric {
+    pub unique_id: String,
+    pub name: String,
+    pub label: Option<String>,
+    #[serde(default)]
+    pub depends_on: DependsOn,
+    pub description: Option<String>,
+    pub path: Option<String>,
+    pub original_file_path: Option<String>,
+}
+
+/// A saved query entry in the manifest (dbt Semantic Layer)
+#[derive(Debug, Deserialize)]
+pub struct ManifestSavedQuery {
+    pub unique_id: String,
+    pub name: String,
+    pub label: Option<String>,
+    #[serde(default)]
+    pub depends_on: DependsOn,
+    pub description: Option<String>,
+    pub path: Option<String>,
+    pub original_file_path: Option<String>,
 }
 
 /// depends_on section with a list of node unique_ids
@@ -236,6 +284,24 @@ impl Manifest {
                 paths.insert(p.clone());
             }
         }
+        for sm in self.semantic_models.values() {
+            let p = sm.original_file_path.as_ref().or(sm.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
+        for metric in self.metrics.values() {
+            let p = metric.original_file_path.as_ref().or(metric.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
+        for sq in self.saved_queries.values() {
+            let p = sq.original_file_path.as_ref().or(sq.path.as_ref());
+            if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
         paths
     }
 }
@@ -262,11 +328,21 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     // 3. Add exposure nodes
     add_exposure_nodes(&mut graph, &mut node_map, &manifest.exposures);
 
-    // 4. Add edges from depends_on for regular nodes
+    // 4. Add semantic layer nodes
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.semantic_models);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.metrics);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.saved_queries);
+
+    // 5. Add edges from depends_on for regular nodes
     add_node_edges(&mut graph, &node_map, &manifest.nodes);
 
-    // 5. Add edges from depends_on for exposures
+    // 6. Add edges from depends_on for exposures
     add_exposure_edges(&mut graph, &node_map, &manifest.exposures);
+
+    // 7. Add edges from depends_on for semantic layer nodes
+    add_depends_on_edges(&mut graph, &node_map, &manifest.semantic_models);
+    add_depends_on_edges(&mut graph, &node_map, &manifest.metrics);
+    add_depends_on_edges(&mut graph, &node_map, &manifest.saved_queries);
 
     Ok(graph)
 }
@@ -416,6 +492,140 @@ fn add_exposure_edges(
         for dep_id in &exposure.depends_on.nodes {
             if let Some(&dep_idx) = node_map.get(dep_id) {
                 graph.add_edge(dep_idx, current_idx, EdgeData::direct(EdgeType::Exposure));
+            }
+        }
+    }
+}
+
+trait HasSemanticLayerFields {
+    fn name(&self) -> &str;
+    fn label(&self) -> Option<&str>;
+    fn depends_on_nodes(&self) -> &[String];
+    fn description(&self) -> Option<&str>;
+    fn original_file_path(&self) -> Option<&str>;
+    fn path(&self) -> Option<&str>;
+    fn node_type(&self) -> NodeType;
+}
+
+impl HasSemanticLayerFields for ManifestSemanticModel {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+    fn depends_on_nodes(&self) -> &[String] {
+        &self.depends_on.nodes
+    }
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+    fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
+    }
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::SemanticModel
+    }
+}
+
+impl HasSemanticLayerFields for ManifestMetric {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+    fn depends_on_nodes(&self) -> &[String] {
+        &self.depends_on.nodes
+    }
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+    fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
+    }
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::Metric
+    }
+}
+
+impl HasSemanticLayerFields for ManifestSavedQuery {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+    fn depends_on_nodes(&self) -> &[String] {
+        &self.depends_on.nodes
+    }
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+    fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
+    }
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn node_type(&self) -> NodeType {
+        NodeType::SavedQuery
+    }
+}
+
+fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
+    graph: &mut LineageGraph,
+    node_map: &mut HashMap<String, NodeIndex>,
+    items: &HashMap<String, T>,
+) {
+    for (orig_id, item) in items {
+        let resource_type = item.node_type().label();
+        let simple_id = simplify_unique_id(orig_id, resource_type);
+        let idx = graph.add_node(NodeData {
+            unique_id: simple_id.clone(),
+            label: item.label().unwrap_or_else(|| item.name()).to_string(),
+            node_type: item.node_type(),
+            file_path: item
+                .original_file_path()
+                .or_else(|| item.path())
+                .map(|p| p.into()),
+            description: item
+                .description()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string),
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+        node_map.insert(orig_id.clone(), idx);
+        node_map.insert(simple_id, idx);
+    }
+}
+
+fn add_depends_on_edges<T: HasSemanticLayerFields>(
+    graph: &mut LineageGraph,
+    node_map: &HashMap<String, NodeIndex>,
+    items: &HashMap<String, T>,
+) {
+    for (orig_id, item) in items {
+        let Some(&current_idx) = node_map.get(orig_id) else {
+            continue;
+        };
+        for dep_id in item.depends_on_nodes() {
+            if let Some(&dep_idx) = node_map.get(dep_id) {
+                graph.add_edge(
+                    dep_idx,
+                    current_idx,
+                    EdgeData::direct(infer_edge_type(dep_id)),
+                );
             }
         }
     }
@@ -1470,6 +1680,145 @@ mod tests {
         assert!(
             !sql_contents.contains_key("model.customers"),
             "customers has no compiled_code in fixture"
+        );
+    }
+
+    #[test]
+    fn test_build_graph_with_semantic_layer_nodes() {
+        let manifest = Manifest {
+            nodes: HashMap::from([(
+                "model.proj.orders".to_string(),
+                ManifestNode {
+                    unique_id: "model.proj.orders".to_string(),
+                    name: "orders".to_string(),
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn::default(),
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                    columns: HashMap::new(),
+                    compiled_code: None,
+                    database: None,
+                    schema: None,
+                },
+            )]),
+            sources: HashMap::new(),
+            semantic_models: HashMap::from([(
+                "semantic_model.proj.orders".to_string(),
+                ManifestSemanticModel {
+                    unique_id: "semantic_model.proj.orders".to_string(),
+                    name: "orders".to_string(),
+                    label: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["model.proj.orders".to_string()],
+                    },
+                    description: Some("Orders semantic model".to_string()),
+                    path: None,
+                    original_file_path: None,
+                },
+            )]),
+            metrics: HashMap::from([(
+                "metric.proj.order_count".to_string(),
+                ManifestMetric {
+                    unique_id: "metric.proj.order_count".to_string(),
+                    name: "order_count".to_string(),
+                    label: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["semantic_model.proj.orders".to_string()],
+                    },
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                },
+            )]),
+            saved_queries: HashMap::from([(
+                "saved_query.proj.order_metrics".to_string(),
+                ManifestSavedQuery {
+                    unique_id: "saved_query.proj.order_metrics".to_string(),
+                    name: "order_metrics".to_string(),
+                    label: None,
+                    depends_on: DependsOn {
+                        nodes: vec!["metric.proj.order_count".to_string()],
+                    },
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
+
+        // 4 nodes: model + semantic_model + metric + saved_query
+        assert_eq!(graph.node_count(), 4);
+        // 3 edges: model->sem, sem->metric, metric->saved_query
+        assert_eq!(graph.edge_count(), 3);
+
+        let sem = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::SemanticModel)
+            .expect("Should have a semantic_model node");
+        assert_eq!(graph[sem].unique_id, "semantic_model.orders");
+        assert_eq!(graph[sem].label, "orders");
+        assert_eq!(
+            graph[sem].description.as_deref(),
+            Some("Orders semantic model")
+        );
+
+        let metric = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::Metric)
+            .expect("Should have a metric node");
+        assert_eq!(graph[metric].unique_id, "metric.order_count");
+
+        let sq = graph
+            .node_indices()
+            .find(|&i| graph[i].node_type == NodeType::SavedQuery)
+            .expect("Should have a saved_query node");
+        assert_eq!(graph[sq].unique_id, "saved_query.order_metrics");
+    }
+
+    #[test]
+    fn test_semantic_layer_nodes_from_jaffle_shop_manifest() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../refs/jaffle-shop/target/manifest.json");
+        if !manifest_path.exists() {
+            eprintln!(
+                "SKIP: jaffle-shop fixture not found at {manifest_path:?}; run `make fixtures` to enable this test"
+            );
+            return;
+        }
+        let graph = build_graph_from_manifest(&manifest_path).unwrap();
+
+        let sem_models: Vec<_> = graph
+            .node_indices()
+            .filter(|&i| graph[i].node_type == NodeType::SemanticModel)
+            .collect();
+        assert!(!sem_models.is_empty(), "Should have semantic_model nodes");
+
+        let metrics: Vec<_> = graph
+            .node_indices()
+            .filter(|&i| graph[i].node_type == NodeType::Metric)
+            .collect();
+        assert!(!metrics.is_empty(), "Should have metric nodes");
+
+        let saved_queries: Vec<_> = graph
+            .node_indices()
+            .filter(|&i| graph[i].node_type == NodeType::SavedQuery)
+            .collect();
+        assert!(!saved_queries.is_empty(), "Should have saved_query nodes");
+
+        // Each semantic_model should have at least one upstream edge (to a model)
+        let sem_idx = sem_models[0];
+        let has_upstream = graph
+            .edges_directed(sem_idx, petgraph::Direction::Incoming)
+            .next()
+            .is_some();
+        assert!(
+            has_upstream,
+            "semantic_model should have upstream model edge"
         );
     }
 }

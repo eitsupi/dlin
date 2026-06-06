@@ -1,5 +1,5 @@
 ---
-source: src/render/summary.rs
+source: crates/dlin-core/src/render/summary.rs
 expression: output
 ---
 {
@@ -12,6 +12,9 @@ expression: output
     "snapshot": 0,
     "test": 3,
     "exposure": 1,
+    "semantic_model": 0,
+    "metric": 0,
+    "saved_query": 0,
     "phantom": 0,
     "total": 12
   },
