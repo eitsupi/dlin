@@ -264,7 +264,7 @@ All selectors support glob patterns (*, **, ?, []):
         value_delimiter = ',',
         long_help = "\
 Filter output by node type (comma-separated). Default: all types.
-Available types: model, source, seed, snapshot, test, exposure.
+Available types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query.
 
 NOTE: In sql mode, generic tests are inferred from YAML declarations
 with dlin-specific IDs. Use --source manifest for exact dependency resolution."
@@ -1222,7 +1222,7 @@ Examples:
         value_delimiter = ',',
         long_help = "\
 Filter output by node type (comma-separated). Default: all types.
-Available types: model, source, seed, snapshot, test, exposure.
+Available types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query.
 
 NOTE: In sql mode, generic tests are inferred from YAML declarations
 with dlin-specific IDs. Use --source manifest for exact dependency resolution."

@@ -1022,18 +1022,20 @@ fn process_semantic_layer(
         // Link to semantic models via measure references (Simple, Conversion, …).
         // Deduplicate: a conversion metric's base_measure and conversion_measure may
         // both belong to the same semantic model, which would otherwise add the edge twice.
-        let sem_indices: std::collections::HashSet<_> = metric
-            .measure_refs()
-            .into_iter()
-            .filter_map(|measure_name| measure_to_sem.get(measure_name))
-            .filter_map(|sem_name| {
-                let sem_id = format!("semantic_model.{}", sem_name);
-                gb.node_map.get(&sem_id).copied()
-            })
-            .collect();
-        for sem_idx in sem_indices {
-            gb.graph
-                .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+        // Use seen-set + ordered iteration to keep insertion order deterministic.
+        let mut seen_sem_indices = std::collections::HashSet::new();
+        for measure_name in metric.measure_refs() {
+            let Some(sem_name) = measure_to_sem.get(measure_name) else {
+                continue;
+            };
+            let sem_id = format!("semantic_model.{}", sem_name);
+            let Some(&sem_idx) = gb.node_map.get(&sem_id) else {
+                continue;
+            };
+            if seen_sem_indices.insert(sem_idx) {
+                gb.graph
+                    .add_edge(sem_idx, metric_idx, EdgeData::direct(EdgeType::Ref));
+            }
         }
         // Ratio/Derived/Conversion/Cumulative: link to upstream metrics (deduplicated,
         // preserving original order so graph insertion is deterministic)
