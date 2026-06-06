@@ -319,7 +319,9 @@ fn process_yaml_files(
                 stem_to_versioned.entry(stem).or_insert(entry);
             }
             if let Some((unversioned_id, latest_versioned_id)) = alias {
-                version_aliases.insert(unversioned_id, latest_versioned_id);
+                version_aliases
+                    .entry(unversioned_id)
+                    .or_insert(latest_versioned_id);
             }
         }
 
@@ -2357,8 +2359,10 @@ models:
 
     #[test]
     fn test_stem_to_versioned_no_duplicate_overwrite() {
-        // When two YAML files define the same model, the first file's mapping
-        // must not be overwritten (entry().or_insert() semantics).
+        // When two YAML files define the same model, both stem_to_versioned and
+        // version_aliases must use first-file-wins (entry().or_insert()) semantics.
+        // Here schema_a (latest_version=2) is processed before schema_b (latest_version=1),
+        // so an unversioned ref('orders') must resolve to v2, not v1.
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().to_path_buf();
 
@@ -2385,6 +2389,12 @@ models:
         // SQL stubs so the model files exist
         fs::write(models_dir.join("orders_v1.sql"), "SELECT 1").unwrap();
         fs::write(models_dir.join("orders_v2.sql"), "SELECT 2").unwrap();
+        // Downstream uses unversioned ref
+        fs::write(
+            models_dir.join("downstream.sql"),
+            "SELECT * FROM {{ ref('orders') }}",
+        )
+        .unwrap();
 
         fs::write(models_dir.join("schema_a.yml"), yaml_a).unwrap();
         fs::write(models_dir.join("schema_b.yml"), yaml_b).unwrap();
@@ -2393,6 +2403,7 @@ models:
             model_sql_files: vec![
                 project_dir.join("models/orders_v1.sql"),
                 project_dir.join("models/orders_v2.sql"),
+                project_dir.join("models/downstream.sql"),
             ],
             yaml_files: vec![
                 project_dir.join("models/schema_a.yml"),
@@ -2401,15 +2412,36 @@ models:
             ..Default::default()
         };
 
-        // Should not panic and should produce a valid graph
         let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
-        // Two versioned nodes
+        // Two versioned nodes + downstream = 3
         assert_eq!(
             graph
                 .node_indices()
                 .filter(|&i| matches!(graph[i].node_type, NodeType::Model))
                 .count(),
-            2
+            3
+        );
+
+        // The unversioned ref('orders') must resolve to v2 (from schema_a, first file)
+        let downstream_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].label == "downstream")
+            .unwrap();
+        let v2_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.orders.v2")
+            .unwrap();
+        let v1_idx = graph
+            .node_indices()
+            .find(|&i| graph[i].unique_id == "model.orders.v1")
+            .unwrap();
+        assert!(
+            graph.contains_edge(v2_idx, downstream_idx),
+            "unversioned ref should resolve to v2 (first file's latest_version)"
+        );
+        assert!(
+            !graph.contains_edge(v1_idx, downstream_idx),
+            "ref must not resolve to v1 (second file's latest_version)"
         );
     }
 }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use minijinja::value::{Kwargs, from_args};
 use minijinja::{Environment, ErrorKind, Value};
 
-use super::sql::{RefCall, SourceCall, SqlConfig};
+use super::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
 /// All extracted information from rendering a dbt Jinja SQL template
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -123,9 +123,19 @@ fn render_with_incremental(
                 .peek::<i64>("version")
                 .ok()
                 .map(|n| n.to_string())
-                .or_else(|| kwargs.peek::<String>("version").ok())
+                .or_else(|| {
+                    kwargs
+                        .peek::<String>("version")
+                        .ok()
+                        .map(|s| normalize_version_str(&s))
+                })
                 .or_else(|| kwargs.peek::<i64>("v").ok().map(|n| n.to_string()))
-                .or_else(|| kwargs.peek::<String>("v").ok());
+                .or_else(|| {
+                    kwargs
+                        .peek::<String>("v")
+                        .ok()
+                        .map(|s| normalize_version_str(&s))
+                });
             match positional.len() {
                 1 => {
                     let name = positional[0].to_string();
@@ -540,6 +550,30 @@ mod tests {
         assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(ext.refs[0].name, "my_model");
         assert_eq!(ext.refs[0].version.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_ref_with_string_version_kwarg() {
+        // version='alpha' (non-numeric string) passes through unchanged
+        let sql = "SELECT * FROM {{ ref('my_model', version='alpha') }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs[0].version.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn test_ref_with_padded_integer_version_kwarg() {
+        // version='02' (string kwarg) must normalize to "2"
+        let sql = "SELECT * FROM {{ ref('my_model', version='02') }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_ref_with_decimal_version_kwarg() {
+        // version='2.0' (string kwarg) must normalize to "2"
+        let sql = "SELECT * FROM {{ ref('my_model', version='2.0') }}";
+        let ext = extract_via_jinja(sql, "").unwrap();
+        assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
     }
 
     #[test]

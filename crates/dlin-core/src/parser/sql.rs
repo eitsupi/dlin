@@ -145,6 +145,25 @@ fn strip_version_quotes(s: &str) -> String {
     }
 }
 
+/// Normalize a version string to a canonical integer form where possible.
+/// Matches the normalization applied to YAML version values so that
+/// ref(version='02') and ref(version='2.0') resolve to the same node as
+/// a YAML `v: 2` entry.
+/// - Integer strings (including zero-padded): "02" → "2"
+/// - Whole-number decimal strings: "2.0" → "2"
+/// - Non-numeric strings: returned as-is
+pub(super) fn normalize_version_str(s: &str) -> String {
+    if let Ok(n) = s.parse::<i64>() {
+        return n.to_string();
+    }
+    if let Ok(f) = s.parse::<f64>()
+        && f.fract() == 0.0
+    {
+        return (f as i64).to_string();
+    }
+    s.to_string()
+}
+
 /// Regex fallback for extracting ref() calls
 fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     let cleaned = strip_jinja_comments(sql);
@@ -156,14 +175,16 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
             refs.push(RefCall {
                 package: Some(pkg.as_str().to_string()),
                 name: name.as_str().to_string(),
-                version: cap.get(3).map(|v| strip_version_quotes(v.as_str())),
+                version: cap
+                    .get(3)
+                    .map(|v| normalize_version_str(&strip_version_quotes(v.as_str()))),
             });
         } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
             // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
             refs.push(RefCall {
                 package: None,
                 name: name.as_str().to_string(),
-                version: Some(strip_version_quotes(ver.as_str())),
+                version: Some(normalize_version_str(&strip_version_quotes(ver.as_str()))),
             });
         } else if let Some(name) = cap.get(6) {
             // Single-arg form: ref('name')
@@ -461,6 +482,22 @@ mod tests {
     fn test_ref_with_quoted_integer_version_kwarg() {
         // version='2' (quoted) must resolve identically to version=2 (bare integer)
         let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='2') }}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_ref_with_padded_integer_version_kwarg() {
+        // version='02' must normalize to "2" to match YAML v: 2 → version_value_to_str → "2"
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='02') }}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].version.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_ref_with_decimal_version_kwarg() {
+        // version='2.0' must normalize to "2" to match YAML v: 2 → version_value_to_str → "2"
+        let refs = extract_refs_regex("SELECT * FROM {{ ref('my_model', version='2.0') }}");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].version.as_deref(), Some("2"));
     }
