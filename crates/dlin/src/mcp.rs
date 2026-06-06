@@ -1289,6 +1289,65 @@ mod tests {
     }
 
     #[test]
+    fn find_nodes_resolves_semantic_layer_full_unique_ids() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("refs")
+            .join("jaffle-shop")
+            .join("target")
+            .join("manifest.json");
+        if !manifest_path.exists() {
+            return;
+        }
+        let state = McpState::load(McpArgs {
+            project_dir: manifest_path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+            manifest_path: Some(manifest_path),
+            dialect: DialectType::Generic,
+        })
+        .unwrap();
+
+        let result = find_nodes(
+            &json!({
+                "names": [
+                    "semantic_model.jaffle_shop.supplies",
+                    "metric.jaffle_shop.revenue",
+                    "saved_query.jaffle_shop.revenue_metrics"
+                ]
+            }),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["not_found"],
+            json!([]),
+            "all full unique IDs should resolve"
+        );
+        assert_eq!(result["count"], 3);
+        let names: Vec<&str> = result["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"supplies"),
+            "semantic_model node should resolve"
+        );
+        assert!(names.contains(&"revenue"), "metric node should resolve");
+        assert!(
+            names.contains(&"revenue_metrics"),
+            "saved_query node should resolve"
+        );
+    }
+
+    #[test]
     fn extract_column_not_found_name_parses_column_prefix() {
         assert_eq!(
             extract_column_not_found_name("column 'order_id': not found in model output"),
