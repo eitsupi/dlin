@@ -129,6 +129,7 @@ pub struct ManifestExposureOwner {
 pub struct ManifestSemanticModel {
     pub unique_id: String,
     pub name: String,
+    pub label: Option<String>,
     #[serde(default)]
     pub depends_on: DependsOn,
     pub description: Option<String>,
@@ -141,6 +142,7 @@ pub struct ManifestSemanticModel {
 pub struct ManifestMetric {
     pub unique_id: String,
     pub name: String,
+    pub label: Option<String>,
     #[serde(default)]
     pub depends_on: DependsOn,
     pub description: Option<String>,
@@ -153,6 +155,7 @@ pub struct ManifestMetric {
 pub struct ManifestSavedQuery {
     pub unique_id: String,
     pub name: String,
+    pub label: Option<String>,
     #[serde(default)]
     pub depends_on: DependsOn,
     pub description: Option<String>,
@@ -326,9 +329,9 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     add_exposure_nodes(&mut graph, &mut node_map, &manifest.exposures);
 
     // 4. Add semantic layer nodes
-    add_semantic_model_nodes(&mut graph, &mut node_map, &manifest.semantic_models);
-    add_metric_nodes(&mut graph, &mut node_map, &manifest.metrics);
-    add_saved_query_nodes(&mut graph, &mut node_map, &manifest.saved_queries);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.semantic_models);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.metrics);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.saved_queries);
 
     // 5. Add edges from depends_on for regular nodes
     add_node_edges(&mut graph, &node_map, &manifest.nodes);
@@ -506,6 +509,7 @@ fn add_exposure_edges(
 
 trait HasSemanticLayerFields {
     fn name(&self) -> &str;
+    fn label(&self) -> Option<&str>;
     fn depends_on_nodes(&self) -> &[String];
     fn description(&self) -> Option<&str>;
     fn original_file_path(&self) -> Option<&str>;
@@ -516,6 +520,9 @@ trait HasSemanticLayerFields {
 impl HasSemanticLayerFields for ManifestSemanticModel {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
     fn depends_on_nodes(&self) -> &[String] {
         &self.depends_on.nodes
@@ -538,6 +545,9 @@ impl HasSemanticLayerFields for ManifestMetric {
     fn name(&self) -> &str {
         &self.name
     }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
     fn depends_on_nodes(&self) -> &[String] {
         &self.depends_on.nodes
     }
@@ -558,6 +568,9 @@ impl HasSemanticLayerFields for ManifestMetric {
 impl HasSemanticLayerFields for ManifestSavedQuery {
     fn name(&self) -> &str {
         &self.name
+    }
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
     fn depends_on_nodes(&self) -> &[String] {
         &self.depends_on.nodes
@@ -586,7 +599,7 @@ fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
         let simple_id = simplify_unique_id(orig_id, resource_type);
         let idx = graph.add_node(NodeData {
             unique_id: simple_id.clone(),
-            label: item.name().to_string(),
+            label: item.label().unwrap_or_else(|| item.name()).to_string(),
             node_type: item.node_type(),
             file_path: item
                 .original_file_path()
@@ -605,30 +618,6 @@ fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
     }
-}
-
-fn add_semantic_model_nodes(
-    graph: &mut LineageGraph,
-    node_map: &mut HashMap<String, NodeIndex>,
-    items: &HashMap<String, ManifestSemanticModel>,
-) {
-    add_semantic_layer_nodes(graph, node_map, items);
-}
-
-fn add_metric_nodes(
-    graph: &mut LineageGraph,
-    node_map: &mut HashMap<String, NodeIndex>,
-    items: &HashMap<String, ManifestMetric>,
-) {
-    add_semantic_layer_nodes(graph, node_map, items);
-}
-
-fn add_saved_query_nodes(
-    graph: &mut LineageGraph,
-    node_map: &mut HashMap<String, NodeIndex>,
-    items: &HashMap<String, ManifestSavedQuery>,
-) {
-    add_semantic_layer_nodes(graph, node_map, items);
 }
 
 fn add_depends_on_edges<T: HasSemanticLayerFields>(
@@ -1727,6 +1716,7 @@ mod tests {
                 ManifestSemanticModel {
                     unique_id: "semantic_model.proj.orders".to_string(),
                     name: "orders".to_string(),
+                    label: None,
                     depends_on: DependsOn {
                         nodes: vec!["model.proj.orders".to_string()],
                     },
@@ -1740,6 +1730,7 @@ mod tests {
                 ManifestMetric {
                     unique_id: "metric.proj.order_count".to_string(),
                     name: "order_count".to_string(),
+                    label: None,
                     depends_on: DependsOn {
                         nodes: vec!["semantic_model.proj.orders".to_string()],
                     },
@@ -1753,6 +1744,7 @@ mod tests {
                 ManifestSavedQuery {
                     unique_id: "saved_query.proj.order_metrics".to_string(),
                     name: "order_metrics".to_string(),
+                    label: None,
                     depends_on: DependsOn {
                         nodes: vec!["metric.proj.order_count".to_string()],
                     },
@@ -1800,7 +1792,10 @@ mod tests {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../../refs/jaffle-shop/target/manifest.json");
         if !manifest_path.exists() {
-            return; // Skip if ref fixture not available
+            eprintln!(
+                "SKIP: jaffle-shop fixture not found at {manifest_path:?}; run `make fixtures` to enable this test"
+            );
+            return;
         }
         let graph = build_graph_from_manifest(&manifest_path).unwrap();
 

@@ -1298,6 +1298,9 @@ mod tests {
             .join("target")
             .join("manifest.json");
         if !manifest_path.exists() {
+            eprintln!(
+                "SKIP: jaffle-shop fixture not found at {manifest_path:?}; run `make fixtures` to enable this test"
+            );
             return;
         }
         let state = McpState::load(McpArgs {
