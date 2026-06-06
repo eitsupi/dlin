@@ -112,6 +112,7 @@ pub(crate) mod test_helpers {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         }
     }
 
@@ -131,6 +132,7 @@ pub(crate) mod test_helpers {
             tags: vec![],
             columns: columns.iter().map(|s| s.to_string()).collect(),
             exposure: None,
+            aliases: vec![],
         }
     }
 
@@ -150,6 +152,7 @@ pub(crate) mod test_helpers {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         }
     }
 

@@ -302,6 +302,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -440,6 +441,7 @@ mod tests {
             tags: vec!["daily".into(), "core".into()],
             columns: vec!["order_id".into(), "customer_id".into()],
             exposure: None,
+            aliases: vec![],
         });
         let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
@@ -458,6 +460,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         graph.add_node(make_node(
             "source.raw.orders",
@@ -501,6 +504,7 @@ mod tests {
             tags: vec!["daily".into(), "core".into()],
             columns: vec!["order_id".into(), "customer_id".into()],
             exposure: None,
+            aliases: vec![],
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -555,6 +559,7 @@ mod tests {
             tags: vec!["daily".into()],
             columns: vec!["id".into()],
             exposure: None,
+            aliases: vec![],
         });
         let fields = resolve_graph_fields(None, false).unwrap();
         let mut buf = Vec::new();
@@ -588,6 +593,7 @@ mod tests {
             tags: vec![],
             columns: vec![],
             exposure: None,
+            aliases: vec![],
         });
         let fields =
             resolve_graph_fields(Some(&["unique_id".into(), "description".into()]), false).unwrap();
@@ -617,6 +623,7 @@ mod tests {
             tags: vec!["daily".into()],
             columns: vec!["id".into()],
             exposure: None,
+            aliases: vec![],
         });
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
@@ -661,6 +668,7 @@ mod tests {
                     email: Some("data@example.com".into()),
                 }),
             }),
+            aliases: vec![],
         });
 
         let fields = resolve_graph_fields(None, true).unwrap();

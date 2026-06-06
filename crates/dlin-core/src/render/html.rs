@@ -302,6 +302,7 @@ mod tests {
             tags: vec!["nightly".into(), "finance".into()],
             columns: vec!["order_id".into(), "customer_id".into(), "amount".into()],
             exposure: None,
+            aliases: vec![],
         });
 
         let json = build_html_json(&graph);

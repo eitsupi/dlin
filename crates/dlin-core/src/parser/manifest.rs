@@ -168,9 +168,10 @@ fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
             }
         }
         _ => {
-            // model.project.name -> model.name
+            // model.project.name → model.name
+            // model.project.name.v1 → model.name.v1  (versioned models)
             if parts.len() >= 3 {
-                format!("{}.{}", parts[0], parts[parts.len() - 1])
+                format!("{}.{}", parts[0], parts[2..].join("."))
             } else {
                 unique_id.to_string()
             }
@@ -297,6 +298,7 @@ fn add_source_nodes(
                 cols
             },
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         // Also index by simplified id for edge resolution
@@ -331,6 +333,7 @@ fn add_regular_nodes(
                 cols
             },
             exposure: None,
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -364,6 +367,7 @@ fn add_exposure_nodes(
                     email: non_empty_string(&o.email),
                 }),
             }),
+            aliases: vec![],
         });
         node_map.insert(orig_id.clone(), idx);
         node_map.insert(simple_id, idx);
@@ -499,6 +503,24 @@ mod tests {
         assert_eq!(
             simplify_unique_id("test.not_null_orders_order_id", "test"),
             "test.not_null_orders_order_id"
+        );
+    }
+
+    #[test]
+    fn test_simplify_unique_id_versioned_model() {
+        // dbt versioned model unique_ids: model.project.name.v{N} → model.name.v{N}
+        assert_eq!(
+            simplify_unique_id("model.my_project.my_model.v1", "model"),
+            "model.my_model.v1"
+        );
+        assert_eq!(
+            simplify_unique_id("model.my_project.my_model.v2", "model"),
+            "model.my_model.v2"
+        );
+        // Unversioned model must still work
+        assert_eq!(
+            simplify_unique_id("model.my_project.stg_orders", "model"),
+            "model.stg_orders"
         );
     }
 

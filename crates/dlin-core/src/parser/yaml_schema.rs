@@ -80,6 +80,63 @@ impl TestDefinition {
     }
 }
 
+/// Normalize a serde_json::Value version field to a canonical string.
+/// JSON integer and float values are normalized without trailing fractional
+/// parts (2.0 → "2"). String values are parsed as i64 when possible (so
+/// "2" normalizes to "2" consistently with a YAML integer `2`); otherwise
+/// the string is returned as-is. This matches dbt-core's int-or-string
+/// version semantics and avoids f64 precision loss on large integers.
+fn version_value_to_str(v: &serde_json::Value) -> String {
+    if let Some(n) = v.as_i64() {
+        return n.to_string();
+    }
+    if let Some(n) = v.as_u64() {
+        return n.to_string();
+    }
+    if let Some(f) = v.as_f64() {
+        // Reached only for JSON floats; serde_json stores integers as i64/u64
+        // (handled above), so NaN/Inf cannot arise from valid JSON input.
+        // dbt-core uses f32 for version comparison, so f64 is already more
+        // precise than the reference implementation.
+        return if f.fract() == 0.0 {
+            (f as i64).to_string()
+        } else {
+            f.to_string()
+        };
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(n) = s.parse::<i64>() {
+            return n.to_string();
+        }
+        return s.to_string();
+    }
+    v.to_string()
+}
+
+/// A single entry in the `versions:` list of a model definition.
+#[derive(Debug, Deserialize, Clone)]
+pub struct VersionSpec {
+    pub v: serde_json::Value,
+    /// SQL file stem override (defaults to `{model_name}_v{v}`)
+    #[serde(default)]
+    pub defined_in: Option<String>,
+}
+
+impl VersionSpec {
+    /// Return the version number formatted as a string (e.g. `"1"`, `"2"`).
+    pub fn v_str(&self) -> String {
+        version_value_to_str(&self.v)
+    }
+
+    /// Return the SQL file stem for this version.
+    /// Falls back to `{model_name}_v{v}` when `defined_in` is not set.
+    pub fn sql_stem(&self, model_name: &str) -> String {
+        self.defined_in
+            .clone()
+            .unwrap_or_else(|| format!("{}_v{}", model_name, self.v_str()))
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelDefinition {
     pub name: String,
@@ -94,6 +151,39 @@ pub struct ModelDefinition {
     /// Model-level tests (not attached to a specific column)
     #[serde(default, alias = "data_tests")]
     pub tests: Vec<TestDefinition>,
+    /// Versioned model definitions (dbt v1.5+)
+    #[serde(default)]
+    pub versions: Vec<VersionSpec>,
+    /// Latest version used when ref('name') is called without version= kwarg
+    #[serde(default)]
+    pub latest_version: Option<serde_json::Value>,
+}
+
+impl ModelDefinition {
+    /// Return the version string used for `latest_version`, or derive it from
+    /// the `versions` list when `latest_version` is unset.
+    ///
+    /// Inference mirrors dbt-core: if all versions parse as numbers, use the
+    /// largest; otherwise fall back to the lexicographically greatest string.
+    pub fn resolved_latest_version_str(&self) -> Option<String> {
+        if let Some(lv) = &self.latest_version {
+            return Some(version_value_to_str(lv));
+        }
+        if self.versions.is_empty() {
+            return None;
+        }
+        let strs: Vec<String> = self.versions.iter().map(|v| v.v_str()).collect();
+        let numerics: Vec<i64> = strs.iter().filter_map(|s| s.parse().ok()).collect();
+        if numerics.len() == strs.len() {
+            // All versions are integers: use the largest. i64 is intentionally
+            // used here — dbt-core itself compares via f32 (losing precision
+            // above 2^24 ≈ 16.7M), so i64 is already far more robust than the
+            // reference implementation.
+            numerics.into_iter().max().map(|n| n.to_string())
+        } else {
+            strs.into_iter().max()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -315,6 +405,114 @@ sources:
         assert!(schema.sources.is_empty());
         assert!(schema.models.is_empty());
         assert!(schema.exposures.is_empty());
+    }
+
+    #[test]
+    fn test_parse_versioned_model() {
+        let yaml = r#"
+models:
+  - name: my_model
+    description: A versioned model
+    latest_version: 2
+    versions:
+      - v: 1
+      - v: 2
+        defined_in: my_model_custom
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        assert_eq!(schema.models.len(), 1);
+        let m = &schema.models[0];
+        assert_eq!(m.name, "my_model");
+        assert_eq!(m.versions.len(), 2);
+        assert_eq!(m.versions[0].v_str(), "1");
+        assert_eq!(m.versions[0].sql_stem("my_model"), "my_model_v1");
+        assert_eq!(m.versions[1].v_str(), "2");
+        assert_eq!(m.versions[1].sql_stem("my_model"), "my_model_custom");
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn test_versioned_model_infers_latest_from_max_v() {
+        let yaml = r#"
+models:
+  - name: orders
+    versions:
+      - v: 1
+      - v: 3
+      - v: 2
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_versioned_model_infers_latest_from_quoted_v() {
+        let yaml = r#"
+models:
+  - name: orders
+    versions:
+      - v: "1"
+      - v: "3"
+      - v: "2"
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert_eq!(m.resolved_latest_version_str().as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn test_v_str_normalizes_quoted_numeric() {
+        // v: "2" (quoted string) must produce the same ID as v: 2 (YAML integer)
+        // so that v_str() and resolved_latest_version_str() stay consistent.
+        let quoted = VersionSpec {
+            v: serde_json::Value::String("2".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(quoted.v_str(), "2");
+
+        // Quoted integer larger than 1 also normalizes correctly
+        let quoted_large = VersionSpec {
+            v: serde_json::Value::String("10".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(quoted_large.v_str(), "10");
+
+        // Non-numeric string is returned as-is
+        let non_numeric = VersionSpec {
+            v: serde_json::Value::String("alpha".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(non_numeric.v_str(), "alpha");
+
+        // Large integer string must not lose precision through f64 conversion
+        // (9007199254740993 = 2^53 + 1, which f64 cannot represent exactly)
+        let large_int = VersionSpec {
+            v: serde_json::Value::String("9007199254740993".to_string()),
+            defined_in: None,
+        };
+        assert_eq!(large_int.v_str(), "9007199254740993");
+
+        // JSON Number stored as u64 (> i64::MAX) must not lose precision via f64
+        let u64_num = VersionSpec {
+            v: serde_json::Value::Number(serde_json::Number::from(i64::MAX as u64 + 1)),
+            defined_in: None,
+        };
+        assert_eq!(u64_num.v_str(), (i64::MAX as u64 + 1).to_string());
+    }
+
+    #[test]
+    fn test_unversioned_model_has_empty_versions() {
+        let yaml = r#"
+models:
+  - name: plain_model
+    description: Not versioned
+"#;
+        let schema = parse_schema_file(yaml, None).unwrap();
+        let m = &schema.models[0];
+        assert!(m.versions.is_empty());
+        assert!(m.latest_version.is_none());
+        assert!(m.resolved_latest_version_str().is_none());
     }
 
     #[test]
