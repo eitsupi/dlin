@@ -1,5 +1,6 @@
 ---
-source: src/graph/filter.rs
+source: crates/dlin-core/src/graph/filter/tests/collapse.rs
+assertion_line: 1687
 expression: render_mermaid(&filtered)
 ---
 flowchart LR
