@@ -14,15 +14,27 @@ pub struct JinjaExtraction {
     pub config: SqlConfig,
 }
 
+/// Result of a Jinja-based extraction attempt.
+///
+/// minijinja evaluates function arguments before resolving the callee, so even
+/// when rendering fails (e.g. on an unknown macro) the refs/sources recorded up
+/// to the failure point are valid. `complete` tells the caller whether rendering
+/// finished; if not, the regex fallback should be merged in to cover anything
+/// after the failure point.
+#[derive(Debug, Clone, Default)]
+pub struct JinjaOutcome {
+    pub extraction: JinjaExtraction,
+    pub complete: bool,
+}
+
 /// Try to extract refs, sources, and config from SQL content using minijinja.
 /// Renders twice (with `is_incremental()` returning both false and true) and
 /// merges results to capture refs/sources from all conditional branches.
-/// Returns `None` if the template fails to render (caller should fall back to regex).
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files.
 /// It is prepended to the template so that custom macros containing
 /// ref()/source() calls are expanded and tracked.
-pub fn extract_via_jinja(sql: &str, macro_prefix: &str) -> Option<JinjaExtraction> {
+pub fn extract_via_jinja(sql: &str, macro_prefix: &str) -> JinjaOutcome {
     extract_via_jinja_with_vars(sql, macro_prefix, &HashMap::new())
 }
 
@@ -32,7 +44,7 @@ pub fn extract_via_jinja_with_vars(
     sql: &str,
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
-) -> Option<JinjaExtraction> {
+) -> JinjaOutcome {
     let template = if macro_prefix.is_empty() {
         sql.to_string()
     } else {
@@ -40,14 +52,16 @@ pub fn extract_via_jinja_with_vars(
     };
 
     // Render with is_incremental=false first (full-load path)
-    let mut result = render_with_incremental(&template, false, vars)?;
+    let (mut result, full_ok) = render_with_incremental(&template, false, vars);
 
     // Render again with is_incremental=true to capture incremental-only refs
-    if let Some(incr) = render_with_incremental(&template, true, vars) {
-        merge_extraction(&mut result, incr);
-    }
+    let (incr, incr_ok) = render_with_incremental(&template, true, vars);
+    merge_extraction(&mut result, incr);
 
-    Some(result)
+    JinjaOutcome {
+        extraction: result,
+        complete: full_ok && incr_ok,
+    }
 }
 
 /// Build a macro prefix string from individual macro sources, skipping
@@ -76,7 +90,7 @@ pub fn build_macro_prefix(macro_sources: &[String]) -> String {
 }
 
 /// Merge `other` into `base`, adding only deduplicated refs and sources
-fn merge_extraction(base: &mut JinjaExtraction, other: JinjaExtraction) {
+pub(super) fn merge_extraction(base: &mut JinjaExtraction, other: JinjaExtraction) {
     for r in other.refs {
         if !base.refs.contains(&r) {
             base.refs.push(r);
@@ -87,7 +101,14 @@ fn merge_extraction(base: &mut JinjaExtraction, other: JinjaExtraction) {
             base.sources.push(s);
         }
     }
-    // config from first render takes precedence
+    // config from the first render takes precedence; fill in fields the
+    // first render did not produce (e.g. it failed before reaching config())
+    if base.config.materialized.is_none() {
+        base.config.materialized = other.config.materialized;
+    }
+    if base.config.tags.is_empty() {
+        base.config.tags = other.config.tags;
+    }
 }
 
 /// Convert a `serde_json::Value` to a `minijinja::Value`.
@@ -96,11 +117,16 @@ fn json_to_minijinja(v: &serde_json::Value) -> Value {
 }
 
 /// Render a dbt SQL template once with the given `is_incremental` value.
+///
+/// Returns the extraction together with a flag indicating whether rendering
+/// succeeded. On failure the extraction still holds everything recorded up to
+/// the failure point (minijinja evaluates call arguments before resolving the
+/// callee, so e.g. `{{ unknown_macro(ref('a')) }}` records `ref('a')`).
 fn render_with_incremental(
     sql: &str,
     is_incremental: bool,
     vars: &HashMap<String, serde_json::Value>,
-) -> Option<JinjaExtraction> {
+) -> (JinjaExtraction, bool) {
     let extraction = Arc::new(Mutex::new(JinjaExtraction::default()));
 
     let mut env = Environment::new();
@@ -292,29 +318,45 @@ fn render_with_incremental(
     env.add_global("model", Value::from("__dbt_model__"));
     env.add_global("execute", Value::from(true));
 
-    let render_result = env.render_str(sql, ());
+    let render_ok = env.render_str(sql, ()).is_ok();
+    // Both env (function closures) and a render error (its debug info can
+    // capture referenced template values) hold clones of the extraction Arc,
+    // so they must be gone before unwrapping.
     drop(env);
 
-    match render_result {
-        Ok(_) => {
-            let result = Arc::try_unwrap(extraction)
-                .expect("single owner")
-                .into_inner()
-                .unwrap_or_else(|e| e.into_inner());
-            Some(result)
-        }
-        Err(_) => None,
-    }
+    let result = Arc::try_unwrap(extraction)
+        .expect("single owner")
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
+    (result, render_ok)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Extract and assert the template rendered to completion.
+    fn extract_complete(sql: &str, macro_prefix: &str) -> JinjaExtraction {
+        let outcome = extract_via_jinja(sql, macro_prefix);
+        assert!(outcome.complete, "expected template to render completely");
+        outcome.extraction
+    }
+
+    /// Like [`extract_complete`] with project vars.
+    fn extract_complete_with_vars(
+        sql: &str,
+        macro_prefix: &str,
+        vars: &HashMap<String, serde_json::Value>,
+    ) -> JinjaExtraction {
+        let outcome = extract_via_jinja_with_vars(sql, macro_prefix, vars);
+        assert!(outcome.complete, "expected template to render completely");
+        outcome.extraction
+    }
+
     #[test]
     fn test_simple_ref() {
         let sql = "SELECT * FROM {{ ref('stg_orders') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
         assert!(ext.refs[0].package.is_none());
@@ -323,7 +365,7 @@ mod tests {
     #[test]
     fn test_two_arg_ref() {
         let sql = "SELECT * FROM {{ ref('other_pkg', 'stg_orders') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("other_pkg"));
         assert_eq!(ext.refs[0].name, "stg_orders");
@@ -332,7 +374,7 @@ mod tests {
     #[test]
     fn test_source() {
         let sql = "SELECT * FROM {{ source('raw', 'orders') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.sources.len(), 1);
         assert_eq!(ext.sources[0].source_name, "raw");
         assert_eq!(ext.sources[0].table_name, "orders");
@@ -341,7 +383,7 @@ mod tests {
     #[test]
     fn test_config() {
         let sql = "{{ config(materialized='incremental', tags=['nightly', 'finance']) }}\nSELECT 1";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly", "finance"]);
     }
@@ -356,7 +398,7 @@ mod tests {
             FROM {{ ref('stg_orders') }} o
             JOIN {{ source('raw', 'customers') }} c ON o.customer_id = c.id
         "#;
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.sources.len(), 1);
         assert_eq!(ext.config.materialized.as_deref(), Some("table"));
@@ -368,7 +410,7 @@ mod tests {
             {% set orders = ref('stg_orders') %}
             SELECT * FROM {{ orders }}
         "#;
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
     }
@@ -383,7 +425,7 @@ mod tests {
             SELECT * FROM {{ ref('stg_full_orders') }}
             {% endif %}
         "#;
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         // Both branches are rendered: unique refs from each branch
         assert_eq!(ext.refs.len(), 2);
         assert!(ext.refs.iter().any(|r| r.name == "stg_full_orders"));
@@ -396,7 +438,7 @@ mod tests {
             {# This is a comment with {{ ref('should_be_ignored') }} #}
             SELECT * FROM {{ ref('actual_model') }}
         "#;
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "actual_model");
     }
@@ -404,7 +446,7 @@ mod tests {
     #[test]
     fn test_whitespace_control() {
         let sql = "SELECT * FROM {{- ref('stg_orders') -}}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "stg_orders");
     }
@@ -412,7 +454,7 @@ mod tests {
     #[test]
     fn test_var_with_default() {
         let sql = "SELECT * FROM {{ ref('model_' ~ var('suffix', 'default')) }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_default");
     }
@@ -425,7 +467,7 @@ mod tests {
             "suffix".to_string(),
             serde_json::Value::String("prod".to_string()),
         );
-        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        let ext = extract_complete_with_vars(sql, "", &vars);
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_prod");
     }
@@ -446,7 +488,7 @@ mod tests {
             "product_categories".to_string(),
             serde_json::json!(["electronics", "clothing"]),
         );
-        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        let ext = extract_complete_with_vars(sql, "", &vars);
         assert_eq!(ext.refs.len(), 2);
         assert!(ext.refs.iter().any(|r| r.name == "stg_electronics_summary"));
         assert!(ext.refs.iter().any(|r| r.name == "stg_clothing_summary"));
@@ -462,7 +504,7 @@ mod tests {
             "env".to_string(),
             serde_json::Value::String("staging".to_string()),
         );
-        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        let ext = extract_complete_with_vars(sql, "", &vars);
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_staging");
     }
@@ -476,7 +518,7 @@ mod tests {
             "other_var".to_string(),
             serde_json::Value::String("unused".to_string()),
         );
-        let ext = extract_via_jinja_with_vars(sql, "", &vars).unwrap();
+        let ext = extract_complete_with_vars(sql, "", &vars);
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "model_fallback");
     }
@@ -489,7 +531,7 @@ mod tests {
                 {% if not loop.last %}UNION ALL{% endif %}
             {% endfor %}
         "#;
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.sources.len(), 2);
         assert_eq!(ext.sources[0].source_name, "raw");
         assert_eq!(ext.sources[0].table_name, "orders");
@@ -500,7 +542,7 @@ mod tests {
     #[test]
     fn test_config_with_extra_kwargs() {
         let sql = "{{ config(materialized='incremental', schema='analytics', unique_key='id', tags=['nightly']) }}\nSELECT 1";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly"]);
     }
@@ -508,7 +550,7 @@ mod tests {
     #[test]
     fn test_ref_with_version_kwarg() {
         let sql = "SELECT * FROM {{ ref('my_model', version=2) }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "my_model");
         assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
@@ -518,7 +560,7 @@ mod tests {
     #[test]
     fn test_ref_with_version_kwarg_and_package() {
         let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', version=3) }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(ext.refs[0].name, "my_model");
@@ -528,14 +570,14 @@ mod tests {
     #[test]
     fn test_ref_without_version_has_none() {
         let sql = "SELECT * FROM {{ ref('my_model') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs[0].version, None);
     }
 
     #[test]
     fn test_ref_with_v_shorthand_kwarg() {
         let sql = "SELECT * FROM {{ ref('my_model', v=2) }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "my_model");
         assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
@@ -545,7 +587,7 @@ mod tests {
     #[test]
     fn test_ref_with_v_shorthand_kwarg_and_package() {
         let sql = "SELECT * FROM {{ ref('mypkg', 'my_model', v=3) }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(ext.refs[0].name, "my_model");
@@ -556,7 +598,7 @@ mod tests {
     fn test_ref_with_string_version_kwarg() {
         // version='alpha' (non-numeric string) passes through unchanged
         let sql = "SELECT * FROM {{ ref('my_model', version='alpha') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs[0].version.as_deref(), Some("alpha"));
     }
 
@@ -564,7 +606,7 @@ mod tests {
     fn test_ref_with_padded_integer_version_kwarg() {
         // version='02' (string kwarg) must normalize to "2"
         let sql = "SELECT * FROM {{ ref('my_model', version='02') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs[0].version.as_deref(), Some("2"));
     }
 
@@ -572,16 +614,27 @@ mod tests {
     fn test_ref_with_decimal_version_kwarg() {
         // version='2.0' stays as "2.0" — matching YAML `v: "2.0"` which also keeps "2.0".
         let sql = "SELECT * FROM {{ ref('my_model', version='2.0') }}";
-        let ext = extract_via_jinja(sql, "").unwrap();
+        let ext = extract_complete(sql, "");
         assert_eq!(ext.refs[0].version.as_deref(), Some("2.0"));
     }
 
     #[test]
-    fn test_returns_none_on_unsupported_template() {
-        // Unknown block tags should cause failure
+    fn test_incomplete_on_unsupported_template() {
+        // Unknown block tags should mark the outcome as incomplete
         let sql = "{% materialization table, default %} SELECT 1 {% endmaterialization %}";
         let result = extract_via_jinja(sql, "");
-        assert!(result.is_none());
+        assert!(!result.complete);
+    }
+
+    #[test]
+    fn test_partial_extraction_salvaged_on_render_failure() {
+        // minijinja evaluates call arguments before resolving the callee, so
+        // refs passed to an unknown macro are recorded before the failure.
+        let sql = "{{ shared_macros.import_cte([('orders', ref('int_orders'))]) }}";
+        let outcome = extract_via_jinja(sql, "");
+        assert!(!outcome.complete);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "int_orders");
     }
 
     #[test]
@@ -592,7 +645,7 @@ mod tests {
             {% endmacro %}
         "#;
         let sql = "SELECT * FROM ({{ my_cte() }})";
-        let ext = extract_via_jinja(sql, macro_src).unwrap();
+        let ext = extract_complete(sql, macro_src);
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "base_model");
     }
@@ -605,7 +658,7 @@ mod tests {
             {% endmacro %}
         "#;
         let sql = "SELECT * FROM ({{ raw_data('orders') }})";
-        let ext = extract_via_jinja(sql, macro_src).unwrap();
+        let ext = extract_complete(sql, macro_src);
         assert_eq!(ext.sources.len(), 1);
         assert_eq!(ext.sources[0].source_name, "raw");
         assert_eq!(ext.sources[0].table_name, "orders");
@@ -621,7 +674,7 @@ mod tests {
             {% endmacro %}
         "#;
         let sql = "{{ join_tables('day') }}";
-        let ext = extract_via_jinja(sql, macro_src).unwrap();
+        let ext = extract_complete(sql, macro_src);
         assert_eq!(ext.refs.len(), 2);
         assert!(ext.refs.iter().any(|r| r.name == "deals"));
         assert!(ext.refs.iter().any(|r| r.name == "providers"));
@@ -647,7 +700,7 @@ mod tests {
         ];
         let prefix = build_macro_prefix(&sources);
         let sql = "{{ get_orders() }} UNION ALL {{ get_customers() }}";
-        let ext = extract_via_jinja(sql, &prefix).unwrap();
+        let ext = extract_complete(sql, &prefix);
         assert_eq!(ext.refs.len(), 2);
         assert!(ext.refs.iter().any(|r| r.name == "stg_orders"));
         assert!(ext.refs.iter().any(|r| r.name == "stg_customers"));
@@ -693,7 +746,7 @@ mod tests {
         ];
         let prefix = build_macro_prefix(&sources);
         let sql = "SELECT * FROM {{ ref('orders') }}";
-        let ext = extract_via_jinja(sql, &prefix).unwrap();
+        let ext = extract_complete(sql, &prefix);
         assert_eq!(ext.refs.len(), 1);
         assert_eq!(ext.refs[0].name, "orders");
     }
