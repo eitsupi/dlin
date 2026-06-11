@@ -25,11 +25,24 @@ pub struct SourceCall {
 
 static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
 
+// Matches {% raw %}...{% endraw %} sections, whose content jinja treats as literal text
+static JINJA_RAW_BLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}").unwrap());
+
+// Matches a jinja expression block {{ ... }} or statement block {% ... %}.
+// ref()/source() calls are only meaningful inside these blocks; scanning
+// block contents (rather than the whole file) avoids false positives from
+// e.g. SQL comments that mention ref('...') outside any jinja block.
+static JINJA_BLOCK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}").unwrap());
+
 // Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
 // ref('name', version=N), ref('name', v=N), and the pkg variants.
 // Both `version=` and `v=` are accepted per dbt-core v2.
 // Version values may be bare integers (version=2) or quoted strings (version='alpha').
-// Handles {{ ref(...) }} and {{- ref(...) -}} whitespace control.
+// Applied to the contents of jinja blocks, so the call may appear anywhere a
+// jinja expression can: as the whole block, as a macro argument, inside
+// {% set %}, etc.
 // Capture groups:
 //   1, 2 → pkg, name      (two-positional-arg form)
 //   3    → version        (optional version=/v= kwarg in two-arg form)
@@ -38,8 +51,7 @@ static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*
 static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
-        \{\{-?\s*
-        ref\s*\(\s*
+        \bref\s*\(\s*
         (?:
             # Two-argument form: ref('pkg', 'name') or ref('pkg', 'name', version=N) or ref('pkg', 'name', v=N)
             (?:['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*(?:,\s*(?:version|v)\s*=\s*(-?\d+|'[^']*'|"[^"]*"))?)
@@ -50,22 +62,19 @@ static REF_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
             # Single-argument form: ref('name') or ref("name")
             ['"]([^'"]+)['"]
         )
-        \s*\)\s*
-        -?\}\}
+        \s*\)
     "#,
     )
     .unwrap()
 });
 
-// Matches source('src_name', 'table_name')
+// Matches source('src_name', 'table_name') anywhere inside a jinja block
 static SOURCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
-        \{\{-?\s*
-        source\s*\(\s*
+        \bsource\s*\(\s*
         ['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]
-        \s*\)\s*
-        -?\}\}
+        \s*\)
     "#,
     )
     .unwrap()
@@ -76,8 +85,17 @@ fn strip_jinja_comments(sql: &str) -> String {
     JINJA_COMMENT.replace_all(sql, "").to_string()
 }
 
+/// Strip jinja constructs whose content is never evaluated ({# #} comments
+/// and {% raw %} sections), leaving only renderable template text.
+fn strip_inert_jinja(sql: &str) -> String {
+    let no_comments = strip_jinja_comments(sql);
+    JINJA_RAW_BLOCK.replace_all(&no_comments, "").to_string()
+}
+
 /// Extract all refs, sources, and config from SQL content in a single pass.
-/// Tries minijinja rendering first; falls back to regex on failure.
+/// Tries minijinja rendering first; if rendering fails partway (e.g. on an
+/// unknown macro), keeps whatever it recorded up to the failure point and
+/// merges in the regex scan to cover the rest.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
@@ -91,18 +109,25 @@ pub fn extract_all_with_vars(
     macro_prefix: &str,
     vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> super::jinja::JinjaExtraction {
-    if let Some(ext) = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars) {
-        return ext;
+    let outcome = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars);
+    if outcome.complete {
+        return outcome.extraction;
     }
-    super::jinja::JinjaExtraction {
-        refs: extract_refs_regex(sql),
-        sources: extract_sources_regex(sql),
-        config: extract_config_regex(sql),
-    }
+    let mut ext = outcome.extraction;
+    super::jinja::merge_extraction(
+        &mut ext,
+        super::jinja::JinjaExtraction {
+            refs: extract_refs_regex(sql),
+            sources: extract_sources_regex(sql),
+            config: extract_config_regex(sql),
+        },
+    );
+    ext
 }
 
 /// Extract all ref() and source() calls from SQL content in a single pass.
-/// Tries minijinja rendering first; falls back to regex on failure.
+/// Tries minijinja rendering first; if rendering fails partway, merges the
+/// partial result with the regex scan.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
@@ -116,10 +141,8 @@ pub fn extract_refs_and_sources_with_vars(
     macro_prefix: &str,
     vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> (Vec<RefCall>, Vec<SourceCall>) {
-    if let Some(ext) = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars) {
-        return (ext.refs, ext.sources);
-    }
-    (extract_refs_regex(sql), extract_sources_regex(sql))
+    let ext = extract_all_with_vars(sql, macro_prefix, vars);
+    (ext.refs, ext.sources)
 }
 
 /// Extract all ref() calls from SQL content.
@@ -158,51 +181,59 @@ pub(super) fn normalize_version_str(s: &str) -> String {
     s.to_string()
 }
 
-/// Regex fallback for extracting ref() calls
+/// Regex fallback for extracting ref() calls.
+/// Scans inside every jinja block so calls nested in macro arguments or
+/// {% set %} statements are found too, mirroring dbt which registers a
+/// ref() wherever it is evaluated.
 fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
-    let cleaned = strip_jinja_comments(sql);
+    let cleaned = strip_inert_jinja(sql);
     let mut refs = Vec::new();
 
-    for cap in REF_PATTERN.captures_iter(&cleaned) {
-        if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
-            // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
-            refs.push(RefCall {
-                package: Some(pkg.as_str().to_string()),
-                name: name.as_str().to_string(),
-                version: cap
-                    .get(3)
-                    .map(|v| normalize_version_str(&strip_version_quotes(v.as_str()))),
-            });
-        } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
-            // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
-            refs.push(RefCall {
-                package: None,
-                name: name.as_str().to_string(),
-                version: Some(normalize_version_str(&strip_version_quotes(ver.as_str()))),
-            });
-        } else if let Some(name) = cap.get(6) {
-            // Single-arg form: ref('name')
-            refs.push(RefCall {
-                package: None,
-                name: name.as_str().to_string(),
-                version: None,
-            });
+    for block in JINJA_BLOCK.find_iter(&cleaned) {
+        for cap in REF_PATTERN.captures_iter(block.as_str()) {
+            if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
+                // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
+                refs.push(RefCall {
+                    package: Some(pkg.as_str().to_string()),
+                    name: name.as_str().to_string(),
+                    version: cap
+                        .get(3)
+                        .map(|v| normalize_version_str(&strip_version_quotes(v.as_str()))),
+                });
+            } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
+                // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
+                refs.push(RefCall {
+                    package: None,
+                    name: name.as_str().to_string(),
+                    version: Some(normalize_version_str(&strip_version_quotes(ver.as_str()))),
+                });
+            } else if let Some(name) = cap.get(6) {
+                // Single-arg form: ref('name')
+                refs.push(RefCall {
+                    package: None,
+                    name: name.as_str().to_string(),
+                    version: None,
+                });
+            }
         }
     }
 
     refs
 }
 
-/// Regex fallback for extracting source() calls
+/// Regex fallback for extracting source() calls.
+/// Scans inside every jinja block, like [`extract_refs_regex`].
 fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
-    let cleaned = strip_jinja_comments(sql);
+    let cleaned = strip_inert_jinja(sql);
     let mut sources = Vec::new();
 
-    for cap in SOURCE_PATTERN.captures_iter(&cleaned) {
-        sources.push(SourceCall {
-            source_name: cap[1].to_string(),
-            table_name: cap[2].to_string(),
-        });
+    for block in JINJA_BLOCK.find_iter(&cleaned) {
+        for cap in SOURCE_PATTERN.captures_iter(block.as_str()) {
+            sources.push(SourceCall {
+                source_name: cap[1].to_string(),
+                table_name: cap[2].to_string(),
+            });
+        }
     }
 
     sources
@@ -243,10 +274,7 @@ static TAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"['"]([^'"]+)[
 /// Extract config() block settings from SQL content.
 /// Tries minijinja rendering first; falls back to regex on failure.
 pub fn extract_config(sql: &str, macro_prefix: &str) -> SqlConfig {
-    if let Some(ext) = super::jinja::extract_via_jinja(sql, macro_prefix) {
-        return ext.config;
-    }
-    extract_config_regex(sql)
+    extract_all(sql, macro_prefix).config
 }
 
 /// Regex fallback for extracting config() settings
@@ -516,6 +544,147 @@ mod tests {
         assert_eq!(refs[0].package.as_deref(), Some("mypkg"));
         assert_eq!(refs[0].name, "my_model");
         assert_eq!(refs[0].version.as_deref(), Some("3"));
+    }
+
+    // ─── Refs nested inside macro arguments (GitHub issue: refs in macro args
+    //     were dropped when jinja rendering failed on an unknown macro) ───
+
+    #[test]
+    fn test_refs_in_namespaced_macro_args() {
+        // Package macros (pkg.macro_name) can't be resolved by minijinja, so
+        // rendering fails; refs in the arguments must still be extracted.
+        let sql = r#"
+            {{
+                shared_macros.import_cte([
+                    ('orders', ref('int_orders_aggregated')),
+                    ('returns', ref('int_returns_by_region')),
+                    ('customers', ref('dim_customers'))
+                ])
+            }}
+            SELECT * FROM orders
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 3);
+        assert!(refs.iter().any(|r| r.name == "int_orders_aggregated"));
+        assert!(refs.iter().any(|r| r.name == "int_returns_by_region"));
+        assert!(refs.iter().any(|r| r.name == "dim_customers"));
+    }
+
+    #[test]
+    fn test_refs_in_unknown_macro_args() {
+        let sql = "{{ import_cte(ref('upstream_model')) }}";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "upstream_model");
+    }
+
+    #[test]
+    fn test_ref_kwarg_in_package_macro() {
+        // dbt_utils is typically not part of the scanned project macros
+        let sql = "SELECT {{ dbt_utils.star(from=ref('stg_orders')) }} FROM x";
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "stg_orders");
+    }
+
+    #[test]
+    fn test_ref_after_failed_macro_call_still_extracted() {
+        // Rendering aborts at the unknown macro; refs after the failure point
+        // must be recovered by the regex merge.
+        let sql = r#"
+            SELECT * FROM {{ ref('before_model') }}
+            JOIN ({{ unknown_macro(ref('arg_model')) }}) USING (id)
+            JOIN {{ ref('after_model') }} USING (id)
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 3);
+        assert!(refs.iter().any(|r| r.name == "before_model"));
+        assert!(refs.iter().any(|r| r.name == "arg_model"));
+        assert!(refs.iter().any(|r| r.name == "after_model"));
+    }
+
+    #[test]
+    fn test_dynamic_ref_salvaged_from_partial_render() {
+        // ref(var(...)) cannot be found by regex; it must be salvaged from the
+        // partial jinja render even though the template fails later.
+        let sql = r#"
+            SELECT * FROM {{ ref('model_' ~ var('env', 'dev')) }}
+            JOIN ({{ unknown_macro() }}) USING (id)
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "model_dev");
+    }
+
+    #[test]
+    fn test_source_in_unknown_macro_args() {
+        let sql = "{{ import_cte(source('raw', 'orders')) }}";
+        let sources = extract_sources(sql);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_name, "raw");
+        assert_eq!(sources[0].table_name, "orders");
+    }
+
+    #[test]
+    fn test_defined_macro_called_with_namespace() {
+        // Even when the macro body is known, dbt allows calling it with the
+        // package namespace, which minijinja can't resolve.
+        let macro_src =
+            "{% macro import_cte(pairs) %}{% for p in pairs %}{{ p[1] }}{% endfor %}{% endmacro %}";
+        let sql = "{{ my_package.import_cte([('orders', ref('int_orders'))]) }}";
+        let (refs, _) = extract_refs_and_sources(sql, macro_src);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "int_orders");
+    }
+
+    #[test]
+    fn test_regex_fallback_ref_in_set_statement() {
+        let refs = extract_refs_regex("{% set orders = ref('stg_orders') %}");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "stg_orders");
+    }
+
+    #[test]
+    fn test_regex_fallback_ignores_ref_outside_jinja_blocks() {
+        // A bare ref('...') in a SQL comment is not a jinja call and must not
+        // create a dependency.
+        let sql = r#"
+            -- replaced ref('old_model') with a CTE
+            {{ unknown_macro() }}
+            SELECT 1
+        "#;
+        let refs = extract_refs_regex(sql);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_regex_fallback_ignores_raw_blocks() {
+        let sql = r#"
+            {% raw %}{{ ref('not_a_dep') }}{% endraw %}
+            {{ unknown_macro(ref('real_dep')) }}
+        "#;
+        let refs = extract_refs_regex(sql);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "real_dep");
+    }
+
+    #[test]
+    fn test_regex_fallback_no_partial_identifier_match() {
+        // myref(...) must not be mistaken for ref(...)
+        let refs = extract_refs_regex("{{ myref('not_a_model') }}");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_config_preserved_when_render_fails_later() {
+        let sql = r#"
+            {{ config(materialized='incremental', tags=['nightly']) }}
+            {{ unknown_macro(ref('a')) }}
+        "#;
+        let ext = extract_all(sql, "");
+        assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
+        assert_eq!(ext.config.tags, vec!["nightly"]);
+        assert_eq!(ext.refs.len(), 1);
     }
 
     // ─── Config extraction tests ───
