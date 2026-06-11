@@ -92,6 +92,37 @@ fn strip_inert_jinja(sql: &str) -> String {
     JINJA_RAW_BLOCK.replace_all(&no_comments, "").to_string()
 }
 
+/// Byte spans of quoted string literals inside a jinja block, honoring
+/// backslash escapes. Used to reject ref()/source() text that appears
+/// inside a string literal (e.g. a log message) rather than as a call.
+fn string_literal_spans(block: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut chars = block.char_indices();
+    while let Some((start, c)) = chars.next() {
+        if c != '\'' && c != '"' {
+            continue;
+        }
+        let mut end = block.len();
+        while let Some((i, d)) = chars.next() {
+            if d == '\\' {
+                chars.next();
+            } else if d == c {
+                end = i + d.len_utf8();
+                break;
+            }
+        }
+        spans.push((start, end));
+    }
+    spans
+}
+
+/// Whether `pos` falls strictly inside any of the given string literal spans
+/// (a call whose own arguments are quoted starts at the identifier, which is
+/// outside every span).
+fn inside_string_literal(spans: &[(usize, usize)], pos: usize) -> bool {
+    spans.iter().any(|&(start, end)| pos > start && pos < end)
+}
+
 /// Extract all refs, sources, and config from SQL content in a single pass.
 /// Tries minijinja rendering first; if rendering fails partway (e.g. on an
 /// unknown macro), keeps whatever it recorded up to the failure point and
@@ -190,7 +221,11 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     let mut refs = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
+        let literal_spans = string_literal_spans(block.as_str());
         for cap in REF_PATTERN.captures_iter(block.as_str()) {
+            if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
+                continue;
+            }
             if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
                 // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
                 refs.push(RefCall {
@@ -228,7 +263,11 @@ fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
     let mut sources = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
+        let literal_spans = string_literal_spans(block.as_str());
         for cap in SOURCE_PATTERN.captures_iter(block.as_str()) {
+            if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
+                continue;
+            }
             sources.push(SourceCall {
                 source_name: cap[1].to_string(),
                 table_name: cap[2].to_string(),
@@ -673,6 +712,36 @@ mod tests {
         // myref(...) must not be mistaken for ref(...)
         let refs = extract_refs_regex("{{ myref('not_a_model') }}");
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_regex_fallback_ignores_ref_text_in_string_literal() {
+        // ref(...) appearing inside a string literal is text, not a call
+        let refs = extract_refs_regex(r#"{{ unknown_macro("ref('not_a_dep')") }}"#);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_regex_fallback_ignores_source_text_in_string_literal() {
+        let sources = extract_sources_regex(r#"{% set msg = "source('raw', 'orders')" %}"#);
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_regex_fallback_real_ref_next_to_string_literal_ref_text() {
+        let refs =
+            extract_refs_regex(r#"{{ unknown_macro('label', "ref('fake')", ref('real_model')) }}"#);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "real_model");
+    }
+
+    #[test]
+    fn test_regex_fallback_handles_escaped_quotes_in_strings() {
+        // The escaped quote must not desynchronize string span tracking
+        let refs =
+            extract_refs_regex(r#"{{ unknown_macro("a \"quoted\" ref('fake')") + ref('real') }}"#);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "real");
     }
 
     #[test]
