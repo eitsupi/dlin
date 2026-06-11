@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.3] - 2026-06-11
+
+### Bug Fixes
+
+- Detect `ref()` calls nested inside Jinja macro arguments (#92)
+
 ## [0.2.2] - 2026-06-06
 
 ### Features
