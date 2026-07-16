@@ -24,7 +24,7 @@ indexmap = "2"
 minijinja = "2"
 rayon = "1"
 globset = "0.4"
-polyglot-sql = { version = "0.4.4", default-features = false, features = ["all-dialects", "semantic"] }
+polyglot-sql = { version = "0.5.14", default-features = false, features = ["all-dialects", "semantic"] }
 path-slash = "0.2.1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
