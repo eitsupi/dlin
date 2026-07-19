@@ -11,6 +11,7 @@ mod cross_model;
 mod impact;
 mod schema;
 mod single_model;
+mod star_guard;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -24,7 +25,8 @@ pub use impact::{
     compute_column_impact_with_manifest_path,
 };
 use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash, infer_output_columns};
-use single_model::{has_unresolved_stars, prepare_lineage_context_with_expr, run_column_lineage};
+use single_model::{prepare_lineage_context_with_expr, run_column_lineage};
+use star_guard::has_unresolved_stars;
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
