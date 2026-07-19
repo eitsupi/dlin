@@ -1706,3 +1706,170 @@ fn test_bigquery_unnest_virtual_source_excluded() {
         }
     }
 }
+
+fn assert_exact_column_outcomes(
+    result: &ModelColumnLineage,
+    expected_columns: &[&str],
+    expected_errors: &[&str],
+) {
+    let mut actual_columns: Vec<_> = result
+        .columns
+        .iter()
+        .map(|column| column.column.as_str())
+        .collect();
+    actual_columns.sort_unstable();
+    let mut expected_columns = expected_columns.to_vec();
+    expected_columns.sort_unstable();
+    assert_eq!(actual_columns, expected_columns);
+
+    let mut actual_errors: Vec<_> = result
+        .errors
+        .iter()
+        .map(|error| {
+            assert_eq!(error.kind, ColumnLineageErrorKind::ColumnNotFound);
+            error
+                .what
+                .strip_prefix("column '")
+                .and_then(|rest| rest.split_once("':"))
+                .map(|(name, _)| name)
+                .expect("column errors should identify their column")
+        })
+        .collect();
+    actual_errors.sort_unstable();
+    let mut expected_errors = expected_errors.to_vec();
+    expected_errors.sort_unstable();
+    assert_eq!(actual_errors, expected_errors);
+}
+
+#[test]
+fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("SELECT order_id, * FROM some_external_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_annotated_star_and_explicit_projection_are_classified_independently() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.depends_on.nodes.clear();
+    node.compiled_code = Some(
+            "SELECT\n  -- unresolved passthrough\n  some_external_table.*,\n  -- explicit output\n  order_id\nFROM some_external_table"
+                .to_string(),
+        );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_known_manifest_source_succeeds_alongside_external_join_star() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+            "SELECT o.id AS order_id, e.*\nFROM raw.orders o\nJOIN some_external_table e ON o.id = e.id"
+                .to_string(),
+        );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_set_operations_guard_unresolved_star_branches() {
+    for operator in ["UNION", "INTERSECT", "EXCEPT"] {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = ["id", "explicit_col"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    ManifestColumn {
+                        name: name.to_string(),
+                    },
+                )
+            })
+            .collect();
+
+        let set_operation = format!(
+            "SELECT id, 1 AS explicit_col FROM raw.orders {operator} SELECT id, * FROM some_external_table"
+        );
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(set_operation.clone());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+
+        for wrapper in [
+            format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
+            format!("SELECT id, explicit_col FROM ({set_operation}) combined"),
+        ] {
+            manifest
+                .nodes
+                .get_mut("model.proj.stg_orders")
+                .unwrap()
+                .compiled_code = Some(wrapper);
+
+            let result = compute_column_lineage(
+                &manifest,
+                "stg_orders",
+                DialectType::Generic,
+                &mut ColumnLineageCache::disabled(),
+            );
+
+            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+        }
+    }
+}

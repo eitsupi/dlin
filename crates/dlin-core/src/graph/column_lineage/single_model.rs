@@ -66,18 +66,129 @@ pub(super) fn run_column_lineage(
     };
 
     match lineage_result {
-        Ok(node) => Ok(extract_leaf_sources(&node)),
+        Ok(node) => {
+            if lineage_depends_on_unresolved_star(&node, true, false, Some(ctx.dialect)) {
+                Err(format!("Cannot find column '{}' in query", col_name))
+            } else {
+                Ok(extract_leaf_sources(&node))
+            }
+        }
         Err(e) => Err(format_lineage_error(&e)),
+    }
+}
+
+/// Return whether lineage for this column relied on polyglot-sql's schema-less
+/// star passthrough. A star elsewhere in the query is not sufficient: explicit
+/// output expressions must remain traceable independently.
+fn lineage_depends_on_unresolved_star(
+    node: &polyglot_sql::lineage::LineageNode,
+    is_root: bool,
+    is_set_operation_branch: bool,
+    dialect: Option<DialectType>,
+) -> bool {
+    let column_name = node
+        .reference_node_name
+        .rsplit_once('.')
+        .map_or(node.name.as_str(), |(_, name)| name);
+
+    let source_has_star = has_unresolved_stars(&node.source);
+    let source_has_explicit_column = select_has_explicit_output(&node.source, column_name, dialect);
+
+    if is_root {
+        if matches!(&node.expression, polyglot_sql::Expression::Column(c) if c.table.is_some())
+            && source_has_star
+            && !source_has_explicit_column
+        {
+            return true;
+        }
+    } else if (is_set_operation_branch
+        || matches!(
+            &node.source,
+            polyglot_sql::Expression::Select(_)
+                | polyglot_sql::Expression::Union(_)
+                | polyglot_sql::Expression::Intersect(_)
+                | polyglot_sql::Expression::Except(_)
+                | polyglot_sql::Expression::Subquery(_)
+                | polyglot_sql::Expression::Cte(_)
+                | polyglot_sql::Expression::Paren(_)
+        ))
+        && source_has_star
+        && !source_has_explicit_column
+    {
+        return true;
+    }
+
+    let is_set_operation = matches!(
+        &node.source,
+        polyglot_sql::Expression::Union(_)
+            | polyglot_sql::Expression::Intersect(_)
+            | polyglot_sql::Expression::Except(_)
+    );
+    node.downstream.iter().any(|child| {
+        lineage_depends_on_unresolved_star(
+            child,
+            false,
+            is_set_operation_branch || is_set_operation,
+            dialect,
+        )
+    })
+}
+
+fn select_has_explicit_output(
+    expr: &polyglot_sql::Expression,
+    column_name: &str,
+    dialect: Option<DialectType>,
+) -> bool {
+    let normalized_column_name = polyglot_sql::normalize_name(column_name, dialect, false, true);
+
+    match expr {
+        polyglot_sql::Expression::Annotated(annotated) => {
+            select_has_explicit_output(&annotated.this, column_name, dialect)
+        }
+        polyglot_sql::Expression::Select(select) => select.expressions.iter().any(|expr| {
+            let output_name = explicit_output_name(expr);
+            output_name.is_some_and(|name| {
+                name != "*"
+                    && polyglot_sql::normalize_name(name, dialect, false, true)
+                        == normalized_column_name
+            })
+        }),
+        polyglot_sql::Expression::Union(union) => {
+            select_has_explicit_output(&union.left, column_name, dialect)
+        }
+        polyglot_sql::Expression::Intersect(intersect) => {
+            select_has_explicit_output(&intersect.left, column_name, dialect)
+        }
+        polyglot_sql::Expression::Except(except) => {
+            select_has_explicit_output(&except.left, column_name, dialect)
+        }
+        polyglot_sql::Expression::Subquery(subquery) => {
+            select_has_explicit_output(&subquery.this, column_name, dialect)
+        }
+        polyglot_sql::Expression::Cte(cte) => {
+            select_has_explicit_output(&cte.this, column_name, dialect)
+        }
+        polyglot_sql::Expression::Paren(paren) => {
+            select_has_explicit_output(&paren.this, column_name, dialect)
+        }
+        _ => false,
+    }
+}
+
+fn explicit_output_name(expr: &polyglot_sql::Expression) -> Option<&str> {
+    match expr {
+        polyglot_sql::Expression::Annotated(annotated) => explicit_output_name(&annotated.this),
+        polyglot_sql::Expression::Alias(alias) => Some(alias.alias.name.as_str()),
+        polyglot_sql::Expression::Column(column) => Some(column.name.name.as_str()),
+        polyglot_sql::Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
     }
 }
 
 pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
     match expr {
         Expression::Select(select) => {
-            let outer_has_star = select.expressions.iter().any(|e| {
-                matches!(e, Expression::Star(_))
-                    || matches!(e, Expression::Column(c) if c.name.name == "*")
-            });
+            let outer_has_star = select.expressions.iter().any(expression_is_star);
             if outer_has_star {
                 return true;
             }
@@ -97,6 +208,26 @@ pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
             false
         }
         Expression::Subquery(subq) => has_unresolved_stars(&subq.this),
+        Expression::Cte(cte) => has_unresolved_stars(&cte.this),
+        Expression::Annotated(annotated) => has_unresolved_stars(&annotated.this),
+        Expression::Union(union) => {
+            has_unresolved_stars(&union.left) || has_unresolved_stars(&union.right)
+        }
+        Expression::Intersect(intersect) => {
+            has_unresolved_stars(&intersect.left) || has_unresolved_stars(&intersect.right)
+        }
+        Expression::Except(except) => {
+            has_unresolved_stars(&except.left) || has_unresolved_stars(&except.right)
+        }
+        _ => false,
+    }
+}
+
+fn expression_is_star(expr: &Expression) -> bool {
+    match expr {
+        Expression::Star(_) => true,
+        Expression::Column(column) => column.name.name == "*",
+        Expression::Annotated(annotated) => expression_is_star(&annotated.this),
         _ => false,
     }
 }
