@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use polyglot_sql::expressions::{Alias, Column, Identifier, Select, TableRef};
+use polyglot_sql::expressions::{Alias, Column, Identifier, Select, TableRef, With};
 use polyglot_sql::lineage::LineageNode;
 use polyglot_sql::scope::SourceKind;
 use polyglot_sql::{DialectType, Expression};
@@ -41,23 +41,7 @@ fn expand_known_cte_stars_scoped(
 ) {
     match expr {
         Expression::Select(select) => {
-            let mut scoped_outputs = outputs.clone();
-            if let Some(with) = &select.with {
-                for cte in &with.ctes {
-                    let names = unwrap_select(&cte.this)
-                        .map(|body| {
-                            body.expressions
-                                .iter()
-                                .filter_map(explicit_output_name)
-                                .map(|name| {
-                                    polyglot_sql::normalize_name(name, Some(dialect), false, true)
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    scoped_outputs.insert(normalize_identifier(&cte.alias), names);
-                }
-            }
+            let scoped_outputs = with_scope(select.with.as_ref(), outputs, dialect);
 
             expand_select_cte_stars(select, &scoped_outputs);
 
@@ -76,16 +60,34 @@ fn expand_known_cte_stars_scoped(
             }
         }
         Expression::Union(set) => {
-            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
-            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
+            let scoped_outputs = with_scope(set.with.as_ref(), outputs, dialect);
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    expand_known_cte_stars_scoped(&mut cte.this, &scoped_outputs, dialect);
+                }
+            }
+            expand_known_cte_stars_scoped(&mut set.left, &scoped_outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, &scoped_outputs, dialect);
         }
         Expression::Intersect(set) => {
-            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
-            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
+            let scoped_outputs = with_scope(set.with.as_ref(), outputs, dialect);
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    expand_known_cte_stars_scoped(&mut cte.this, &scoped_outputs, dialect);
+                }
+            }
+            expand_known_cte_stars_scoped(&mut set.left, &scoped_outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, &scoped_outputs, dialect);
         }
         Expression::Except(set) => {
-            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
-            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
+            let scoped_outputs = with_scope(set.with.as_ref(), outputs, dialect);
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    expand_known_cte_stars_scoped(&mut cte.this, &scoped_outputs, dialect);
+                }
+            }
+            expand_known_cte_stars_scoped(&mut set.left, &scoped_outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, &scoped_outputs, dialect);
         }
         Expression::Subquery(node) => {
             expand_known_cte_stars_scoped(&mut node.this, outputs, dialect)
@@ -96,6 +98,34 @@ fn expand_known_cte_stars_scoped(
         }
         _ => {}
     }
+}
+
+// Builds the CTE-name-to-output-columns scope introduced by `with`, layering it on
+// top of the inherited `outputs`. `with` may come from a `SELECT`'s own clause or
+// from a set operation's (`UNION`/`INTERSECT`/`EXCEPT` each carry their own `WITH`
+// field, since the parser attaches a top-level `WITH` to the operation as a whole
+// rather than to either operand).
+fn with_scope(
+    with: Option<&With>,
+    outputs: &HashMap<String, Vec<String>>,
+    dialect: DialectType,
+) -> HashMap<String, Vec<String>> {
+    let mut scoped_outputs = outputs.clone();
+    if let Some(with) = with {
+        for cte in &with.ctes {
+            let names = unwrap_select(&cte.this)
+                .map(|body| {
+                    body.expressions
+                        .iter()
+                        .filter_map(explicit_output_name)
+                        .map(|name| polyglot_sql::normalize_name(name, Some(dialect), false, true))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            scoped_outputs.insert(normalize_identifier(&cte.alias), names);
+        }
+    }
+    scoped_outputs
 }
 
 fn expand_select_cte_stars(select: &mut Select, outputs: &HashMap<String, Vec<String>>) {
@@ -194,6 +224,13 @@ fn make_column(name: &str, table: Option<&Identifier>) -> Expression {
     }))
 }
 
+// Searches every nested query for a star modifier (REPLACE/RENAME) whose target
+// equals `name`. `name` is the single requested output name and is not translated
+// across query boundaries, so a modifier reachable only through an outer alias
+// (e.g. `WITH c AS (SELECT * RENAME(id AS wanted) FROM t) SELECT wanted AS final
+// FROM c`, requesting `final`) will not be found. TODO: this needs a query-scoped
+// projection model that follows aliases through CTE/subquery boundaries before
+// searching for the modifier, rather than a flat name-string search.
 fn materialize_star_modifier(expr: &mut Expression, name: &str, dialect: DialectType) -> bool {
     match expr {
         Expression::Select(select) => {
@@ -217,19 +254,37 @@ fn materialize_star_modifier(expr: &mut Expression, name: &str, dialect: Dialect
             changed
         }
         Expression::Union(set) => {
-            let left = materialize_star_modifier(&mut set.left, name, dialect);
-            let right = materialize_star_modifier(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_star_modifier(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_star_modifier(&mut set.left, name, dialect);
+            changed |= materialize_star_modifier(&mut set.right, name, dialect);
+            changed
         }
         Expression::Intersect(set) => {
-            let left = materialize_star_modifier(&mut set.left, name, dialect);
-            let right = materialize_star_modifier(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_star_modifier(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_star_modifier(&mut set.left, name, dialect);
+            changed |= materialize_star_modifier(&mut set.right, name, dialect);
+            changed
         }
         Expression::Except(set) => {
-            let left = materialize_star_modifier(&mut set.left, name, dialect);
-            let right = materialize_star_modifier(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_star_modifier(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_star_modifier(&mut set.left, name, dialect);
+            changed |= materialize_star_modifier(&mut set.right, name, dialect);
+            changed
         }
         Expression::Subquery(node) => materialize_star_modifier(&mut node.this, name, dialect),
         Expression::Paren(node) => materialize_star_modifier(&mut node.this, name, dialect),
@@ -270,8 +325,16 @@ fn materialize_projection_modifier(
             .iter()
             .find(|(_, target)| normalize_name(&target.name, Some(dialect)) == normalized)
     }) {
+        let qualifier = star.table.clone();
         *expression = Expression::Alias(Box::new(Alias::new(
-            make_column(&source.name, None),
+            Expression::Column(Box::new(Column {
+                name: source.clone(),
+                table: qualifier,
+                join_mark: false,
+                trailing_comments: Vec::new(),
+                span: None,
+                inferred_type: None,
+            })),
             target.clone(),
         )));
         return true;
@@ -284,9 +347,7 @@ impl StarGuard {
         let mut projections = Vec::new();
         let mut cte_names = HashSet::new();
         visit_queries(expr, &mut |query| {
-            if let Some(select) = unwrap_select(query)
-                && let Some(with) = &select.with
-            {
+            if let Some(with) = query_with(query) {
                 cte_names.extend(with.ctes.iter().map(|cte| cte.alias.name.to_lowercase()));
             }
             let knowledge = projection_knowledge(query, dialect);
@@ -444,16 +505,31 @@ fn set_has_explicit_name_anywhere(
         }),
         Expression::Union(set) => {
             set_has_explicit_name(expr, name, dialect)
+                || set.with.as_ref().is_some_and(|with| {
+                    with.ctes
+                        .iter()
+                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
+                })
                 || set_has_explicit_name_anywhere(&set.left, name, dialect)
                 || set_has_explicit_name_anywhere(&set.right, name, dialect)
         }
         Expression::Intersect(set) => {
             set_has_explicit_name(expr, name, dialect)
+                || set.with.as_ref().is_some_and(|with| {
+                    with.ctes
+                        .iter()
+                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
+                })
                 || set_has_explicit_name_anywhere(&set.left, name, dialect)
                 || set_has_explicit_name_anywhere(&set.right, name, dialect)
         }
         Expression::Except(set) => {
             set_has_explicit_name(expr, name, dialect)
+                || set.with.as_ref().is_some_and(|with| {
+                    with.ctes
+                        .iter()
+                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
+                })
                 || set_has_explicit_name_anywhere(&set.left, name, dialect)
                 || set_has_explicit_name_anywhere(&set.right, name, dialect)
         }
@@ -501,19 +577,37 @@ fn materialize_set_stars(expr: &mut Expression, name: &str, dialect: DialectType
             changed
         }
         Expression::Union(set) => {
-            let left = materialize_set_stars(&mut set.left, name, dialect);
-            let right = materialize_set_stars(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_set_stars(&mut set.left, name, dialect);
+            changed |= materialize_set_stars(&mut set.right, name, dialect);
+            changed
         }
         Expression::Intersect(set) => {
-            let left = materialize_set_stars(&mut set.left, name, dialect);
-            let right = materialize_set_stars(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_set_stars(&mut set.left, name, dialect);
+            changed |= materialize_set_stars(&mut set.right, name, dialect);
+            changed
         }
         Expression::Except(set) => {
-            let left = materialize_set_stars(&mut set.left, name, dialect);
-            let right = materialize_set_stars(&mut set.right, name, dialect);
-            left || right
+            let mut changed = false;
+            if let Some(with) = &mut set.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
+                }
+            }
+            changed |= materialize_set_stars(&mut set.left, name, dialect);
+            changed |= materialize_set_stars(&mut set.right, name, dialect);
+            changed
         }
         Expression::Subquery(node) => materialize_set_stars(&mut node.this, name, dialect),
         Expression::Paren(node) => materialize_set_stars(&mut node.this, name, dialect),
@@ -661,14 +755,29 @@ fn visit_queries(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
             }
         }
         Expression::Union(set) => {
+            if let Some(with) = &set.with {
+                for cte in &with.ctes {
+                    visit_queries(&cte.this, visitor);
+                }
+            }
             visit_queries(&set.left, visitor);
             visit_queries(&set.right, visitor);
         }
         Expression::Intersect(set) => {
+            if let Some(with) = &set.with {
+                for cte in &with.ctes {
+                    visit_queries(&cte.this, visitor);
+                }
+            }
             visit_queries(&set.left, visitor);
             visit_queries(&set.right, visitor);
         }
         Expression::Except(set) => {
+            if let Some(with) = &set.with {
+                for cte in &with.ctes {
+                    visit_queries(&cte.this, visitor);
+                }
+            }
             visit_queries(&set.left, visitor);
             visit_queries(&set.right, visitor);
         }
@@ -677,6 +786,19 @@ fn visit_queries(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
         Expression::Paren(paren) => visit_queries(&paren.this, visitor),
         Expression::Annotated(annotated) => visit_queries(&annotated.this, visitor),
         _ => {}
+    }
+}
+
+// Returns the `WITH` clause attached directly to `expr`, whether it belongs to a
+// `SELECT` or to a set operation (`UNION`/`INTERSECT`/`EXCEPT` each carry their own
+// `WITH` field rather than inheriting one from either operand).
+fn query_with(expr: &Expression) -> Option<&With> {
+    match expr {
+        Expression::Select(select) => select.with.as_ref(),
+        Expression::Union(set) => set.with.as_ref(),
+        Expression::Intersect(set) => set.with.as_ref(),
+        Expression::Except(set) => set.with.as_ref(),
+        _ => None,
     }
 }
 

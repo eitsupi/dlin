@@ -1490,6 +1490,33 @@ fn test_qualified_external_star_is_not_expanded_from_joined_cte() {
 }
 
 #[test]
+fn test_cte_scope_propagates_to_all_set_operation_operands() {
+    // The parser attaches a top-level WITH clause to the UNION/INTERSECT/EXCEPT
+    // node itself (its own `with` field), not to either operand's SELECT, but the
+    // CTE it defines is visible to every operand.
+    let result = compute_star_shape(
+        "WITH c AS (SELECT id AS x FROM raw.orders) SELECT x FROM c UNION ALL SELECT * FROM c",
+        &["x"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "x", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_star_rename_in_join_keeps_source_table_qualifier() {
+    // The RENAME source must keep the star's own qualifier so it resolves against
+    // the correct joined table rather than an unqualified (and ambiguous) name.
+    let result = compute_star_shape(
+        "SELECT b.* RENAME (id AS wanted) FROM raw.orders a JOIN raw.customers b ON a.customer_id = b.id",
+        &["wanted"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "wanted", &[("raw.customers", "id")]);
+}
+
+#[test]
 fn test_set_operation_nested_in_from_subquery_uses_explicit_branch() {
     let result = compute_star_shape(
         "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",
