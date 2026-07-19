@@ -1,3 +1,5 @@
+use polyglot_sql::lineage::LineageNode;
+use polyglot_sql::scope::SourceKind;
 use polyglot_sql::{DialectType, Expression};
 
 use crate::parser::manifest::Manifest;
@@ -67,7 +69,7 @@ pub(super) fn run_column_lineage(
 
     match lineage_result {
         Ok(node) => {
-            if lineage_depends_on_unresolved_star(&node, true, false, Some(ctx.dialect)) {
+            if lineage_depends_on_unresolved_star(&node, true, false, None, Some(ctx.dialect)) {
                 Err(format!("Cannot find column '{}' in query", col_name))
             } else {
                 Ok(extract_leaf_sources(&node))
@@ -81,9 +83,10 @@ pub(super) fn run_column_lineage(
 /// star passthrough. A star elsewhere in the query is not sufficient: explicit
 /// output expressions must remain traceable independently.
 fn lineage_depends_on_unresolved_star(
-    node: &polyglot_sql::lineage::LineageNode,
+    node: &LineageNode,
     is_root: bool,
     is_set_operation_branch: bool,
+    set_operation_ordinal: Option<usize>,
     dialect: Option<DialectType>,
 ) -> bool {
     let column_name = node
@@ -91,61 +94,130 @@ fn lineage_depends_on_unresolved_star(
         .rsplit_once('.')
         .map_or(node.name.as_str(), |(_, name)| name);
 
+    let is_set_operation = matches!(
+        &node.source,
+        Expression::Union(_) | Expression::Intersect(_) | Expression::Except(_)
+    );
+    let set_operation_ordinal = if is_set_operation {
+        column_to_ordinal(&node.source, column_name, dialect)
+            .or_else(|| synthetic_ordinal(column_name))
+    } else {
+        set_operation_ordinal
+    };
+    let crosses_query_boundary =
+        matches!(node.source_kind, SourceKind::Cte | SourceKind::DerivedTable);
     let source_has_star = has_unresolved_stars(&node.source);
     let source_has_explicit_column = select_has_explicit_output(&node.source, column_name, dialect);
+    let branch_projection_checked = is_set_operation_branch
+        && !crosses_query_boundary
+        && matches!(&node.source, Expression::Select(_))
+        && set_operation_ordinal.is_some();
+    let branch_projection_is_star = branch_projection_checked
+        && set_operation_ordinal
+            .is_some_and(|ordinal| projection_at_ordinal_is_star(&node.source, ordinal));
 
     if is_root {
-        if matches!(&node.expression, polyglot_sql::Expression::Column(c) if c.table.is_some())
+        if matches!(&node.expression, Expression::Column(c) if c.table.is_some())
             && source_has_star
             && !source_has_explicit_column
         {
             return true;
         }
-    } else if (is_set_operation_branch
-        || matches!(
-            &node.source,
-            polyglot_sql::Expression::Select(_)
-                | polyglot_sql::Expression::Union(_)
-                | polyglot_sql::Expression::Intersect(_)
-                | polyglot_sql::Expression::Except(_)
-                | polyglot_sql::Expression::Subquery(_)
-                | polyglot_sql::Expression::Cte(_)
-                | polyglot_sql::Expression::Paren(_)
-        ))
-        && source_has_star
-        && !source_has_explicit_column
+    } else if branch_projection_is_star
+        || (!branch_projection_checked
+            && !is_set_operation
+            && (is_set_operation_branch
+                || matches!(
+                    &node.source,
+                    Expression::Select(_)
+                        | Expression::Union(_)
+                        | Expression::Intersect(_)
+                        | Expression::Except(_)
+                        | Expression::Subquery(_)
+                        | Expression::Cte(_)
+                        | Expression::Paren(_)
+                ))
+            && source_has_star
+            && !source_has_explicit_column)
     {
         return true;
     }
 
-    let is_set_operation = matches!(
-        &node.source,
-        polyglot_sql::Expression::Union(_)
-            | polyglot_sql::Expression::Intersect(_)
-            | polyglot_sql::Expression::Except(_)
-    );
+    let child_set_operation_ordinal = if is_set_operation || !crosses_query_boundary {
+        set_operation_ordinal
+    } else {
+        None
+    };
     node.downstream.iter().any(|child| {
         lineage_depends_on_unresolved_star(
             child,
             false,
             is_set_operation_branch || is_set_operation,
+            child_set_operation_ordinal,
             dialect,
         )
     })
 }
 
+/// Find the positional index of a column name in a set operation's first SELECT branch.
+fn column_to_ordinal(
+    set_operation_expr: &Expression,
+    column_name: &str,
+    dialect: Option<DialectType>,
+) -> Option<usize> {
+    let normalized_column_name = polyglot_sql::normalize_name(column_name, dialect, false, true);
+    let mut expr = set_operation_expr;
+
+    loop {
+        match expr {
+            Expression::Union(union) => expr = &union.left,
+            Expression::Intersect(intersect) => expr = &intersect.left,
+            Expression::Except(except) => expr = &except.left,
+            Expression::Annotated(annotated) => expr = &annotated.this,
+            Expression::Subquery(subquery) => expr = &subquery.this,
+            Expression::Cte(cte) => expr = &cte.this,
+            Expression::Paren(paren) => expr = &paren.this,
+            Expression::Select(select) => {
+                return select.expressions.iter().position(|expr| {
+                    explicit_output_name(expr).is_some_and(|name| {
+                        polyglot_sql::normalize_name(name, dialect, false, true)
+                            == normalized_column_name
+                    })
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Polyglot names an index-resolved set-operation node `_N`.
+fn synthetic_ordinal(column_name: &str) -> Option<usize> {
+    column_name.strip_prefix('_')?.parse().ok()
+}
+
+fn projection_at_ordinal_is_star(expr: &Expression, ordinal: usize) -> bool {
+    match expr {
+        Expression::Annotated(annotated) => projection_at_ordinal_is_star(&annotated.this, ordinal),
+        Expression::Select(select) => select
+            .expressions
+            .get(ordinal)
+            .is_some_and(expression_is_star),
+        _ => false,
+    }
+}
+
 fn select_has_explicit_output(
-    expr: &polyglot_sql::Expression,
+    expr: &Expression,
     column_name: &str,
     dialect: Option<DialectType>,
 ) -> bool {
     let normalized_column_name = polyglot_sql::normalize_name(column_name, dialect, false, true);
 
     match expr {
-        polyglot_sql::Expression::Annotated(annotated) => {
+        Expression::Annotated(annotated) => {
             select_has_explicit_output(&annotated.this, column_name, dialect)
         }
-        polyglot_sql::Expression::Select(select) => select.expressions.iter().any(|expr| {
+        Expression::Select(select) => select.expressions.iter().any(|expr| {
             let output_name = explicit_output_name(expr);
             output_name.is_some_and(|name| {
                 name != "*"
@@ -153,34 +225,28 @@ fn select_has_explicit_output(
                         == normalized_column_name
             })
         }),
-        polyglot_sql::Expression::Union(union) => {
-            select_has_explicit_output(&union.left, column_name, dialect)
-        }
-        polyglot_sql::Expression::Intersect(intersect) => {
+        Expression::Union(union) => select_has_explicit_output(&union.left, column_name, dialect),
+        Expression::Intersect(intersect) => {
             select_has_explicit_output(&intersect.left, column_name, dialect)
         }
-        polyglot_sql::Expression::Except(except) => {
+        Expression::Except(except) => {
             select_has_explicit_output(&except.left, column_name, dialect)
         }
-        polyglot_sql::Expression::Subquery(subquery) => {
+        Expression::Subquery(subquery) => {
             select_has_explicit_output(&subquery.this, column_name, dialect)
         }
-        polyglot_sql::Expression::Cte(cte) => {
-            select_has_explicit_output(&cte.this, column_name, dialect)
-        }
-        polyglot_sql::Expression::Paren(paren) => {
-            select_has_explicit_output(&paren.this, column_name, dialect)
-        }
+        Expression::Cte(cte) => select_has_explicit_output(&cte.this, column_name, dialect),
+        Expression::Paren(paren) => select_has_explicit_output(&paren.this, column_name, dialect),
         _ => false,
     }
 }
 
-fn explicit_output_name(expr: &polyglot_sql::Expression) -> Option<&str> {
+fn explicit_output_name(expr: &Expression) -> Option<&str> {
     match expr {
-        polyglot_sql::Expression::Annotated(annotated) => explicit_output_name(&annotated.this),
-        polyglot_sql::Expression::Alias(alias) => Some(alias.alias.name.as_str()),
-        polyglot_sql::Expression::Column(column) => Some(column.name.name.as_str()),
-        polyglot_sql::Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        Expression::Annotated(annotated) => explicit_output_name(&annotated.this),
+        Expression::Alias(alias) => Some(alias.alias.name.as_str()),
+        Expression::Column(column) => Some(column.name.name.as_str()),
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
         _ => None,
     }
 }
@@ -250,7 +316,7 @@ pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
     }
 }
 
-fn classify_transformation(node: &polyglot_sql::lineage::LineageNode) -> TransformationType {
+fn classify_transformation(node: &LineageNode) -> TransformationType {
     let t = classify_expression(&node.expression);
     if t != TransformationType::Direct || node.downstream.is_empty() {
         return t;
@@ -267,8 +333,7 @@ fn classify_transformation(node: &polyglot_sql::lineage::LineageNode) -> Transfo
     TransformationType::Direct
 }
 
-fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
-    use polyglot_sql::Expression;
+fn classify_expression(expr: &Expression) -> TransformationType {
     match expr {
         Expression::Column(_) | Expression::Identifier(_) => TransformationType::Direct,
         Expression::Alias(alias) => classify_expression(&alias.this),
@@ -301,7 +366,7 @@ pub(super) struct ColumnLineageResult {
     pub(super) transformation: TransformationType,
 }
 
-fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLineageResult {
+fn extract_leaf_sources(node: &LineageNode) -> ColumnLineageResult {
     let transformation = classify_transformation(node);
     let mut sources = Vec::new();
     collect_leaves(node, &mut sources);
@@ -313,9 +378,9 @@ fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLine
     }
 }
 
-fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<ColumnSource>) {
+fn collect_leaves(node: &LineageNode, sources: &mut Vec<ColumnSource>) {
     if node.downstream.is_empty() {
-        if node.source_kind == polyglot_sql::scope::SourceKind::Virtual {
+        if node.source_kind == SourceKind::Virtual {
             return;
         }
         let name = &node.name;

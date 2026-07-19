@@ -1087,6 +1087,44 @@ fn test_set_operations_guard_unresolved_star_branches() {
 }
 
 #[test]
+fn test_set_operations_match_unresolved_stars_by_ordinal() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+        "SELECT id AS a, user_id AS b, order_date AS c FROM raw.orders \
+             UNION SELECT 3, 4, * FROM some_external_table"
+            .to_string(),
+    );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(&result, &["a", "b"], &["c"]);
+}
+
+#[test]
 fn test_parenthesized_unresolved_star_is_detected() {
     // In polyglot-sql 0.6.2, a nested parenthesized query in a FROM clause
     // preserves a Paren node around the inner query.
