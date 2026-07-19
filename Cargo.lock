@@ -597,14 +597,26 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "polyglot-sql"
-version = "0.4.4"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0d5ea9283f03d3b6c32a230e60e7c6bc854e5bec83c399c75cad02bf46e9622"
+checksum = "009cbd62f8c82de46697221ee66b0cf3a6dacbda16f8c5a2ce25853940073bd5"
 dependencies = [
+ "polyglot-sql-ast-derive",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "polyglot-sql-ast-derive"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3250a6ffcd1d39670eb532e2b1877ad430799c49cb91b243d63c9425b868161"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

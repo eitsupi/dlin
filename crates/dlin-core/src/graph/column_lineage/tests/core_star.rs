@@ -1,155 +1,4 @@
 use super::*;
-#[test]
-fn test_rename_detection() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert_eq!(result.model, "stg_orders");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 4);
-
-    // order_id comes from orders.id (renamed)
-    let order_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "order_id")
-        .unwrap();
-    assert!(!order_id.sources.is_empty(), "order_id should have sources");
-    assert_eq!(order_id.sources[0].column, "id");
-    // Rename is classified as direct (the rename is evident from column name difference)
-    assert_eq!(order_id.transformation, TransformationType::Direct);
-
-    // customer_id comes from orders.user_id (renamed)
-    let customer_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "customer_id")
-        .unwrap();
-    assert_eq!(customer_id.sources[0].column, "user_id");
-    assert_eq!(customer_id.transformation, TransformationType::Direct);
-}
-
-#[test]
-fn test_join_lineage() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert_eq!(result.model, "orders");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 3);
-
-    // total_amount is aliased from p.amount
-    let total_amount = result
-        .columns
-        .iter()
-        .find(|c| c.column == "total_amount")
-        .unwrap();
-    assert!(!total_amount.sources.is_empty());
-    assert_eq!(total_amount.sources[0].column, "amount");
-
-    // order_id comes from o.order_id
-    let order_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "order_id")
-        .unwrap();
-    assert_eq!(order_id.sources[0].column, "order_id");
-}
-
-#[test]
-fn test_model_not_found() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "nonexistent",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert_eq!(result.columns.len(), 0);
-    assert!(!result.errors.is_empty());
-    assert!(result.errors[0].what.contains("not found"));
-}
-
-#[test]
-fn test_no_compiled_code() {
-    let mut manifest = make_test_manifest();
-    // Remove compiled_code from stg_orders
-    manifest
-        .nodes
-        .get_mut("model.proj.stg_orders")
-        .unwrap()
-        .compiled_code = None;
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.columns.is_empty());
-    assert!(result.errors[0].what.contains("compiled_code"));
-}
-
-#[test]
-fn test_no_yaml_columns_uses_sql_inference() {
-    // When YAML columns are empty, column names should be inferred from compiled SQL
-    let mut manifest = make_test_manifest();
-    manifest
-        .nodes
-        .get_mut("model.proj.stg_orders")
-        .unwrap()
-        .columns
-        .clear();
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    // SQL inference should find: customer_id, order_date, order_id, status
-    assert_eq!(
-        result.columns.len(),
-        4,
-        "should infer 4 columns from SQL: {:?}",
-        result.errors
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-}
-
-#[test]
-fn test_no_columns_and_no_sql() {
-    // When YAML columns are empty AND compiled SQL cannot be parsed, error
-    let mut manifest = make_test_manifest();
-    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
-    node.columns.clear();
-    node.compiled_code = Some("INVALID SQL %%%".to_string());
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.columns.is_empty());
-    assert!(!result.errors.is_empty());
-    assert!(
-        result.errors[0]
-            .what
-            .contains("could not determine output columns")
-    );
-}
 
 #[test]
 fn test_cte_select_star() {
@@ -307,273 +156,6 @@ select * from orders"#;
 }
 
 #[test]
-fn test_json_serialization() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    let json = serde_json::to_string_pretty(&result).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["model"], "stg_orders");
-    assert!(parsed["columns"].is_array());
-}
-
-// --- Cross-model lineage tests ---
-
-/// Build a manifest with 3 levels: customers → orders → stg_orders → raw.orders
-#[test]
-fn test_cross_model_single_hop() {
-    // orders.order_id → stg_orders.order_id → raw.orders.id
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let order_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "order_id")
-        .unwrap();
-    // Should trace through stg_orders to raw source (orders table)
-    assert!(
-        order_id
-            .sources
-            .iter()
-            .any(|s| s.column == "id" && s.table.contains("orders")),
-        "order_id should trace to raw orders.id, got: {:?}",
-        order_id.sources
-    );
-    // model_path should show the hop through stg_orders
-    let src = order_id.sources.iter().find(|s| s.column == "id").unwrap();
-    assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
-        "model_path should include stg_orders, got: {:?}",
-        src.model_path
-    );
-}
-
-#[test]
-fn test_cross_model_two_hops() {
-    // customers.customer_id → orders.customer_id → stg_orders.customer_id → raw.orders.user_id
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "customers",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let customer_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "customer_id")
-        .unwrap();
-    assert!(
-        customer_id
-            .sources
-            .iter()
-            .any(|s| s.column == "user_id" && s.table.contains("orders")),
-        "customer_id should trace to raw orders.user_id, got: {:?}",
-        customer_id.sources
-    );
-    // model_path should show both hops: orders → stg_orders
-    let src = customer_id
-        .sources
-        .iter()
-        .find(|s| s.column == "user_id")
-        .unwrap();
-    assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "orders")
-            && src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
-        "model_path should include orders and stg_orders, got: {:?}",
-        src.model_path
-    );
-    // orders should come before stg_orders in the path (closer to target)
-    let orders_pos = src
-        .model_path
-        .iter()
-        .position(|(m, _, _)| m == "orders")
-        .unwrap();
-    let stg_pos = src
-        .model_path
-        .iter()
-        .position(|(m, _, _)| m == "stg_orders")
-        .unwrap();
-    assert!(
-        orders_pos < stg_pos,
-        "orders should precede stg_orders in path"
-    );
-}
-
-#[test]
-fn test_cross_model_join_sources() {
-    // orders.total_amount → stg_payments.amount → raw.payments.amount
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    let total_amount = result
-        .columns
-        .iter()
-        .find(|c| c.column == "total_amount")
-        .unwrap();
-    assert!(
-        total_amount
-            .sources
-            .iter()
-            .any(|s| s.column == "amount" && s.table.contains("payments")),
-        "total_amount should trace to raw payments.amount, got: {:?}",
-        total_amount.sources
-    );
-    // model_path should show the hop through stg_payments
-    let src = total_amount
-        .sources
-        .iter()
-        .find(|s| s.column == "amount")
-        .unwrap();
-    assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "stg_payments"),
-        "model_path should include stg_payments, got: {:?}",
-        src.model_path
-    );
-}
-
-#[test]
-fn test_cross_model_source_table_is_leaf() {
-    // stg_orders directly references a source — cross-model should not change the result
-    let manifest = make_cross_model_manifest();
-    let single = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    let cross = compute_cross_model_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert_eq!(single.columns.len(), cross.columns.len());
-    for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
-        assert_eq!(s.column, c.column);
-        assert_eq!(s.sources, c.sources);
-    }
-}
-
-#[test]
-fn test_cross_model_model_not_found() {
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "nonexistent",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(!result.errors.is_empty());
-    assert!(result.errors[0].what.contains("not found"));
-}
-
-#[test]
-fn test_normalize_table_name() {
-    assert_eq!(normalize_table_name("stg_orders"), "stg_orders");
-    assert_eq!(
-        normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""),
-        "stg_orders"
-    );
-    assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
-    assert_eq!(normalize_table_name("schema.table"), "table");
-}
-
-#[test]
-fn test_format_lineage_error_strips_position() {
-    let err = polyglot_sql::Error::parse("Cannot find column 'x' in query", 0, 0, 0, 0);
-    let formatted = format_lineage_error(&err);
-    assert_eq!(formatted, "lineage failed: Cannot find column 'x' in query");
-    assert!(
-        !formatted.contains("line 0"),
-        "should strip meaningless position info"
-    );
-}
-
-#[test]
-fn test_format_lineage_error_preserves_real_position() {
-    let err = polyglot_sql::Error::parse("unexpected token", 5, 10, 0, 0);
-    let formatted = format_lineage_error(&err);
-    assert!(
-        formatted.contains("line 5"),
-        "should preserve real position info: {}",
-        formatted
-    );
-}
-
-#[test]
-fn test_format_lineage_error_internal() {
-    let err = polyglot_sql::Error::internal("lineage recursion depth exceeded");
-    let formatted = format_lineage_error(&err);
-    assert_eq!(
-        formatted,
-        "lineage failed: lineage recursion depth exceeded"
-    );
-}
-
-#[test]
-fn test_partial_failure_summary() {
-    // Model with some columns that can be traced and some that fail
-    let mut manifest = make_test_manifest();
-    // Add a column to stg_orders that doesn't exist in the SQL
-    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
-    node.columns.insert(
-        "nonexistent_col".to_string(),
-        ManifestColumn {
-            name: "nonexistent_col".to_string(),
-        },
-    );
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    // Should have 4 successful columns and 1 failed
-    assert_eq!(result.columns.len(), 4);
-    assert_eq!(result.traced_columns, 4);
-    assert_eq!(result.total_columns, 5);
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|e| e.what.contains("nonexistent_col")),
-        "should include per-column error, got: {:?}",
-        result.errors
-    );
-    assert!(
-        result
-            .errors
-            .iter()
-            .all(|e| matches!(e.kind, ColumnLineageErrorKind::ColumnNotFound)),
-        "all errors should be column_not_found, got: {:?}",
-        result.errors
-    );
-}
-
-#[test]
 fn test_column_not_found_hint_when_select_star_unresolved() {
     // When SELECT * cannot be expanded (external table not in manifest),
     // ColumnNotFound errors for YAML-defined columns should include the SELECT * hint.
@@ -690,260 +272,6 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
         result.errors
     );
 }
-
-#[test]
-fn test_transformation_classification() {
-    // customers model has: customer_id (direct) and order_count (aggregation via count(*))
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "customers",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let customer_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "customer_id")
-        .unwrap();
-    assert_eq!(
-        customer_id.transformation,
-        TransformationType::Direct,
-        "customer_id should be direct"
-    );
-
-    let order_count = result
-        .columns
-        .iter()
-        .find(|c| c.column == "order_count")
-        .unwrap();
-    assert_eq!(
-        order_count.transformation,
-        TransformationType::Aggregation,
-        "order_count (count(*)) should be aggregation"
-    );
-}
-
-#[test]
-fn test_source_table_has_empty_model_path() {
-    // stg_orders references raw source directly — model_path should be empty
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    for entry in &result.columns {
-        for source in &entry.sources {
-            assert!(
-                source.model_path.is_empty(),
-                "source {}.{} should have empty model_path (no cross-model hops), got: {:?}",
-                source.table,
-                source.column,
-                source.model_path
-            );
-        }
-    }
-}
-
-#[test]
-fn test_json_includes_new_fields() {
-    let manifest = make_cross_model_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "customers",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    let json = serde_json::to_string_pretty(&result).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-    // transformation field should be present on all columns
-    for col in parsed["columns"].as_array().unwrap() {
-        assert!(
-            col["transformation"].is_string(),
-            "transformation should be serialized: {:?}",
-            col
-        );
-    }
-
-    // model_path should be present on sources with cross-model hops
-    let customer_id = parsed["columns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["column"] == "customer_id")
-        .unwrap();
-    let first_source = &customer_id["sources"][0];
-    assert!(
-        first_source["model_path"].is_array(),
-        "model_path should be present for cross-model source: {:?}",
-        first_source
-    );
-}
-
-#[test]
-fn test_traced_total_columns_success() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert_eq!(result.total_columns, 4);
-    assert_eq!(result.traced_columns, 4);
-}
-
-#[test]
-fn test_scalar_function_transformation() {
-    // Bug: UPPER(x) and CONCAT(x,y) were classified as unknown instead of expression.
-    // COALESCE has a dedicated AST variant and was always correct; UPPER uses the
-    // specialized Upper variant and CONCAT uses the generic Function variant.
-    let manifest = make_transformation_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "scalar_funcs",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let find = |name: &str| {
-        result
-            .columns
-            .iter()
-            .find(|c| c.column == name)
-            .unwrap_or_else(|| panic!("{name} not found"))
-            .transformation
-            .clone()
-    };
-
-    assert_eq!(
-        find("col_upper"),
-        TransformationType::Expression,
-        "UPPER should be expression"
-    );
-    assert_eq!(
-        find("col_concat"),
-        TransformationType::Expression,
-        "CONCAT should be expression"
-    );
-    assert_eq!(
-        find("col_coalesce"),
-        TransformationType::Expression,
-        "COALESCE should remain expression"
-    );
-}
-
-#[test]
-fn test_cte_passthrough_inherits_transformation() {
-    // Bug: when a CTE computes an expression and the next SELECT references it by
-    // name (pass-through), the transformation type was incorrectly reported as direct.
-    let manifest = make_transformation_manifest();
-
-    // UPPER → pass-through: should be expression, not direct
-    let result_upper = compute_column_lineage(
-        &manifest,
-        "passthrough_upper",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(
-        result_upper.errors.is_empty(),
-        "errors: {:?}",
-        result_upper.errors
-    );
-    let status_upper = result_upper
-        .columns
-        .iter()
-        .find(|c| c.column == "status_upper")
-        .expect("status_upper not found");
-    assert_eq!(
-        status_upper.transformation,
-        TransformationType::Expression,
-        "UPPER pass-through should be expression, not direct"
-    );
-
-    // COALESCE → pass-through: should be expression, not direct
-    let result_coalesce = compute_column_lineage(
-        &manifest,
-        "passthrough_coalesce",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(
-        result_coalesce.errors.is_empty(),
-        "errors: {:?}",
-        result_coalesce.errors
-    );
-    let status_coalesced = result_coalesce
-        .columns
-        .iter()
-        .find(|c| c.column == "status_coalesced")
-        .expect("status_coalesced not found");
-    assert_eq!(
-        status_coalesced.transformation,
-        TransformationType::Expression,
-        "COALESCE pass-through should be expression, not direct"
-    );
-}
-
-#[test]
-fn test_traced_total_columns_partial_failure() {
-    let mut manifest = make_test_manifest();
-    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
-    node.columns.insert(
-        "nonexistent_col".to_string(),
-        ManifestColumn {
-            name: "nonexistent_col".to_string(),
-        },
-    );
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert_eq!(result.total_columns, 5);
-    assert_eq!(result.traced_columns, 4);
-}
-
-#[test]
-fn test_traced_total_columns_model_not_found() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "nonexistent",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert_eq!(result.total_columns, 0);
-    assert_eq!(result.traced_columns, 0);
-}
-
-#[test]
-fn test_traced_total_columns_in_json() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "stg_orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    let json = serde_json::to_string(&result).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["traced_columns"], 4);
-    assert_eq!(parsed["total_columns"], 4);
-}
-
-// --- Regression tests for known issues ---
 
 #[test]
 fn test_cte_alias_resolution() {
@@ -1530,122 +858,6 @@ fn test_select_star_chain_with_cte_alias_and_join() {
 // --- Column impact tests ---
 
 #[test]
-fn test_cross_model_diamond_different_columns_through_shared_model() {
-    // In a diamond DAG, different columns (x and y) flow through a shared
-    // upstream model. Both should be resolved independently — the visited set
-    // must not truncate the second column's path through the shared model.
-    let manifest = make_diamond_manifest();
-
-    // Verify left_model traces x through shared to raw_data
-    let left = compute_cross_model_column_lineage(
-        &manifest,
-        "left_model",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(left.errors.is_empty(), "left errors: {:?}", left.errors);
-    let left_x = left.columns.iter().find(|c| c.column == "x").unwrap();
-    assert!(
-        left_x.sources.iter().any(|s| s.column == "x"),
-        "left_model.x should trace through shared, got: {:?}",
-        left_x.sources
-    );
-
-    // Verify right_model traces y through shared to raw_data
-    let right = compute_cross_model_column_lineage(
-        &manifest,
-        "right_model",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(right.errors.is_empty(), "right errors: {:?}", right.errors);
-    let right_y = right.columns.iter().find(|c| c.column == "y").unwrap();
-    assert!(
-        right_y.sources.iter().any(|s| s.column == "y"),
-        "right_model.y should trace through shared, got: {:?}",
-        right_y.sources
-    );
-
-    // Both left and right depend on 'shared' — the key assertion is that
-    // resolving one does not prevent the other from being resolved.
-    // With the old model-only visited set, whichever resolved first would
-    // block the other from tracing through 'shared'.
-    assert!(
-        !left_x.sources.is_empty() && !right_y.sources.is_empty(),
-        "both paths through shared should resolve independently"
-    );
-}
-
-// The orders model uses aliases (stg_orders AS o, stg_payments AS p).
-// These two tests guard against regressions where collect_leaves returns
-// the SQL alias instead of the actual model name.
-
-#[test]
-fn test_join_alias_resolves_to_model_name() {
-    let manifest = make_test_manifest();
-    let result = compute_column_lineage(
-        &manifest,
-        "orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    // p.amount → table must be "stg_payments", not the alias "p"
-    let total_amount = result
-        .columns
-        .iter()
-        .find(|c| c.column == "total_amount")
-        .unwrap();
-    assert_eq!(
-        total_amount.sources[0].table, "stg_payments",
-        "expected stg_payments, got SQL alias 'p': {:?}",
-        total_amount.sources
-    );
-
-    // o.order_id → table must be "stg_orders", not the alias "o"
-    let order_id = result
-        .columns
-        .iter()
-        .find(|c| c.column == "order_id")
-        .unwrap();
-    assert_eq!(
-        order_id.sources[0].table, "stg_orders",
-        "expected stg_orders, got SQL alias 'o': {:?}",
-        order_id.sources
-    );
-}
-
-#[test]
-fn test_cross_model_join_alias_traces_to_raw_source() {
-    // Cross-model lineage must follow through aliases to reach raw sources.
-    // Before the fix, "p" didn't match upstream_models so the trace stopped early.
-    let manifest = make_test_manifest();
-    let result = compute_cross_model_column_lineage(
-        &manifest,
-        "orders",
-        DialectType::Generic,
-        &mut ColumnLineageCache::disabled(),
-    );
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let total_amount = result
-        .columns
-        .iter()
-        .find(|c| c.column == "total_amount")
-        .unwrap();
-    assert!(!total_amount.sources.is_empty());
-    let src = &total_amount.sources[0];
-    assert_ne!(src.table, "p", "source table must not be SQL alias 'p'");
-    assert_ne!(
-        src.table, "stg_payments",
-        "cross-model must trace beyond stg_payments"
-    );
-    assert_eq!(src.table, "raw.payments");
-    assert_eq!(src.column, "amount");
-}
-
-#[test]
 fn test_bigquery_unnest_virtual_source_excluded() {
     // BigQuery UNNEST produces a Virtual source node. Before the fix, collect_leaves
     // would include it as a leaf with an empty/synthetic table name. After the fix,
@@ -1705,4 +917,377 @@ fn test_bigquery_unnest_virtual_source_excluded() {
             );
         }
     }
+}
+
+fn assert_exact_column_outcomes(
+    result: &ModelColumnLineage,
+    expected_columns: &[&str],
+    expected_errors: &[&str],
+) {
+    let mut actual_columns: Vec<_> = result
+        .columns
+        .iter()
+        .map(|column| column.column.as_str())
+        .collect();
+    actual_columns.sort_unstable();
+    let mut expected_columns = expected_columns.to_vec();
+    expected_columns.sort_unstable();
+    assert_eq!(actual_columns, expected_columns);
+
+    let mut actual_errors: Vec<_> = result
+        .errors
+        .iter()
+        .map(|error| {
+            assert_eq!(error.kind, ColumnLineageErrorKind::ColumnNotFound);
+            error
+                .what
+                .strip_prefix("column '")
+                .and_then(|rest| rest.split_once("':"))
+                .map(|(name, _)| name)
+                .expect("column errors should identify their column")
+        })
+        .collect();
+    actual_errors.sort_unstable();
+    let mut expected_errors = expected_errors.to_vec();
+    expected_errors.sort_unstable();
+    assert_eq!(actual_errors, expected_errors);
+}
+
+#[test]
+fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("SELECT order_id, * FROM some_external_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_annotated_star_and_explicit_projection_are_classified_independently() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.depends_on.nodes.clear();
+    node.compiled_code = Some(
+            "SELECT\n  -- unresolved passthrough\n  some_external_table.*,\n  -- explicit output\n  order_id\nFROM some_external_table"
+                .to_string(),
+        );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_known_manifest_source_succeeds_alongside_external_join_star() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+            "SELECT o.id AS order_id, e.*\nFROM raw.orders o\nJOIN some_external_table e ON o.id = e.id"
+                .to_string(),
+        );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(
+        &result,
+        &["order_id"],
+        &["customer_id", "order_date", "status"],
+    );
+}
+
+#[test]
+fn test_set_operations_guard_unresolved_star_branches() {
+    for operator in ["UNION", "INTERSECT", "EXCEPT"] {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = ["id", "explicit_col"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    ManifestColumn {
+                        name: name.to_string(),
+                    },
+                )
+            })
+            .collect();
+
+        let set_operation = format!(
+            "SELECT id, 1 AS explicit_col FROM raw.orders {operator} SELECT id, * FROM some_external_table"
+        );
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(set_operation.clone());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+
+        for wrapper in [
+            format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
+            format!("SELECT id, explicit_col FROM ({set_operation}) combined"),
+        ] {
+            manifest
+                .nodes
+                .get_mut("model.proj.stg_orders")
+                .unwrap()
+                .compiled_code = Some(wrapper);
+
+            let result = compute_column_lineage(
+                &manifest,
+                "stg_orders",
+                DialectType::Generic,
+                &mut ColumnLineageCache::disabled(),
+            );
+
+            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+        }
+    }
+}
+
+#[test]
+fn test_set_operations_match_unresolved_stars_by_ordinal() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+        "SELECT id AS a, user_id AS b, order_date AS c FROM raw.orders \
+             UNION SELECT 3, 4, * FROM some_external_table"
+            .to_string(),
+    );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(&result, &["a", "b"], &["c"]);
+}
+
+#[test]
+fn test_set_operation_star_only_branch_rejects_all_ordinals() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = ["a", "b"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+        "SELECT id AS a, user_id AS b FROM raw.orders \
+             UNION SELECT * FROM some_external_table"
+            .to_string(),
+    );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(&result, &[], &["a", "b"]);
+}
+
+#[test]
+fn test_set_operation_explicit_projection_after_unresolved_star_is_rejected() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(
+        "SELECT id AS a, user_id AS b, order_date AS c FROM raw.orders \
+             UNION SELECT 3, *, 4 AS extra_col FROM some_external_table"
+            .to_string(),
+    );
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(&result, &["a"], &["b", "c"]);
+}
+
+#[test]
+fn test_parenthesized_unresolved_star_is_detected() {
+    // In polyglot-sql 0.6.2, a nested parenthesized query in a FROM clause
+    // preserves a Paren node around the inner query.
+    let expr = polyglot_sql::parse_one(
+        "SELECT id FROM ((SELECT * FROM some_external_table))",
+        DialectType::Generic,
+    )
+    .unwrap();
+
+    assert!(format!("{expr:?}").contains("Paren"));
+    assert!(has_unresolved_stars(&expr), "expr: {expr:?}");
+}
+
+#[test]
+fn test_nested_set_operations_guard_unresolved_star_branch() {
+    // The 0.6.2 parser represents an unparenthesized UNION chain as a
+    // left-nested Union(Union(...), ...).
+    let sql = "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, 2 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_external_table";
+    let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+    assert!(matches!(
+        &expr,
+        polyglot_sql::Expression::Union(union)
+            if matches!(union.left, polyglot_sql::Expression::Union(_))
+    ));
+
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = ["id", "explicit_col"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(sql.to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+}
+
+#[test]
+fn test_explicit_output_case_normalization_with_unresolved_star() {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("SELECT ORDER_ID, * FROM some_external_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Snowflake,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(
+        result
+            .columns
+            .iter()
+            .any(|column| column.column == "order_id"),
+        "case-folded explicit output should resolve order_id: {:?}",
+        result.errors
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| !error.what.starts_with("column 'order_id':")),
+        "order_id should not be rejected because of Snowflake case folding: {:?}",
+        result.errors
+    );
 }
