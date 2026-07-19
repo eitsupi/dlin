@@ -1466,7 +1466,48 @@ fn test_star_replace_introduced_name_is_explicit() {
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.traced_columns, 1);
-    assert_sources_for(&result, "wanted", &[("raw.orders", "wanted")]);
+    assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_star_rename_introduced_name_traces_original_column() {
+    let result = compute_star_shape(
+        "SELECT * RENAME (id AS wanted) FROM raw.orders",
+        &["wanted"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_qualified_external_star_is_not_expanded_from_joined_cte() {
+    let result = compute_star_shape(
+        "WITH c AS (SELECT 1 AS x) SELECT e.* FROM c JOIN external e ON true",
+        &["x"],
+    );
+    assert_exact_column_outcomes(&result, &[], &["x"]);
+}
+
+#[test]
+fn test_set_operation_nested_in_from_subquery_uses_explicit_branch() {
+    let result = compute_star_shape(
+        "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",
+        &["col_a"],
+    );
+    assert_exact_column_outcomes(&result, &["col_a"], &[]);
+}
+
+#[test]
+fn test_nested_cte_name_does_not_shadow_outer_sibling_scope() {
+    let result = compute_star_shape(
+        "WITH c AS (SELECT id AS outer_id FROM raw.orders) \
+         SELECT c.* FROM c \
+         JOIN (WITH c AS (SELECT 2 AS inner_id) SELECT * FROM c) nested ON true",
+        &["outer_id"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_sources_for(&result, "outer_id", &[("raw.orders", "id")]);
 }
 
 #[test]

@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use polyglot_sql::expressions::{Alias, Column, Identifier, Select, TableRef};
 use polyglot_sql::lineage::LineageNode;
 use polyglot_sql::scope::SourceKind;
 use polyglot_sql::{DialectType, Expression};
@@ -30,103 +31,252 @@ pub(super) struct StarGuard {
 /// only the leftmost set operand (upstream issue #368). TODO: remove this
 /// compensation layer once the upstream expansion covers every operand.
 pub(super) fn expand_known_cte_stars(expr: &mut Expression, dialect: DialectType) {
-    let mut outputs = std::collections::HashMap::new();
-    collect_cte_outputs(expr, &mut outputs, dialect);
-    expand_cte_star_nodes(expr, &outputs, dialect);
+    expand_known_cte_stars_scoped(expr, &HashMap::new(), dialect);
 }
 
-fn collect_cte_outputs(
-    expr: &Expression,
-    outputs: &mut std::collections::HashMap<String, Vec<String>>,
-    dialect: DialectType,
-) {
-    if let Some(select) = unwrap_select(expr)
-        && let Some(with) = &select.with
-    {
-        for cte in &with.ctes {
-            let names = unwrap_select(&cte.this)
-                .map(|body| {
-                    body.expressions
-                        .iter()
-                        .filter_map(explicit_output_name)
-                        .map(|name| polyglot_sql::normalize_name(name, Some(dialect), false, true))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !names.is_empty() {
-                outputs.insert(cte.alias.name.to_lowercase(), names);
-            }
-            collect_cte_outputs(&cte.this, outputs, dialect);
-        }
-    }
-    match expr {
-        Expression::Union(set) => {
-            collect_cte_outputs(&set.left, outputs, dialect);
-            collect_cte_outputs(&set.right, outputs, dialect);
-        }
-        Expression::Intersect(set) => {
-            collect_cte_outputs(&set.left, outputs, dialect);
-            collect_cte_outputs(&set.right, outputs, dialect);
-        }
-        Expression::Except(set) => {
-            collect_cte_outputs(&set.left, outputs, dialect);
-            collect_cte_outputs(&set.right, outputs, dialect);
-        }
-        Expression::Subquery(node) => collect_cte_outputs(&node.this, outputs, dialect),
-        Expression::Paren(node) => collect_cte_outputs(&node.this, outputs, dialect),
-        Expression::Annotated(node) => collect_cte_outputs(&node.this, outputs, dialect),
-        _ => {}
-    }
-}
-
-fn expand_cte_star_nodes(
+fn expand_known_cte_stars_scoped(
     expr: &mut Expression,
-    outputs: &std::collections::HashMap<String, Vec<String>>,
+    outputs: &HashMap<String, Vec<String>>,
     dialect: DialectType,
 ) {
     match expr {
         Expression::Select(select) => {
-            if let Some(from) = &select.from
-                && let Some(Expression::Table(table)) = from.expressions.first()
-                && let Some(names) = outputs.get(&table.name.name.to_lowercase())
-            {
-                let mut expanded = Vec::new();
-                for expression in select.expressions.drain(..) {
-                    if expression_is_star(&expression) {
-                        expanded.extend(
-                            names.iter().filter_map(|name| {
-                                parse_projection(&table.name.name, name, dialect)
-                            }),
-                        );
-                    } else {
-                        expanded.push(expression);
-                    }
+            let mut scoped_outputs = outputs.clone();
+            if let Some(with) = &select.with {
+                for cte in &with.ctes {
+                    let names = unwrap_select(&cte.this)
+                        .map(|body| {
+                            body.expressions
+                                .iter()
+                                .filter_map(explicit_output_name)
+                                .map(|name| {
+                                    polyglot_sql::normalize_name(name, Some(dialect), false, true)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    scoped_outputs.insert(normalize_identifier(&cte.alias), names);
                 }
-                select.expressions = expanded;
             }
+
+            expand_select_cte_stars(select, &scoped_outputs);
+
             if let Some(with) = &mut select.with {
                 for cte in &mut with.ctes {
-                    expand_cte_star_nodes(&mut cte.this, outputs, dialect);
+                    expand_known_cte_stars_scoped(&mut cte.this, &scoped_outputs, dialect);
                 }
+            }
+            if let Some(from) = &mut select.from {
+                for source in &mut from.expressions {
+                    expand_known_cte_stars_scoped(source, &scoped_outputs, dialect);
+                }
+            }
+            for join in &mut select.joins {
+                expand_known_cte_stars_scoped(&mut join.this, &scoped_outputs, dialect);
             }
         }
         Expression::Union(set) => {
-            expand_cte_star_nodes(&mut set.left, outputs, dialect);
-            expand_cte_star_nodes(&mut set.right, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
         }
         Expression::Intersect(set) => {
-            expand_cte_star_nodes(&mut set.left, outputs, dialect);
-            expand_cte_star_nodes(&mut set.right, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
         }
         Expression::Except(set) => {
-            expand_cte_star_nodes(&mut set.left, outputs, dialect);
-            expand_cte_star_nodes(&mut set.right, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.left, outputs, dialect);
+            expand_known_cte_stars_scoped(&mut set.right, outputs, dialect);
         }
-        Expression::Subquery(node) => expand_cte_star_nodes(&mut node.this, outputs, dialect),
-        Expression::Paren(node) => expand_cte_star_nodes(&mut node.this, outputs, dialect),
-        Expression::Annotated(node) => expand_cte_star_nodes(&mut node.this, outputs, dialect),
+        Expression::Subquery(node) => {
+            expand_known_cte_stars_scoped(&mut node.this, outputs, dialect)
+        }
+        Expression::Paren(node) => expand_known_cte_stars_scoped(&mut node.this, outputs, dialect),
+        Expression::Annotated(node) => {
+            expand_known_cte_stars_scoped(&mut node.this, outputs, dialect)
+        }
         _ => {}
     }
+}
+
+fn expand_select_cte_stars(select: &mut Select, outputs: &HashMap<String, Vec<String>>) {
+    let sources = select_table_sources(select);
+    let single_source = if select.joins.is_empty()
+        && select
+            .from
+            .as_ref()
+            .is_some_and(|from| from.expressions.len() == 1)
+    {
+        sources.first()
+    } else {
+        None
+    };
+
+    let mut expanded = Vec::new();
+    for expression in std::mem::take(&mut select.expressions) {
+        let source = expandable_star_qualifier(&expression).and_then(|qualifier| match qualifier {
+            Some(qualifier) => {
+                let mut matches = sources.iter().filter(|source| {
+                    identifiers_match(source.alias.as_ref().unwrap_or(&source.name), qualifier)
+                });
+                let source = matches.next()?;
+                matches.next().is_none().then_some(source)
+            }
+            None => single_source,
+        });
+
+        if let Some(source) = source
+            && source.schema.is_none()
+            && source.catalog.is_none()
+            && let Some(names) = outputs.get(&normalize_identifier(&source.name))
+            && !names.is_empty()
+        {
+            let qualifier = source.alias.as_ref().unwrap_or(&source.name);
+            expanded.extend(names.iter().map(|name| make_column(name, Some(qualifier))));
+        } else {
+            expanded.push(expression);
+        }
+    }
+    select.expressions = expanded;
+}
+
+fn select_table_sources(select: &Select) -> Vec<TableRef> {
+    let mut sources = Vec::new();
+    if let Some(from) = &select.from {
+        for source in &from.expressions {
+            if let Expression::Table(table) = source {
+                sources.push((**table).clone());
+            }
+        }
+    }
+    for join in &select.joins {
+        if let Expression::Table(table) = &join.this {
+            sources.push((**table).clone());
+        }
+    }
+    sources
+}
+
+fn expandable_star_qualifier(expr: &Expression) -> Option<Option<&Identifier>> {
+    match expr {
+        Expression::Star(star)
+            if star.except.as_ref().is_none_or(Vec::is_empty)
+                && star.replace.as_ref().is_none_or(Vec::is_empty)
+                && star.rename.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            Some(star.table.as_ref())
+        }
+        Expression::Column(column) if column.name.name == "*" => Some(column.table.as_ref()),
+        Expression::Annotated(node) => expandable_star_qualifier(&node.this),
+        _ => None,
+    }
+}
+
+fn normalize_identifier(identifier: &Identifier) -> String {
+    if identifier.quoted {
+        identifier.name.clone()
+    } else {
+        identifier.name.to_lowercase()
+    }
+}
+
+fn identifiers_match(left: &Identifier, right: &Identifier) -> bool {
+    normalize_identifier(left) == normalize_identifier(right)
+}
+
+fn make_column(name: &str, table: Option<&Identifier>) -> Expression {
+    Expression::Column(Box::new(Column {
+        name: Identifier::new(name),
+        table: table.cloned(),
+        join_mark: false,
+        trailing_comments: Vec::new(),
+        span: None,
+        inferred_type: None,
+    }))
+}
+
+fn materialize_star_modifier(expr: &mut Expression, name: &str, dialect: DialectType) -> bool {
+    match expr {
+        Expression::Select(select) => {
+            let mut changed = false;
+            for expression in &mut select.expressions {
+                changed |= materialize_projection_modifier(expression, name, dialect);
+            }
+            if let Some(with) = &mut select.with {
+                for cte in &mut with.ctes {
+                    changed |= materialize_star_modifier(&mut cte.this, name, dialect);
+                }
+            }
+            if let Some(from) = &mut select.from {
+                for source in &mut from.expressions {
+                    changed |= materialize_star_modifier(source, name, dialect);
+                }
+            }
+            for join in &mut select.joins {
+                changed |= materialize_star_modifier(&mut join.this, name, dialect);
+            }
+            changed
+        }
+        Expression::Union(set) => {
+            let left = materialize_star_modifier(&mut set.left, name, dialect);
+            let right = materialize_star_modifier(&mut set.right, name, dialect);
+            left || right
+        }
+        Expression::Intersect(set) => {
+            let left = materialize_star_modifier(&mut set.left, name, dialect);
+            let right = materialize_star_modifier(&mut set.right, name, dialect);
+            left || right
+        }
+        Expression::Except(set) => {
+            let left = materialize_star_modifier(&mut set.left, name, dialect);
+            let right = materialize_star_modifier(&mut set.right, name, dialect);
+            left || right
+        }
+        Expression::Subquery(node) => materialize_star_modifier(&mut node.this, name, dialect),
+        Expression::Paren(node) => materialize_star_modifier(&mut node.this, name, dialect),
+        Expression::Annotated(node) => materialize_star_modifier(&mut node.this, name, dialect),
+        _ => false,
+    }
+}
+
+fn materialize_projection_modifier(
+    expression: &mut Expression,
+    name: &str,
+    dialect: DialectType,
+) -> bool {
+    if let Expression::Annotated(node) = expression {
+        return materialize_projection_modifier(&mut node.this, name, dialect);
+    }
+    let Expression::Star(star) = expression else {
+        return false;
+    };
+    let normalized = normalize_name(name, Some(dialect));
+    if star.except.as_ref().is_some_and(|except| {
+        except
+            .iter()
+            .any(|identifier| normalize_name(&identifier.name, Some(dialect)) == normalized)
+    }) {
+        return false;
+    }
+    if let Some(alias) = star.replace.as_ref().and_then(|replace| {
+        replace
+            .iter()
+            .find(|alias| normalize_name(&alias.alias.name, Some(dialect)) == normalized)
+    }) {
+        *expression = Expression::Alias(Box::new(alias.clone()));
+        return true;
+    }
+    if let Some((source, target)) = star.rename.as_ref().and_then(|rename| {
+        rename
+            .iter()
+            .find(|(_, target)| normalize_name(&target.name, Some(dialect)) == normalized)
+    }) {
+        *expression = Expression::Alias(Box::new(Alias::new(
+            make_column(&source.name, None),
+            target.clone(),
+        )));
+        return true;
+    }
+    false
 }
 
 impl StarGuard {
@@ -214,6 +364,16 @@ impl StarGuard {
         Some(candidate)
     }
 
+    pub(super) fn materialize_star_modifier(
+        &self,
+        expr: &Expression,
+        name: &str,
+        dialect: DialectType,
+    ) -> Option<Expression> {
+        let mut candidate = expr.clone();
+        materialize_star_modifier(&mut candidate, name, dialect).then_some(candidate)
+    }
+
     pub(super) fn synthetic_set_lineage(
         &self,
         expr: &Expression,
@@ -250,11 +410,20 @@ impl StarGuard {
 fn contains_set_operation(expr: &Expression) -> bool {
     match expr {
         Expression::Union(_) | Expression::Intersect(_) | Expression::Except(_) => true,
-        Expression::Select(select) => select.with.as_ref().is_some_and(|with| {
-            with.ctes
-                .iter()
-                .any(|cte| contains_set_operation(&cte.this))
-        }),
+        Expression::Select(select) => {
+            select.with.as_ref().is_some_and(|with| {
+                with.ctes
+                    .iter()
+                    .any(|cte| contains_set_operation(&cte.this))
+            }) || select
+                .from
+                .as_ref()
+                .is_some_and(|from| from.expressions.iter().any(contains_set_operation))
+                || select
+                    .joins
+                    .iter()
+                    .any(|join| contains_set_operation(&join.this))
+        }
         Expression::Subquery(node) => contains_set_operation(&node.this),
         Expression::Paren(node) => contains_set_operation(&node.this),
         Expression::Annotated(node) => contains_set_operation(&node.this),
@@ -320,6 +489,14 @@ fn materialize_set_stars(expr: &mut Expression, name: &str, dialect: DialectType
                 for cte in &mut with.ctes {
                     changed |= materialize_set_stars(&mut cte.this, name, dialect);
                 }
+            }
+            if let Some(from) = &mut select.from {
+                for source in &mut from.expressions {
+                    changed |= materialize_set_stars(source, name, dialect);
+                }
+            }
+            for join in &mut select.joins {
+                changed |= materialize_set_stars(&mut join.this, name, dialect);
             }
             changed
         }

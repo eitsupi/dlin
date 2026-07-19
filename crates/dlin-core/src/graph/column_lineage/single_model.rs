@@ -58,17 +58,21 @@ pub(super) fn run_column_lineage(
     ctx: &LineageContext,
 ) -> Result<ColumnLineageResult, String> {
     let dialect = Some(ctx.dialect);
+    let modifier_expr =
+        ctx.star_guard
+            .materialize_star_modifier(&ctx.expanded_expr, col_name, ctx.dialect);
+    let lineage_expr = modifier_expr.as_ref().unwrap_or(&ctx.expanded_expr);
     let lineage_result = if let Some(ref s) = ctx.schema {
         polyglot_sql::lineage::lineage_with_schema(
             col_name,
-            &ctx.expanded_expr,
+            lineage_expr,
             Some(s as &dyn polyglot_sql::Schema),
             dialect,
             false,
         )
-        .or_else(|_| polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false))
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false))
     } else {
-        polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false)
+        polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false)
     };
 
     let lineage_result = lineage_result.or_else(|original_error| {
