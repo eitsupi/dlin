@@ -70,7 +70,7 @@ fn test_cte_select_star_in_manifest_model() {
 }
 
 #[test]
-fn test_schema_resolves_cte_star_from_external_table() {
+fn test_schema_resolves_cte_star_from_unknown_source() {
     // Test that lineage_with_schema can resolve columns through CTEs that
     // reference external tables registered in the schema.
     let sql = r#"with
@@ -165,7 +165,7 @@ fn test_column_not_found_hint_when_select_star_unresolved() {
         .nodes
         .get_mut("model.proj.stg_orders")
         .unwrap()
-        .compiled_code = Some("SELECT * FROM some_external_table".to_string());
+        .compiled_code = Some("SELECT * FROM some_unknown_source".to_string());
 
     let result = compute_column_lineage(
         &manifest,
@@ -186,7 +186,7 @@ fn test_column_not_found_hint_when_select_star_unresolved() {
 }
 
 #[test]
-fn test_column_not_found_hint_when_cte_select_star_unresolved() {
+fn test_cte_select_star_passthrough_is_traced() {
     // When a CTE body has SELECT * from an external table, the hint should still
     // fire for the outer query's ColumnNotFound errors even though the outermost
     // SELECT list has no star.
@@ -196,7 +196,7 @@ fn test_column_not_found_hint_when_cte_select_star_unresolved() {
         .get_mut("model.proj.stg_orders")
         .unwrap()
         .compiled_code =
-        Some("WITH src AS (SELECT * FROM some_external_table) SELECT id FROM src".to_string());
+        Some("WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src".to_string());
 
     let result = compute_column_lineage(
         &manifest,
@@ -205,18 +205,16 @@ fn test_column_not_found_hint_when_cte_select_star_unresolved() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for CTE-nested stars should include SELECT * hint; got: {:?}",
-        result.errors
+    assert_exact_column_outcomes(
+        &result,
+        &["id"],
+        &["customer_id", "order_date", "order_id", "status"],
     );
+    assert_select_star_hint(&result);
 }
 
 #[test]
-fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
+fn test_derived_table_select_star_passthrough_is_traced() {
     // Derived-table pattern: SELECT id FROM (SELECT * FROM ext) src
     // The outermost SELECT has no star; the star is inside a FROM subquery.
     let mut manifest = make_test_manifest();
@@ -224,7 +222,7 @@ fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
         .nodes
         .get_mut("model.proj.stg_orders")
         .unwrap()
-        .compiled_code = Some("SELECT id FROM (SELECT * FROM some_external_table) src".to_string());
+        .compiled_code = Some("SELECT id FROM (SELECT * FROM some_unknown_source) src".to_string());
 
     let result = compute_column_lineage(
         &manifest,
@@ -233,18 +231,16 @@ fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for derived-table stars should include SELECT * hint; got: {:?}",
-        result.errors
+    assert_exact_column_outcomes(
+        &result,
+        &["id"],
+        &["customer_id", "order_date", "order_id", "status"],
     );
+    assert_select_star_hint(&result);
 }
 
 #[test]
-fn test_column_not_found_hint_when_join_select_star_unresolved() {
+fn test_join_select_star_passthrough_is_traced() {
     // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
     // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
     let mut manifest = make_test_manifest();
@@ -253,7 +249,7 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
         .get_mut("model.proj.stg_orders")
         .unwrap()
         .compiled_code = Some(
-        "SELECT id FROM some_table JOIN (SELECT * FROM some_external_table) src ON 1=1".to_string(),
+        "SELECT id FROM some_table JOIN (SELECT * FROM some_unknown_source) src ON 1=1".to_string(),
     );
 
     let result = compute_column_lineage(
@@ -263,14 +259,127 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
-        result.errors
+    assert_exact_column_outcomes(
+        &result,
+        &["id"],
+        &["customer_id", "order_date", "order_id", "status"],
     );
+    assert_select_star_hint(&result);
+}
+
+#[test]
+fn test_star_passthrough_query_shapes_are_traceable() {
+    let cases = [
+        "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
+        "SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders",
+        "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT COALESCE(a.id, b.id) AS id FROM a JOIN b ON true",
+        "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT CASE WHEN a.id IS NULL THEN b.id ELSE a.id END AS id FROM a JOIN b ON true",
+        "WITH left_side AS (SELECT id FROM raw.orders), right_side AS (SELECT * FROM some_unknown_source) SELECT id FROM left_side UNION ALL SELECT id FROM right_side",
+        "(SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders) INTERSECT SELECT id FROM raw.orders",
+        "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
+    ];
+
+    for sql in cases {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = [(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(sql.to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert!(
+            result.errors.is_empty(),
+            "SQL: {sql}\nerrors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+    }
+}
+
+#[test]
+fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
+    let cases = [
+        (
+            "col_a",
+            "WITH u AS (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) SELECT col_a FROM u",
+        ),
+        (
+            "col_a",
+            "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
+        ),
+        (
+            "col_a",
+            "WITH lit AS (SELECT 1 AS col_a), lit2 AS (SELECT 2 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM lit2) SELECT col_a FROM u",
+        ),
+        (
+            "c1",
+            "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c1, 2 AS c2 UNION ALL SELECT a.col_x, a.col_y FROM a) SELECT c1 FROM u",
+        ),
+        (
+            "c9",
+            "WITH u AS (SELECT 1 AS c1 UNION ALL SELECT 2 AS c9) SELECT c9 FROM u",
+        ),
+        (
+            "a",
+            "WITH u AS (SELECT 1 AS a, 2 AS a UNION ALL SELECT 3, 4) SELECT a FROM u",
+        ),
+        (
+            "c",
+            "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c UNION ALL SELECT a.col_a FROM a UNION ALL SELECT 3 AS c3) SELECT c FROM u",
+        ),
+    ];
+
+    for (column, sql) in cases {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = [(
+            column.to_string(),
+            ManifestColumn {
+                name: column.to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some(sql.to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DialectType::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert!(
+            result.errors.is_empty(),
+            "SQL: {sql}\nerrors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+    }
 }
 
 #[test]
@@ -864,14 +973,13 @@ fn test_bigquery_unnest_virtual_source_excluded() {
     // Virtual leaf nodes are skipped so only real table sources survive.
     let mut nodes = HashMap::new();
     let mut columns = HashMap::new();
-    for name in ["week_start"] {
-        columns.insert(
-            name.to_string(),
-            ManifestColumn {
-                name: name.to_string(),
-            },
-        );
-    }
+    let name = "week_start";
+    columns.insert(
+        name.to_string(),
+        ManifestColumn {
+            name: name.to_string(),
+        },
+    );
     nodes.insert(
         "model.proj.unnest_model".to_string(),
         ManifestNode {
@@ -953,6 +1061,17 @@ fn assert_exact_column_outcomes(
     assert_eq!(actual_errors, expected_errors);
 }
 
+fn assert_select_star_hint(result: &ModelColumnLineage) {
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.hint.as_deref().unwrap_or("").contains("SELECT *")),
+        "expected SELECT * hint, got errors: {:?}",
+        result.errors
+    );
+}
+
 #[test]
 fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
     let mut manifest = make_test_manifest();
@@ -960,7 +1079,7 @@ fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
         .nodes
         .get_mut("model.proj.stg_orders")
         .unwrap()
-        .compiled_code = Some("SELECT order_id, * FROM some_external_table".to_string());
+        .compiled_code = Some("SELECT order_id, * FROM some_unknown_source".to_string());
 
     let result = compute_column_lineage(
         &manifest,
@@ -982,7 +1101,7 @@ fn test_annotated_star_and_explicit_projection_are_classified_independently() {
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.depends_on.nodes.clear();
     node.compiled_code = Some(
-            "SELECT\n  -- unresolved passthrough\n  some_external_table.*,\n  -- explicit output\n  order_id\nFROM some_external_table"
+            "SELECT\n  -- unresolved passthrough\n  some_unknown_source.*,\n  -- explicit output\n  order_id\nFROM some_unknown_source"
                 .to_string(),
         );
 
@@ -1008,7 +1127,7 @@ fn test_known_manifest_source_succeeds_alongside_external_join_star() {
         .get_mut("model.proj.stg_orders")
         .unwrap()
         .compiled_code = Some(
-            "SELECT o.id AS order_id, e.*\nFROM raw.orders o\nJOIN some_external_table e ON o.id = e.id"
+            "SELECT o.id AS order_id, e.*\nFROM raw.orders o\nJOIN some_unknown_source e ON o.id = e.id"
                 .to_string(),
         );
 
@@ -1047,7 +1166,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
             .collect();
 
         let set_operation = format!(
-            "SELECT id, 1 AS explicit_col FROM raw.orders {operator} SELECT id, * FROM some_external_table"
+            "SELECT id, 1 AS explicit_col FROM raw.orders {operator} SELECT id, * FROM some_unknown_source"
         );
         manifest
             .nodes
@@ -1062,7 +1181,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
             &mut ColumnLineageCache::disabled(),
         );
 
-        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+        assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
 
         for wrapper in [
             format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
@@ -1081,7 +1200,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
                 &mut ColumnLineageCache::disabled(),
             );
 
-            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+            assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
         }
     }
 }
@@ -1110,7 +1229,7 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
         .unwrap()
         .compiled_code = Some(
         "SELECT id AS a, user_id AS b, order_date AS c FROM raw.orders \
-             UNION SELECT 3, 4, * FROM some_external_table"
+             UNION SELECT 3, 4, * FROM some_unknown_source"
             .to_string(),
     );
 
@@ -1121,11 +1240,11 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b"], &["c"]);
+    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
 }
 
 #[test]
-fn test_set_operation_star_only_branch_rejects_all_ordinals() {
+fn test_set_operation_star_only_branch_keeps_explicit_left_names() {
     let mut manifest = make_test_manifest();
     manifest
         .nodes
@@ -1148,7 +1267,7 @@ fn test_set_operation_star_only_branch_rejects_all_ordinals() {
         .unwrap()
         .compiled_code = Some(
         "SELECT id AS a, user_id AS b FROM raw.orders \
-             UNION SELECT * FROM some_external_table"
+             UNION SELECT * FROM some_unknown_source"
             .to_string(),
     );
 
@@ -1159,11 +1278,11 @@ fn test_set_operation_star_only_branch_rejects_all_ordinals() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &[], &["a", "b"]);
+    assert_exact_column_outcomes(&result, &["a", "b"], &[]);
 }
 
 #[test]
-fn test_set_operation_explicit_projection_after_unresolved_star_is_rejected() {
+fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
     let mut manifest = make_test_manifest();
     manifest
         .nodes
@@ -1186,7 +1305,7 @@ fn test_set_operation_explicit_projection_after_unresolved_star_is_rejected() {
         .unwrap()
         .compiled_code = Some(
         "SELECT id AS a, user_id AS b, order_date AS c FROM raw.orders \
-             UNION SELECT 3, *, 4 AS extra_col FROM some_external_table"
+             UNION SELECT 3, *, 4 AS extra_col FROM some_unknown_source"
             .to_string(),
     );
 
@@ -1197,7 +1316,7 @@ fn test_set_operation_explicit_projection_after_unresolved_star_is_rejected() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a"], &["b", "c"]);
+    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
 }
 
 #[test]
@@ -1205,7 +1324,7 @@ fn test_parenthesized_unresolved_star_is_detected() {
     // In polyglot-sql 0.6.2, a nested parenthesized query in a FROM clause
     // preserves a Paren node around the inner query.
     let expr = polyglot_sql::parse_one(
-        "SELECT id FROM ((SELECT * FROM some_external_table))",
+        "SELECT id FROM ((SELECT * FROM some_unknown_source))",
         DialectType::Generic,
     )
     .unwrap();
@@ -1218,7 +1337,7 @@ fn test_parenthesized_unresolved_star_is_detected() {
 fn test_nested_set_operations_guard_unresolved_star_branch() {
     // The 0.6.2 parser represents an unparenthesized UNION chain as a
     // left-nested Union(Union(...), ...).
-    let sql = "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, 2 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_external_table";
+    let sql = "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, 2 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source";
     let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
     assert!(matches!(
         &expr,
@@ -1255,7 +1374,7 @@ fn test_nested_set_operations_guard_unresolved_star_branch() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+    assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
 }
 
 #[test]
@@ -1265,7 +1384,7 @@ fn test_explicit_output_case_normalization_with_unresolved_star() {
         .nodes
         .get_mut("model.proj.stg_orders")
         .unwrap()
-        .compiled_code = Some("SELECT ORDER_ID, * FROM some_external_table".to_string());
+        .compiled_code = Some("SELECT ORDER_ID, * FROM some_unknown_source".to_string());
 
     let result = compute_column_lineage(
         &manifest,
@@ -1290,4 +1409,181 @@ fn test_explicit_output_case_normalization_with_unresolved_star() {
         "order_id should not be rejected because of Snowflake case folding: {:?}",
         result.errors
     );
+}
+
+fn compute_star_shape(sql: &str, columns: &[&str]) -> ModelColumnLineage {
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = columns
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                ManifestColumn {
+                    name: (*name).to_string(),
+                },
+            )
+        })
+        .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some(sql.to_string());
+    compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DialectType::Generic,
+        &mut ColumnLineageCache::disabled(),
+    )
+}
+
+fn assert_sources_for(result: &ModelColumnLineage, column: &str, expected: &[(&str, &str)]) {
+    let entry = result
+        .columns
+        .iter()
+        .find(|entry| entry.column == column)
+        .unwrap_or_else(|| panic!("missing traced column {column}: {:?}", result.errors));
+    let mut actual: Vec<_> = entry
+        .sources
+        .iter()
+        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .collect();
+    actual.sort_unstable();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_star_replace_introduced_name_is_explicit() {
+    let result = compute_star_shape(
+        "SELECT * REPLACE (id AS wanted) FROM raw.orders",
+        &["wanted"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_star_rename_introduced_name_traces_original_column() {
+    let result = compute_star_shape(
+        "SELECT * RENAME (id AS wanted) FROM raw.orders",
+        &["wanted"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_qualified_external_star_is_not_expanded_from_joined_cte() {
+    let result = compute_star_shape(
+        "WITH c AS (SELECT 1 AS x) SELECT e.* FROM c JOIN external e ON true",
+        &["x"],
+    );
+    assert_exact_column_outcomes(&result, &[], &["x"]);
+}
+
+#[test]
+fn test_cte_scope_propagates_to_all_set_operation_operands() {
+    // The parser attaches a top-level WITH clause to the UNION/INTERSECT/EXCEPT
+    // node itself (its own `with` field), not to either operand's SELECT, but the
+    // CTE it defines is visible to every operand.
+    let result = compute_star_shape(
+        "WITH c AS (SELECT id AS x FROM raw.orders) SELECT x FROM c UNION ALL SELECT * FROM c",
+        &["x"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "x", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_star_rename_in_join_keeps_source_table_qualifier() {
+    // The RENAME source must keep the star's own qualifier so it resolves against
+    // the correct joined table rather than an unqualified (and ambiguous) name.
+    let result = compute_star_shape(
+        "SELECT b.* RENAME (id AS wanted) FROM raw.orders a JOIN raw.customers b ON a.customer_id = b.id",
+        &["wanted"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "wanted", &[("raw.customers", "id")]);
+}
+
+#[test]
+fn test_set_operation_nested_in_from_subquery_uses_explicit_branch() {
+    let result = compute_star_shape(
+        "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",
+        &["col_a"],
+    );
+    assert_exact_column_outcomes(&result, &["col_a"], &[]);
+}
+
+#[test]
+fn test_nested_cte_name_does_not_shadow_outer_sibling_scope() {
+    let result = compute_star_shape(
+        "WITH c AS (SELECT id AS outer_id FROM raw.orders) \
+         SELECT c.* FROM c \
+         JOIN (WITH c AS (SELECT 2 AS inner_id) SELECT * FROM c) nested ON true",
+        &["outer_id"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_sources_for(&result, "outer_id", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_star_except_removed_name_remains_unresolved() {
+    let result = compute_star_shape(
+        "SELECT * EXCEPT (wanted) FROM some_unknown_source",
+        &["wanted"],
+    );
+    assert_eq!(result.traced_columns, 0);
+    assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.errors[0]
+            .hint
+            .as_deref()
+            .unwrap_or("")
+            .contains("SELECT *")
+    );
+}
+
+#[test]
+fn test_real_underscore_one_column_is_not_synthetic_ordinal() {
+    let result = compute_star_shape("SELECT id AS _1 FROM raw.orders", &["_1"]);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "_1", &[("raw.orders", "id")]);
+}
+
+#[test]
+fn test_cte_star_expansion_preserves_marker_and_sources() {
+    let result = compute_star_shape(
+        "WITH known AS (SELECT 1 AS a, 2 AS b) SELECT 9 AS marker, * FROM known",
+        &["marker", "a", "b"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 3);
+    assert!(result.columns.iter().any(|entry| entry.column == "marker"));
+    assert!(result.columns.iter().any(|entry| entry.column == "a"));
+    assert!(result.columns.iter().any(|entry| entry.column == "b"));
+    assert_sources_for(&result, "a", &[("known", "a")]);
+    assert_sources_for(&result, "b", &[("known", "b")]);
+}
+
+#[test]
+fn test_duplicate_left_output_name_preserves_sources() {
+    let result = compute_star_shape(
+        "WITH dup AS (SELECT 1 AS a, 2 AS a) SELECT a FROM dup",
+        &["a"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
+    assert_sources_for(&result, "a", &[("dup", "a")]);
 }
