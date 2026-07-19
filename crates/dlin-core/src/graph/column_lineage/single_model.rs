@@ -104,6 +104,12 @@ fn lineage_depends_on_unresolved_star(
     } else {
         set_operation_ordinal
     };
+    if is_set_operation
+        && set_operation_ordinal
+            .is_some_and(|ordinal| set_operation_has_star_dependent_branch(&node.source, ordinal))
+    {
+        return true;
+    }
     let crosses_query_boundary =
         matches!(node.source_kind, SourceKind::Cte | SourceKind::DerivedTable);
     let source_has_star = has_unresolved_stars(&node.source);
@@ -114,7 +120,7 @@ fn lineage_depends_on_unresolved_star(
         && set_operation_ordinal.is_some();
     let branch_projection_is_star = branch_projection_checked
         && set_operation_ordinal
-            .is_some_and(|ordinal| projection_at_ordinal_is_star(&node.source, ordinal));
+            .is_some_and(|ordinal| projection_ordinal_depends_on_star(&node.source, ordinal));
 
     if is_root {
         if matches!(&node.expression, Expression::Column(c) if c.table.is_some())
@@ -195,13 +201,43 @@ fn synthetic_ordinal(column_name: &str) -> Option<usize> {
     column_name.strip_prefix('_')?.parse().ok()
 }
 
-fn projection_at_ordinal_is_star(expr: &Expression, ordinal: usize) -> bool {
+fn projection_ordinal_depends_on_star(expr: &Expression, ordinal: usize) -> bool {
     match expr {
-        Expression::Annotated(annotated) => projection_at_ordinal_is_star(&annotated.this, ordinal),
+        Expression::Annotated(annotated) => {
+            projection_ordinal_depends_on_star(&annotated.this, ordinal)
+        }
         Expression::Select(select) => select
             .expressions
-            .get(ordinal)
-            .is_some_and(expression_is_star),
+            .iter()
+            .position(expression_is_star)
+            .is_some_and(|first_star_ordinal| ordinal >= first_star_ordinal),
+        _ => false,
+    }
+}
+
+fn set_operation_has_star_dependent_branch(expr: &Expression, ordinal: usize) -> bool {
+    match expr {
+        Expression::Union(union) => {
+            set_operation_has_star_dependent_branch(&union.left, ordinal)
+                || set_operation_has_star_dependent_branch(&union.right, ordinal)
+        }
+        Expression::Intersect(intersect) => {
+            set_operation_has_star_dependent_branch(&intersect.left, ordinal)
+                || set_operation_has_star_dependent_branch(&intersect.right, ordinal)
+        }
+        Expression::Except(except) => {
+            set_operation_has_star_dependent_branch(&except.left, ordinal)
+                || set_operation_has_star_dependent_branch(&except.right, ordinal)
+        }
+        Expression::Annotated(annotated) => {
+            set_operation_has_star_dependent_branch(&annotated.this, ordinal)
+        }
+        Expression::Subquery(subquery) => {
+            set_operation_has_star_dependent_branch(&subquery.this, ordinal)
+        }
+        Expression::Cte(cte) => set_operation_has_star_dependent_branch(&cte.this, ordinal),
+        Expression::Paren(paren) => set_operation_has_star_dependent_branch(&paren.this, ordinal),
+        Expression::Select(_) => projection_ordinal_depends_on_star(expr, ordinal),
         _ => false,
     }
 }
