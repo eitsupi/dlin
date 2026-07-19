@@ -210,6 +210,7 @@ pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
         Expression::Subquery(subq) => has_unresolved_stars(&subq.this),
         Expression::Cte(cte) => has_unresolved_stars(&cte.this),
         Expression::Annotated(annotated) => has_unresolved_stars(&annotated.this),
+        Expression::Paren(paren) => has_unresolved_stars(&paren.this),
         Expression::Union(union) => {
             has_unresolved_stars(&union.left) || has_unresolved_stars(&union.right)
         }
