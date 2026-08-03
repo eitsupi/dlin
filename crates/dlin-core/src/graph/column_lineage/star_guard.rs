@@ -222,11 +222,83 @@ impl StarGuard {
         materialize_star_modifier(&mut candidate, name, dialect).then_some(candidate)
     }
 
+    pub(super) fn explicit_set_operands<'a>(
+        expr: &'a Expression,
+        name: &str,
+        dialect: Option<DialectType>,
+    ) -> Option<Vec<&'a Expression>> {
+        if !is_set_operation(unwrap_query(expr)) {
+            return None;
+        }
+
+        // A WITH attached to a set operation scopes over all of its operands.
+        // Standalone operand lineage would lose that scope, so leave those cases
+        // to the normal lineage path rather than risk resolving a CTE as a table.
+        let mut operands = Vec::new();
+        collect_explicit_set_operands(expr, name, dialect, &mut operands).then_some(operands)
+    }
+
     fn knowledge(&self, expr: &Expression) -> Option<&ProjectionKnowledge> {
         self.projections
             .iter()
             .find(|(candidate, _)| candidate == expr)
             .map(|(_, knowledge)| knowledge)
+    }
+}
+
+fn collect_explicit_set_operands<'a>(
+    expr: &'a Expression,
+    name: &str,
+    dialect: Option<DialectType>,
+    operands: &mut Vec<&'a Expression>,
+) -> bool {
+    match expr {
+        Expression::Union(set) => {
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, name, dialect, operands)
+                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+        }
+        Expression::Intersect(set) => {
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, name, dialect, operands)
+                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+        }
+        Expression::Except(set) => {
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, name, dialect, operands)
+                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+        }
+        Expression::Annotated(node) => {
+            collect_explicit_set_operands(&node.this, name, dialect, operands)
+        }
+        Expression::Subquery(node) => {
+            collect_explicit_set_operands(&node.this, name, dialect, operands)
+        }
+        Expression::Cte(node) => collect_explicit_set_operands(&node.this, name, dialect, operands),
+        Expression::Paren(node) => {
+            collect_explicit_set_operands(&node.this, name, dialect, operands)
+        }
+        Expression::Select(select) => {
+            let normalized = normalize_name(name, dialect);
+            if select.expressions.iter().any(|expression| {
+                explicit_output_name(expression)
+                    .is_some_and(|output| normalize_name(output, dialect) == normalized)
+            }) {
+                operands.push(expr);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn unwrap_query(expr: &Expression) -> &Expression {
+    match expr {
+        Expression::Annotated(node) => unwrap_query(&node.this),
+        Expression::Subquery(node) => unwrap_query(&node.this),
+        Expression::Cte(node) => unwrap_query(&node.this),
+        Expression::Paren(node) => unwrap_query(&node.this),
+        _ => expr,
     }
 }
 

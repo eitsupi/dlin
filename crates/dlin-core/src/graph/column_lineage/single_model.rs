@@ -55,23 +55,11 @@ pub(super) fn run_column_lineage(
     col_name: &str,
     ctx: &LineageContext,
 ) -> Result<ColumnLineageResult, String> {
-    let dialect = Some(ctx.dialect);
     let modifier_expr =
         ctx.star_guard
             .materialize_star_modifier(&ctx.expanded_expr, col_name, ctx.dialect);
     let lineage_expr = modifier_expr.as_ref().unwrap_or(&ctx.expanded_expr);
-    let lineage_result = if let Some(ref s) = ctx.schema {
-        polyglot_sql::lineage::lineage_with_schema(
-            col_name,
-            lineage_expr,
-            Some(s as &dyn polyglot_sql::Schema),
-            dialect,
-            false,
-        )
-        .or_else(|_| polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false))
-    } else {
-        polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false)
-    };
+    let lineage_result = lineage_node(col_name, lineage_expr, ctx);
 
     match lineage_result {
         Ok(node) => {
@@ -81,8 +69,68 @@ pub(super) fn run_column_lineage(
                 Ok(extract_leaf_sources(&node))
             }
         }
-        Err(e) => Err(format_lineage_error(&e)),
+        Err(e) => explicit_set_operand_lineage(col_name, lineage_expr, ctx, &e)
+            .ok_or_else(|| format_lineage_error(&e)),
     }
+}
+
+fn lineage_node(
+    col_name: &str,
+    expr: &Expression,
+    ctx: &LineageContext,
+) -> Result<LineageNode, polyglot_sql::Error> {
+    let dialect = Some(ctx.dialect);
+    if let Some(ref schema) = ctx.schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            col_name,
+            expr,
+            Some(schema as &dyn polyglot_sql::Schema),
+            dialect,
+            false,
+        )
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, expr, dialect, false))
+    } else {
+        polyglot_sql::lineage::lineage(col_name, expr, dialect, false)
+    }
+}
+
+fn explicit_set_operand_lineage(
+    col_name: &str,
+    expr: &Expression,
+    ctx: &LineageContext,
+    original_error: &polyglot_sql::Error,
+) -> Option<ColumnLineageResult> {
+    let error = original_error.to_string();
+    if !error.contains("Cannot find column") || !error.contains("in set operation") {
+        return None;
+    }
+
+    // A set's leftmost star can make its output names unknowable to polyglot-sql.
+    // Trace only intact operands that explicitly declare the requested name;
+    // unresolved star operands contribute no source instead of a guessed one.
+    let operands = StarGuard::explicit_set_operands(expr, col_name, Some(ctx.dialect))?;
+    let mut results = operands.into_iter().filter_map(|operand| {
+        let node = lineage_node(col_name, operand, ctx).ok()?;
+        (!ctx.star_guard.rejects(&node)).then(|| extract_leaf_sources(&node))
+    });
+    let first = results.next()?;
+    Some(results.fold(first, merge_lineage_results))
+}
+
+fn merge_lineage_results(
+    mut left: ColumnLineageResult,
+    right: ColumnLineageResult,
+) -> ColumnLineageResult {
+    if left.transformation == TransformationType::Direct
+        && right.transformation != TransformationType::Direct
+    {
+        left.transformation = right.transformation;
+    }
+    left.sources.extend(right.sources);
+    left.sources
+        .sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
+    left.sources.dedup();
+    left
 }
 
 pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
