@@ -94,6 +94,15 @@ fn lineage_node(
     }
 }
 
+// TODO: this locates an operand's projection by ordinal (see
+// `StarGuard::explicit_set_operands`) but then re-derives lineage by looking that
+// projection's output *name* back up via `lineage_node`, instead of tracing the
+// already-located projection directly. Unaliased expressions have no name to look
+// up (e.g. `fee * 2` in `SELECT other.*, fee FROM a UNION ALL SELECT x, fee * 2
+// FROM b`) and are silently dropped; duplicate output names (`SELECT a.id, b.id`)
+// make the lookup ambiguous and can retrace the wrong projection. Redesign: keep
+// projection-list position and output ordinal as distinct types and trace
+// positionally instead of round-tripping through a name.
 fn explicit_set_operand_lineage(
     col_name: &str,
     expr: &Expression,

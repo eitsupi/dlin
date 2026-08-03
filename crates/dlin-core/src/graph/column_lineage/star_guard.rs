@@ -251,6 +251,7 @@ fn rejects_trace_key(expr: &Expression, name: &str, dialect: Option<DialectType>
     }
 }
 
+// TODO: same ordinal-vs-list-index caveat as `explicit_set_ordinal` above.
 fn collect_explicit_set_operands<'a>(
     expr: &'a Expression,
     ordinal: usize,
@@ -522,6 +523,13 @@ fn explicit_ordinal(expr: &Expression, name: &str, dialect: Option<DialectType>)
 
 // The fallback must only trace operands when every explicit declaration of the
 // requested name agrees on one ordinal and the set has no attached WITH.
+//
+// TODO: `ordinal` here (and in `collect_explicit_ordinal`/`collect_explicit_set_operands`
+// below) is a projection-list index, not a reliable output ordinal — they diverge
+// once an earlier projection is an unresolved `*`, whose expansion width is
+// unknown. E.g. in `SELECT other.*, fee`, `fee` is at list index 1, but its real
+// output ordinal depends on how wide `other.*` expands. Redesign: treat
+// projection-list position and output ordinal as distinct types.
 fn explicit_set_ordinal(
     expr: &Expression,
     name: &str,
@@ -532,6 +540,7 @@ fn explicit_set_ordinal(
     collect_explicit_ordinal(expr, &normalized, dialect, &mut ordinal).then_some(ordinal)?
 }
 
+// TODO: same ordinal-vs-list-index caveat as `explicit_set_ordinal` above.
 fn collect_explicit_ordinal(
     expr: &Expression,
     normalized_name: &str,
