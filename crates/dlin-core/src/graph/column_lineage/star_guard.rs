@@ -212,22 +212,6 @@ impl StarGuard {
         here || node.downstream.iter().any(|child| self.rejects(child))
     }
 
-    pub(super) fn materialize_set_star(
-        &self,
-        expr: &Expression,
-        name: &str,
-        dialect: DialectType,
-    ) -> Option<Expression> {
-        if !contains_set_operation(expr) {
-            return None;
-        }
-        let mut candidate = expr.clone();
-        if !materialize_set_stars(&mut candidate, name, dialect) {
-            return None;
-        }
-        Some(candidate)
-    }
-
     pub(super) fn materialize_star_modifier(
         &self,
         expr: &Expression,
@@ -238,184 +222,11 @@ impl StarGuard {
         materialize_star_modifier(&mut candidate, name, dialect).then_some(candidate)
     }
 
-    pub(super) fn synthetic_set_lineage(
-        &self,
-        expr: &Expression,
-        name: &str,
-        dialect: DialectType,
-    ) -> Option<LineageNode> {
-        if !contains_set_operation(expr)
-            || !set_has_explicit_name_anywhere(expr, name, self.dialect)
-        {
-            return None;
-        }
-        let Expression::Select(select) =
-            polyglot_sql::parse_one(&format!("SELECT synthetic_source.{name}"), dialect).ok()?
-        else {
-            return None;
-        };
-        let source = select.from.as_ref()?.expressions.first()?.clone();
-        let expression = select.expressions.into_iter().next()?;
-        Some(LineageNode::new(
-            format!("synthetic_source.{name}"),
-            expression,
-            source,
-        ))
-    }
-
     fn knowledge(&self, expr: &Expression) -> Option<&ProjectionKnowledge> {
         self.projections
             .iter()
             .find(|(candidate, _)| candidate == expr)
             .map(|(_, knowledge)| knowledge)
-    }
-}
-
-fn contains_set_operation(expr: &Expression) -> bool {
-    match expr {
-        Expression::Union(_) | Expression::Intersect(_) | Expression::Except(_) => true,
-        Expression::Select(select) => {
-            select.with.as_ref().is_some_and(|with| {
-                with.ctes
-                    .iter()
-                    .any(|cte| contains_set_operation(&cte.this))
-            }) || select
-                .from
-                .as_ref()
-                .is_some_and(|from| from.expressions.iter().any(contains_set_operation))
-                || select
-                    .joins
-                    .iter()
-                    .any(|join| contains_set_operation(&join.this))
-        }
-        Expression::Subquery(node) => contains_set_operation(&node.this),
-        Expression::Paren(node) => contains_set_operation(&node.this),
-        Expression::Annotated(node) => contains_set_operation(&node.this),
-        _ => false,
-    }
-}
-
-fn set_has_explicit_name_anywhere(
-    expr: &Expression,
-    name: &str,
-    dialect: Option<DialectType>,
-) -> bool {
-    match expr {
-        Expression::Select(select) => select.with.as_ref().is_some_and(|with| {
-            with.ctes
-                .iter()
-                .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-        }),
-        Expression::Union(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
-        }
-        Expression::Intersect(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
-        }
-        Expression::Except(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
-        }
-        Expression::Subquery(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
-        Expression::Paren(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
-        Expression::Annotated(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
-        _ => false,
-    }
-}
-
-fn materialize_set_stars(expr: &mut Expression, name: &str, dialect: DialectType) -> bool {
-    match expr {
-        Expression::Select(select) => {
-            let mut changed = false;
-            let source_name = select
-                .from
-                .as_ref()
-                .and_then(|from| from.expressions.first())
-                .and_then(|source| match source {
-                    Expression::Table(table) => Some(table.name.name.as_str()),
-                    _ => None,
-                });
-            for expression in &mut select.expressions {
-                if expression_is_star(expression)
-                    && let Some(replacement) =
-                        parse_projection(source_name.unwrap_or("star_source"), name, dialect)
-                {
-                    *expression = replacement;
-                    changed = true;
-                }
-            }
-            if let Some(with) = &mut select.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            if let Some(from) = &mut select.from {
-                for source in &mut from.expressions {
-                    changed |= materialize_set_stars(source, name, dialect);
-                }
-            }
-            for join in &mut select.joins {
-                changed |= materialize_set_stars(&mut join.this, name, dialect);
-            }
-            changed
-        }
-        Expression::Union(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Intersect(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Except(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Subquery(node) => materialize_set_stars(&mut node.this, name, dialect),
-        Expression::Paren(node) => materialize_set_stars(&mut node.this, name, dialect),
-        Expression::Annotated(node) => materialize_set_stars(&mut node.this, name, dialect),
-        _ => false,
     }
 }
 
@@ -527,14 +338,6 @@ fn projection_knowledge(expr: &Expression, dialect: Option<DialectType>) -> Proj
 
 fn normalize_name(name: &str, dialect: Option<DialectType>) -> String {
     polyglot_sql::normalize_name(name, dialect, false, true)
-}
-
-fn parse_projection(table: &str, name: &str, dialect: DialectType) -> Option<Expression> {
-    let parsed = polyglot_sql::parse_one(&format!("SELECT {table}.{name}"), dialect).ok()?;
-    let Expression::Select(parsed) = parsed else {
-        return None;
-    };
-    parsed.expressions.into_iter().next()
 }
 
 fn visit_queries(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {

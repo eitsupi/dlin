@@ -73,33 +73,6 @@ pub(super) fn run_column_lineage(
         polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false)
     };
 
-    let lineage_result = lineage_result.or_else(|original_error| {
-        if let Some(synthetic) =
-            ctx.star_guard
-                .synthetic_set_lineage(&ctx.expanded_expr, col_name, ctx.dialect)
-        {
-            return Ok(synthetic);
-        }
-        let Some(materialized) =
-            ctx.star_guard
-                .materialize_set_star(&ctx.expanded_expr, col_name, ctx.dialect)
-        else {
-            return Err(original_error);
-        };
-        if let Some(ref s) = ctx.schema {
-            polyglot_sql::lineage::lineage_with_schema(
-                col_name,
-                &materialized,
-                Some(s as &dyn polyglot_sql::Schema),
-                dialect,
-                false,
-            )
-            .or_else(|_| polyglot_sql::lineage::lineage(col_name, &materialized, dialect, false))
-        } else {
-            polyglot_sql::lineage::lineage(col_name, &materialized, dialect, false)
-        }
-    });
-
     match lineage_result {
         Ok(node) => {
             if ctx.star_guard.rejects(&node) {
