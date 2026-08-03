@@ -175,15 +175,7 @@ impl StarGuard {
             .knowledge(&node.source)
             .cloned()
             .unwrap_or_else(|| projection_knowledge(&node.source, self.dialect));
-        let key = if is_set_operation(&node.source) {
-            TraceKey::SetOrdinal(
-                explicit_ordinal(&node.source, name, self.dialect)
-                    .or_else(|| synthetic_ordinal(name))
-                    .unwrap_or(usize::MAX),
-            )
-        } else {
-            TraceKey::Name
-        };
+        let key = rejects_trace_key(&node.source, name, self.dialect);
         let here = (matches!(key, TraceKey::Name)
             && knowledge.unresolved_star_ordinal.is_some()
             && !knowledge.explicit_names.iter().any(|output| {
@@ -212,22 +204,6 @@ impl StarGuard {
         here || node.downstream.iter().any(|child| self.rejects(child))
     }
 
-    pub(super) fn materialize_set_star(
-        &self,
-        expr: &Expression,
-        name: &str,
-        dialect: DialectType,
-    ) -> Option<Expression> {
-        if !contains_set_operation(expr) {
-            return None;
-        }
-        let mut candidate = expr.clone();
-        if !materialize_set_stars(&mut candidate, name, dialect) {
-            return None;
-        }
-        Some(candidate)
-    }
-
     pub(super) fn materialize_star_modifier(
         &self,
         expr: &Expression,
@@ -238,29 +214,21 @@ impl StarGuard {
         materialize_star_modifier(&mut candidate, name, dialect).then_some(candidate)
     }
 
-    pub(super) fn synthetic_set_lineage(
-        &self,
-        expr: &Expression,
+    pub(super) fn explicit_set_operands<'a>(
+        expr: &'a Expression,
         name: &str,
-        dialect: DialectType,
-    ) -> Option<LineageNode> {
-        if !contains_set_operation(expr)
-            || !set_has_explicit_name_anywhere(expr, name, self.dialect)
-        {
+        dialect: Option<DialectType>,
+    ) -> Option<Vec<(&'a Expression, &'a str)>> {
+        if !is_set_operation(unwrap_query(expr)) {
             return None;
         }
-        let Expression::Select(select) =
-            polyglot_sql::parse_one(&format!("SELECT synthetic_source.{name}"), dialect).ok()?
-        else {
-            return None;
-        };
-        let source = select.from.as_ref()?.expressions.first()?.clone();
-        let expression = select.expressions.into_iter().next()?;
-        Some(LineageNode::new(
-            format!("synthetic_source.{name}"),
-            expression,
-            source,
-        ))
+
+        // A WITH attached to a set operation scopes over all of its operands.
+        // Standalone operand lineage would lose that scope, so leave those cases
+        // to the normal lineage path rather than risk resolving a CTE as a table.
+        let ordinal = explicit_set_ordinal(expr, name, dialect)?;
+        let mut operands = Vec::new();
+        collect_explicit_set_operands(expr, ordinal, &mut operands).then_some(operands)
     }
 
     fn knowledge(&self, expr: &Expression) -> Option<&ProjectionKnowledge> {
@@ -271,151 +239,63 @@ impl StarGuard {
     }
 }
 
-fn contains_set_operation(expr: &Expression) -> bool {
-    match expr {
-        Expression::Union(_) | Expression::Intersect(_) | Expression::Except(_) => true,
-        Expression::Select(select) => {
-            select.with.as_ref().is_some_and(|with| {
-                with.ctes
-                    .iter()
-                    .any(|cte| contains_set_operation(&cte.this))
-            }) || select
-                .from
-                .as_ref()
-                .is_some_and(|from| from.expressions.iter().any(contains_set_operation))
-                || select
-                    .joins
-                    .iter()
-                    .any(|join| contains_set_operation(&join.this))
-        }
-        Expression::Subquery(node) => contains_set_operation(&node.this),
-        Expression::Paren(node) => contains_set_operation(&node.this),
-        Expression::Annotated(node) => contains_set_operation(&node.this),
-        _ => false,
+fn rejects_trace_key(expr: &Expression, name: &str, dialect: Option<DialectType>) -> TraceKey {
+    if is_set_operation(expr) {
+        TraceKey::SetOrdinal(
+            explicit_ordinal(expr, name, dialect)
+                .or_else(|| synthetic_ordinal(name))
+                .unwrap_or(usize::MAX),
+        )
+    } else {
+        TraceKey::Name
     }
 }
 
-fn set_has_explicit_name_anywhere(
-    expr: &Expression,
-    name: &str,
-    dialect: Option<DialectType>,
+// TODO: same ordinal-vs-list-index caveat as `explicit_set_ordinal` above.
+fn collect_explicit_set_operands<'a>(
+    expr: &'a Expression,
+    ordinal: usize,
+    operands: &mut Vec<(&'a Expression, &'a str)>,
 ) -> bool {
     match expr {
-        Expression::Select(select) => select.with.as_ref().is_some_and(|with| {
-            with.ctes
-                .iter()
-                .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-        }),
         Expression::Union(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
         Expression::Intersect(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
         Expression::Except(set) => {
-            set_has_explicit_name(expr, name, dialect)
-                || set.with.as_ref().is_some_and(|with| {
-                    with.ctes
-                        .iter()
-                        .any(|cte| set_has_explicit_name_anywhere(&cte.this, name, dialect))
-                })
-                || set_has_explicit_name_anywhere(&set.left, name, dialect)
-                || set_has_explicit_name_anywhere(&set.right, name, dialect)
+            set.with.is_none()
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
-        Expression::Subquery(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
-        Expression::Paren(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
-        Expression::Annotated(node) => set_has_explicit_name_anywhere(&node.this, name, dialect),
+        Expression::Annotated(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Subquery(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Cte(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Paren(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Select(select) => {
+            if let Some(expression) = select.expressions.get(ordinal)
+                && let Some(output) = explicit_output_name(expression)
+            {
+                operands.push((expr, output));
+            }
+            true
+        }
         _ => false,
     }
 }
 
-fn materialize_set_stars(expr: &mut Expression, name: &str, dialect: DialectType) -> bool {
+fn unwrap_query(expr: &Expression) -> &Expression {
     match expr {
-        Expression::Select(select) => {
-            let mut changed = false;
-            let source_name = select
-                .from
-                .as_ref()
-                .and_then(|from| from.expressions.first())
-                .and_then(|source| match source {
-                    Expression::Table(table) => Some(table.name.name.as_str()),
-                    _ => None,
-                });
-            for expression in &mut select.expressions {
-                if expression_is_star(expression)
-                    && let Some(replacement) =
-                        parse_projection(source_name.unwrap_or("star_source"), name, dialect)
-                {
-                    *expression = replacement;
-                    changed = true;
-                }
-            }
-            if let Some(with) = &mut select.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            if let Some(from) = &mut select.from {
-                for source in &mut from.expressions {
-                    changed |= materialize_set_stars(source, name, dialect);
-                }
-            }
-            for join in &mut select.joins {
-                changed |= materialize_set_stars(&mut join.this, name, dialect);
-            }
-            changed
-        }
-        Expression::Union(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Intersect(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Except(set) => {
-            let mut changed = false;
-            if let Some(with) = &mut set.with {
-                for cte in &mut with.ctes {
-                    changed |= materialize_set_stars(&mut cte.this, name, dialect);
-                }
-            }
-            changed |= materialize_set_stars(&mut set.left, name, dialect);
-            changed |= materialize_set_stars(&mut set.right, name, dialect);
-            changed
-        }
-        Expression::Subquery(node) => materialize_set_stars(&mut node.this, name, dialect),
-        Expression::Paren(node) => materialize_set_stars(&mut node.this, name, dialect),
-        Expression::Annotated(node) => materialize_set_stars(&mut node.this, name, dialect),
-        _ => false,
+        Expression::Annotated(node) => unwrap_query(&node.this),
+        Expression::Subquery(node) => unwrap_query(&node.this),
+        Expression::Cte(node) => unwrap_query(&node.this),
+        Expression::Paren(node) => unwrap_query(&node.this),
+        _ => expr,
     }
 }
 
@@ -529,14 +409,6 @@ fn normalize_name(name: &str, dialect: Option<DialectType>) -> String {
     polyglot_sql::normalize_name(name, dialect, false, true)
 }
 
-fn parse_projection(table: &str, name: &str, dialect: DialectType) -> Option<Expression> {
-    let parsed = polyglot_sql::parse_one(&format!("SELECT {table}.{name}"), dialect).ok()?;
-    let Expression::Select(parsed) = parsed else {
-        return None;
-    };
-    parsed.expressions.into_iter().next()
-}
-
 fn visit_queries(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
     if unwrap_select(expr).is_some() || is_set_operation(expr) {
         visitor(expr);
@@ -623,6 +495,8 @@ fn is_set_operation(expr: &Expression) -> bool {
     )
 }
 
+// Set output names follow the leftmost operand. This is the ordinal policy used
+// by rejects(), and is intentionally separate from explicit_set_ordinal().
 fn explicit_ordinal(expr: &Expression, name: &str, dialect: Option<DialectType>) -> Option<usize> {
     let mut current = expr;
     loop {
@@ -644,6 +518,77 @@ fn explicit_ordinal(expr: &Expression, name: &str, dialect: Option<DialectType>)
             }
             _ => return None,
         };
+    }
+}
+
+// The fallback must only trace operands when every explicit declaration of the
+// requested name agrees on one ordinal and the set has no attached WITH.
+//
+// TODO: `ordinal` here (and in `collect_explicit_ordinal`/`collect_explicit_set_operands`
+// below) is a projection-list index, not a reliable output ordinal — they diverge
+// once an earlier projection is an unresolved `*`, whose expansion width is
+// unknown. E.g. in `SELECT other.*, fee`, `fee` is at list index 1, but its real
+// output ordinal depends on how wide `other.*` expands. Redesign: treat
+// projection-list position and output ordinal as distinct types.
+fn explicit_set_ordinal(
+    expr: &Expression,
+    name: &str,
+    dialect: Option<DialectType>,
+) -> Option<usize> {
+    let normalized = polyglot_sql::normalize_name(name, dialect, false, true);
+    let mut ordinal = None;
+    collect_explicit_ordinal(expr, &normalized, dialect, &mut ordinal).then_some(ordinal)?
+}
+
+// TODO: same ordinal-vs-list-index caveat as `explicit_set_ordinal` above.
+fn collect_explicit_ordinal(
+    expr: &Expression,
+    normalized_name: &str,
+    dialect: Option<DialectType>,
+    ordinal: &mut Option<usize>,
+) -> bool {
+    match expr {
+        Expression::Union(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Intersect(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Except(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Annotated(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Subquery(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Cte(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Paren(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Select(select) => {
+            for (candidate_ordinal, expression) in select.expressions.iter().enumerate() {
+                if explicit_output_name(expression).is_some_and(|output| {
+                    polyglot_sql::normalize_name(output, dialect, false, true) == normalized_name
+                }) {
+                    if ordinal.is_some_and(|existing| existing != candidate_ordinal) {
+                        return false;
+                    }
+                    *ordinal = Some(candidate_ordinal);
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -680,4 +625,28 @@ pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
         }
     });
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_keeps_leftmost_ordinal_when_other_operands_conflict() {
+        let expr = polyglot_sql::parse_one(
+            "SELECT 1 AS target, 2 AS keep FROM left_table \
+             UNION ALL SELECT 3 AS keep, 4 AS target FROM right_table",
+            DialectType::Generic,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rejects_trace_key(&expr, "target", Some(DialectType::Generic)),
+            TraceKey::SetOrdinal(0)
+        );
+        assert_eq!(
+            explicit_set_ordinal(&expr, "target", Some(DialectType::Generic)),
+            None
+        );
+    }
 }

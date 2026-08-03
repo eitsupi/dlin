@@ -1459,6 +1459,113 @@ fn assert_sources_for(result: &ModelColumnLineage, column: &str, expected: &[(&s
 }
 
 #[test]
+fn test_set_star_with_unknown_source_does_not_fabricate_lineage() {
+    let result = compute_star_shape(
+        "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &["total"], &[]);
+    assert_sources_for(&result, "total", &[("known_table", "amt")]);
+    assert!(result.columns.iter().all(|entry| {
+        entry
+            .sources
+            .iter()
+            .all(|source| source.table != "orders" && source.table != "unknown_source")
+    }));
+}
+
+#[test]
+fn test_nested_set_star_does_not_fabricate_lineage() {
+    let result = compute_star_shape(
+        "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt AS total FROM known_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &["total"], &[]);
+    assert_sources_for(&result, "total", &[("known_table", "amt")]);
+    assert!(result.columns.iter().all(|entry| {
+        entry.sources.iter().all(|source| {
+            source.table != "real_x"
+                && source.table != "star_source"
+                && source.table != "synthetic_source"
+        })
+    }));
+}
+
+#[test]
+fn test_every_explicit_set_operand_contributes_sources() {
+    // Each operand that declares the name is traced on its own and the results
+    // are merged, so a name present in several operands keeps all of them.
+    let result = compute_star_shape(
+        "SELECT * FROM unknown_source \
+         UNION ALL SELECT id, amt AS total FROM known_table \
+         UNION ALL SELECT id, fee AS total FROM third_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &["total"], &[]);
+    assert_sources_for(
+        &result,
+        "total",
+        &[("known_table", "amt"), ("third_table", "fee")],
+    );
+}
+
+#[test]
+fn test_set_operands_match_explicit_projections_by_ordinal() {
+    let result = compute_star_shape(
+        "SELECT * FROM unknown_source \
+         UNION ALL SELECT id, amt AS total FROM known_table \
+         UNION ALL SELECT id, fee FROM third_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &["total"], &[]);
+    assert_sources_for(
+        &result,
+        "total",
+        &[("known_table", "amt"), ("third_table", "fee")],
+    );
+}
+
+#[test]
+fn test_set_operands_do_not_match_explicit_projections_by_name_at_other_ordinal() {
+    let result = compute_star_shape(
+        "SELECT * FROM unknown_source \
+         UNION ALL SELECT id, amt AS total FROM known_table \
+         UNION ALL SELECT fee AS total, id FROM third_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert!(result.columns.is_empty());
+}
+
+#[test]
+fn test_set_with_no_explicit_operand_stays_unresolved() {
+    // No operand declares the name, so there is nothing to trace and the
+    // column is reported as not found rather than guessed from a star.
+    let result = compute_star_shape(
+        "SELECT * FROM unknown_a UNION ALL SELECT * FROM unknown_b",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &[], &["total"]);
+}
+
+#[test]
+fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
+    let result = compute_star_shape(
+        "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt FROM known_table",
+        &["total"],
+    );
+    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert!(result.columns.iter().all(|entry| {
+        entry.sources.iter().all(|source| {
+            source.table != "real_x"
+                && source.table != "known_table"
+                && source.table != "star_source"
+                && source.table != "synthetic_source"
+        })
+    }));
+}
+
+#[test]
 fn test_star_replace_introduced_name_is_explicit() {
     let result = compute_star_shape(
         "SELECT * REPLACE (id AS wanted) FROM raw.orders",

@@ -55,50 +55,11 @@ pub(super) fn run_column_lineage(
     col_name: &str,
     ctx: &LineageContext,
 ) -> Result<ColumnLineageResult, String> {
-    let dialect = Some(ctx.dialect);
     let modifier_expr =
         ctx.star_guard
             .materialize_star_modifier(&ctx.expanded_expr, col_name, ctx.dialect);
     let lineage_expr = modifier_expr.as_ref().unwrap_or(&ctx.expanded_expr);
-    let lineage_result = if let Some(ref s) = ctx.schema {
-        polyglot_sql::lineage::lineage_with_schema(
-            col_name,
-            lineage_expr,
-            Some(s as &dyn polyglot_sql::Schema),
-            dialect,
-            false,
-        )
-        .or_else(|_| polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false))
-    } else {
-        polyglot_sql::lineage::lineage(col_name, lineage_expr, dialect, false)
-    };
-
-    let lineage_result = lineage_result.or_else(|original_error| {
-        if let Some(synthetic) =
-            ctx.star_guard
-                .synthetic_set_lineage(&ctx.expanded_expr, col_name, ctx.dialect)
-        {
-            return Ok(synthetic);
-        }
-        let Some(materialized) =
-            ctx.star_guard
-                .materialize_set_star(&ctx.expanded_expr, col_name, ctx.dialect)
-        else {
-            return Err(original_error);
-        };
-        if let Some(ref s) = ctx.schema {
-            polyglot_sql::lineage::lineage_with_schema(
-                col_name,
-                &materialized,
-                Some(s as &dyn polyglot_sql::Schema),
-                dialect,
-                false,
-            )
-            .or_else(|_| polyglot_sql::lineage::lineage(col_name, &materialized, dialect, false))
-        } else {
-            polyglot_sql::lineage::lineage(col_name, &materialized, dialect, false)
-        }
-    });
+    let lineage_result = lineage_node(col_name, lineage_expr, ctx);
 
     match lineage_result {
         Ok(node) => {
@@ -108,8 +69,77 @@ pub(super) fn run_column_lineage(
                 Ok(extract_leaf_sources(&node))
             }
         }
-        Err(e) => Err(format_lineage_error(&e)),
+        Err(e) => explicit_set_operand_lineage(col_name, lineage_expr, ctx, &e)
+            .ok_or_else(|| format_lineage_error(&e)),
     }
+}
+
+fn lineage_node(
+    col_name: &str,
+    expr: &Expression,
+    ctx: &LineageContext,
+) -> Result<LineageNode, polyglot_sql::Error> {
+    let dialect = Some(ctx.dialect);
+    if let Some(ref schema) = ctx.schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            col_name,
+            expr,
+            Some(schema as &dyn polyglot_sql::Schema),
+            dialect,
+            false,
+        )
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, expr, dialect, false))
+    } else {
+        polyglot_sql::lineage::lineage(col_name, expr, dialect, false)
+    }
+}
+
+// TODO: this locates an operand's projection by ordinal (see
+// `StarGuard::explicit_set_operands`) but then re-derives lineage by looking that
+// projection's output *name* back up via `lineage_node`, instead of tracing the
+// already-located projection directly. Unaliased expressions have no name to look
+// up (e.g. `fee * 2` in `SELECT other.*, fee FROM a UNION ALL SELECT x, fee * 2
+// FROM b`) and are silently dropped; duplicate output names (`SELECT a.id, b.id`)
+// make the lookup ambiguous and can retrace the wrong projection. Redesign: keep
+// projection-list position and output ordinal as distinct types and trace
+// positionally instead of round-tripping through a name.
+fn explicit_set_operand_lineage(
+    col_name: &str,
+    expr: &Expression,
+    ctx: &LineageContext,
+    original_error: &polyglot_sql::Error,
+) -> Option<ColumnLineageResult> {
+    let error = original_error.to_string();
+    if !error.contains("Cannot find column") || !error.contains("in set operation") {
+        return None;
+    }
+
+    // A set's leftmost star can make its output names unknowable to polyglot-sql.
+    // Trace only intact operands that explicitly project the requested ordinal;
+    // unresolved star operands contribute no source instead of a guessed one.
+    let operands = StarGuard::explicit_set_operands(expr, col_name, Some(ctx.dialect))?;
+    let mut results = operands.into_iter().filter_map(|(operand, operand_name)| {
+        let node = lineage_node(operand_name, operand, ctx).ok()?;
+        (!ctx.star_guard.rejects(&node)).then(|| extract_leaf_sources(&node))
+    });
+    let first = results.next()?;
+    Some(results.fold(first, merge_lineage_results))
+}
+
+fn merge_lineage_results(
+    mut left: ColumnLineageResult,
+    right: ColumnLineageResult,
+) -> ColumnLineageResult {
+    if left.transformation == TransformationType::Direct
+        && right.transformation != TransformationType::Direct
+    {
+        left.transformation = right.transformation;
+    }
+    left.sources.extend(right.sources);
+    left.sources
+        .sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
+    left.sources.dedup();
+    left
 }
 
 pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
