@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4-rc.1] - 2026-08-03
+
+### Bug Fixes
+
+- Fix column lineage tracing across `UNION`/`INTERSECT`/`EXCEPT` set operations involving `SELECT *`: explicit columns are now traced correctly and unresolvable stars no longer produce fabricated sources (#110, #120, #121)
+
 ## [0.2.3] - 2026-06-11
 
 ### Bug Fixes
