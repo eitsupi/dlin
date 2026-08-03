@@ -5,7 +5,7 @@ use polyglot_sql::{DialectType, Expression};
 use crate::parser::manifest::Manifest;
 
 use super::schema::build_schema_from_manifest;
-use super::star_guard::{StarGuard, expand_known_cte_stars};
+use super::star_guard::StarGuard;
 use super::{ColumnSource, TransformationType};
 
 pub(super) struct LineageContext {
@@ -42,8 +42,6 @@ pub(super) fn prepare_lineage_context_with_expr(
         &mut expanded_expr,
         schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
     );
-    expand_known_cte_stars(&mut expanded_expr, dialect);
-
     let star_guard = StarGuard::new(&expanded_expr, Some(dialect));
     Ok(LineageContext {
         expanded_expr,
