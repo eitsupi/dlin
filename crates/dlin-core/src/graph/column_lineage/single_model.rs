@@ -106,11 +106,11 @@ fn explicit_set_operand_lineage(
     }
 
     // A set's leftmost star can make its output names unknowable to polyglot-sql.
-    // Trace only intact operands that explicitly declare the requested name;
+    // Trace only intact operands that explicitly project the requested ordinal;
     // unresolved star operands contribute no source instead of a guessed one.
     let operands = StarGuard::explicit_set_operands(expr, col_name, Some(ctx.dialect))?;
-    let mut results = operands.into_iter().filter_map(|operand| {
-        let node = lineage_node(col_name, operand, ctx).ok()?;
+    let mut results = operands.into_iter().filter_map(|(operand, operand_name)| {
+        let node = lineage_node(operand_name, operand, ctx).ok()?;
         (!ctx.star_guard.rejects(&node)).then(|| extract_leaf_sources(&node))
     });
     let first = results.next()?;

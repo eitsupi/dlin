@@ -175,15 +175,7 @@ impl StarGuard {
             .knowledge(&node.source)
             .cloned()
             .unwrap_or_else(|| projection_knowledge(&node.source, self.dialect));
-        let key = if is_set_operation(&node.source) {
-            TraceKey::SetOrdinal(
-                explicit_ordinal(&node.source, name, self.dialect)
-                    .or_else(|| synthetic_ordinal(name))
-                    .unwrap_or(usize::MAX),
-            )
-        } else {
-            TraceKey::Name
-        };
+        let key = rejects_trace_key(&node.source, name, self.dialect);
         let here = (matches!(key, TraceKey::Name)
             && knowledge.unresolved_star_ordinal.is_some()
             && !knowledge.explicit_names.iter().any(|output| {
@@ -226,7 +218,7 @@ impl StarGuard {
         expr: &'a Expression,
         name: &str,
         dialect: Option<DialectType>,
-    ) -> Option<Vec<&'a Expression>> {
+    ) -> Option<Vec<(&'a Expression, &'a str)>> {
         if !is_set_operation(unwrap_query(expr)) {
             return None;
         }
@@ -234,8 +226,9 @@ impl StarGuard {
         // A WITH attached to a set operation scopes over all of its operands.
         // Standalone operand lineage would lose that scope, so leave those cases
         // to the normal lineage path rather than risk resolving a CTE as a table.
+        let ordinal = explicit_set_ordinal(expr, name, dialect)?;
         let mut operands = Vec::new();
-        collect_explicit_set_operands(expr, name, dialect, &mut operands).then_some(operands)
+        collect_explicit_set_operands(expr, ordinal, &mut operands).then_some(operands)
     }
 
     fn knowledge(&self, expr: &Expression) -> Option<&ProjectionKnowledge> {
@@ -246,45 +239,48 @@ impl StarGuard {
     }
 }
 
+fn rejects_trace_key(expr: &Expression, name: &str, dialect: Option<DialectType>) -> TraceKey {
+    if is_set_operation(expr) {
+        TraceKey::SetOrdinal(
+            explicit_ordinal(expr, name, dialect)
+                .or_else(|| synthetic_ordinal(name))
+                .unwrap_or(usize::MAX),
+        )
+    } else {
+        TraceKey::Name
+    }
+}
+
 fn collect_explicit_set_operands<'a>(
     expr: &'a Expression,
-    name: &str,
-    dialect: Option<DialectType>,
-    operands: &mut Vec<&'a Expression>,
+    ordinal: usize,
+    operands: &mut Vec<(&'a Expression, &'a str)>,
 ) -> bool {
     match expr {
         Expression::Union(set) => {
             set.with.is_none()
-                && collect_explicit_set_operands(&set.left, name, dialect, operands)
-                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
         Expression::Intersect(set) => {
             set.with.is_none()
-                && collect_explicit_set_operands(&set.left, name, dialect, operands)
-                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
         Expression::Except(set) => {
             set.with.is_none()
-                && collect_explicit_set_operands(&set.left, name, dialect, operands)
-                && collect_explicit_set_operands(&set.right, name, dialect, operands)
+                && collect_explicit_set_operands(&set.left, ordinal, operands)
+                && collect_explicit_set_operands(&set.right, ordinal, operands)
         }
-        Expression::Annotated(node) => {
-            collect_explicit_set_operands(&node.this, name, dialect, operands)
-        }
-        Expression::Subquery(node) => {
-            collect_explicit_set_operands(&node.this, name, dialect, operands)
-        }
-        Expression::Cte(node) => collect_explicit_set_operands(&node.this, name, dialect, operands),
-        Expression::Paren(node) => {
-            collect_explicit_set_operands(&node.this, name, dialect, operands)
-        }
+        Expression::Annotated(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Subquery(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Cte(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
+        Expression::Paren(node) => collect_explicit_set_operands(&node.this, ordinal, operands),
         Expression::Select(select) => {
-            let normalized = normalize_name(name, dialect);
-            if select.expressions.iter().any(|expression| {
-                explicit_output_name(expression)
-                    .is_some_and(|output| normalize_name(output, dialect) == normalized)
-            }) {
-                operands.push(expr);
+            if let Some(expression) = select.expressions.get(ordinal)
+                && let Some(output) = explicit_output_name(expression)
+            {
+                operands.push((expr, output));
             }
             true
         }
@@ -498,6 +494,8 @@ fn is_set_operation(expr: &Expression) -> bool {
     )
 }
 
+// Set output names follow the leftmost operand. This is the ordinal policy used
+// by rejects(), and is intentionally separate from explicit_set_ordinal().
 fn explicit_ordinal(expr: &Expression, name: &str, dialect: Option<DialectType>) -> Option<usize> {
     let mut current = expr;
     loop {
@@ -519,6 +517,69 @@ fn explicit_ordinal(expr: &Expression, name: &str, dialect: Option<DialectType>)
             }
             _ => return None,
         };
+    }
+}
+
+// The fallback must only trace operands when every explicit declaration of the
+// requested name agrees on one ordinal and the set has no attached WITH.
+fn explicit_set_ordinal(
+    expr: &Expression,
+    name: &str,
+    dialect: Option<DialectType>,
+) -> Option<usize> {
+    let normalized = polyglot_sql::normalize_name(name, dialect, false, true);
+    let mut ordinal = None;
+    collect_explicit_ordinal(expr, &normalized, dialect, &mut ordinal).then_some(ordinal)?
+}
+
+fn collect_explicit_ordinal(
+    expr: &Expression,
+    normalized_name: &str,
+    dialect: Option<DialectType>,
+    ordinal: &mut Option<usize>,
+) -> bool {
+    match expr {
+        Expression::Union(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Intersect(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Except(set) => {
+            set.with.is_none()
+                && collect_explicit_ordinal(&set.left, normalized_name, dialect, ordinal)
+                && collect_explicit_ordinal(&set.right, normalized_name, dialect, ordinal)
+        }
+        Expression::Annotated(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Subquery(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Cte(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Paren(node) => {
+            collect_explicit_ordinal(&node.this, normalized_name, dialect, ordinal)
+        }
+        Expression::Select(select) => {
+            for (candidate_ordinal, expression) in select.expressions.iter().enumerate() {
+                if explicit_output_name(expression).is_some_and(|output| {
+                    polyglot_sql::normalize_name(output, dialect, false, true) == normalized_name
+                }) {
+                    if ordinal.is_some_and(|existing| existing != candidate_ordinal) {
+                        return false;
+                    }
+                    *ordinal = Some(candidate_ordinal);
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -555,4 +616,28 @@ pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
         }
     });
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_keeps_leftmost_ordinal_when_other_operands_conflict() {
+        let expr = polyglot_sql::parse_one(
+            "SELECT 1 AS target, 2 AS keep FROM left_table \
+             UNION ALL SELECT 3 AS keep, 4 AS target FROM right_table",
+            DialectType::Generic,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rejects_trace_key(&expr, "target", Some(DialectType::Generic)),
+            TraceKey::SetOrdinal(0)
+        );
+        assert_eq!(
+            explicit_set_ordinal(&expr, "target", Some(DialectType::Generic)),
+            None
+        );
+    }
 }
