@@ -1,11 +1,13 @@
 use polyglot_sql::lineage::LineageNode;
 use polyglot_sql::scope::SourceKind;
-use polyglot_sql::{DialectType, Expression};
+use polyglot_sql::{
+    ColumnResolutionReason, ColumnResolutionTarget, DialectType, Error, Expression,
+};
 
 use crate::parser::manifest::Manifest;
 
 use super::schema::build_schema_from_manifest;
-use super::star_guard::StarGuard;
+use super::star_guard::{StarGuard, has_unresolved_stars};
 use super::{ColumnSource, TransformationType};
 
 pub(super) struct LineageContext {
@@ -54,7 +56,7 @@ pub(super) fn prepare_lineage_context_with_expr(
 pub(super) fn run_column_lineage(
     col_name: &str,
     ctx: &LineageContext,
-) -> Result<ColumnLineageResult, String> {
+) -> Result<ColumnLineageResult, Error> {
     let modifier_expr =
         ctx.star_guard
             .materialize_star_modifier(&ctx.expanded_expr, col_name, ctx.dialect);
@@ -64,14 +66,48 @@ pub(super) fn run_column_lineage(
     match lineage_result {
         Ok(node) => {
             if ctx.star_guard.rejects(&node) {
-                Err(format!("Cannot find column '{}' in query", col_name))
+                Err(Error::column_resolution(
+                    ColumnResolutionTarget::Name {
+                        name: col_name.to_string(),
+                    },
+                    ColumnResolutionReason::Indeterminate,
+                ))
             } else {
                 Ok(extract_leaf_sources(&node))
             }
         }
-        Err(e) => explicit_set_operand_lineage(col_name, lineage_expr, ctx, &e)
-            .ok_or_else(|| format_lineage_error(&e)),
+        Err(e) => {
+            let e = resolution_error_with_unresolved_star_context(col_name, ctx, e);
+            match explicit_set_operand_lineage(col_name, lineage_expr, ctx, &e) {
+                Some(result) => Ok(result),
+                None => Err(e),
+            }
+        }
     }
+}
+
+fn resolution_error_with_unresolved_star_context(
+    col_name: &str,
+    ctx: &LineageContext,
+    error: Error,
+) -> Error {
+    if has_unresolved_stars(&ctx.expanded_expr)
+        && matches!(
+            &error,
+            Error::ColumnResolution {
+                target: ColumnResolutionTarget::Name { name },
+                reason: ColumnResolutionReason::NotFound,
+            } if name == col_name
+        )
+    {
+        return Error::column_resolution(
+            ColumnResolutionTarget::Name {
+                name: col_name.to_string(),
+            },
+            ColumnResolutionReason::Indeterminate,
+        );
+    }
+    error
 }
 
 fn lineage_node(
@@ -88,7 +124,13 @@ fn lineage_node(
             dialect,
             false,
         )
-        .or_else(|_| polyglot_sql::lineage::lineage(col_name, expr, dialect, false))
+        .or_else(|error| match error {
+            // Preserve structured resolution failures. Falling back to the
+            // schema-less resolver can otherwise turn an ambiguous name into
+            // a guessed lineage result.
+            Error::ColumnResolution { .. } => Err(error),
+            _ => polyglot_sql::lineage::lineage(col_name, expr, dialect, false),
+        })
     } else {
         polyglot_sql::lineage::lineage(col_name, expr, dialect, false)
     }
@@ -107,11 +149,15 @@ fn explicit_set_operand_lineage(
     col_name: &str,
     expr: &Expression,
     ctx: &LineageContext,
-    original_error: &polyglot_sql::Error,
+    original_error: &Error,
 ) -> Option<ColumnLineageResult> {
-    let error = original_error.to_string();
-    if !error.contains("Cannot find column") || !error.contains("in set operation") {
-        return None;
+    match original_error {
+        Error::ColumnResolution {
+            target: ColumnResolutionTarget::Name { name },
+            reason: ColumnResolutionReason::NotFound | ColumnResolutionReason::Indeterminate,
+        } if name == col_name => {}
+        // An ambiguous output name must not be guessed by the ordinal fallback.
+        _ => return None,
     }
 
     // A set's leftmost star can make its output names unknowable to polyglot-sql.
@@ -142,8 +188,20 @@ fn merge_lineage_results(
     left
 }
 
-pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
-    let msg = e.to_string();
+pub(super) fn format_lineage_error(e: &Error) -> String {
+    // Keep dlin's existing error text stable while retaining the structured
+    // reason internally for control flow.
+    let msg = match e {
+        Error::ColumnResolution {
+            target: ColumnResolutionTarget::Name { name },
+            ..
+        } => format!("Cannot find column '{}' in query", name),
+        Error::ColumnResolution {
+            target: ColumnResolutionTarget::Ordinal { ordinal },
+            ..
+        } => format!("Cannot find column at ordinal {} in query", ordinal),
+        _ => e.to_string(),
+    };
     if let Some(rest) = msg
         .strip_prefix("Parse error at line 0, column 0: ")
         .or_else(|| msg.strip_prefix("Syntax error at line 0, column 0: "))
