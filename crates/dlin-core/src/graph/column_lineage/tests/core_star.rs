@@ -1073,6 +1073,31 @@ fn assert_select_star_hint(result: &ModelColumnLineage) {
 }
 
 #[test]
+fn test_column_resolution_reasons_map_to_dlin_outcomes() {
+    let not_found = compute_star_shape("SELECT id FROM raw.orders", &["missing"]);
+    assert!(
+        not_found
+            .errors
+            .iter()
+            .any(|error| error.what.starts_with("column 'missing':"))
+    );
+    assert!(not_found.errors.iter().all(|error| error.hint.is_none()));
+
+    let indeterminate = compute_star_shape("SELECT * FROM unknown_source", &["missing"]);
+    assert_exact_column_outcomes(&indeterminate, &[], &["missing"]);
+    assert_select_star_hint(&indeterminate);
+
+    // Duplicate output names are ambiguous. They must remain an error rather
+    // than being guessed by the legacy set-operation fallback.
+    let ambiguous = compute_star_shape(
+        "SELECT a.id, b.id FROM raw.orders a JOIN raw.orders b ON a.id = b.id",
+        &["id"],
+    );
+    assert_exact_column_outcomes(&ambiguous, &[], &["id"]);
+    assert!(ambiguous.errors.iter().all(|error| error.hint.is_none()));
+}
+
+#[test]
 fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
     let mut manifest = make_test_manifest();
     manifest
