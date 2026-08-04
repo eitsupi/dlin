@@ -290,7 +290,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     let node = super::super::find_model_by_name(&manifest, model_name).unwrap();
     let compiled_code = node.compiled_code.as_deref().unwrap();
     let manifest_columns_hash =
-        super::super::schema::compute_manifest_columns_hash(&manifest, node);
+        super::super::manifest_schema::compute_manifest_columns_hash(&manifest, node);
 
     let sentinel = ModelColumnLineage {
         model: model_name.to_string(),

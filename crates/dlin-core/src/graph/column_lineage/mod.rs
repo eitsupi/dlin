@@ -9,7 +9,9 @@ use crate::parser::manifest::Manifest;
 mod cache;
 mod cross_model;
 mod impact;
+pub mod manifest_schema;
 mod schema;
+pub mod semantic_model;
 mod single_model;
 mod star_guard;
 #[cfg(test)]
@@ -24,7 +26,8 @@ pub use impact::{
     ColumnImpactReport, ImpactedColumn, compute_column_impact,
     compute_column_impact_with_manifest_path,
 };
-use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash, infer_output_columns};
+use manifest_schema::compute_manifest_columns_hash;
+use schema::{build_yaml_schema_for_node, infer_output_columns};
 use single_model::{prepare_lineage_context_with_expr, run_column_lineage};
 use star_guard::has_unresolved_stars;
 pub use types::{

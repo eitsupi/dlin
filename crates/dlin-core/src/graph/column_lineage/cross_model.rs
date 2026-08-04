@@ -5,6 +5,7 @@ use polyglot_sql::DialectType;
 
 use crate::parser::manifest::Manifest;
 
+use super::manifest_schema::make_fq_table_name;
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
     find_model_by_name,
@@ -253,12 +254,4 @@ fn compute_single_column_lineage(
     super::single_model::run_column_lineage(column_name, &ctx)
         .ok()
         .map(|r| (r.sources, r.transformation))
-}
-
-fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
-    match (database, schema) {
-        (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
-        (None, Some(s)) => format!("{}.{}", s, name),
-        _ => name.to_string(),
-    }
 }
