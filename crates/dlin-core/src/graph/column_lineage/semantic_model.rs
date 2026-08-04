@@ -88,7 +88,10 @@ enum CatalogEntry {
 ///
 /// `ResolvedOutput` values are created only while constructing this catalog;
 /// callers cannot manufacture one from an arbitrary integer or projection
-/// index.
+/// index. This holds only because the `QueryOutput` fed into construction is
+/// itself proven by polyglot-sql: the constructors that accept a raw
+/// `QueryOutput` are private to this module, reachable only through
+/// [`build_query_model_from_sql`].
 #[derive(Debug, Clone)]
 pub struct OutputCatalog {
     entries: Vec<CatalogEntry>,
@@ -178,7 +181,12 @@ impl OutputCatalog {
 }
 
 /// Build an output catalog from polyglot-sql's ordered output description.
-pub fn build_output_catalog(query: QueryOutput, dialect: DialectType) -> OutputCatalog {
+///
+/// Not exposed outside this module: a caller could otherwise hand-build a
+/// `QueryOutput` with arbitrary ordinals and receive back `ResolvedOutput`
+/// values this module treats as proven. Ordinals must come from polyglot-sql
+/// via [`build_query_model_from_sql`].
+fn build_output_catalog(query: QueryOutput, dialect: DialectType) -> OutputCatalog {
     let mut entries = Vec::with_capacity(query.columns.len());
     let mut resolved_outputs = Vec::new();
     let mut named: HashMap<String, Vec<OutputCandidate>> = HashMap::new();
@@ -246,7 +254,11 @@ pub struct QueryModel {
 }
 
 /// Assemble a query model from an expression and its upstream output result.
-pub fn build_query_model(
+///
+/// Not exposed outside this module for the same reason as
+/// [`build_output_catalog`]: `query` must come from polyglot-sql, not be
+/// assembled by the caller. Use [`build_query_model_from_sql`] instead.
+fn build_query_model(
     expression: Expression,
     query: QueryOutput,
     ordinal_schema: Option<MappingSchema>,
