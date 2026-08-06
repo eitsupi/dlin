@@ -32,7 +32,7 @@ libc = "0.2"
 # dev
 tempfile = "3"
 insta = "1"
-serial_test = "3.4.0"
+serial_test = "4.0.1"
 
 # internal
 dlin-core = { version = "0.2.4-rc.2", path = "crates/dlin-core" }
