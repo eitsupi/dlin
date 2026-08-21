@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::parser::manifest::Manifest;
 
 use super::backend::{
-    Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend, LineageRequest,
-    OutputColumnRequest, OutputOrdinal, PolyglotBackend, require_single_lineage_statement,
+    AnalysisSlot, Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend,
+    LineageRequest, OutputColumnRequest, PolyglotBackend, require_single_lineage_statement,
 };
 use super::schema;
 use super::{
@@ -254,7 +254,7 @@ fn compute_single_column_lineage(
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
 
     let outputs = [OutputColumnRequest {
-        ordinal: OutputOrdinal(0),
+        slot: AnalysisSlot(0),
         name: column_name.to_string(),
     }];
     let duplicate_output_names = BTreeSet::new();

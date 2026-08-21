@@ -15,8 +15,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::super::backend::{
-    Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot, DlinDialect,
-    LineageBackend, LineageRequest, OutputColumnRequest, OutputOrdinal, PolyglotBackend,
+    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot,
+    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, PolyglotBackend,
     require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
@@ -118,7 +118,7 @@ fn analyze_one_column(
     let compiled_code = node.compiled_code.as_ref().unwrap();
 
     let outputs = vec![OutputColumnRequest {
-        ordinal: OutputOrdinal(0),
+        slot: AnalysisSlot(0),
         name: column.to_string(),
     }];
     let duplicate_output_names = BTreeSet::new();
@@ -307,12 +307,12 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let duplicate_output_names = BTreeSet::new();
 
-    for (ordinal, (column, expected_sources)) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])]
+    for (slot, (column, expected_sources)) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])]
         .into_iter()
         .enumerate()
     {
         let outputs = [OutputColumnRequest {
-            ordinal: OutputOrdinal(ordinal),
+            slot: AnalysisSlot(slot),
             name: column.to_string(),
         }];
         let request = LineageRequest {

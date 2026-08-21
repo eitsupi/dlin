@@ -13,10 +13,10 @@ use crate::graph::column_lineage::TransformationType;
 use crate::graph::column_lineage::backend::catalog::CatalogSnapshot;
 use crate::graph::column_lineage::backend::dialect::DlinDialect;
 use crate::graph::column_lineage::backend::types::{
-    AnalysisCompleteness, BackendAnalysis, BackendColumnFailure, BackendColumnOutcome,
-    BackendColumnResult, BackendError, BackendErrorKind, BackendSource, BackendStatementResult,
-    OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName, OutputOrdinal,
-    OutputTarget, ResolutionState,
+    AnalysisCompleteness, AnalysisSlot, BackendAnalysis, BackendColumnFailure,
+    BackendColumnOutcome, BackendColumnResult, BackendError, BackendErrorKind, BackendSource,
+    BackendStatementResult, OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest,
+    OutputName, OutputTarget, ResolutionState,
 };
 
 /// Infer output column names from a SQL query's top-level SELECT list,
@@ -211,7 +211,7 @@ fn analyze_single_output(
     duplicate_output_names: &BTreeSet<String>,
 ) -> BackendColumnOutcome {
     let target = OutputTarget {
-        ordinal: output.ordinal.clone(),
+        slot: output.slot.clone(),
         name: OutputName::Named(output.name.clone()),
     };
 
@@ -298,8 +298,9 @@ fn run_column_lineage_as_backend_result(
     let raw =
         run_column_lineage_raw(col_name, ctx).map_err(|error| classify_polyglot_error(&error))?;
     Ok(BackendColumnResult {
+        // This target is placeholder data; the caller replaces it before returning the result.
         target: OutputTarget {
-            ordinal: OutputOrdinal(0),
+            slot: AnalysisSlot(0),
             name: OutputName::Named(String::new()),
         },
         resolution: ResolutionState::Resolved,

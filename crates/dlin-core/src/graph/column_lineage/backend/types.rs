@@ -8,8 +8,12 @@ pub enum AnalysisCompleteness {
     Indeterminate { reason: String },
 }
 
+/// Index of an output column within an analysis request. The request order is
+/// the alphabetically sorted set of output column names rather than the SQL
+/// projection order, so this is not a SQL projection position or output
+/// ordinal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutputOrdinal(pub usize);
+pub struct AnalysisSlot(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputDiscovery {
@@ -91,13 +95,13 @@ pub struct BackendColumnFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputTarget {
-    pub ordinal: OutputOrdinal,
+    pub slot: AnalysisSlot,
     pub name: OutputName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputColumnRequest {
-    pub ordinal: OutputOrdinal,
+    pub slot: AnalysisSlot,
     pub name: String,
 }
 

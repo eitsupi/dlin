@@ -13,8 +13,8 @@ mod tests;
 mod types;
 
 use backend::{
-    Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend, LineageRequest,
-    OutputColumnRequest, OutputOrdinal, PolyglotBackend, ResolutionState,
+    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
+    LineageRequest, OutputColumnRequest, PolyglotBackend, ResolutionState,
     require_single_lineage_statement,
 };
 pub use backend::{
@@ -146,7 +146,8 @@ pub fn compute_column_lineage_with_manifest_path(
         .iter()
         .enumerate()
         .map(|(i, name)| OutputColumnRequest {
-            ordinal: OutputOrdinal(i),
+            // The slot index follows the alphabetically sorted name list above.
+            slot: AnalysisSlot(i),
             name: name.clone(),
         })
         .collect();
