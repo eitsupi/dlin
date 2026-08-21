@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use super::cache::{CACHE_DIR, COLUMN_LINEAGE_CACHE_FILENAME, ColumnLineageCacheFile};
 use super::cross_model::normalize_table_name;
 use super::impact::build_downstream_model_map;
-use super::single_model::format_lineage_error;
 use super::*;
 use crate::parser::manifest::{
     DependsOn, ManifestColumn, ManifestConfig, ManifestNode, ManifestSource,
 };
-use polyglot_sql::Schema;
 
 /// Build a minimal manifest for testing column lineage.
 fn make_test_manifest() -> Manifest {
@@ -461,7 +459,7 @@ fn test_column_impact_duplicate_model_names_across_packages() {
         &manifest,
         "stg_orders",
         "customer_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -928,6 +926,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
     }
 }
 
+mod backend_regression;
 mod cache;
 mod core;
 mod impact;

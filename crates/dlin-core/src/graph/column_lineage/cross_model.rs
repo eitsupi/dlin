@@ -1,10 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-
-use polyglot_sql::DialectType;
 
 use crate::parser::manifest::Manifest;
 
+use super::backend::{
+    Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend, LineageRequest,
+    OutputColumnRequest, OutputOrdinal, PolyglotBackend, require_single_lineage_statement,
+};
+use super::schema;
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
     find_model_by_name,
@@ -13,7 +16,7 @@ use super::{
 pub fn compute_cross_model_column_lineage(
     manifest: &Manifest,
     model_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     compute_cross_model_column_lineage_with_manifest_path(
@@ -24,7 +27,7 @@ pub fn compute_cross_model_column_lineage(
 pub fn compute_cross_model_column_lineage_with_manifest_path(
     manifest: &Manifest,
     model_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
@@ -41,7 +44,7 @@ pub fn compute_cross_model_column_lineage_with_manifest_path(
 
 struct CrossModelContext<'a> {
     manifest: &'a Manifest,
-    dialect: DialectType,
+    dialect: DlinDialect,
     manifest_path: Option<&'a Path>,
     in_memory_cache: HashMap<String, ModelColumnLineage>,
     computing: HashSet<String>,
@@ -244,15 +247,51 @@ fn compute_single_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     column_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
 ) -> Option<(Vec<ColumnSource>, TransformationType)> {
     let node = find_model_by_name(manifest, model_name)?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let ctx = super::single_model::prepare_lineage_context(compiled_code, manifest, node, dialect)
-        .ok()?;
-    super::single_model::run_column_lineage(column_name, &ctx)
-        .ok()
-        .map(|r| (r.sources, r.transformation))
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+
+    let outputs = [OutputColumnRequest {
+        ordinal: OutputOrdinal(0),
+        name: column_name.to_string(),
+    }];
+    let duplicate_output_names = BTreeSet::new();
+    let request = LineageRequest {
+        sql: compiled_code,
+        dialect,
+        catalog: catalog.as_ref(),
+        outputs: &outputs,
+        duplicate_output_names: &duplicate_output_names,
+    };
+
+    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let analysis = backend.analyze(&request).ok()?;
+    let statement = require_single_lineage_statement(analysis).ok()?;
+    let outcome = statement.columns.into_iter().next()?;
+
+    match outcome {
+        BackendColumnOutcome::Resolved(result) => Some((
+            result
+                .sources
+                .into_iter()
+                .map(|s| match s {
+                    BackendSource::Concrete { table, column } => ColumnSource {
+                        table,
+                        column,
+                        model_path: vec![],
+                    },
+                    other => unreachable!(
+                        "the polyglot backend never produces this source variant: {:?}",
+                        other
+                    ),
+                })
+                .collect(),
+            result.transformation,
+        )),
+        BackendColumnOutcome::Failed(_) => None,
+    }
 }
 
 fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {

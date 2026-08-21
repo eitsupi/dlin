@@ -9,22 +9,122 @@ use polyglot_sql::{self, Expression, Schema, expressions::DataType};
 use rayon::prelude::*;
 
 use crate::graph::column_lineage::ColumnSource;
+use crate::graph::column_lineage::TransformationType;
 use crate::graph::column_lineage::backend::catalog::CatalogSnapshot;
+use crate::graph::column_lineage::backend::dialect::DlinDialect;
 use crate::graph::column_lineage::backend::types::{
     AnalysisCompleteness, BackendAnalysis, BackendColumnFailure, BackendColumnOutcome,
     BackendColumnResult, BackendError, BackendErrorKind, BackendSource, BackendStatementResult,
     OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName, OutputOrdinal,
     OutputTarget, ResolutionState,
 };
-use crate::graph::column_lineage::{TransformationType, schema};
-use crate::parser::manifest::Manifest;
+
+/// Infer output column names from a SQL query's top-level SELECT list,
+/// expanding CTE-level `SELECT *` where the catalog allows it. Returns an
+/// empty list when `sql` does not parse.
+pub(crate) fn infer_output_columns(
+    sql: &str,
+    dialect: DlinDialect,
+    catalog: Option<&CatalogSnapshot>,
+) -> Vec<String> {
+    match polyglot_sql::parse_one(sql, dialect.to_polyglot()) {
+        Ok(expr) => extract_select_columns_from_expr(&expr, catalog),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Parse-only check used by CLI debug commands to surface a parse failure
+/// before any other argument (e.g. a `--schema` string) is validated,
+/// matching the order those commands have always evaluated their inputs in.
+pub fn check_sql_parses(sql: &str, dialect: DlinDialect) -> Result<(), String> {
+    polyglot_sql::parse_one(sql, dialect.to_polyglot())
+        .map(|_| ())
+        .map_err(|e| format!("{}", e))
+}
+
+/// Parse `sql` and render its AST as the Rust `Debug` representation, for
+/// `dlin debug parse-sql --format ast`.
+pub fn debug_parse_sql_ast_debug(sql: &str, dialect: DlinDialect) -> Result<String, String> {
+    polyglot_sql::parse_one(sql, dialect.to_polyglot())
+        .map(|expr| format!("{:#?}", expr))
+        .map_err(|e| format!("parse error: {}", e))
+}
+
+/// Parse `sql` and render its AST as JSON, for `dlin debug parse-sql --format json`.
+pub fn debug_parse_sql_json(
+    sql: &str,
+    dialect: DlinDialect,
+    pretty: bool,
+) -> Result<String, String> {
+    let expr = polyglot_sql::parse_one(sql, dialect.to_polyglot())
+        .map_err(|e| format!("parse error: {}", e))?;
+    let result = if pretty {
+        serde_json::to_string_pretty(&expr)
+    } else {
+        serde_json::to_string(&expr)
+    };
+    result.map_err(|e| format!("{}", e))
+}
+
+/// Parse `sql`, trace `column`'s lineage (optionally qualified against
+/// `catalog`), and render the resulting lineage graph as JSON, for
+/// `dlin debug trace-column`. Mirrors that command's existing schema-fallback
+/// behavior: CTE-star expansion only runs when a catalog is supplied, and a
+/// schema-qualified trace falls back to an unqualified one on failure.
+pub fn debug_trace_column_json(
+    sql: &str,
+    dialect: DlinDialect,
+    catalog: Option<&CatalogSnapshot>,
+    column: &str,
+    pretty: bool,
+) -> Result<String, String> {
+    let poly_dialect = dialect.to_polyglot();
+    let mut expr =
+        polyglot_sql::parse_one(sql, poly_dialect).map_err(|e| format!("parse error: {}", e))?;
+
+    let schema = catalog.map(to_polyglot_schema);
+    if let Some(ref s) = schema {
+        polyglot_sql::lineage::expand_cte_stars(&mut expr, Some(s as &dyn polyglot_sql::Schema));
+    }
+
+    let lineage_result = if let Some(ref s) = schema {
+        polyglot_sql::lineage::lineage_with_schema(
+            column,
+            &expr,
+            Some(s as &dyn polyglot_sql::Schema),
+            Some(poly_dialect),
+            false,
+        )
+        .or_else(|err| {
+            crate::warn!(
+                "lineage_with_schema failed: {}, falling back to schema-less lineage",
+                err
+            );
+            polyglot_sql::lineage::lineage(column, &expr, Some(poly_dialect), false)
+        })
+    } else {
+        polyglot_sql::lineage::lineage(column, &expr, Some(poly_dialect), false)
+    };
+
+    match lineage_result {
+        Ok(node) => {
+            let result = if pretty {
+                serde_json::to_string_pretty(&node)
+            } else {
+                serde_json::to_string(&node)
+            };
+            result.map_err(|e| format!("{}", e))
+        }
+        Err(e) => Err(format!("lineage error: {}", e)),
+    }
+}
 
 pub(crate) fn discover_output_columns(
     request: &OutputDiscoveryRequest<'_>,
 ) -> Result<OutputDiscovery, BackendError> {
     let dialect = request.dialect.to_polyglot();
     let expr = polyglot_sql::parse_one(request.sql, dialect)
-        .map_err(|error| classify_polyglot_error(&error))?;
+        .map_err(|error| classify_parse_error(&error))?;
     let columns =
         infer_output_columns_with_expr(request.sql, dialect, request.catalog, Some(&expr));
 
@@ -53,7 +153,7 @@ pub(crate) fn analyze(
 ) -> Result<BackendAnalysis, BackendError> {
     let dialect = request.dialect.to_polyglot();
     let expr = polyglot_sql::parse_one(request.sql, dialect)
-        .map_err(|error| classify_polyglot_error(&error))?;
+        .map_err(|error| classify_parse_error(&error))?;
 
     let schema = request.catalog.map(to_polyglot_schema);
     let mut expanded_expr = expr;
@@ -79,7 +179,22 @@ pub(crate) fn analyze(
     Ok(BackendAnalysis {
         statements: vec![BackendStatementResult {
             statement_ordinal: 0,
-            lineage_bearing: matches!(context.expanded_expr, Expression::Select(_)),
+            // `build_scope_impl` (polyglot's lineage::Scope builder) only produces a
+            // usable source scope for `Select`, `Union`, `Intersect`, and `Except` at
+            // the top level (plus `CreateTable`/`Prepare`, which never appear as dbt
+            // compiled model SQL); every other top-level variant falls through its
+            // catch-all arm and leaves the scope empty, so tracing any column against
+            // it fails regardless. Those four variants are exactly the ones a
+            // top-level dbt query can parse to (a bare SELECT, or one wrapped in a set
+            // operation), so matching them here does not reject anything the legacy
+            // unconditional-call path would have traced successfully.
+            lineage_bearing: matches!(
+                context.expanded_expr,
+                Expression::Select(_)
+                    | Expression::Union(_)
+                    | Expression::Intersect(_)
+                    | Expression::Except(_)
+            ),
             completeness,
             has_unresolved_stars: has_unresolved_stars(&context.expanded_expr),
             columns: results,
@@ -150,50 +265,6 @@ pub(super) struct LineageContext {
     pub(super) expanded_expr: Expression,
     schema: Option<polyglot_sql::MappingSchema>,
     dialect: polyglot_sql::DialectType,
-}
-
-pub(super) fn prepare_lineage_context(
-    compiled_code: &str,
-    manifest: &Manifest,
-    node: &crate::parser::manifest::ManifestNode,
-    dialect: polyglot_sql::DialectType,
-) -> Result<LineageContext, String> {
-    prepare_lineage_context_with_expr(compiled_code, manifest, node, dialect, None)
-}
-
-pub(super) fn prepare_lineage_context_with_expr(
-    compiled_code: &str,
-    manifest: &Manifest,
-    node: &crate::parser::manifest::ManifestNode,
-    dialect: polyglot_sql::DialectType,
-    parsed_expr: Option<&Expression>,
-) -> Result<LineageContext, String> {
-    let expr = match parsed_expr {
-        Some(e) => e.clone(),
-        None => polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?,
-    };
-
-    let schema =
-        schema::build_schema_from_manifest(manifest, node, dialect).map(|s| to_polyglot_schema(&s));
-
-    let mut expanded_expr = expr;
-    polyglot_sql::lineage::expand_cte_stars(
-        &mut expanded_expr,
-        schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
-    );
-
-    Ok(LineageContext {
-        expanded_expr,
-        schema,
-        dialect,
-    })
-}
-
-pub(super) fn run_column_lineage(
-    col_name: &str,
-    ctx: &LineageContext,
-) -> Result<ColumnLineageResult, String> {
-    run_column_lineage_raw(col_name, ctx).map_err(|error| format_lineage_error(&error))
 }
 
 fn run_column_lineage_raw(
@@ -332,6 +403,20 @@ pub(crate) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
         )
     } else {
         msg
+    }
+}
+
+/// Classify a `parse_one` failure. Unlike [`classify_polyglot_error`], this is
+/// never a column-resolution outcome — the statement was never parsed, so
+/// there is no scope to resolve columns against. The message is the plain
+/// `Display` of the underlying error, not run through [`format_lineage_error`]:
+/// that formatting exists to normalize the synthetic zero-position errors
+/// `lineage()` raises for resolution failures, and would be a no-op here
+/// anyway since real parse errors carry real line/column positions.
+fn classify_parse_error(error: &polyglot_sql::Error) -> BackendError {
+    BackendError {
+        kind: BackendErrorKind::Parse,
+        message: format!("{}", error),
     }
 }
 
@@ -519,5 +604,210 @@ select * from renamed"#;
             cols
         );
         assert_eq!(cols.len(), 10, "cols: {:?}", cols);
+    }
+
+    #[test]
+    fn test_cte_select_star() {
+        // CTE + SELECT * now works with the expand_cte_stars preprocessing
+        let sql = r#"with renamed as (select id as customer_id from source) select * from renamed"#;
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+        let result = polyglot_sql::lineage::lineage("customer_id", &expr, None, false);
+        assert!(
+            result.is_ok(),
+            "CTE + SELECT * should work: {:?}",
+            result.err()
+        );
+        let node = result.unwrap();
+        assert_eq!(node.name, "customer_id");
+    }
+
+    #[test]
+    fn test_nested_cte_select_star() {
+        // Nested CTE: cte2 references cte1 via SELECT *
+        let sql = r#"
+            with
+                cte1 as (select id as order_id, amount from raw_orders),
+                cte2 as (select * from cte1)
+            select * from cte2
+        "#;
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+        let result = polyglot_sql::lineage::lineage("order_id", &expr, None, false);
+        assert!(
+            result.is_ok(),
+            "nested CTE + SELECT * should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_schema_resolves_cte_star_from_external_table() {
+        // Test that lineage_with_schema can resolve columns through CTEs that
+        // reference external tables registered in the schema.
+        let sql = r#"with
+orders as (
+    select * from stg_orders
+),
+enriched as (
+    select orders.*, 'extra' as extra_col
+    from orders
+)
+select * from enriched"#;
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+
+        let mut schema = polyglot_sql::MappingSchema::new();
+        let cols = vec![
+            ("order_id".to_string(), DataType::Unknown),
+            ("customer_id".to_string(), DataType::Unknown),
+            ("order_total".to_string(), DataType::Unknown),
+        ];
+        schema.add_table("stg_orders", &cols, None).unwrap();
+
+        let result = polyglot_sql::lineage::lineage_with_schema(
+            "order_id",
+            &expr,
+            Some(&schema as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "should resolve order_id: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_schema_resolves_three_part_name() {
+        // Test with fully-qualified 3-part table name as dbt generates
+        let sql = r#"with
+orders as (
+    select * from "jaffle_shop"."main"."stg_orders"
+)
+select * from orders"#;
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+
+        let mut schema = polyglot_sql::MappingSchema::new();
+        let cols = vec![
+            ("order_id".to_string(), DataType::Unknown),
+            ("customer_id".to_string(), DataType::Unknown),
+        ];
+        // Register with 3-part name
+        schema
+            .add_table("jaffle_shop.main.stg_orders", &cols, None)
+            .unwrap();
+
+        let result = polyglot_sql::lineage::lineage_with_schema(
+            "order_id",
+            &expr,
+            Some(&schema as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "should resolve order_id via 3-part name: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_schema_resolves_cte_star_from_unknown_source() {
+        // Test that lineage_with_schema can resolve columns through CTEs that
+        // reference external tables registered in the schema.
+        let sql = r#"with
+orders as (
+    select * from stg_orders
+),
+enriched as (
+    select orders.*, 'extra' as extra_col
+    from orders
+)
+select * from enriched"#;
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+
+        let mut schema = polyglot_sql::MappingSchema::new();
+        let cols = vec![
+            ("order_id".to_string(), DataType::Unknown),
+            ("customer_id".to_string(), DataType::Unknown),
+            ("order_total".to_string(), DataType::Unknown),
+        ];
+        schema.add_table("stg_orders", &cols, None).unwrap();
+
+        let result = polyglot_sql::lineage::lineage_with_schema(
+            "order_id",
+            &expr,
+            Some(&schema as &dyn polyglot_sql::Schema),
+            None,
+            false,
+        );
+        assert!(
+            result.is_ok(),
+            "should resolve order_id: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "has_unresolved_stars in the 0.4.4-era implementation does not recurse into \
+                Expression::Paren, so a double-parenthesized derived table with SELECT * is not \
+                detected as unresolved"]
+    fn test_parenthesized_unresolved_star_is_detected() {
+        // In polyglot-sql 0.6.2, a nested parenthesized query in a FROM clause
+        // preserves a Paren node around the inner query.
+        let expr = polyglot_sql::parse_one(
+            "SELECT id FROM ((SELECT * FROM some_unknown_source))",
+            DialectType::Generic,
+        )
+        .unwrap();
+
+        assert!(format!("{expr:?}").contains("Paren"));
+        assert!(has_unresolved_stars(&expr), "expr: {expr:?}");
+    }
+
+    #[test]
+    fn test_union_chain_is_left_nested() {
+        // The parser represents an unparenthesized UNION chain as a
+        // left-nested Union(Union(...), ...). This shape is what makes the
+        // recursive descent into `union.left` in `has_unresolved_stars`
+        // callers necessary rather than a single flat pass.
+        let sql = "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, 2 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source";
+        let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
+        assert!(matches!(
+            &expr,
+            Expression::Union(union)
+                if matches!(union.left, Expression::Union(_))
+        ));
+    }
+
+    #[test]
+    fn test_format_lineage_error_strips_position() {
+        let err = polyglot_sql::Error::parse("Cannot find column 'x' in query", 0, 0, 0, 0);
+        let formatted = format_lineage_error(&err);
+        assert_eq!(formatted, "lineage failed: Cannot find column 'x' in query");
+        assert!(
+            !formatted.contains("line 0"),
+            "should strip meaningless position info"
+        );
+    }
+
+    #[test]
+    fn test_format_lineage_error_preserves_real_position() {
+        let err = polyglot_sql::Error::parse("unexpected token", 5, 10, 0, 0);
+        let formatted = format_lineage_error(&err);
+        assert!(
+            formatted.contains("line 5"),
+            "should preserve real position info: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn test_format_lineage_error_internal() {
+        let err = polyglot_sql::Error::internal("lineage recursion depth exceeded");
+        let formatted = format_lineage_error(&err);
+        assert_eq!(
+            formatted,
+            "lineage failed: lineage recursion depth exceeded"
+        );
     }
 }

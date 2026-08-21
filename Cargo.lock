@@ -218,7 +218,6 @@ dependencies = [
  "dlin-core",
  "libc",
  "path-slash",
- "polyglot-sql",
  "regex",
  "serde",
  "serde-saphyr",

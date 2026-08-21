@@ -23,7 +23,7 @@ fn test_column_cache_hit() {
     cache.insert(
         "test_model",
         "SELECT id FROM raw",
-        DialectType::Generic,
+        DlinDialect::Generic,
         0,
         None,
         lineage,
@@ -36,7 +36,7 @@ fn test_column_cache_hit() {
         .get(
             "test_model",
             "SELECT id FROM raw",
-            DialectType::Generic,
+            DlinDialect::Generic,
             None,
             Some(0),
         )
@@ -58,13 +58,13 @@ fn test_column_cache_miss_on_code_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::Generic, 0, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 2", DialectType::Generic, None, Some(0))
+            .get("m", "SELECT 2", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -82,13 +82,13 @@ fn test_column_cache_miss_on_dialect_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::BigQuery, 0, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::BigQuery, 0, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Snowflake, None, Some(0))
+            .get("m", "SELECT 1", DlinDialect::Snowflake, None, Some(0))
             .is_none()
     );
 }
@@ -106,20 +106,20 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 42, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::Generic, 42, None, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     // Same hash → hit
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, None, Some(42))
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(42))
             .is_some()
     );
     // Different hash → miss (YAML columns changed in manifest)
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, None, Some(99))
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(99))
             .is_none()
     );
 }
@@ -137,7 +137,7 @@ fn test_column_cache_version_invalidation() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::Generic, 0, None, lineage);
     cache.save();
 
     // Tamper with version in saved file
@@ -152,7 +152,7 @@ fn test_column_cache_version_invalidation() {
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -167,11 +167,11 @@ fn test_column_cache_disabled() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::Generic, 0, None, lineage);
     // Disabled cache still works in-memory (only disk persistence is disabled)
     assert!(
         cache
-            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_some()
     );
     // But save is a no-op (no cache_path)
@@ -192,14 +192,14 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert("m", "SELECT 1", DialectType::Generic, 0, None, lineage);
+    cache.insert("m", "SELECT 1", DlinDialect::Generic, 0, None, lineage);
     cache.save();
 
     // Fresh cache ignores existing entries
     let fresh = ColumnLineageCache::fresh(project_dir, None);
     assert!(
         fresh
-            .get("m", "SELECT 1", DialectType::Generic, None, Some(0))
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 
@@ -212,13 +212,13 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    fresh.insert("m2", "SELECT 2", DialectType::Generic, 0, None, lineage2);
+    fresh.insert("m2", "SELECT 2", DlinDialect::Generic, 0, None, lineage2);
     fresh.save();
 
     let reloaded = ColumnLineageCache::load(project_dir, None);
     assert!(
         reloaded
-            .get("m2", "SELECT 2", DialectType::Generic, None, Some(0))
+            .get("m2", "SELECT 2", DlinDialect::Generic, None, Some(0))
             .is_some()
     );
 }
@@ -241,7 +241,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
     cache.insert(
         "m",
         "SELECT 1",
-        DialectType::Generic,
+        DlinDialect::Generic,
         42,
         Some(&manifest_path),
         lineage,
@@ -254,7 +254,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
             .get(
                 "m",
                 "SELECT 1",
-                DialectType::Generic,
+                DlinDialect::Generic,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -270,7 +270,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
             .get(
                 "m",
                 "SELECT 1",
-                DialectType::Generic,
+                DlinDialect::Generic,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -304,7 +304,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     seeded.insert(
         model_name,
         compiled_code,
-        DialectType::Generic,
+        DlinDialect::Generic,
         manifest_columns_hash,
         Some(&manifest_path),
         sentinel,
@@ -318,7 +318,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     let result = compute_column_lineage_with_manifest_path(
         &manifest,
         model_name,
-        DialectType::Generic,
+        DlinDialect::Generic,
         Some(&manifest_path),
         &mut cache,
     );

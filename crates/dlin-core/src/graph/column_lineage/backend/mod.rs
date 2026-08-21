@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 //! Backend abstraction and dispatch for column lineage.
 
-use crate::graph::column_lineage::backend::types::{
-    BackendAnalysis, BackendError, LineageRequest, OutputDiscovery, OutputDiscoveryRequest,
-};
-
 pub mod catalog;
 pub mod dialect;
 pub mod polyglot;
@@ -15,11 +11,24 @@ pub use catalog::CatalogSnapshot;
 #[allow(unused_imports)]
 pub use dialect::DlinDialect;
 #[allow(unused_imports)]
+pub use polyglot::{
+    check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
+};
+#[allow(unused_imports)]
 pub use types::*;
 
 /// Backend identities for the column-lineage dispatch layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendId {
     Polyglot,
+}
+
+impl BackendId {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Polyglot => "polyglot",
+        }
+    }
 }
 
 /// Uniform interface for lineages backends.
@@ -32,7 +41,7 @@ pub trait LineageBackend: Send + Sync {
     fn analyze(&self, request: &LineageRequest<'_>) -> Result<BackendAnalysis, BackendError>;
 }
 
-/// Concrete backend variant (only `Polyglot` exists in this stage).
+/// Concrete backend variant (only `Polyglot` exists today).
 pub enum Backend {
     Polyglot(PolyglotBackend),
 }
@@ -60,7 +69,7 @@ impl LineageBackend for Backend {
     }
 }
 
-/// Polyglot backend placeholder for this stage.
+/// The `polyglot-sql`-backed lineage backend.
 pub struct PolyglotBackend;
 
 impl PolyglotBackend {

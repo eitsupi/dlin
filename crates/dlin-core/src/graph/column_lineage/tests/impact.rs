@@ -7,7 +7,7 @@ fn test_column_impact_direct_dependent() {
         &manifest,
         "stg_orders",
         "order_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -31,7 +31,7 @@ fn test_column_impact_two_hops() {
         &manifest,
         "stg_orders",
         "customer_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -63,7 +63,7 @@ fn test_column_impact_model_path() {
         &manifest,
         "stg_orders",
         "customer_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -88,7 +88,7 @@ fn test_column_impact_no_dependents() {
         &manifest,
         "customers",
         "customer_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -107,7 +107,7 @@ fn test_column_impact_model_not_found() {
         &manifest,
         "nonexistent",
         "col",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -122,7 +122,7 @@ fn test_column_impact_json_serialization() {
         &manifest,
         "stg_orders",
         "order_id",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_string_pretty(&result).unwrap();
@@ -152,7 +152,7 @@ fn test_column_impact_diamond_different_columns_through_shared_model() {
         &manifest,
         "raw_data",
         "x",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(impact_x.errors.is_empty(), "errors: {:?}", impact_x.errors);
@@ -182,7 +182,7 @@ fn test_column_impact_diamond_different_columns_through_shared_model() {
         &manifest,
         "raw_data",
         "y",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(impact_y.errors.is_empty(), "errors: {:?}", impact_y.errors);
@@ -247,7 +247,7 @@ fn test_column_impact_reconverging_dag_multi_path() {
         &manifest,
         "source_model",
         "x",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -481,7 +481,7 @@ fn test_column_impact_excludes_off_path_errors() {
         &manifest,
         "source_model",
         "col_x",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -560,7 +560,7 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
         &manifest,
         "source_model",
         "col_x",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 

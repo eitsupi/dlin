@@ -1,6 +1,18 @@
 use clap::{Parser, Subcommand};
-use polyglot_sql::DialectType;
+use dlin_core::graph::column_lineage::DlinDialect;
 use std::path::PathBuf;
+
+/// Parse a `--dialect` value via `DlinDialect`'s `FromStr` implementation.
+///
+/// `DlinDialect` derives `clap::ValueEnum` (for its per-variant aliases), but
+/// clap's automatic parser selection would then list every dialect spelling
+/// as a "Possible values" block in `--help`, which is not how this flag has
+/// ever been documented (its accepted spellings are described in prose in
+/// each command's own help text instead). Pinning the parser to `FromStr`
+/// keeps the flag's parsing behavior — and `--help` output — unchanged.
+fn parse_dialect(s: &str) -> Result<DlinDialect, String> {
+    s.parse()
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -654,13 +666,14 @@ pub struct McpArgs {
     #[arg(
         long,
         required = true,
+        value_parser = parse_dialect,
         long_help = "\
 SQL dialect for parsing compiled SQL in get_column_lineage.
 
 This is required because the generic parser can produce incorrect or incomplete
 column lineage for warehouse-specific SQL."
     )]
-    pub dialect: DialectType,
+    pub dialect: DlinDialect,
 }
 
 #[derive(Debug, clap::Args)]
@@ -759,8 +772,8 @@ pub struct DebugParseSqlArgs {
     pub sql: Option<String>,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic")]
-    pub dialect: DialectType,
+    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
+    pub dialect: DlinDialect,
 
     /// Output format: ast (Debug representation), json (JSON AST)
     #[arg(long, default_value = "ast")]
@@ -777,8 +790,8 @@ pub struct DebugTraceColumnArgs {
     pub column: String,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic")]
-    pub dialect: DialectType,
+    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
+    pub dialect: DlinDialect,
 
     /// Table schema definitions for accurate lineage resolution.
     /// Format: table1:col1,col2;table2:col3,col4
@@ -957,8 +970,8 @@ pub struct ColumnGraphArgs {
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
     /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
-    #[arg(long)]
-    pub dialect: Option<DialectType>,
+    #[arg(long, value_parser = parse_dialect)]
+    pub dialect: Option<DlinDialect>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1002,8 +1015,8 @@ pub struct ColumnImpactArgs {
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
     /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
-    #[arg(long)]
-    pub dialect: Option<DialectType>,
+    #[arg(long, value_parser = parse_dialect)]
+    pub dialect: Option<DlinDialect>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1954,7 +1967,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(polyglot_sql::DialectType::BigQuery));
+        assert_eq!(args.dialect, Some(DlinDialect::BigQuery));
     }
 
     #[test]
@@ -1980,7 +1993,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(polyglot_sql::DialectType::Snowflake));
+        assert_eq!(args.dialect, Some(DlinDialect::Snowflake));
     }
 
     #[test]
@@ -2235,7 +2248,7 @@ mod tests {
         );
         match args.command {
             DebugCommand::ParseSql(ref a) => {
-                assert_eq!(a.dialect, polyglot_sql::DialectType::BigQuery);
+                assert_eq!(a.dialect, DlinDialect::BigQuery);
             }
             _ => panic!("Expected ParseSql"),
         }
@@ -2247,7 +2260,7 @@ mod tests {
             unwrap_debug(Cli::try_parse_from(["dlin", "debug", "parse-sql", "SELECT 1"]).unwrap());
         match args.command {
             DebugCommand::ParseSql(ref a) => {
-                assert_eq!(a.dialect, polyglot_sql::DialectType::Generic);
+                assert_eq!(a.dialect, DlinDialect::Generic);
             }
             _ => panic!("Expected ParseSql"),
         }
@@ -2271,7 +2284,7 @@ mod tests {
                 assert_eq!(a.sql.as_deref(), Some("SELECT a FROM t"));
                 assert_eq!(a.column, "a");
                 assert!(a.schema.is_none());
-                assert_eq!(a.dialect, polyglot_sql::DialectType::Generic);
+                assert_eq!(a.dialect, DlinDialect::Generic);
             }
             _ => panic!("Expected TraceColumn"),
         }

@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use polyglot_sql::{DialectType, Expression};
-
-use super::backend::{catalog::CatalogSnapshot, polyglot as polyglot_backend};
+use super::backend::{DlinDialect, catalog::CatalogSnapshot, polyglot as polyglot_backend};
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
@@ -18,7 +16,7 @@ fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) 
 pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
-    dialect: DialectType,
+    dialect: DlinDialect,
 ) -> Option<CatalogSnapshot> {
     let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
@@ -80,7 +78,7 @@ pub(super) fn build_schema_from_manifest(
 fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
     manifest: &Manifest,
-    dialect: DialectType,
+    dialect: DlinDialect,
 ) -> Vec<String> {
     let yaml_cols: HashSet<String> = dep_node.columns.keys().cloned().collect();
     let inferred_cols: HashSet<String> = dep_node
@@ -88,7 +86,7 @@ fn resolve_node_columns(
         .as_ref()
         .map(|code| {
             let schema = build_yaml_schema_for_node(manifest, dep_node);
-            infer_output_columns(code, dialect, schema.as_ref(), None)
+            polyglot_backend::infer_output_columns(code, dialect, schema.as_ref())
         })
         .unwrap_or_default()
         .into_iter()
@@ -159,22 +157,6 @@ pub(super) fn build_yaml_schema_for_node(
     }
 
     if has_entries { Some(schema) } else { None }
-}
-
-pub(super) fn infer_output_columns(
-    sql: &str,
-    dialect: DialectType,
-    schema: Option<&CatalogSnapshot>,
-    parsed_expr: Option<&Expression>,
-) -> Vec<String> {
-    let expr = match parsed_expr {
-        Some(e) => e.clone(),
-        None => match polyglot_sql::parse_one(sql, dialect) {
-            Ok(e) => e,
-            Err(_) => return vec![],
-        },
-    };
-    polyglot_backend::extract_select_columns_from_expr(&expr, schema)
 }
 
 pub(super) fn compute_manifest_columns_hash(

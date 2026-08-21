@@ -5,7 +5,6 @@ use std::time::SystemTime;
 use anyhow::Result;
 use clap::Parser;
 use path_slash::PathExt as _;
-use polyglot_sql::{DialectType, Schema as _};
 use regex::RegexBuilder;
 
 mod cli;
@@ -18,6 +17,7 @@ use cli::{
     SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
+use dlin_core::graph::column_lineage::{CatalogSnapshot, DlinDialect};
 use dlin_core::input;
 use dlin_core::parser;
 use dlin_core::render;
@@ -816,15 +816,15 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
 /// Avoids silent fallback to Generic, which produces incorrect results for
 /// warehouse-specific SQL (e.g. BigQuery backtick quoting, Snowflake QUALIFY).
 fn resolve_dialect(
-    cli_dialect: Option<DialectType>,
+    cli_dialect: Option<DlinDialect>,
     manifest: &parser::manifest::Manifest,
-) -> Result<DialectType> {
+) -> Result<DlinDialect> {
     if let Some(d) = cli_dialect {
         return Ok(d);
     }
     match manifest.metadata.adapter_type.as_deref() {
         Some(adapter) if !adapter.trim().is_empty() => {
-            adapter.trim().parse::<DialectType>().map_err(|_| {
+            adapter.trim().parse::<DlinDialect>().map_err(|_| {
                 anyhow::anyhow!(
                     "manifest adapter_type '{}' has no matching SQL dialect; \
                      use --dialect to specify one explicitly (e.g. --dialect postgres)",
@@ -850,7 +850,7 @@ fn run_column_lineage_command(
     cli_models: Vec<String>,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DialectType>,
+    dialect: Option<DlinDialect>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -1064,7 +1064,7 @@ fn run_column_impact_command(
     model: &str,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DialectType>,
+    dialect: Option<DlinDialect>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -1497,27 +1497,20 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
     use std::io::Write;
 
     let sql = read_sql_input(args.sql.as_deref())?;
-    let expr = polyglot_sql::parse_one(&sql, args.dialect)
-        .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match args.format {
         DebugOutputFormat::Ast => {
-            writeln!(out, "{:#?}", expr)?;
+            let text = graph::column_lineage::debug_parse_sql_ast_debug(&sql, args.dialect)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(out, "{}", text)?;
         }
         DebugOutputFormat::Json => {
             let pretty = std::io::IsTerminal::is_terminal(&stdout);
-            let res = if pretty {
-                serde_json::to_writer_pretty(&mut out, &expr)
-            } else {
-                serde_json::to_writer(&mut out, &expr)
-            };
-            if let Err(e) = res {
-                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
-                }
-            } else if let Err(e) = writeln!(out)
+            let text = graph::column_lineage::debug_parse_sql_json(&sql, args.dialect, pretty)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if let Err(e) = writeln!(out, "{}", text)
                 && e.kind() != std::io::ErrorKind::BrokenPipe
             {
                 return Err(e.into());
@@ -1527,9 +1520,9 @@ fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
     Ok(())
 }
 
-/// Parse a schema string like "table1:col1,col2;table2:col3,col4" into a MappingSchema.
-fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> {
-    let mut schema = polyglot_sql::MappingSchema::new();
+/// Parse a schema string like "table1:col1,col2;table2:col3,col4" into a `CatalogSnapshot`.
+fn parse_schema_string(schema_str: &str) -> Result<CatalogSnapshot> {
+    let mut schema = CatalogSnapshot::new();
     for table_def in schema_str.split(';') {
         let table_def = table_def.trim();
         if table_def.is_empty() {
@@ -1541,11 +1534,11 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
                 table_def
             )
         })?;
-        let columns: Vec<(String, polyglot_sql::expressions::DataType)> = cols_str
+        let columns: Vec<String> = cols_str
             .split(',')
             .map(|c| c.trim())
             .filter(|c| !c.is_empty())
-            .map(|c| (c.to_string(), polyglot_sql::expressions::DataType::Unknown))
+            .map(|c| c.to_string())
             .collect();
         if columns.is_empty() {
             anyhow::bail!(
@@ -1553,9 +1546,7 @@ fn parse_schema_string(schema_str: &str) -> Result<polyglot_sql::MappingSchema> 
                 table_name.trim()
             );
         }
-        schema
-            .add_table(table_name.trim(), &columns, None)
-            .map_err(|e| anyhow::anyhow!("schema error: {}", e))?;
+        schema.add_table(table_name.trim(), columns);
     }
     Ok(schema)
 }
@@ -1566,62 +1557,34 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
     use std::io::Write;
 
     let sql = read_sql_input(args.sql.as_deref())?;
-    let mut expr = polyglot_sql::parse_one(&sql, args.dialect)
+    // Check that the SQL parses before validating `--schema`, so a bad SQL
+    // string is reported even when `--schema` is also malformed — matching
+    // the order these two inputs have always been evaluated in.
+    graph::column_lineage::check_sql_parses(&sql, args.dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
-    let schema = args
+    let catalog = args
         .schema
         .as_deref()
         .map(parse_schema_string)
         .transpose()?;
 
-    // Expand CTE stars if schema is provided
-    if let Some(ref s) = schema {
-        polyglot_sql::lineage::expand_cte_stars(&mut expr, Some(s as &dyn polyglot_sql::Schema));
-    }
+    let stdout = std::io::stdout();
+    let pretty = std::io::IsTerminal::is_terminal(&stdout);
+    let text = graph::column_lineage::debug_trace_column_json(
+        &sql,
+        args.dialect,
+        catalog.as_ref(),
+        &args.column,
+        pretty,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
-    let lineage_result = if let Some(ref s) = schema {
-        polyglot_sql::lineage::lineage_with_schema(
-            &args.column,
-            &expr,
-            Some(s as &dyn polyglot_sql::Schema),
-            Some(args.dialect),
-            false,
-        )
-        .or_else(|err| {
-            dlin_core::warn!(
-                "lineage_with_schema failed: {}, falling back to schema-less lineage",
-                err
-            );
-            polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
-        })
-    } else {
-        polyglot_sql::lineage::lineage(&args.column, &expr, Some(args.dialect), false)
-    };
-
-    match lineage_result {
-        Ok(node) => {
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            let pretty = std::io::IsTerminal::is_terminal(&stdout);
-            let res = if pretty {
-                serde_json::to_writer_pretty(&mut out, &node)
-            } else {
-                serde_json::to_writer(&mut out, &node)
-            };
-            if let Err(e) = res {
-                if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
-                }
-            } else if let Err(e) = writeln!(out)
-                && e.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                return Err(e.into());
-            }
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("lineage error: {}", e));
-        }
+    let mut out = stdout.lock();
+    if let Err(e) = writeln!(out, "{}", text)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(e.into());
     }
 
     Ok(())
@@ -1630,7 +1593,6 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polyglot_sql::Schema;
 
     fn sorted(mut v: Vec<String>) -> Vec<String> {
         v.sort();
@@ -1640,32 +1602,32 @@ mod tests {
     #[test]
     fn test_parse_schema_string_single_table() {
         let schema = parse_schema_string("t:a,b,c").unwrap();
-        let cols = schema.column_names("t").unwrap();
+        let cols = schema.table_columns("t").unwrap().to_vec();
         assert_eq!(sorted(cols), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn test_parse_schema_string_multiple_tables() {
         let schema = parse_schema_string("orders:id,amount;customers:id,name").unwrap();
-        let order_cols = schema.column_names("orders").unwrap();
+        let order_cols = schema.table_columns("orders").unwrap().to_vec();
         assert_eq!(sorted(order_cols), vec!["amount", "id"]);
-        let cust_cols = schema.column_names("customers").unwrap();
+        let cust_cols = schema.table_columns("customers").unwrap().to_vec();
         assert_eq!(sorted(cust_cols), vec!["id", "name"]);
     }
 
     #[test]
     fn test_parse_schema_string_whitespace_tolerance() {
         let schema = parse_schema_string(" t : a , b ; u : x ").unwrap();
-        let cols = schema.column_names("t").unwrap();
+        let cols = schema.table_columns("t").unwrap().to_vec();
         assert_eq!(sorted(cols), vec!["a", "b"]);
-        let cols2 = schema.column_names("u").unwrap();
+        let cols2 = schema.table_columns("u").unwrap().to_vec();
         assert_eq!(cols2, vec!["x"]);
     }
 
     #[test]
     fn test_parse_schema_string_empty() {
         let schema = parse_schema_string("").unwrap();
-        assert!(schema.column_names("t").is_err());
+        assert!(schema.table_columns("t").is_none());
     }
 
     #[test]
@@ -1685,7 +1647,7 @@ mod tests {
     fn test_parse_schema_string_consecutive_commas_ignored() {
         // "t:a,,b" — the empty segment is dropped, result has only a and b
         let schema = parse_schema_string("t:a,,b").unwrap();
-        let cols = schema.column_names("t").unwrap();
+        let cols = schema.table_columns("t").unwrap().to_vec();
         assert_eq!(sorted(cols), vec!["a", "b"]);
     }
 }
