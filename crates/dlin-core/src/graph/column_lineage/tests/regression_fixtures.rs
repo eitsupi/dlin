@@ -139,20 +139,23 @@ fn test_join_select_star_passthrough_is_traced() {
     assert_select_star_hint(&result);
 }
 
-#[test]
-#[ignore = "0.4.4's lineage() fails a parenthesized UNION operand feeding an INTERSECT with \
-            'Expected SELECT or set operation' instead of tracing through it"]
-fn test_star_passthrough_query_shapes_are_traceable() {
-    let cases = [
-        "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
-        "SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders",
-        "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT COALESCE(a.id, b.id) AS id FROM a JOIN b ON true",
-        "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT CASE WHEN a.id IS NULL THEN b.id ELSE a.id END AS id FROM a JOIN b ON true",
-        "WITH left_side AS (SELECT id FROM raw.orders), right_side AS (SELECT * FROM some_unknown_source) SELECT id FROM left_side UNION ALL SELECT id FROM right_side",
-        "(SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders) INTERSECT SELECT id FROM raw.orders",
-        "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
-    ];
+const STAR_PASSTHROUGH_TRACEABLE_CASES: &[&str] = &[
+    "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
+    "SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders",
+    "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT COALESCE(a.id, b.id) AS id FROM a JOIN b ON true",
+    "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT CASE WHEN a.id IS NULL THEN b.id ELSE a.id END AS id FROM a JOIN b ON true",
+    "WITH left_side AS (SELECT id FROM raw.orders), right_side AS (SELECT * FROM some_unknown_source) SELECT id FROM left_side UNION ALL SELECT id FROM right_side",
+    "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
+];
 
+// Split out of the list above so the shapes that do resolve keep their
+// coverage while this one stays ignored. The SQL and expected values are
+// unchanged.
+const STAR_PASSTHROUGH_PARENTHESIZED_SET_CASES: &[&str] = &[
+    "(SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders) INTERSECT SELECT id FROM raw.orders",
+];
+
+fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
     for sql in cases {
         let mut manifest = make_test_manifest();
         manifest
@@ -186,6 +189,18 @@ fn test_star_passthrough_query_shapes_are_traceable() {
         );
         assert_eq!(result.traced_columns, 1, "SQL: {sql}");
     }
+}
+
+#[test]
+fn test_star_passthrough_query_shapes_are_traceable() {
+    assert_star_passthrough_shapes_are_traceable(STAR_PASSTHROUGH_TRACEABLE_CASES);
+}
+
+#[test]
+#[ignore = "0.4.4's lineage() fails a parenthesized UNION operand feeding an INTERSECT with \
+            'Expected SELECT or set operation' instead of tracing through it"]
+fn test_star_passthrough_parenthesized_set_operand_is_traceable() {
+    assert_star_passthrough_shapes_are_traceable(STAR_PASSTHROUGH_PARENTHESIZED_SET_CASES);
 }
 
 #[test]
@@ -302,9 +317,6 @@ fn assert_select_star_hint(result: &ModelColumnLineage) {
 }
 
 #[test]
-#[ignore = "0.4.4 does not detect the ambiguous-duplicate-output-name case: for \
-            'SELECT a.id, b.id FROM raw.orders a JOIN raw.orders b ON a.id = b.id', it resolves \
-            'id' to raw.orders.id instead of reporting it unresolved"]
 fn test_column_resolution_reasons_map_to_dlin_outcomes() {
     let not_found = compute_star_shape("SELECT id FROM raw.orders", &["missing"]);
     assert!(
@@ -318,7 +330,16 @@ fn test_column_resolution_reasons_map_to_dlin_outcomes() {
     let indeterminate = compute_star_shape("SELECT * FROM unknown_source", &["missing"]);
     assert_exact_column_outcomes(&indeterminate, &[], &["missing"]);
     assert_select_star_hint(&indeterminate);
+}
 
+// Split out of test_column_resolution_reasons_map_to_dlin_outcomes so the
+// resolution outcomes that do hold keep their coverage while this one stays
+// ignored. The expected values are unchanged.
+#[test]
+#[ignore = "0.4.4 does not detect the ambiguous-duplicate-output-name case: for \
+            'SELECT a.id, b.id FROM raw.orders a JOIN raw.orders b ON a.id = b.id', it resolves \
+            'id' to raw.orders.id instead of reporting it unresolved"]
+fn test_duplicate_output_names_are_reported_as_ambiguous() {
     // Duplicate output names are ambiguous. They must remain an error rather
     // than being guessed by the legacy set-operation fallback.
     let ambiguous = compute_star_shape(
