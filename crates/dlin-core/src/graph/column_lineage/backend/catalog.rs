@@ -26,8 +26,7 @@ impl CatalogSnapshot {
         columns: impl IntoIterator<Item = String>,
     ) {
         let table_name = name.into();
-        let mut cols = columns.into_iter().collect::<Vec<_>>();
-        cols.sort_unstable();
+        let cols = columns.into_iter().collect::<Vec<_>>();
         self.tables.insert(
             table_name.clone(),
             CatalogTable {
@@ -51,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_snapshot_add_table_sorts_columns() {
+    fn catalog_snapshot_add_table_preserves_column_order() {
         let mut catalog = CatalogSnapshot::new();
 
         catalog.add_table("model_a", vec!["z".into(), "a".into(), "m".into()]);
@@ -62,7 +61,7 @@ mod tests {
             .to_vec();
         assert_eq!(
             cols,
-            vec!["a".to_string(), "m".to_string(), "z".to_string()]
+            vec!["z".to_string(), "a".to_string(), "m".to_string()]
         );
     }
 
@@ -77,7 +76,7 @@ mod tests {
             .table_columns("model_a")
             .expect("table should exist")
             .to_vec();
-        assert_eq!(cols, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(cols, vec!["b".to_string(), "a".to_string()]);
     }
 
     #[test]

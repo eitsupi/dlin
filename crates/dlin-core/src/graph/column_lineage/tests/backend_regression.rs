@@ -298,6 +298,53 @@ fn top_level_union_all_traces_both_operands() {
 }
 
 #[test]
+fn cli_ordered_schema_aligns_select_star_union_columns() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("t", ["b".to_string(), "a".to_string()]);
+    assert_eq!(catalog.table_columns("t").unwrap(), ["b", "a"]);
+
+    let sql = "select * from t union all select * from t";
+    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let duplicate_output_names = BTreeSet::new();
+
+    for (ordinal, (column, expected_sources)) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])]
+        .into_iter()
+        .enumerate()
+    {
+        let outputs = [OutputColumnRequest {
+            ordinal: OutputOrdinal(ordinal),
+            name: column.to_string(),
+        }];
+        let request = LineageRequest {
+            sql,
+            dialect: DlinDialect::Generic,
+            catalog: Some(&catalog),
+            outputs: &outputs,
+            duplicate_output_names: &duplicate_output_names,
+        };
+        let analysis = backend.analyze(&request).unwrap();
+        let mut statement = require_single_lineage_statement(analysis).unwrap();
+        let outcome = statement.columns.pop().unwrap();
+        let sources = match outcome {
+            BackendColumnOutcome::Resolved(result) => result
+                .sources
+                .into_iter()
+                .map(|source| match source {
+                    BackendSource::Concrete { table, column } => (table, column),
+                    other => panic!("unexpected source: {:?}", other),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected resolved output, got: {:?}", other),
+        };
+        let expected = expected_sources
+            .into_iter()
+            .map(|(table, column)| (table.to_string(), column.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(sources, expected, "lineage for output column {column}");
+    }
+}
+
+#[test]
 fn top_level_except_traces_both_operands() {
     assert_resolved(
         "select id from t1 except select id from t2",

@@ -1594,32 +1594,27 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn sorted(mut v: Vec<String>) -> Vec<String> {
-        v.sort();
-        v
-    }
-
     #[test]
     fn test_parse_schema_string_single_table() {
         let schema = parse_schema_string("t:a,b,c").unwrap();
         let cols = schema.table_columns("t").unwrap().to_vec();
-        assert_eq!(sorted(cols), vec!["a", "b", "c"]);
+        assert_eq!(cols, vec!["a", "b", "c"]);
     }
 
     #[test]
     fn test_parse_schema_string_multiple_tables() {
         let schema = parse_schema_string("orders:id,amount;customers:id,name").unwrap();
         let order_cols = schema.table_columns("orders").unwrap().to_vec();
-        assert_eq!(sorted(order_cols), vec!["amount", "id"]);
+        assert_eq!(order_cols, vec!["id", "amount"]);
         let cust_cols = schema.table_columns("customers").unwrap().to_vec();
-        assert_eq!(sorted(cust_cols), vec!["id", "name"]);
+        assert_eq!(cust_cols, vec!["id", "name"]);
     }
 
     #[test]
     fn test_parse_schema_string_whitespace_tolerance() {
         let schema = parse_schema_string(" t : a , b ; u : x ").unwrap();
         let cols = schema.table_columns("t").unwrap().to_vec();
-        assert_eq!(sorted(cols), vec!["a", "b"]);
+        assert_eq!(cols, vec!["a", "b"]);
         let cols2 = schema.table_columns("u").unwrap().to_vec();
         assert_eq!(cols2, vec!["x"]);
     }
@@ -1648,6 +1643,6 @@ mod tests {
         // "t:a,,b" — the empty segment is dropped, result has only a and b
         let schema = parse_schema_string("t:a,,b").unwrap();
         let cols = schema.table_columns("t").unwrap().to_vec();
-        assert_eq!(sorted(cols), vec!["a", "b"]);
+        assert_eq!(cols, vec!["a", "b"]);
     }
 }

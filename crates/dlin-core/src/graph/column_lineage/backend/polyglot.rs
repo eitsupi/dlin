@@ -82,7 +82,10 @@ pub fn debug_trace_column_json(
     let mut expr =
         polyglot_sql::parse_one(sql, poly_dialect).map_err(|e| format!("parse error: {}", e))?;
 
-    let schema = catalog.map(to_polyglot_schema);
+    let schema = catalog
+        .map(to_polyglot_schema_strict)
+        .transpose()
+        .map_err(|error| format!("schema error: {}", error.message))?;
     if let Some(ref s) = schema {
         polyglot_sql::lineage::expand_cte_stars(&mut expr, Some(s as &dyn polyglot_sql::Schema));
     }
@@ -389,6 +392,26 @@ pub(crate) fn to_polyglot_schema(snapshot: &CatalogSnapshot) -> polyglot_sql::Ma
     schema
 }
 
+pub(crate) fn to_polyglot_schema_strict(
+    snapshot: &CatalogSnapshot,
+) -> Result<polyglot_sql::MappingSchema, BackendError> {
+    let mut schema = polyglot_sql::MappingSchema::new();
+    for table in snapshot.tables() {
+        let cols = table
+            .columns
+            .iter()
+            .map(|name| (name.clone(), DataType::Unknown))
+            .collect::<Vec<_>>();
+        schema
+            .add_table(&table.name, &cols, None)
+            .map_err(|error| BackendError {
+                kind: BackendErrorKind::Internal,
+                message: error.to_string(),
+            })?;
+    }
+    Ok(schema)
+}
+
 pub(crate) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
     let msg = e.to_string();
     if let Some(rest) = msg
@@ -565,6 +588,47 @@ select * from renamed"#;
         assert!(
             schema.column_names("raw.orders").is_ok(),
             "table names must normalize to lower case"
+        );
+    }
+
+    #[test]
+    fn strict_schema_conversion_errors_while_lenient_conversion_skips() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("a", ["root_col".to_string()]);
+        snapshot.add_table("a.b", ["nested_col".to_string()]);
+
+        let strict_error = to_polyglot_schema_strict(&snapshot)
+            .expect_err("a table below an existing table must be rejected");
+        assert_eq!(strict_error.kind, BackendErrorKind::Internal);
+        assert!(strict_error.message.contains("Expected namespace at a"));
+
+        use polyglot_sql::Schema as _;
+        let lenient = to_polyglot_schema(&snapshot);
+        assert!(lenient.column_names("a").is_ok());
+        assert_eq!(
+            lenient.column_names("a").unwrap(),
+            vec!["root_col".to_string()]
+        );
+        assert!(lenient.column_names("a.b").is_err());
+    }
+
+    #[test]
+    fn debug_trace_rejects_schema_conversion_errors() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("a", ["root_col".to_string()]);
+        snapshot.add_table("a.b", ["nested_col".to_string()]);
+
+        let error = debug_trace_column_json(
+            "select root_col from a",
+            DlinDialect::Generic,
+            Some(&snapshot),
+            "root_col",
+            false,
+        )
+        .expect_err("debug tracing must not silently discard schema errors");
+        assert_eq!(
+            error,
+            "schema error: Invalid schema structure: Expected namespace at a but found table"
         );
     }
 
