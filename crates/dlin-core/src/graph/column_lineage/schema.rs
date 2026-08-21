@@ -2,9 +2,16 @@ use std::collections::HashSet;
 
 use polyglot_sql::{DialectType, Expression, Schema};
 
+use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
-use super::manifest_schema::make_fq_table_name;
+fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
+    match (database, schema) {
+        (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
+        (None, Some(s)) => format!("{}.{}", s, name),
+        _ => name.to_string(),
+    }
+}
 
 pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
@@ -182,4 +189,61 @@ pub(super) fn infer_output_columns(
         &expr,
         schema.map(|s| s as &dyn polyglot_sql::Schema),
     )
+}
+
+pub(super) fn compute_manifest_columns_hash(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+) -> u64 {
+    let mut visited: HashSet<String> = HashSet::new();
+    hash_node_columns_transitive(manifest, node, &mut visited)
+}
+
+fn hash_node_columns_transitive(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+    visited: &mut HashSet<String>,
+) -> u64 {
+    let mut parts: Vec<String> = Vec::new();
+
+    let mut own_cols: Vec<&String> = node.columns.keys().collect();
+    own_cols.sort();
+    for col in own_cols {
+        parts.push(col.clone());
+    }
+    if let Some(code) = &node.compiled_code {
+        parts.push(format!("sql:{}", hash_str(code)));
+    }
+    parts.push("|".to_string());
+
+    let mut dep_ids: Vec<&String> = node.depends_on.nodes.iter().collect();
+    dep_ids.sort();
+    for dep_id in dep_ids {
+        parts.push(dep_id.clone());
+        if visited.contains(dep_id) {
+            continue;
+        }
+        visited.insert(dep_id.clone());
+        if let Some(dep_node) = manifest.nodes.get(dep_id) {
+            let dep_hash = hash_node_columns_transitive(manifest, dep_node, visited);
+            parts.push(format!("node:{}", dep_hash));
+        } else if let Some(dep_source) = manifest.sources.get(dep_id) {
+            let mut cols: Vec<&String> = dep_source.columns.keys().collect();
+            cols.sort();
+            for col in cols {
+                parts.push(col.clone());
+            }
+            if let Some(db) = &dep_source.database {
+                parts.push(format!("db:{}", db));
+            }
+            if let Some(s) = &dep_source.schema {
+                parts.push(format!("schema:{}", s));
+            }
+            if let Some(id) = &dep_source.identifier {
+                parts.push(format!("id:{}", id));
+            }
+        }
+    }
+
+    hash_str(&parts.join("\0"))
 }

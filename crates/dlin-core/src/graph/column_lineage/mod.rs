@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use polyglot_sql::{ColumnResolutionReason, DialectType, Error};
+use polyglot_sql::DialectType;
 use rayon::prelude::*;
 
 use crate::parser::manifest::Manifest;
@@ -9,11 +9,8 @@ use crate::parser::manifest::Manifest;
 mod cache;
 mod cross_model;
 mod impact;
-pub mod manifest_schema;
 mod schema;
-pub mod semantic_model;
 mod single_model;
-mod star_guard;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -26,10 +23,8 @@ pub use impact::{
     ColumnImpactReport, ImpactedColumn, compute_column_impact,
     compute_column_impact_with_manifest_path,
 };
-use manifest_schema::compute_manifest_columns_hash;
-use schema::{build_yaml_schema_for_node, infer_output_columns};
-use single_model::{prepare_lineage_context_with_expr, run_column_lineage};
-use star_guard::has_unresolved_stars;
+use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash, infer_output_columns};
+use single_model::{has_unresolved_stars, prepare_lineage_context_with_expr, run_column_lineage};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
@@ -179,19 +174,14 @@ pub fn compute_column_lineage_with_manifest_path(
                 sources: result.sources,
             }),
             Err(e) => {
-                let hint =
-                    (has_star_columns && is_indeterminate_column_resolution(&e)).then(|| {
-                        "column may be introduced via SELECT * that could not be expanded; \
+                let hint = (has_star_columns && e.contains("Cannot find column")).then(|| {
+                    "column may be introduced via SELECT * that could not be expanded; \
                      define upstream columns in the model YAML to enable full resolution"
-                            .to_string()
-                    });
+                        .to_string()
+                });
                 Err(ColumnLineageError {
                     kind: ColumnLineageErrorKind::ColumnNotFound,
-                    what: format!(
-                        "column '{}': {}",
-                        col_name,
-                        single_model::format_lineage_error(&e)
-                    ),
+                    what: format!("column '{}': {}", col_name, e),
                     why: None,
                     hint,
                 })
@@ -226,16 +216,6 @@ pub fn compute_column_lineage_with_manifest_path(
     );
 
     result
-}
-
-fn is_indeterminate_column_resolution(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::ColumnResolution {
-            reason: ColumnResolutionReason::Indeterminate,
-            ..
-        }
-    )
 }
 
 pub(super) fn find_model_by_name<'a>(

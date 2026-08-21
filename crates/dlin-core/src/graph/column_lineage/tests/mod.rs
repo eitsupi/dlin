@@ -929,8 +929,6 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
 }
 
 mod cache;
-mod core_basic;
-mod core_cross_model;
-mod core_star;
-mod core_util;
+mod core;
 mod impact;
+mod regression_fixtures;
