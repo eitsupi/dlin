@@ -1,5 +1,6 @@
 use polyglot_sql::{DialectType, Expression};
 
+use crate::graph::column_lineage::backend::polyglot::to_polyglot_schema;
 use crate::parser::manifest::Manifest;
 
 use super::schema::build_schema_from_manifest;
@@ -32,7 +33,8 @@ pub(super) fn prepare_lineage_context_with_expr(
         None => polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?,
     };
 
-    let schema = build_schema_from_manifest(manifest, node, dialect);
+    let schema = build_schema_from_manifest(manifest, node, dialect)
+        .map(|schema| to_polyglot_schema(&schema));
 
     let mut expanded_expr = expr;
     polyglot_sql::lineage::expand_cte_stars(

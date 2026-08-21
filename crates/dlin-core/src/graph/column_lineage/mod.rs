@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use crate::parser::manifest::Manifest;
 
+mod backend;
 mod cache;
 mod cross_model;
 mod impact;
