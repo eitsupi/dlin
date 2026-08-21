@@ -1,20 +1,14 @@
-use polyglot_sql::lineage::LineageNode;
-use polyglot_sql::scope::SourceKind;
-use polyglot_sql::{
-    ColumnResolutionReason, ColumnResolutionTarget, DialectType, Error, Expression,
-};
+use polyglot_sql::{DialectType, Expression};
 
 use crate::parser::manifest::Manifest;
 
 use super::schema::build_schema_from_manifest;
-use super::star_guard::{StarGuard, has_unresolved_stars};
 use super::{ColumnSource, TransformationType};
 
 pub(super) struct LineageContext {
     pub(super) expanded_expr: Expression,
     schema: Option<polyglot_sql::MappingSchema>,
     dialect: DialectType,
-    star_guard: StarGuard,
 }
 
 pub(super) fn prepare_lineage_context(
@@ -37,6 +31,7 @@ pub(super) fn prepare_lineage_context_with_expr(
         Some(e) => e.clone(),
         None => polyglot_sql::parse_one(compiled_code, dialect).map_err(|e| format!("{}", e))?,
     };
+
     let schema = build_schema_from_manifest(manifest, node, dialect);
 
     let mut expanded_expr = expr;
@@ -44,164 +39,70 @@ pub(super) fn prepare_lineage_context_with_expr(
         &mut expanded_expr,
         schema.as_ref().map(|s| s as &dyn polyglot_sql::Schema),
     );
-    let star_guard = StarGuard::new(&expanded_expr, Some(dialect));
+
     Ok(LineageContext {
         expanded_expr,
         schema,
         dialect,
-        star_guard,
     })
 }
 
 pub(super) fn run_column_lineage(
     col_name: &str,
     ctx: &LineageContext,
-) -> Result<ColumnLineageResult, Error> {
-    let modifier_expr =
-        ctx.star_guard
-            .materialize_star_modifier(&ctx.expanded_expr, col_name, ctx.dialect);
-    let lineage_expr = modifier_expr.as_ref().unwrap_or(&ctx.expanded_expr);
-    let lineage_result = lineage_node(col_name, lineage_expr, ctx);
-
-    match lineage_result {
-        Ok(node) => {
-            if ctx.star_guard.rejects(&node) {
-                Err(Error::column_resolution(
-                    ColumnResolutionTarget::Name {
-                        name: col_name.to_string(),
-                    },
-                    ColumnResolutionReason::Indeterminate,
-                ))
-            } else {
-                Ok(extract_leaf_sources(&node))
-            }
-        }
-        Err(e) => {
-            let e = resolution_error_with_unresolved_star_context(col_name, ctx, e);
-            match explicit_set_operand_lineage(col_name, lineage_expr, ctx, &e) {
-                Some(result) => Ok(result),
-                None => Err(e),
-            }
-        }
-    }
-}
-
-fn resolution_error_with_unresolved_star_context(
-    col_name: &str,
-    ctx: &LineageContext,
-    error: Error,
-) -> Error {
-    if has_unresolved_stars(&ctx.expanded_expr)
-        && matches!(
-            &error,
-            Error::ColumnResolution {
-                target: ColumnResolutionTarget::Name { name },
-                reason: ColumnResolutionReason::NotFound,
-            } if name == col_name
-        )
-    {
-        return Error::column_resolution(
-            ColumnResolutionTarget::Name {
-                name: col_name.to_string(),
-            },
-            ColumnResolutionReason::Indeterminate,
-        );
-    }
-    error
-}
-
-fn lineage_node(
-    col_name: &str,
-    expr: &Expression,
-    ctx: &LineageContext,
-) -> Result<LineageNode, polyglot_sql::Error> {
+) -> Result<ColumnLineageResult, String> {
     let dialect = Some(ctx.dialect);
-    if let Some(ref schema) = ctx.schema {
+    let lineage_result = if let Some(ref s) = ctx.schema {
         polyglot_sql::lineage::lineage_with_schema(
             col_name,
-            expr,
-            Some(schema as &dyn polyglot_sql::Schema),
+            &ctx.expanded_expr,
+            Some(s as &dyn polyglot_sql::Schema),
             dialect,
             false,
         )
-        .or_else(|error| match error {
-            // Preserve structured resolution failures. Falling back to the
-            // schema-less resolver can otherwise turn an ambiguous name into
-            // a guessed lineage result.
-            Error::ColumnResolution { .. } => Err(error),
-            _ => polyglot_sql::lineage::lineage(col_name, expr, dialect, false),
-        })
+        .or_else(|_| polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false))
     } else {
-        polyglot_sql::lineage::lineage(col_name, expr, dialect, false)
-    }
-}
-
-// TODO: this locates an operand's projection by ordinal (see
-// `StarGuard::explicit_set_operands`) but then re-derives lineage by looking that
-// projection's output *name* back up via `lineage_node`, instead of tracing the
-// already-located projection directly. Unaliased expressions have no name to look
-// up (e.g. `fee * 2` in `SELECT other.*, fee FROM a UNION ALL SELECT x, fee * 2
-// FROM b`) and are silently dropped; duplicate output names (`SELECT a.id, b.id`)
-// make the lookup ambiguous and can retrace the wrong projection. Redesign: keep
-// projection-list position and output ordinal as distinct types and trace
-// positionally instead of round-tripping through a name.
-fn explicit_set_operand_lineage(
-    col_name: &str,
-    expr: &Expression,
-    ctx: &LineageContext,
-    original_error: &Error,
-) -> Option<ColumnLineageResult> {
-    match original_error {
-        Error::ColumnResolution {
-            target: ColumnResolutionTarget::Name { name },
-            reason: ColumnResolutionReason::NotFound | ColumnResolutionReason::Indeterminate,
-        } if name == col_name => {}
-        // An ambiguous output name must not be guessed by the ordinal fallback.
-        _ => return None,
-    }
-
-    // A set's leftmost star can make its output names unknowable to polyglot-sql.
-    // Trace only intact operands that explicitly project the requested ordinal;
-    // unresolved star operands contribute no source instead of a guessed one.
-    let operands = StarGuard::explicit_set_operands(expr, col_name, Some(ctx.dialect))?;
-    let mut results = operands.into_iter().filter_map(|(operand, operand_name)| {
-        let node = lineage_node(operand_name, operand, ctx).ok()?;
-        (!ctx.star_guard.rejects(&node)).then(|| extract_leaf_sources(&node))
-    });
-    let first = results.next()?;
-    Some(results.fold(first, merge_lineage_results))
-}
-
-fn merge_lineage_results(
-    mut left: ColumnLineageResult,
-    right: ColumnLineageResult,
-) -> ColumnLineageResult {
-    if left.transformation == TransformationType::Direct
-        && right.transformation != TransformationType::Direct
-    {
-        left.transformation = right.transformation;
-    }
-    left.sources.extend(right.sources);
-    left.sources
-        .sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
-    left.sources.dedup();
-    left
-}
-
-pub(super) fn format_lineage_error(e: &Error) -> String {
-    // Keep dlin's existing error text stable while retaining the structured
-    // reason internally for control flow.
-    let msg = match e {
-        Error::ColumnResolution {
-            target: ColumnResolutionTarget::Name { name },
-            ..
-        } => format!("Cannot find column '{}' in query", name),
-        Error::ColumnResolution {
-            target: ColumnResolutionTarget::Ordinal { ordinal },
-            ..
-        } => format!("Cannot find column at ordinal {} in query", ordinal),
-        _ => e.to_string(),
+        polyglot_sql::lineage::lineage(col_name, &ctx.expanded_expr, dialect, false)
     };
+
+    match lineage_result {
+        Ok(node) => Ok(extract_leaf_sources(&node)),
+        Err(e) => Err(format_lineage_error(&e)),
+    }
+}
+
+pub(super) fn has_unresolved_stars(expr: &Expression) -> bool {
+    match expr {
+        Expression::Select(select) => {
+            let outer_has_star = select.expressions.iter().any(|e| {
+                matches!(e, Expression::Star(_))
+                    || matches!(e, Expression::Column(c) if c.name.name == "*")
+            });
+            if outer_has_star {
+                return true;
+            }
+            if let Some(with) = &select.with
+                && with.ctes.iter().any(|cte| has_unresolved_stars(&cte.this))
+            {
+                return true;
+            }
+            if let Some(from) = &select.from
+                && from.expressions.iter().any(has_unresolved_stars)
+            {
+                return true;
+            }
+            if select.joins.iter().any(|j| has_unresolved_stars(&j.this)) {
+                return true;
+            }
+            false
+        }
+        Expression::Subquery(subq) => has_unresolved_stars(&subq.this),
+        _ => false,
+    }
+}
+
+pub(super) fn format_lineage_error(e: &polyglot_sql::Error) -> String {
+    let msg = e.to_string();
     if let Some(rest) = msg
         .strip_prefix("Parse error at line 0, column 0: ")
         .or_else(|| msg.strip_prefix("Syntax error at line 0, column 0: "))
@@ -217,7 +118,7 @@ pub(super) fn format_lineage_error(e: &Error) -> String {
     }
 }
 
-fn classify_transformation(node: &LineageNode) -> TransformationType {
+fn classify_transformation(node: &polyglot_sql::lineage::LineageNode) -> TransformationType {
     let t = classify_expression(&node.expression);
     if t != TransformationType::Direct || node.downstream.is_empty() {
         return t;
@@ -234,7 +135,8 @@ fn classify_transformation(node: &LineageNode) -> TransformationType {
     TransformationType::Direct
 }
 
-fn classify_expression(expr: &Expression) -> TransformationType {
+fn classify_expression(expr: &polyglot_sql::Expression) -> TransformationType {
+    use polyglot_sql::Expression;
     match expr {
         Expression::Column(_) | Expression::Identifier(_) => TransformationType::Direct,
         Expression::Alias(alias) => classify_expression(&alias.this),
@@ -267,7 +169,7 @@ pub(super) struct ColumnLineageResult {
     pub(super) transformation: TransformationType,
 }
 
-fn extract_leaf_sources(node: &LineageNode) -> ColumnLineageResult {
+fn extract_leaf_sources(node: &polyglot_sql::lineage::LineageNode) -> ColumnLineageResult {
     let transformation = classify_transformation(node);
     let mut sources = Vec::new();
     collect_leaves(node, &mut sources);
@@ -279,9 +181,9 @@ fn extract_leaf_sources(node: &LineageNode) -> ColumnLineageResult {
     }
 }
 
-fn collect_leaves(node: &LineageNode, sources: &mut Vec<ColumnSource>) {
+fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<ColumnSource>) {
     if node.downstream.is_empty() {
-        if node.source_kind == SourceKind::Virtual {
+        if node.source_kind == polyglot_sql::scope::SourceKind::Virtual {
             return;
         }
         let name = &node.name;
@@ -302,7 +204,7 @@ fn collect_leaves(node: &LineageNode, sources: &mut Vec<ColumnSource>) {
             });
         } else {
             sources.push(ColumnSource {
-                table: node.source_name.clone(),
+                table: String::new(),
                 column: name.to_string(),
                 model_path: vec![],
             });
