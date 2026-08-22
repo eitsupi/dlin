@@ -123,8 +123,46 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
 }
 
 pub(super) fn normalize_table_name(table: &str) -> String {
-    let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
-    stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
+    split_qualified_table_name(table).pop().unwrap_or_default()
+}
+
+pub(super) fn relation_names_match(left: &str, right: &str) -> bool {
+    let left_parts = split_qualified_table_name(left);
+    let right_parts = split_qualified_table_name(right);
+
+    if left_parts.len() == 1 || right_parts.len() == 1 {
+        left_parts.last() == right_parts.last()
+    } else {
+        left_parts == right_parts
+    }
+}
+
+fn split_qualified_table_name(table: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut component = String::new();
+    let mut quote = None;
+
+    for character in table.chars() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {
+                if character != '"' && character != '`' {
+                    component.push(character);
+                }
+            }
+            None => match character {
+                '"' | '`' => quote = Some(character),
+                '.' => parts.push(std::mem::take(&mut component)),
+                character if character != '"' && character != '`' => {
+                    component.push(character);
+                }
+                _ => {}
+            },
+        }
+    }
+
+    parts.push(component);
+    parts
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -316,7 +354,11 @@ fn normalize_single_column_outcome(
     normalized_outcomes.into_iter().next()
 }
 
-fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
+pub(super) fn make_fq_table_name(
+    database: Option<&str>,
+    schema: Option<&str>,
+    name: &str,
+) -> String {
     match (database, schema) {
         (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
         (None, Some(s)) => format!("{}.{}", s, name),
@@ -331,6 +373,47 @@ mod tests {
         BackendColumnFailure, BackendError, BackendErrorKind,
     };
     use crate::graph::column_lineage::backend::{BackendColumnResult, ResolutionState};
+
+    #[test]
+    fn relation_names_match_respects_qualification_depth() {
+        let cases = [
+            ("warehouse.raw.orders", "raw.orders", false),
+            ("db_a.raw.orders", "db_b.raw.orders", false),
+            ("raw.orders", "staging.orders", false),
+            ("orders", "warehouse.raw.orders", true),
+            ("warehouse.raw.orders", "orders", true),
+            ("warehouse.raw.orders", "warehouse.raw.orders", true),
+            (
+                "warehouse.raw.orders",
+                "\"warehouse\".\"raw\".\"orders\"",
+                true,
+            ),
+        ];
+
+        for (left, right, expected) in cases {
+            assert_eq!(
+                relation_names_match(left, right),
+                expected,
+                "{left} vs {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn relation_names_match_keeps_dots_inside_quoted_components() {
+        assert!(!relation_names_match(
+            "\"foo.bar\".\"orders\"",
+            "\"foo\".\"bar\".\"orders\""
+        ));
+        assert!(relation_names_match(
+            "\"foo.bar\".\"orders\"",
+            "\"foo.bar\".\"orders\""
+        ));
+        assert!(relation_names_match(
+            "`foo.bar`.`orders`",
+            "`foo.bar`.`orders`"
+        ));
+    }
 
     #[test]
     fn cross_model_keeps_requested_outcome_with_unrelated_contract_diagnostic() {

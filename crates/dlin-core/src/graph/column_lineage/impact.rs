@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::parser::manifest::Manifest;
 
 use super::backend::DlinDialect;
+use super::cross_model::{make_fq_table_name, relation_names_match};
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, TransformationType,
     find_model_by_name,
@@ -134,9 +135,14 @@ pub fn compute_column_impact_with_manifest_path(
         let source_relation = manifest
             .nodes
             .get(&source_uid)
-            .map(|n| n.relation_name())
-            .unwrap_or(source_uid.as_str());
-
+            .map(|node| {
+                make_fq_table_name(
+                    node.database.as_deref(),
+                    node.schema.as_deref(),
+                    node.relation_name(),
+                )
+            })
+            .unwrap_or_else(|| source_uid.clone());
         let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
@@ -168,9 +174,7 @@ pub fn compute_column_impact_with_manifest_path(
                 }
 
                 let references_source = entry.sources.iter().any(|s| {
-                    let table_matches = s.table == source_relation
-                        || normalize_table_name(&s.table) == source_relation;
-                    table_matches && s.column == source_column
+                    relation_names_match(&s.table, &source_relation) && s.column == source_column
                 });
 
                 if references_source {
@@ -264,9 +268,4 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
     }
 
     map
-}
-
-fn normalize_table_name(table: &str) -> String {
-    let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
-    stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
 }
