@@ -27,6 +27,7 @@ path-slash = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+filetime = { workspace = true }
 dlin-core = { workspace = true }
 tempfile = { workspace = true }
 regex = { workspace = true }
