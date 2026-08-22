@@ -14,8 +14,8 @@ mod types;
 
 use backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
-    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, OutputName, PolyglotBackend,
-    ResolutionState, normalize_column_outcomes, require_single_lineage_statement,
+    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, PolyglotBackend, ResolutionState,
+    normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
     BackendId, CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS,
@@ -35,6 +35,43 @@ pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
 };
+
+fn discover_named_output_columns(
+    backend: &dyn LineageBackend,
+    request: &OutputDiscoveryRequest<'_>,
+) -> HashSet<String> {
+    // Deliberately preserve the previous parse-failure behavior:
+    // YAML columns remain usable when discovery cannot parse the SQL.
+    // Surfacing discovery parse errors is an error-model change to decide on
+    // its own merits, rather than inherit from this refactor.
+    match backend.discover_output_columns(request) {
+        Ok(discovery) => discovery
+            .outputs
+            .into_iter()
+            .filter_map(|output| match output.name {
+                backend::OutputName::Named(name) => Some(name),
+                backend::OutputName::UnaliasedExpression => None,
+            })
+            .collect(),
+        Err(error) => {
+            // These are the ways a backend says "I cannot name this model's outputs":
+            // the SQL does not parse, it is not a single statement, or the statement
+            // carries no lineage. Falling back to the YAML columns is right for all
+            // three. Any other kind means the backend failed for a reason this caller
+            // does not understand, and swallowing it would hide a bug.
+            debug_assert!(
+                matches!(
+                    error.kind,
+                    BackendErrorKind::Parse
+                        | BackendErrorKind::IncompleteAnalysis
+                        | BackendErrorKind::UnsupportedStatement
+                ),
+                "unexpected discovery error kind: {error:?}"
+            );
+            HashSet::new()
+        }
+    }
+}
 
 /// Compute column-level lineage for a model.
 ///
@@ -121,24 +158,7 @@ pub fn compute_column_lineage_with_manifest_path(
             dialect,
             catalog: yaml_schema.as_ref(),
         };
-        let inferred_names: Vec<String> = match backend.discover_output_columns(&request) {
-            Ok(discovery) => discovery
-                .outputs
-                .into_iter()
-                .filter_map(|output| match output.name {
-                    OutputName::Named(name) => Some(name),
-                    OutputName::UnaliasedExpression => None,
-                })
-                .collect(),
-            Err(error) => {
-                // Deliberately preserve the previous parse-failure behavior:
-                // YAML columns remain usable when discovery cannot parse the SQL.
-                // Surfacing discovery parse errors is an error-model change to decide on
-                // its own merits, rather than inherit from this refactor.
-                debug_assert!(matches!(error.kind, BackendErrorKind::Parse));
-                Vec::new()
-            }
-        };
+        let inferred_names = discover_named_output_columns(&backend, &request);
         names.extend(inferred_names);
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();

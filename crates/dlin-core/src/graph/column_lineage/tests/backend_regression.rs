@@ -17,7 +17,8 @@ use std::collections::{BTreeSet, HashMap};
 use super::super::backend::{
     AnalysisCompleteness, AnalysisSlot, BackendColumnOutcome, BackendErrorKind, BackendId,
     BackendSource, CatalogSnapshot, DlinDialect, LineageBackend, LineageRequest,
-    OutputColumnRequest, backend_for_tests, normalize_column_outcomes,
+    OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName,
+    SqllineageCatalogProvider, backend_for_tests, normalize_column_outcomes,
     require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
@@ -987,4 +988,128 @@ fn sqllineage_parse_failure_is_parse_error() {
 
     let error = backend.analyze(&request).unwrap_err();
     assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+fn sqllineage_discovery(
+    sql: &str,
+    catalog: Option<&CatalogSnapshot>,
+) -> Result<OutputDiscovery, super::super::backend::BackendError> {
+    let request = OutputDiscoveryRequest {
+        sql,
+        dialect: DlinDialect::Generic,
+        catalog,
+    };
+    backend_for_tests(BackendId::Sqllineage).discover_output_columns(&request)
+}
+
+fn discovered_names(discovery: &OutputDiscovery) -> Vec<String> {
+    discovery
+        .outputs
+        .iter()
+        .map(|output| match &output.name {
+            OutputName::Named(name) => name.clone(),
+            OutputName::UnaliasedExpression => {
+                panic!("sqllineage discovery produced an unaliased expression")
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn sqllineage_discovery_plain_projection_preserves_order_and_aliases() {
+    let discovery =
+        sqllineage_discovery("SELECT id, amount AS total, status FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "total", "status"]);
+}
+
+#[test]
+fn sqllineage_discovery_top_level_set_operation_uses_projection_names() {
+    let discovery = sqllineage_discovery(
+        "SELECT id, amount AS total FROM first_source UNION ALL SELECT id, amount AS other FROM second_source",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "total"]);
+}
+
+#[test]
+fn sqllineage_discovery_unexpanded_star_has_no_name() {
+    let discovery = sqllineage_discovery("SELECT * FROM orders", None).unwrap();
+
+    assert!(discovery.outputs.is_empty());
+    assert!(!discovery.duplicate_names.contains("*"));
+}
+
+#[test]
+fn sqllineage_discovery_expands_star_from_catalog() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("orders", ["id".to_string(), "amount".to_string()]);
+
+    let discovery = sqllineage_discovery("SELECT * FROM orders", Some(&catalog)).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "amount"]);
+}
+
+#[test]
+fn sqllineage_discovery_cte_uses_outer_projection() {
+    let discovery = sqllineage_discovery(
+        "WITH base AS (SELECT id, amount AS inner_amount FROM orders) SELECT inner_amount AS outer_amount FROM base",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["outer_amount"]);
+}
+
+#[test]
+fn sqllineage_discovery_records_duplicate_names() {
+    let discovery =
+        sqllineage_discovery("SELECT id AS value, amount AS value FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["value", "value"]);
+    assert_eq!(
+        discovery.duplicate_names,
+        BTreeSet::from(["value".to_string()])
+    );
+}
+
+#[test]
+fn sqllineage_discovery_parse_failure_is_parse_error() {
+    let error = sqllineage_discovery("SELECT * FROM", None).unwrap_err();
+
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
+fn sqllineage_discovery_matches_analyze_mapping_targets() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table(
+        "orders",
+        ["id".to_string(), "amount".to_string(), "status".to_string()],
+    );
+    let sql = "SELECT id, amount AS total, status FROM orders";
+
+    let discovery = sqllineage_discovery(sql, Some(&catalog)).unwrap();
+    let discovered = discovered_names(&discovery);
+    let provider = SqllineageCatalogProvider::new(&catalog, DlinDialect::Generic);
+    let analyzed = sqllineage::analyze(
+        sql,
+        sqllineage::AnalyzeOptions {
+            dialect: DlinDialect::Generic.to_sqllineage(),
+            catalog: Some(Box::new(provider)),
+            normalize_case: true,
+        },
+    )
+    .unwrap();
+    let analyzed_names: Vec<String> = analyzed[0]
+        .columns
+        .mappings
+        .iter()
+        .map(|mapping| mapping.target.column.clone())
+        .filter(|name| name != "*")
+        .collect();
+
+    assert_eq!(discovered, analyzed_names);
 }

@@ -20,13 +20,6 @@ impl SqllineageBackend {
     }
 }
 
-fn not_implemented() -> BackendError {
-    BackendError {
-        kind: BackendErrorKind::Internal,
-        message: "sqllineage backend is not implemented yet".to_string(),
-    }
-}
-
 impl LineageBackend for SqllineageBackend {
     fn id(&self) -> BackendId {
         BackendId::Sqllineage
@@ -34,28 +27,55 @@ impl LineageBackend for SqllineageBackend {
 
     fn discover_output_columns(
         &self,
-        _request: &OutputDiscoveryRequest<'_>,
+        request: &OutputDiscoveryRequest<'_>,
     ) -> Result<OutputDiscovery, BackendError> {
-        Err(not_implemented())
+        let mut results = analyze_sql(request.sql, request.dialect, request.catalog)?;
+        if results.len() != 1 {
+            let message = if results.is_empty() {
+                "no statements in analysis result".to_string()
+            } else {
+                format!("expected exactly one statement, found {}", results.len())
+            };
+            return Err(BackendError {
+                kind: BackendErrorKind::IncompleteAnalysis,
+                message,
+            });
+        }
+
+        let result = results.pop().expect("result length checked above");
+        if matches!(result.statement_type, StatementType::Other) {
+            return Err(BackendError {
+                kind: BackendErrorKind::UnsupportedStatement,
+                message: "statement is not lineage-bearing".to_string(),
+            });
+        }
+
+        let mut duplicates = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut outputs = Vec::new();
+        for mapping in result.columns.mappings {
+            let name = mapping.target.column;
+            // sqllineage uses this target for an unexpanded SELECT *. It is a
+            // sentinel for unknown output columns, not an output column itself.
+            if name == "*" {
+                continue;
+            }
+            if !seen.insert(name.clone()) {
+                duplicates.insert(name.clone());
+            }
+            outputs.push(super::DiscoveredOutput {
+                name: super::OutputName::Named(name),
+            });
+        }
+
+        Ok(OutputDiscovery {
+            outputs,
+            duplicate_names: duplicates,
+        })
     }
 
     fn analyze(&self, request: &LineageRequest<'_>) -> Result<BackendAnalysis, BackendError> {
-        let catalog = request.catalog.map(|snapshot| {
-            Box::new(SqllineageCatalogProvider::new(snapshot, request.dialect))
-                as Box<dyn sqllineage::CatalogProvider>
-        });
-        let results = sqllineage::analyze(
-            request.sql,
-            AnalyzeOptions {
-                dialect: request.dialect.to_sqllineage(),
-                catalog,
-                normalize_case: true,
-            },
-        )
-        .map_err(|error| BackendError {
-            kind: BackendErrorKind::Parse,
-            message: error.to_string(),
-        })?;
+        let results = analyze_sql(request.sql, request.dialect, request.catalog)?;
 
         let shape_check = check_set_operation_shapes(request.sql, request.dialect);
 
@@ -109,6 +129,29 @@ impl LineageBackend for SqllineageBackend {
                 .collect(),
         })
     }
+}
+
+fn analyze_sql(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+    catalog: Option<&super::CatalogSnapshot>,
+) -> Result<Vec<sqllineage::AnalyzeResult>, BackendError> {
+    let catalog = catalog.map(|snapshot| {
+        Box::new(SqllineageCatalogProvider::new(snapshot, dialect))
+            as Box<dyn sqllineage::CatalogProvider>
+    });
+    sqllineage::analyze(
+        sql,
+        AnalyzeOptions {
+            dialect: dialect.to_sqllineage(),
+            catalog,
+            normalize_case: true,
+        },
+    )
+    .map_err(|error| BackendError {
+        kind: BackendErrorKind::Parse,
+        message: error.to_string(),
+    })
 }
 
 fn analyze_output(

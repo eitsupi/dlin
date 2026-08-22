@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::backend::{
-    DlinDialect, LineageBackend, OutputDiscoveryRequest, OutputName, catalog::CatalogSnapshot,
+    DlinDialect, LineageBackend, OutputDiscoveryRequest, catalog::CatalogSnapshot,
 };
 
 use crate::parser::cache::hash_str;
@@ -95,27 +95,7 @@ fn resolve_node_columns(
                 dialect,
                 catalog: schema.as_ref(),
             };
-            match backend.discover_output_columns(&request) {
-                Ok(discovery) => discovery
-                    .outputs
-                    .into_iter()
-                    .filter_map(|output| match output.name {
-                        OutputName::Named(name) => Some(name),
-                        OutputName::UnaliasedExpression => None,
-                    })
-                    .collect(),
-                Err(error) => {
-                    // Deliberately preserve the previous parse-failure behavior:
-                    // YAML columns remain usable when discovery cannot parse the SQL.
-                    // Surfacing discovery parse errors is an error-model change to decide on
-                    // its own merits, rather than inherit from this refactor.
-                    debug_assert!(matches!(
-                        error.kind,
-                        super::backend::BackendErrorKind::Parse
-                    ));
-                    HashSet::new()
-                }
-            }
+            super::discover_named_output_columns(backend, &request)
         })
         .unwrap_or_default()
         .into_iter()
