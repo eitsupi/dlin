@@ -485,3 +485,51 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
         "should recompute, not return sentinel"
     );
 }
+
+#[test]
+fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
+    let manifest = make_test_manifest();
+    let downstream = super::super::find_model_by_name(&manifest, "orders").unwrap();
+    let initial_hash = super::super::schema::compute_manifest_columns_hash(&manifest, downstream);
+    let compiled_code = downstream.compiled_code.as_deref().unwrap();
+
+    let sentinel = ModelColumnLineage {
+        model: "orders".to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+    let mut cache = ColumnLineageCache::disabled();
+    cache.insert(
+        "orders",
+        compiled_code,
+        DlinDialect::Generic,
+        BackendId::Polyglot,
+        initial_hash,
+        None,
+        sentinel,
+    );
+
+    let mut changed_manifest = manifest;
+    changed_manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .alias = Some("stg_orders_alias".to_string());
+    let changed_downstream = super::super::find_model_by_name(&changed_manifest, "orders").unwrap();
+    let changed_hash =
+        super::super::schema::compute_manifest_columns_hash(&changed_manifest, changed_downstream);
+
+    assert_ne!(initial_hash, changed_hash);
+    let result = compute_column_lineage(
+        &changed_manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut cache,
+    );
+    assert!(
+        result.total_columns > 0,
+        "alias change should invalidate the cache"
+    );
+}

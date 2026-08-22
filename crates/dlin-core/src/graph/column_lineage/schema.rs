@@ -185,6 +185,14 @@ fn hash_node_columns_transitive(
 ) -> u64 {
     let mut parts: Vec<String> = Vec::new();
 
+    parts.push(format!("relation:{}", node.relation_name()));
+    if let Some(database) = &node.database {
+        parts.push(format!("db:{}", database));
+    }
+    if let Some(schema) = &node.schema {
+        parts.push(format!("schema:{}", schema));
+    }
+
     let mut own_cols: Vec<&String> = node.columns.keys().collect();
     own_cols.sort();
     for col in own_cols {

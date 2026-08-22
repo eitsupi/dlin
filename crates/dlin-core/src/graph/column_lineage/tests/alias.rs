@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use super::super::backend::{BackendId, backend_for_tests};
 use super::super::schema;
-use super::super::{ColumnLineageCache, ColumnSource, DlinDialect, TransformationType};
+use super::super::{
+    ColumnLineageCache, ColumnSource, DlinDialect, TransformationType, compute_column_impact,
+};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
 
 #[allow(clippy::too_many_arguments)]
@@ -266,4 +268,156 @@ fn cross_model_lineage_resolves_an_aliased_upstream_relation() {
             )],
         }]
     );
+}
+
+#[test]
+fn column_impact_matches_aliased_upstream_and_keeps_logical_labels() {
+    let upstream_id = "model.proj.upstream_model";
+    let downstream_id = "model.proj.downstream_model";
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                upstream_id.to_string(),
+                node(
+                    upstream_id,
+                    "upstream_model",
+                    Some("upstream_alias"),
+                    None,
+                    vec![],
+                    &["id"],
+                    Some("select raw_upstream.id from raw_upstream"),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                downstream_id.to_string(),
+                node(
+                    downstream_id,
+                    "downstream_model",
+                    None,
+                    None,
+                    vec![upstream_id],
+                    &["id"],
+                    Some("select upstream_alias.id from upstream_alias"),
+                    None,
+                    None,
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let report = compute_column_impact(
+        &manifest,
+        "upstream_model",
+        "id",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_eq!(report.model, "upstream_model");
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert!(report.impacted_columns.iter().any(|column| {
+        column.unique_id == downstream_id
+            && column.model == "downstream_model"
+            && column.column == "id"
+    }));
+}
+
+#[test]
+fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
+    let pkg_a_id = "model.pkg_a.shared_model";
+    let pkg_b_id = "model.pkg_b.shared_model";
+    let downstream_id = "model.pkg_b.downstream_model";
+    let source_a_id = "source.pkg_a.raw_a";
+    let source_b_id = "source.pkg_b.raw_b";
+
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                pkg_a_id.to_string(),
+                node(
+                    pkg_a_id,
+                    "shared_model",
+                    None,
+                    None,
+                    vec![source_a_id],
+                    &["id"],
+                    Some("select id from raw_a"),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                pkg_b_id.to_string(),
+                node(
+                    pkg_b_id,
+                    "shared_model",
+                    None,
+                    None,
+                    vec![source_b_id],
+                    &["id"],
+                    Some("select id from raw_b"),
+                    None,
+                    None,
+                ),
+            ),
+            (
+                downstream_id.to_string(),
+                node(
+                    downstream_id,
+                    "downstream_model",
+                    None,
+                    None,
+                    vec![pkg_b_id],
+                    &["id"],
+                    Some("select shared_model.id from shared_model"),
+                    None,
+                    None,
+                ),
+            ),
+        ]),
+        sources: HashMap::from([
+            (source_a_id.to_string(), source("raw_a", source_a_id)),
+            (source_b_id.to_string(), source("raw_b", source_b_id)),
+        ]),
+        ..Default::default()
+    };
+
+    let result = super::super::compute_cross_model_column_lineage(
+        &manifest,
+        "downstream_model",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let id = result
+        .columns
+        .iter()
+        .find(|column| column.column == "id")
+        .unwrap();
+
+    assert_eq!(id.sources[0].table, "raw_b");
+    assert_eq!(id.sources[0].model_path[0].0, "shared_model");
+}
+
+fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSource {
+    crate::parser::manifest::ManifestSource {
+        unique_id: unique_id.to_string(),
+        name: name.to_string(),
+        source_name: "raw".to_string(),
+        resource_type: "source".to_string(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: HashMap::from([(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )]),
+        database: None,
+        schema: None,
+        identifier: None,
+    }
 }

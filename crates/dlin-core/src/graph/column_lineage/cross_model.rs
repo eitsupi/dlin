@@ -11,7 +11,7 @@ use super::backend::{
 use super::schema;
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
-    find_model_by_name,
+    find_model_by_name, find_model_by_unique_id,
 };
 
 pub fn compute_cross_model_column_lineage(
@@ -94,7 +94,8 @@ fn compute_cross_model_inner(
 fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
-    let node = find_model_by_name(manifest, model_name);
+    let node = find_model_by_unique_id(manifest, model_name)
+        .or_else(|| find_model_by_name(manifest, model_name));
     let node = match node {
         Some(n) => n,
         None => return map,
@@ -106,14 +107,14 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
                 continue;
             }
             let relation_name = dep_node.relation_name();
-            map.insert(relation_name.to_string(), dep_node.name.clone());
+            map.insert(relation_name.to_string(), dep_node.unique_id.clone());
             let fq = make_fq_table_name(
                 dep_node.database.as_deref(),
                 dep_node.schema.as_deref(),
                 relation_name,
             );
             if fq != relation_name {
-                map.insert(fq, dep_node.name.clone());
+                map.insert(fq, dep_node.unique_id.clone());
             }
         }
     }
@@ -137,7 +138,7 @@ fn resolve_source_recursive(
     disk_cache: &mut ColumnLineageCache,
     current_path: &[(String, String, TransformationType)],
 ) {
-    let model_name = upstream_models
+    let model_unique_id = upstream_models
         .get(&source.table)
         .or_else(|| {
             let normalized = normalize_table_name(&source.table);
@@ -145,9 +146,9 @@ fn resolve_source_recursive(
         })
         .cloned();
 
-    let model_name = match model_name {
-        Some(name) => {
-            let pair = (name.clone(), source.column.clone());
+    let model_unique_id = match model_unique_id {
+        Some(unique_id) => {
+            let pair = (unique_id.clone(), source.column.clone());
             if visited.contains(&pair) {
                 let mut leaf = source.clone();
                 leaf.model_path = current_path.to_vec();
@@ -155,7 +156,7 @@ fn resolve_source_recursive(
                 return;
             }
             visited.insert(pair);
-            name
+            unique_id
         }
         None => {
             let mut leaf = source.clone();
@@ -165,19 +166,19 @@ fn resolve_source_recursive(
         }
     };
 
-    if !ctx.in_memory_cache.contains_key(&model_name) {
-        if ctx.computing.contains(&model_name) {
+    if !ctx.in_memory_cache.contains_key(&model_unique_id) {
+        if ctx.computing.contains(&model_unique_id) {
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
             return;
         }
-        ctx.computing.insert(model_name.clone());
-        let upstream_result = compute_cross_model_inner(&model_name, ctx, disk_cache);
+        ctx.computing.insert(model_unique_id.clone());
+        let upstream_result = compute_cross_model_inner(&model_unique_id, ctx, disk_cache);
         ctx.in_memory_cache
-            .insert(model_name.clone(), upstream_result);
+            .insert(model_unique_id.clone(), upstream_result);
     }
-    let upstream_result = ctx.in_memory_cache.get(&model_name).unwrap();
+    let upstream_result = ctx.in_memory_cache.get(&model_unique_id).unwrap();
 
     for err in &upstream_result.errors {
         if !errors.contains(err) {
@@ -193,7 +194,7 @@ fn resolve_source_recursive(
         // Build extended_path with the transformation type now that we know it
         let mut extended_path = current_path.to_vec();
         extended_path.push((
-            model_name.clone(),
+            upstream_result.model.clone(),
             source.column.clone(),
             col_entry.transformation.clone(),
         ));
@@ -214,13 +215,23 @@ fn resolve_source_recursive(
             }
         }
     } else {
-        let on_demand =
-            compute_single_column_lineage(ctx.manifest, &model_name, &source.column, ctx.dialect);
+        let on_demand = compute_single_column_lineage(
+            ctx.manifest,
+            &model_unique_id,
+            &source.column,
+            ctx.dialect,
+        );
         let transformation = on_demand
             .as_ref()
             .map_or(TransformationType::Unknown, |(_, t)| t.clone());
+        let model_display_name = ctx
+            .manifest
+            .nodes
+            .get(&model_unique_id)
+            .map(|node| node.name.clone())
+            .unwrap_or_else(|| model_unique_id.clone());
         let mut extended_path = current_path.to_vec();
-        extended_path.push((model_name.clone(), source.column.clone(), transformation));
+        extended_path.push((model_display_name, source.column.clone(), transformation));
         let on_demand_sources = on_demand.map(|(sources, _)| sources).unwrap_or_default();
         if on_demand_sources.is_empty() {
             // Leaf: column at model_name has no traceable sources — don't self-include in path.
@@ -228,7 +239,7 @@ fn resolve_source_recursive(
             leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
-            let further_upstream = build_upstream_model_names(ctx.manifest, &model_name);
+            let further_upstream = build_upstream_model_names(ctx.manifest, &model_unique_id);
             for s in &on_demand_sources {
                 resolve_source_recursive(
                     s,
@@ -251,7 +262,8 @@ fn compute_single_column_lineage(
     column_name: &str,
     dialect: DlinDialect,
 ) -> Option<(Vec<ColumnSource>, TransformationType)> {
-    let node = find_model_by_name(manifest, model_name)?;
+    let node = find_model_by_unique_id(manifest, model_name)
+        .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
