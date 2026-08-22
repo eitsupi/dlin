@@ -265,6 +265,16 @@ fn generic_cases() -> Vec<MatrixCase> {
             }],
         ),
         case(
+            "union_star_leading_operand_matching_arity",
+            "SELECT * FROM ext_a UNION ALL SELECT 1 AS col_x, 2 AS col_y",
+            DlinDialect::Generic,
+            ext_a(),
+            &[OutputSpec {
+                slot: 0,
+                name: "col_x",
+            }],
+        ),
+        case(
             "requested_output_missing",
             "SELECT id FROM raw_table",
             DlinDialect::Generic,
@@ -380,6 +390,7 @@ struct CanonicalRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CanonicalError {
     kind: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +410,8 @@ enum CanonicalOutcome {
     },
     Failed {
         resolution: ResolutionState,
+        error_kind: String,
+        error_message: String,
     },
 }
 
@@ -465,6 +478,8 @@ fn canonical_analysis(analysis: BackendAnalysis, outputs: &[OutputColumnRequest]
                             failure.target.slot.0,
                             CanonicalOutcome::Failed {
                                 resolution: failure.resolution,
+                                error_kind: format!("{:?}", failure.error.kind),
+                                error_message: failure.error.message,
                             },
                         ),
                     })
@@ -511,6 +526,7 @@ fn run(case: &MatrixCase, backend_id: BackendId) -> CanonicalRun {
         Err(error) => CanonicalRun {
             result: Err(CanonicalError {
                 kind: format!("{:?}", error.kind),
+                message: error.message,
             }),
         },
     }
@@ -538,6 +554,14 @@ fn differences(
                     field: "analysis.error.kind".to_string(),
                     polyglot: polyglot.kind.clone(),
                     sqllineage: sqllineage.kind.clone(),
+                });
+            }
+            if polyglot.message != sqllineage.message {
+                differences.push(Difference {
+                    case_id: case.id,
+                    field: "analysis.error.message".to_string(),
+                    polyglot: polyglot.message.clone(),
+                    sqllineage: sqllineage.message.clone(),
                 });
             }
         }
@@ -662,20 +686,35 @@ fn compare_outcome(
         }
         (
             CanonicalOutcome::Failed {
-                resolution: polyglot,
+                resolution: _polyglot_resolution,
+                error_kind: polyglot_error_kind,
+                error_message: polyglot_error_message,
             },
             CanonicalOutcome::Failed {
-                resolution: sqllineage,
+                resolution: _sqllineage_resolution,
+                error_kind: sqllineage_error_kind,
+                error_message: sqllineage_error_message,
             },
-        ) => compare_column_field(
-            differences,
-            case_id,
-            ordinal,
-            slot,
-            "resolution",
-            polyglot,
-            sqllineage,
-        ),
+        ) => {
+            compare_column_field(
+                differences,
+                case_id,
+                ordinal,
+                slot,
+                "error.kind",
+                polyglot_error_kind,
+                sqllineage_error_kind,
+            );
+            compare_column_field(
+                differences,
+                case_id,
+                ordinal,
+                slot,
+                "error.message",
+                polyglot_error_message,
+                sqllineage_error_message,
+            );
+        }
         (polyglot, sqllineage) => differences.push(Difference {
             case_id,
             field: format!("statement[{ordinal}].column[{slot}].outcome_kind"),
@@ -697,9 +736,8 @@ fn compare_outcome(
 
 fn resolution_of(outcome: &CanonicalOutcome) -> &ResolutionState {
     match outcome {
-        CanonicalOutcome::Resolved { resolution, .. } | CanonicalOutcome::Failed { resolution } => {
-            resolution
-        }
+        CanonicalOutcome::Resolved { resolution, .. }
+        | CanonicalOutcome::Failed { resolution, .. } => resolution,
     }
 }
 
@@ -759,7 +797,6 @@ struct LedgerEntry {
     sqllineage: &'static str,
     status: LedgerStatus,
     authority: &'static str,
-    must_observe: bool,
 }
 
 // Keep this table deliberately explicit. A new backend difference must carry
@@ -775,7 +812,6 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "Accepted. sqllineage classifies a cast as a passthrough, and dlin accepted that when it dropped its own `Cast` transformation for this migration. Column lineage is an experimental feature and the loss was taken deliberately.",
         },
         authority: "dlin transformation contract and the backend implementation notes",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "aggregate",
@@ -786,7 +822,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "For COUNT(*), settle whether the transformation should be Direct as sqllineage reports or Aggregation as polyglot reports. Sqllineage reports Aggregation for aggregates that take a column argument, so this appears specific to aggregates with no column argument and needs confirming upstream.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "aggregate",
@@ -797,29 +832,26 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "For COUNT(*), settle whether dlin should emit no sources, as sqllineage does because COUNT(*) reads no column, or the polyglot source with an empty table name naming the output column, which is a fabrication.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "unqualified_join_without_catalog",
         field: "statement[0].column[0].outcome_kind",
         polyglot: "resolved",
         sqllineage: "failed",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether an unqualified id in a join with no catalog should be resolved, as polyglot does, or rejected, as sqllineage does; the corpus does not establish which behavior dlin should publish.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right. With two tables in scope and no catalog, there is no basis for attributing a bare `id` to either table, so reporting it ambiguous is correct and polyglot resolving it is a guess.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "unqualified_join_without_catalog",
         field: "statement[0].column[0].resolution",
         polyglot: "Resolved",
         sqllineage: "Ambiguous",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether the resolution state for an unqualified id in a join with no catalog should be Resolved, as polyglot reports, or Ambiguous, as sqllineage reports; the corpus does not establish which state dlin should publish.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right. With two tables in scope and no catalog, there is no basis for attributing a bare `id` to either table, so reporting it ambiguous is correct and polyglot resolving it is a guess.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "star_with_catalog",
@@ -830,7 +862,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle whether catalog expansion of SELECT * should clear the unresolved-star marker, as sqllineage reports, or retain it, as polyglot reports; the observed values do not establish which metadata dlin should publish.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "star_without_catalog",
@@ -841,7 +872,26 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "Accepted. The two backends label the same inability differently, NotFound against Indeterminate, and dlin's own rule is that an unresolvable source makes lineage indeterminate rather than the output absent. The sqllineage label follows that rule.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
+    },
+    LedgerEntry {
+        case_id: "star_without_catalog",
+        field: "statement[0].column[0].error.kind",
+        polyglot: "\"ColumnResolution { state: NotFound }\"",
+        sqllineage: "\"ColumnResolution { state: Indeterminate }\"",
+        status: LedgerStatus::Open {
+            to_settle: "This is a behavioral finding, not a wording change: polyglot reports NotFound while sqllineage reports Indeterminate for an unexpanded star. The error kind controls the production hint, so the correct state must be reviewed before the production backend changes.",
+        },
+        authority: "dlin backend comparison and production error-hint behavior",
+    },
+    LedgerEntry {
+        case_id: "star_without_catalog",
+        field: "statement[0].column[0].error.message",
+        polyglot: "\"lineage failed: Cannot find column 'col_x' in query\"",
+        sqllineage: "\"cannot match output 'col_x' because an unexpanded SELECT * leaves the output columns unknown\"",
+        status: LedgerStatus::Open {
+            to_settle: "This is a finding as well as a wording change: polyglot says the column cannot be found, while sqllineage identifies the unexpanded SELECT * as the reason the output is unknown. Review the user-visible diagnosis before the production backend changes.",
+        },
+        authority: "dlin backend comparison and production error reporting",
     },
     LedgerEntry {
         case_id: "union_named_leading_operand",
@@ -852,7 +902,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle whether a set operation with named leading operands should classify its output as Unknown, as polyglot reports, or Direct, as sqllineage reports; the corpus does not establish which transformation dlin should publish.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "union_star_leading_operand",
@@ -863,7 +912,6 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
         },
         authority: "sqllineage safety guard and dlin comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "union_star_leading_operand",
@@ -874,7 +922,6 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
         },
         authority: "sqllineage safety guard and dlin comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "union_star_leading_operand",
@@ -885,7 +932,36 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
         },
         authority: "sqllineage safety guard and dlin comparison",
-        must_observe: true,
+    },
+    LedgerEntry {
+        case_id: "union_star_leading_operand_matching_arity",
+        field: "statement[0].completeness",
+        polyglot: "\"Complete\"",
+        sqllineage: "\"Indeterminate(reason=\\\"a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted\\\")\"",
+        status: LedgerStatus::Open {
+            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches. Review whether refusing this alignable case is a false positive before the production backend changes.",
+        },
+        authority: "sqllineage safety guard and dlin comparison",
+    },
+    LedgerEntry {
+        case_id: "union_star_leading_operand_matching_arity",
+        field: "statement[0].column[0].outcome_kind",
+        polyglot: "resolved",
+        sqllineage: "failed",
+        status: LedgerStatus::Open {
+            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches: polyglot resolves the output while sqllineage refuses it. Review this as a possible false positive before the production backend changes.",
+        },
+        authority: "sqllineage safety guard and dlin comparison",
+    },
+    LedgerEntry {
+        case_id: "union_star_leading_operand_matching_arity",
+        field: "statement[0].column[0].resolution",
+        polyglot: "Resolved",
+        sqllineage: "Indeterminate",
+        status: LedgerStatus::Open {
+            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches: polyglot resolves the output while sqllineage marks it Indeterminate. Review this as a possible false positive before the production backend changes.",
+        },
+        authority: "sqllineage safety guard and dlin comparison",
     },
     LedgerEntry {
         case_id: "known_polyglot_overclaim",
@@ -896,7 +972,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "This is a finding, not a preference: polyglot overclaims the mixed set-operation lineage and sqllineage is incomplete.",
         },
         authority: "column-lineage review finding; neither backend",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "known_polyglot_overclaim",
@@ -907,7 +982,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Neither backend is right for this known finding: polyglot overclaims and sqllineage is incomplete. The resolution states make that distinction explicit.",
         },
         authority: "column-lineage review finding; neither backend",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
@@ -918,7 +992,26 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Sqllineage resolves the literal branch as Direct while the polyglot set-operation result is Unknown; record the observed result.",
         },
         authority: "column-lineage review finding; neither backend",
-        must_observe: true,
+    },
+    LedgerEntry {
+        case_id: "requested_output_missing",
+        field: "statement[0].column[0].error.message",
+        polyglot: "\"lineage failed: Cannot find column 'missing' in query\"",
+        sqllineage: "\"no sqllineage mapping for output 'missing'\"",
+        status: LedgerStatus::Open {
+            to_settle: "The two backends describe a missing requested output differently. Review the new user-visible wording before the production backend changes.",
+        },
+        authority: "dlin backend comparison and production error reporting",
+    },
+    LedgerEntry {
+        case_id: "unparseable_sql",
+        field: "statement[0].column[0].error.message",
+        polyglot: "\"lineage failed: Cannot find column 'id' in query\"",
+        sqllineage: "\"no sqllineage mapping for output 'id'\"",
+        status: LedgerStatus::Open {
+            to_settle: "The two backends describe the unavailable output from malformed SQL differently. Review the new user-visible wording before the production backend changes.",
+        },
+        authority: "dlin backend comparison and production error reporting",
     },
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
@@ -929,7 +1022,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Sqllineage reports a resolved constant with no sources, so the star branch contribution disappears without a trace; this is a finding, not an accepted preference.",
         },
         authority: "column-lineage review finding; neither backend",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "snowflake_qualified_mixed",
@@ -940,7 +1032,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "snowflake_unqualified_mixed",
@@ -951,7 +1042,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "snowflake_alias_case",
@@ -962,7 +1052,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "bigquery_qualified_mixed",
@@ -973,7 +1062,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "bigquery_unqualified_mixed",
@@ -984,7 +1072,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "bigquery_alias_case",
@@ -995,7 +1082,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
         },
         authority: "identifier-normalization regression coverage",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "bigquery_quoted_identifier",
@@ -1006,7 +1092,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle whether the BigQuery quoted-identifier projection should be classified as Unknown, as polyglot reports, or Direct, as sqllineage reports. The corpus shows the classification difference but does not establish why it occurs or which behavior dlin should publish.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
     LedgerEntry {
         case_id: "bigquery_quoted_identifier",
@@ -1017,7 +1102,6 @@ const LEDGER: &[LedgerEntry] = &[
             to_settle: "Settle whether the BigQuery quoted-identifier projection should emit no sources, as sqllineage reports, or the concrete source with an empty table name and the output column as its column, as polyglot reports. The corpus shows the difference but does not establish why it occurs or which source behavior dlin should publish.",
         },
         authority: "dlin backend comparison",
-        must_observe: true,
     },
 ];
 
@@ -1066,18 +1150,9 @@ fn backend_difference_matrix_is_adjudicated() {
         }
     }
 
-    let missing = LEDGER
+    let stale_entries = LEDGER
         .iter()
-        .filter(|entry| {
-            entry.must_observe && !observed.contains(&(entry.case_id, entry.field.to_string()))
-        })
-        .map(|entry| format!("case '{}' field '{}'", entry.case_id, entry.field))
-        .collect::<Vec<_>>();
-    let stale_shape = LEDGER
-        .iter()
-        .filter(|entry| {
-            !entry.must_observe && !observed.contains(&(entry.case_id, entry.field.to_string()))
-        })
+        .filter(|entry| !observed.contains(&(entry.case_id, entry.field.to_string())))
         .map(|entry| format!("case '{}' field '{}'", entry.case_id, entry.field))
         .collect::<Vec<_>>();
 
@@ -1092,14 +1167,9 @@ fn backend_difference_matrix_is_adjudicated() {
         stale.join("\n")
     );
     assert!(
-        stale_shape.is_empty(),
-        "ledger entry's difference no longer has the recorded shape (no longer observed):\n{}",
-        stale_shape.join("\n")
-    );
-    assert!(
-        missing.is_empty(),
-        "must-observe ledger entry was never exercised:\n{}",
-        missing.join("\n")
+        stale_entries.is_empty(),
+        "ledger entry is stale and should be removed or the corpus case restored:\n{}",
+        stale_entries.join("\n")
     );
 
     // Keep the status metadata live: every ledger entry must carry the required
