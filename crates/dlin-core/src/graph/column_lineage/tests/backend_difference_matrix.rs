@@ -286,7 +286,7 @@ fn generic_cases() -> Vec<MatrixCase> {
         ),
         case(
             "unparseable_sql",
-            "SELECT FROM raw_table",
+            "SELECT FROM FROM",
             DlinDialect::Generic,
             None,
             &[OutputSpec {
@@ -329,6 +329,11 @@ fn identifier_cases() -> Vec<MatrixCase> {
         .into_iter()
         .flat_map(|dialect| {
             let prefix = dialect.as_str();
+            let quoted_identifier_sql = match dialect {
+                DlinDialect::Snowflake => "SELECT \"MixedCol\" AS quoted_result FROM \"RawTable\"",
+                DlinDialect::BigQuery => "SELECT `MixedCol` AS quoted_result FROM `RawTable`",
+                _ => unreachable!("identifier cases have a concrete dialect"),
+            };
             vec![
                 case(
                     Box::leak(format!("{prefix}_qualified_mixed").into_boxed_str()),
@@ -362,7 +367,7 @@ fn identifier_cases() -> Vec<MatrixCase> {
                 ),
                 case(
                     Box::leak(format!("{prefix}_quoted_identifier").into_boxed_str()),
-                    "SELECT \"MixedCol\" AS quoted_result FROM \"RawTable\"",
+                    quoted_identifier_sql,
                     dialect,
                     catalog(),
                     &[OutputSpec {
@@ -800,8 +805,9 @@ struct LedgerEntry {
 }
 
 // Keep this table deliberately explicit. A new backend difference must carry
-// its two observed values, a status-specific verdict or open question, and an
-// observation policy.
+// its two observed values, a status-specific verdict or open question, and the
+// authority for the decision. Every entry must be observed by the corpus;
+// an unobserved entry is stale.
 const LEDGER: &[LedgerEntry] = &[
     LedgerEntry {
         case_id: "cast",
@@ -995,13 +1001,13 @@ const LEDGER: &[LedgerEntry] = &[
     },
     LedgerEntry {
         case_id: "unparseable_sql",
-        field: "statement[0].column[0].error.message",
-        polyglot: "\"lineage failed: Cannot find column 'id' in query\"",
-        sqllineage: "\"no sqllineage mapping for output 'id'\"",
+        field: "analysis.shape",
+        polyglot: "error(Parse)",
+        sqllineage: "1 statement(s)",
         status: LedgerStatus::Open {
-            to_settle: "The two backends describe the unavailable output from malformed SQL differently. Review the new user-visible wording before the production backend changes.",
+            to_settle: "Polyglot rejects the malformed statement while sqllineage returns a statement with no mapping for the requested output. Review whether malformed SQL should fail the whole analysis consistently before the production backend changes.",
         },
-        authority: "dlin backend comparison and production error reporting",
+        authority: "dlin backend comparison and parse-error behavior",
     },
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
@@ -1073,16 +1079,6 @@ const LEDGER: &[LedgerEntry] = &[
         },
         authority: "identifier-normalization regression coverage",
     },
-    LedgerEntry {
-        case_id: "bigquery_quoted_identifier",
-        field: "statement[0].column[0].transformation",
-        polyglot: "Unknown",
-        sqllineage: "Direct",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether the BigQuery quoted-identifier projection should be classified as Unknown, as polyglot reports, or Direct, as sqllineage reports. The corpus shows the classification difference but does not establish why it occurs or which behavior dlin should publish.",
-        },
-        authority: "dlin backend comparison",
-    },
 ];
 
 fn ledger_entry(case_id: &str, field: &str) -> Option<&'static LedgerEntry> {
@@ -1136,6 +1132,8 @@ fn backend_difference_matrix_is_adjudicated() {
         .map(|entry| format!("case '{}' field '{}'", entry.case_id, entry.field))
         .collect::<Vec<_>>();
 
+    // Every ledger entry must be observed at least once. An entry that is not
+    // observed by the corpus is stale and must be removed or restored.
     assert!(
         unledgered.is_empty(),
         "unledgered backend difference(s):\n{}",
@@ -1153,8 +1151,8 @@ fn backend_difference_matrix_is_adjudicated() {
     );
 
     // Keep the status metadata live: every ledger entry must carry the required
-    // payload for its status and state who made it, even entries that are not
-    // currently required to be exercised.
+    // payload for its status and state who made it. The observation requirement
+    // above applies to every entry.
     for entry in LEDGER {
         match &entry.status {
             LedgerStatus::Decided { verdict } => {
