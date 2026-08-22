@@ -16,8 +16,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::super::backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot,
-    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, PolyglotBackend,
-    require_single_lineage_statement,
+    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, OutputName, PolyglotBackend,
+    normalize_column_outcomes, require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
@@ -132,9 +132,23 @@ fn analyze_one_column(
 
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = backend.analyze(&request).map_err(|e| (e.kind, e.message))?;
-    let mut statement =
-        require_single_lineage_statement(analysis).map_err(|e| (e.kind, e.message))?;
-    let outcome = statement.columns.pop().expect("one column was requested");
+    let statement = require_single_lineage_statement(analysis).map_err(|e| (e.kind, e.message))?;
+    let (outcomes, diagnostics) = normalize_column_outcomes(&outputs, statement.columns);
+    assert!(
+        diagnostics.is_empty(),
+        "backend contract diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(outcomes.len(), outputs.len());
+    let outcome = outcomes
+        .into_iter()
+        .next()
+        .expect("one column was requested");
+    let target = match &outcome {
+        BackendColumnOutcome::Resolved(result) => &result.target,
+        BackendColumnOutcome::Failed(failure) => &failure.target,
+    };
+    assert_eq!(target.slot, outputs[0].slot);
+    assert_eq!(target.name, OutputName::Named(outputs[0].name.clone()));
 
     Ok(match outcome {
         BackendColumnOutcome::Resolved(result) => PathOutcome::Resolved {
@@ -307,12 +321,10 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let duplicate_output_names = BTreeSet::new();
 
-    for (slot, (column, expected_sources)) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])]
-        .into_iter()
-        .enumerate()
+    for (column, expected_sources) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])].into_iter()
     {
         let outputs = [OutputColumnRequest {
-            slot: AnalysisSlot(slot),
+            slot: AnalysisSlot(0),
             name: column.to_string(),
         }];
         let request = LineageRequest {
@@ -323,8 +335,20 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
             duplicate_output_names: &duplicate_output_names,
         };
         let analysis = backend.analyze(&request).unwrap();
-        let mut statement = require_single_lineage_statement(analysis).unwrap();
-        let outcome = statement.columns.pop().unwrap();
+        let statement = require_single_lineage_statement(analysis).unwrap();
+        let (outcomes, diagnostics) = normalize_column_outcomes(&outputs, statement.columns);
+        assert!(
+            diagnostics.is_empty(),
+            "backend contract diagnostics: {diagnostics:?}"
+        );
+        assert_eq!(outcomes.len(), outputs.len());
+        let outcome = outcomes.into_iter().next().unwrap();
+        let target = match &outcome {
+            BackendColumnOutcome::Resolved(result) => &result.target,
+            BackendColumnOutcome::Failed(failure) => &failure.target,
+        };
+        assert_eq!(target.slot, outputs[0].slot);
+        assert_eq!(target.name, OutputName::Named(outputs[0].name.clone()));
         let sources = match outcome {
             BackendColumnOutcome::Resolved(result) => result
                 .sources

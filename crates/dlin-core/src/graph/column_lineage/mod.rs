@@ -15,7 +15,7 @@ mod types;
 use backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
     LineageRequest, OutputColumnRequest, PolyglotBackend, ResolutionState,
-    require_single_lineage_statement,
+    normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
     CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
@@ -205,10 +205,12 @@ pub fn compute_column_lineage_with_manifest_path(
     };
 
     let has_star_columns = statement.has_unresolved_stars;
+    let (normalized_outcomes, contract_errors) =
+        normalize_column_outcomes(&outputs, statement.columns);
 
     let mut columns = Vec::new();
     let mut errors = Vec::new();
-    for (col_name, outcome) in column_names.iter().zip(statement.columns) {
+    for (col_name, outcome) in column_names.iter().zip(normalized_outcomes) {
         match outcome {
             BackendColumnOutcome::Resolved(result) => columns.push(ColumnLineageEntry {
                 column: col_name.clone(),
@@ -251,6 +253,12 @@ pub fn compute_column_lineage_with_manifest_path(
             }
         }
     }
+    errors.extend(contract_errors.into_iter().map(|error| ColumnLineageError {
+        kind: ColumnLineageErrorKind::ColumnNotFound,
+        what: "backend contract violation while correlating column outcomes".to_string(),
+        why: Some(error.message),
+        hint: None,
+    }));
 
     let result = ModelColumnLineage {
         model: display_name.to_string(),

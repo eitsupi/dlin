@@ -5,7 +5,8 @@ use crate::parser::manifest::Manifest;
 
 use super::backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend,
-    LineageRequest, OutputColumnRequest, PolyglotBackend, require_single_lineage_statement,
+    LineageRequest, OutputColumnRequest, PolyglotBackend, normalize_column_outcomes,
+    require_single_lineage_statement,
 };
 use super::schema;
 use super::{
@@ -269,7 +270,12 @@ fn compute_single_column_lineage(
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = backend.analyze(&request).ok()?;
     let statement = require_single_lineage_statement(analysis).ok()?;
-    let outcome = statement.columns.into_iter().next()?;
+    let (normalized_outcomes, contract_errors) =
+        normalize_column_outcomes(&outputs, statement.columns);
+    if !contract_errors.is_empty() {
+        return None;
+    }
+    let outcome = normalized_outcomes.into_iter().next()?;
 
     match outcome {
         BackendColumnOutcome::Resolved(result) => Some((
