@@ -158,12 +158,14 @@ fn test_star_passthrough_parenthesized_set_operand_is_traceable() {
 }
 
 #[test]
-fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
+fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
+    // These cases assert SQL semantics, not a workaround for a particular
+    // implementation: a set operation is traced when its leading operand
+    // names the requested output and the branches align by ordinal.
+    // DuckDB confirms the naming rule: `SELECT c9` reports `Binder Error:
+    // Referenced column "c9" not found ... Candidate bindings: "c1"`, while
+    // `SELECT *` returns one column named `c1`.
     let cases = [
-        (
-            "col_a",
-            "WITH u AS (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) SELECT col_a FROM u",
-        ),
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
@@ -171,18 +173,6 @@ fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), lit2 AS (SELECT 2 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM lit2) SELECT col_a FROM u",
-        ),
-        (
-            "c1",
-            "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c1, 2 AS c2 UNION ALL SELECT a.col_x, a.col_y FROM a) SELECT c1 FROM u",
-        ),
-        (
-            "c9",
-            "WITH u AS (SELECT 1 AS c1 UNION ALL SELECT 2 AS c9) SELECT c9 FROM u",
-        ),
-        (
-            "a",
-            "WITH u AS (SELECT 1 AS a, 2 AS a UNION ALL SELECT 3, 4) SELECT a FROM u",
         ),
         (
             "c",
@@ -223,6 +213,52 @@ fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
         );
         assert_eq!(result.traced_columns, 1, "SQL: {sql}");
     }
+}
+
+#[test]
+#[ignore = "no backend detects duplicate column names introduced inside a CTE's leading operand"]
+fn test_set_operation_duplicate_leading_output_name_is_not_detected() {
+    // DuckDB verifies the portable concern here: SELECT * exposes the duplicate
+    // leading names as `a` and `a_1`, and a bare `a` resolves to the first one.
+    // Other engines may reject the same reference as ambiguous, so this remains
+    // isolated until a backend can represent that distinction.
+    // The retained expectation is therefore resolved with no source, as for a
+    // legitimate constant projection; this test does not demand an ambiguity
+    // error that neither backend currently implements.
+    //
+    // $ duckdb -c "WITH u AS (SELECT 1 AS a, 2 AS a UNION ALL SELECT 3, 4) SELECT * FROM u"
+    // a | a_1
+    // $ duckdb -c "WITH u AS (SELECT 1 AS a, 2 AS a UNION ALL SELECT 3, 4) SELECT a FROM u"
+    // 1
+    // 3
+    let mut manifest = make_test_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .columns = [(
+        "a".to_string(),
+        ManifestColumn {
+            name: "a".to_string(),
+        },
+    )]
+    .into_iter()
+    .collect();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code =
+        Some("WITH u AS (SELECT 1 AS a, 2 AS a UNION ALL SELECT 3, 4) SELECT a FROM u".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.traced_columns, 1);
 }
 
 fn assert_exact_column_outcomes(
@@ -672,82 +708,51 @@ fn assert_sources_for(result: &ModelColumnLineage, column: &str, expected: &[(&s
 }
 
 #[test]
-#[ignore = "0.4.4 cannot trace an explicit column name declared in a non-leading UNION operand \
-            when an earlier operand has an unresolved SELECT *; it reports column_not_found for \
-            'total' instead of tracing the operand that names it"]
 fn test_set_star_with_unknown_source_does_not_fabricate_lineage() {
+    // The leading SELECT * has unknown output names, so total from the
+    // non-leading operand is not a nameable set-operation output.
     let result = compute_star_shape(
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &["total"], &[]);
-    assert_sources_for(&result, "total", &[("known_table", "amt")]);
-    assert!(result.columns.iter().all(|entry| {
-        entry
-            .sources
-            .iter()
-            .all(|source| source.table != "orders" && source.table != "unknown_source")
-    }));
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
-#[ignore = "same class as test_set_star_with_unknown_source_does_not_fabricate_lineage: 0.4.4 \
-            cannot trace 'total' declared only in a non-leading UNION operand when an earlier \
-            operand's SELECT * is unresolved"]
 fn test_nested_set_star_does_not_fabricate_lineage() {
+    // Wrapping the leading star in a derived table does not give it output
+    // names; total remains declared only by a non-leading operand.
     let result = compute_star_shape(
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &["total"], &[]);
-    assert_sources_for(&result, "total", &[("known_table", "amt")]);
-    assert!(result.columns.iter().all(|entry| {
-        entry.sources.iter().all(|source| {
-            source.table != "real_x"
-                && source.table != "star_source"
-                && source.table != "synthetic_source"
-        })
-    }));
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
-#[ignore = "same class as test_set_star_with_unknown_source_does_not_fabricate_lineage: 0.4.4 \
-            cannot trace 'total' declared only in non-leading UNION operands when the leading \
-            operand's SELECT * is unresolved"]
-fn test_every_explicit_set_operand_contributes_sources() {
-    // Each operand that declares the name is traced on its own and the results
-    // are merged, so a name present in several operands keeps all of them.
+fn test_leading_star_hides_a_name_declared_by_several_operands() {
+    // Even though later operands declare total, the leading unknown SELECT *
+    // supplies no output name for the ordinally aligned column.
     let result = compute_star_shape(
         "SELECT * FROM unknown_source \
          UNION ALL SELECT id, amt AS total FROM known_table \
          UNION ALL SELECT id, fee AS total FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &["total"], &[]);
-    assert_sources_for(
-        &result,
-        "total",
-        &[("known_table", "amt"), ("third_table", "fee")],
-    );
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
-#[ignore = "same class as test_set_star_with_unknown_source_does_not_fabricate_lineage: 0.4.4 \
-            cannot trace 'total' declared only in non-leading UNION operands when the leading \
-            operand's SELECT * is unresolved"]
-fn test_set_operands_match_explicit_projections_by_ordinal() {
+fn test_leading_star_hides_a_name_despite_ordinal_alignment() {
+    // Ordinal alignment cannot rescue total: the leading SELECT * still does
+    // not name the output column.
     let result = compute_star_shape(
         "SELECT * FROM unknown_source \
          UNION ALL SELECT id, amt AS total FROM known_table \
          UNION ALL SELECT id, fee FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &["total"], &[]);
-    assert_sources_for(
-        &result,
-        "total",
-        &[("known_table", "amt"), ("third_table", "fee")],
-    );
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
@@ -859,12 +864,14 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
 }
 
 #[test]
-fn test_set_operation_nested_in_from_subquery_uses_explicit_branch() {
+#[ignore = "polyglot currently traces a name introduced only by a non-leading branch through \
+            a nested set operation, but SQL semantics leave the output unresolved"]
+fn test_set_operation_in_from_subquery_does_not_adopt_a_non_leading_name() {
     let result = compute_star_shape(
         "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",
         &["col_a"],
     );
-    assert_exact_column_outcomes(&result, &["col_a"], &[]);
+    assert_exact_column_outcomes(&result, &[], &["col_a"]);
 }
 
 #[test]

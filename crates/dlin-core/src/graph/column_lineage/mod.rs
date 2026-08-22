@@ -276,7 +276,7 @@ pub fn compute_column_lineage_with_manifest_path(
                     && matches!(
                         failure.error.kind,
                         BackendErrorKind::ColumnResolution {
-                            state: ResolutionState::NotFound
+                            state: ResolutionState::NotFound | ResolutionState::Indeterminate
                         }
                     ))
                 .then(|| {

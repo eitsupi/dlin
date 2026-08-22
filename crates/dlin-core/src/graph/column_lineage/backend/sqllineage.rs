@@ -242,9 +242,12 @@ fn analyze_output(
                 });
             }
             ColumnOrigin::Ambiguous { column, candidates } if candidates.is_empty() => {
+                // sqllineage uses this same origin for an unbound output and for an output
+                // whose source is hidden behind an unexpanded star. The latter exists but has
+                // incomplete lineage; Indeterminate is the only label that is true for both.
                 return failed_output(
                     target,
-                    ResolutionState::NotFound,
+                    ResolutionState::Indeterminate,
                     format!("column '{}' has no visible binding", column),
                 );
             }
