@@ -7,9 +7,7 @@ use serde::Serialize;
 use crate::parser::manifest::Manifest;
 
 use super::backend::DlinDialect;
-use super::cross_model::{
-    make_fq_table_name, normalize_qualified_table_name, normalize_table_name,
-};
+use super::cross_model::{make_fq_table_name, relation_names_match};
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, TransformationType,
     find_model_by_name,
@@ -145,8 +143,6 @@ pub fn compute_column_impact_with_manifest_path(
                 )
             })
             .unwrap_or_else(|| source_uid.clone());
-        let normalized_source_relation = normalize_qualified_table_name(&source_relation);
-
         let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
@@ -178,19 +174,7 @@ pub fn compute_column_impact_with_manifest_path(
                 }
 
                 let references_source = entry.sources.iter().any(|s| {
-                    let normalized_table = normalize_qualified_table_name(&s.table);
-                    // Compare qualified names when both sides carry qualification;
-                    // two relations sharing a bare name in different schemas are not
-                    // the same table. Fall back to the bare name only when one side
-                    // has no qualification to compare, where there is nothing better
-                    // to go on and refusing would drop a real edge.
-                    let either_side_unqualified = !normalized_table.contains('.')
-                        || !normalized_source_relation.contains('.');
-                    let table_matches = normalized_table == normalized_source_relation
-                        || (either_side_unqualified
-                            && normalize_table_name(&s.table)
-                                == normalize_table_name(&source_relation));
-                    table_matches && s.column == source_column
+                    relation_names_match(&s.table, &source_relation) && s.column == source_column
                 });
 
                 if references_source {

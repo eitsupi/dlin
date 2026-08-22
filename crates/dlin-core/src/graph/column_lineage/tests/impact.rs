@@ -123,14 +123,14 @@ fn test_column_impact_model_not_found() {
 fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
     let raw_id = "model.proj.raw_model";
     let staging_id = "model.proj.staging_model";
-    let raw_downstream_id = "model.proj.raw_downstream";
-    let staging_downstream_id = "model.proj.staging_downstream";
+    let downstream_id = "model.proj.downstream";
 
     let node = |id: &str,
                 name: &str,
                 alias: Option<&str>,
                 schema: Option<&str>,
                 deps: Vec<&str>,
+                columns: &[&str],
                 sql: Option<&str>| ManifestNode {
         unique_id: id.to_string(),
         name: name.to_string(),
@@ -143,12 +143,17 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         description: None,
         path: None,
         original_file_path: None,
-        columns: HashMap::from([(
-            "id".to_string(),
-            ManifestColumn {
-                name: "id".to_string(),
-            },
-        )]),
+        columns: columns
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect(),
         compiled_code: sql.map(str::to_string),
         database: Some("warehouse".to_string()),
         schema: schema.map(str::to_string),
@@ -164,6 +169,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
                     Some("orders"),
                     Some("raw"),
                     vec![],
+                    &["id"],
                     None,
                 ),
             ),
@@ -175,29 +181,22 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
                     Some("orders"),
                     Some("staging"),
                     vec![],
+                    &["id"],
                     None,
                 ),
             ),
             (
-                raw_downstream_id.to_string(),
+                downstream_id.to_string(),
                 node(
-                    raw_downstream_id,
-                    "raw_downstream",
+                    downstream_id,
+                    "downstream",
                     None,
                     None,
-                    vec![raw_id],
-                    Some(r#"select id from "warehouse"."raw"."orders""#),
-                ),
-            ),
-            (
-                staging_downstream_id.to_string(),
-                node(
-                    staging_downstream_id,
-                    "staging_downstream",
-                    None,
-                    None,
-                    vec![staging_id],
-                    Some(r#"select id from "warehouse"."staging"."orders""#),
+                    vec![raw_id, staging_id],
+                    &["raw_id", "staging_id"],
+                    Some(
+                        "select raw.id as raw_id, staging.id as staging_id from raw.orders raw join staging.orders staging on raw.id = staging.id",
+                    ),
                 ),
             ),
         ]),
@@ -220,7 +219,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         raw_impact
             .impacted_columns
             .iter()
-            .any(|column| column.model == "raw_downstream"),
+            .any(|column| column.model == "downstream" && column.column == "raw_id"),
         "raw impact: {:?}, errors: {:?}",
         raw_impact.impacted_columns,
         raw_impact.errors
@@ -229,7 +228,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         !raw_impact
             .impacted_columns
             .iter()
-            .any(|column| column.model == "staging_downstream")
+            .any(|column| column.model == "downstream" && column.column == "staging_id")
     );
 
     let staging_impact = compute_column_impact(
@@ -248,13 +247,13 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         staging_impact
             .impacted_columns
             .iter()
-            .any(|column| column.model == "staging_downstream")
+            .any(|column| column.model == "downstream" && column.column == "staging_id")
     );
     assert!(
         !staging_impact
             .impacted_columns
             .iter()
-            .any(|column| column.model == "raw_downstream")
+            .any(|column| column.model == "downstream" && column.column == "raw_id")
     );
 }
 

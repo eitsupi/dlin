@@ -131,6 +131,15 @@ pub(super) fn normalize_table_name(table: &str) -> String {
     stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
 }
 
+pub(super) fn relation_names_match(left: &str, right: &str) -> bool {
+    let left_parts = normalize_qualified_table_name(left);
+    let right_parts = normalize_qualified_table_name(right);
+    left_parts
+        .rsplit('.')
+        .zip(right_parts.rsplit('.'))
+        .all(|(left_part, right_part)| left_part == right_part)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
     source: &ColumnSource,
