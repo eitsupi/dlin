@@ -131,10 +131,10 @@ pub fn compute_column_impact_with_manifest_path(
         vec![(initial_uid, column_name.to_string(), None, initial_visited)];
 
     while let Some((source_uid, source_column, current_path, visited_nodes)) = queue.pop() {
-        let source_name = manifest
+        let source_relation = manifest
             .nodes
             .get(&source_uid)
-            .map(|n| n.name.as_str())
+            .map(|n| n.relation_name())
             .unwrap_or(source_uid.as_str());
 
         let dependents = match downstream_map.get(&source_uid) {
@@ -168,8 +168,8 @@ pub fn compute_column_impact_with_manifest_path(
                 }
 
                 let references_source = entry.sources.iter().any(|s| {
-                    let table_matches =
-                        s.table == source_name || normalize_table_name(&s.table) == source_name;
+                    let table_matches = s.table == source_relation
+                        || normalize_table_name(&s.table) == source_relation;
                     table_matches && s.column == source_column
                 });
 

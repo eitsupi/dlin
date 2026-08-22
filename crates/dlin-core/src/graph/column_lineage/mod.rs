@@ -92,7 +92,8 @@ pub fn compute_column_lineage_with_manifest_path(
     manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
-    let node = find_model_by_name(manifest, model_name);
+    let node = find_model_by_unique_id(manifest, model_name)
+        .or_else(|| find_model_by_name(manifest, model_name));
 
     let node = match node {
         Some(n) => n,
@@ -351,4 +352,14 @@ pub(super) fn find_model_by_name<'a>(
             Some(matches[0])
         }
     }
+}
+
+pub(super) fn find_model_by_unique_id<'a>(
+    manifest: &'a Manifest,
+    unique_id: &str,
+) -> Option<&'a crate::parser::manifest::ManifestNode> {
+    manifest
+        .nodes
+        .get(unique_id)
+        .filter(|node| node.resource_type == "model")
 }
