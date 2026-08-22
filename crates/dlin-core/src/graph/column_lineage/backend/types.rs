@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::relation::RelationRef;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalysisCompleteness {
     Complete,
@@ -43,15 +45,15 @@ pub enum ResolutionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendSource {
     Concrete {
-        table: String,
+        relation: RelationRef,
         column: String,
     },
     Ambiguous {
         column: String,
-        candidates: Vec<String>,
+        candidates: Vec<RelationRef>,
     },
     Wildcard {
-        table: String,
+        relation: RelationRef,
     },
     Recursive {
         base_sources: Vec<BackendSource>,

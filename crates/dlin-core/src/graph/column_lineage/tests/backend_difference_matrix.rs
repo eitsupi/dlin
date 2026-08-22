@@ -424,15 +424,22 @@ fn canonical_source(source: &BackendSource) -> String {
     // Source order is not semantic. These tagged, escaped strings preserve every
     // source variant and field while providing a total order for sorting.
     match source {
-        BackendSource::Concrete { table, column } => {
-            format!("concrete(table={table:?},column={column:?})")
+        BackendSource::Concrete { relation, column } => {
+            // Keep the matrix's historical, public spelling stable while the
+            // backend carries RelationRef internally.
+            format!("concrete(table={:?},column={column:?})", relation.render())
         }
         BackendSource::Ambiguous { column, candidates } => {
-            let mut candidates = candidates.clone();
+            let mut candidates = candidates
+                .iter()
+                .map(|relation| relation.render())
+                .collect::<Vec<_>>();
             candidates.sort();
             format!("ambiguous(column={column:?},candidates={candidates:?})")
         }
-        BackendSource::Wildcard { table } => format!("wildcard(table={table:?})"),
+        BackendSource::Wildcard { relation } => {
+            format!("wildcard(table={:?})", relation.render())
+        }
         BackendSource::Recursive { base_sources } => {
             let mut base_sources = base_sources
                 .iter()

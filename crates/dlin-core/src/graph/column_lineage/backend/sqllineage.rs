@@ -11,6 +11,7 @@ use super::{
     OutputDiscoveryRequest, OutputTarget, ResolutionState,
 };
 use crate::graph::column_lineage::TransformationType;
+use crate::graph::column_lineage::relation::RelationRef;
 
 /// The sqllineage-backed lineage implementation.
 pub struct SqllineageBackend;
@@ -237,7 +238,11 @@ fn analyze_output(
             // while non-empty candidates mean genuine ambiguity.
             ColumnOrigin::Concrete { table, column } => {
                 sources.push(BackendSource::Concrete {
-                    table: table.to_string(),
+                    relation: RelationRef::from_backend(
+                        table.catalog.as_deref(),
+                        table.schema.as_deref(),
+                        &table.table,
+                    ),
                     column: column.clone(),
                 });
             }

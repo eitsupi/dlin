@@ -30,7 +30,6 @@ pub use impact::{
     ColumnImpactReport, ImpactedColumn, compute_column_impact,
     compute_column_impact_with_manifest_path,
 };
-use relation::RelationRef;
 use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
@@ -274,9 +273,8 @@ fn compute_column_lineage_internal(
                     .sources
                     .into_iter()
                     .map(|s| match s {
-                        BackendSource::Concrete { table, column } => InternalColumnSource {
-                            relation: RelationRef::parse(&table)
-                                .unwrap_or_else(|_| RelationRef::bare(table)),
+                        BackendSource::Concrete { relation, column } => InternalColumnSource {
+                            relation,
                             column,
                             model_path: vec![],
                         },

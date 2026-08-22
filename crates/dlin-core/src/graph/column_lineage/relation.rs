@@ -108,6 +108,17 @@ impl RelationRef {
         }
     }
 
+    /// Construct a relation from a backend's normalized table reference.
+    /// Backends expose component values but not their original quote tokens,
+    /// so the normalized spelling is represented as unquoted SQL.
+    pub(crate) fn from_backend(catalog: Option<&str>, schema: Option<&str>, name: &str) -> Self {
+        Self {
+            catalog: catalog.map(Identifier::unquoted),
+            schema: schema.map(Identifier::unquoted),
+            name: Identifier::unquoted(name),
+        }
+    }
+
     pub(crate) fn bare(name: impl Into<String>) -> Self {
         Self {
             catalog: None,

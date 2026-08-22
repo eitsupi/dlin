@@ -329,8 +329,8 @@ fn compute_single_column_lineage(
                 .sources
                 .into_iter()
                 .map(|s| match s {
-                    BackendSource::Concrete { table, column } => ColumnSource {
-                        table,
+                    BackendSource::Concrete { relation, column } => ColumnSource {
+                        table: relation.render(),
                         column,
                         model_path: vec![],
                     },
@@ -368,6 +368,7 @@ pub(super) fn make_fq_table_name(
 
 #[cfg(test)]
 mod tests {
+    use super::super::relation::RelationRef;
     use super::*;
     use crate::graph::column_lineage::backend::{
         BackendColumnFailure, BackendError, BackendErrorKind,
@@ -432,7 +433,7 @@ mod tests {
                     resolution: ResolutionState::Resolved,
                     transformation: TransformationType::Direct,
                     sources: vec![BackendSource::Concrete {
-                        table: "upstream".to_string(),
+                        relation: RelationRef::bare("upstream"),
                         column: "alpha".to_string(),
                     }],
                 }),
@@ -456,7 +457,7 @@ mod tests {
                 if result.target.slot == AnalysisSlot(0)
                     && result.target.name == "alpha"
                     && result.sources == vec![BackendSource::Concrete {
-                        table: "upstream".to_string(),
+                        relation: RelationRef::bare("upstream"),
                         column: "alpha".to_string(),
                     }]
         ));

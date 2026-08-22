@@ -18,6 +18,7 @@ use crate::graph::column_lineage::backend::types::{
     BackendStatementResult, OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest,
     OutputName, OutputTarget, ResolutionState,
 };
+use crate::graph::column_lineage::relation::RelationRef;
 
 /// Infer output column names from a SQL query's top-level SELECT list,
 /// expanding CTE-level `SELECT *` where the catalog allows it. Returns an
@@ -541,7 +542,8 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
 
 fn backend_source_from_legacy(source: ColumnSource) -> BackendSource {
     BackendSource::Concrete {
-        table: source.table,
+        relation: RelationRef::parse(&source.table)
+            .unwrap_or_else(|_| RelationRef::bare(source.table)),
         column: source.column,
     }
 }

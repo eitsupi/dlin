@@ -21,6 +21,7 @@ use super::super::backend::{
     SqllineageCatalogProvider, backend_for_tests, normalize_column_outcomes,
     require_single_lineage_statement,
 };
+use super::super::relation::RelationRef;
 use super::super::{TransformationType, schema};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
 
@@ -160,7 +161,7 @@ fn analyze_one_column(
                 .sources
                 .into_iter()
                 .map(|s| match s {
-                    BackendSource::Concrete { table, column } => (table, column),
+                    BackendSource::Concrete { relation, column } => (relation.render(), column),
                     other => panic!(
                         "the polyglot backend never produces this source variant: {:?}",
                         other
@@ -360,7 +361,7 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
                 .sources
                 .into_iter()
                 .map(|source| match source {
-                    BackendSource::Concrete { table, column } => (table, column),
+                    BackendSource::Concrete { relation, column } => (relation.render(), column),
                     other => panic!("unexpected source: {:?}", other),
                 })
                 .collect::<Vec<_>>(),
@@ -806,7 +807,7 @@ fn sqllineage_plain_projection_resolves_case_folded_concrete_source() {
             assert_eq!(
                 result.sources,
                 vec![BackendSource::Concrete {
-                    table: "source_table".to_string(),
+                    relation: RelationRef::bare("source_table"),
                     // The fork normalizes relation identifiers, while its
                     // expression visitor preserves this source column spelling.
                     column: "ID".to_string(),
@@ -930,7 +931,7 @@ fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
         BackendColumnOutcome::Resolved(result) => assert_eq!(
             result.sources,
             vec![BackendSource::Concrete {
-                table: "left_table".to_string(),
+                relation: RelationRef::bare("left_table"),
                 column: "id".to_string(),
             }]
         ),
@@ -1047,7 +1048,7 @@ fn sqllineage_catalog_expands_star_to_concrete_sources() {
         BackendColumnOutcome::Resolved(result) => assert_eq!(
             result.sources,
             vec![BackendSource::Concrete {
-                table: "orders".to_string(),
+                relation: RelationRef::bare("orders"),
                 column: "id".to_string(),
             }]
         ),
