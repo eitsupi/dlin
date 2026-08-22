@@ -1,4 +1,8 @@
 use super::*;
+use std::collections::HashMap;
+
+use crate::parser::manifest::{DependsOn, ManifestColumn, ManifestConfig, ManifestNode};
+
 #[test]
 fn test_column_impact_direct_dependent() {
     // stg_orders.order_id is used by orders.order_id
@@ -113,6 +117,296 @@ fn test_column_impact_model_not_found() {
 
     assert!(!result.errors.is_empty());
     assert!(result.errors[0].what.contains("not found"));
+}
+
+#[test]
+fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
+    let raw_id = "model.proj.raw_model";
+    let staging_id = "model.proj.staging_model";
+    let raw_downstream_id = "model.proj.raw_downstream";
+    let staging_downstream_id = "model.proj.staging_downstream";
+
+    let node = |id: &str,
+                name: &str,
+                alias: Option<&str>,
+                schema: Option<&str>,
+                deps: Vec<&str>,
+                sql: Option<&str>| ManifestNode {
+        unique_id: id.to_string(),
+        name: name.to_string(),
+        alias: alias.map(str::to_string),
+        resource_type: "model".to_string(),
+        depends_on: DependsOn {
+            nodes: deps.into_iter().map(str::to_string).collect(),
+        },
+        config: ManifestConfig::default(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: HashMap::from([(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )]),
+        compiled_code: sql.map(str::to_string),
+        database: Some("warehouse".to_string()),
+        schema: schema.map(str::to_string),
+    };
+
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                raw_id.to_string(),
+                node(
+                    raw_id,
+                    "raw_model",
+                    Some("orders"),
+                    Some("raw"),
+                    vec![],
+                    None,
+                ),
+            ),
+            (
+                staging_id.to_string(),
+                node(
+                    staging_id,
+                    "staging_model",
+                    Some("orders"),
+                    Some("staging"),
+                    vec![],
+                    None,
+                ),
+            ),
+            (
+                raw_downstream_id.to_string(),
+                node(
+                    raw_downstream_id,
+                    "raw_downstream",
+                    None,
+                    None,
+                    vec![raw_id],
+                    Some(r#"select id from "warehouse"."raw"."orders""#),
+                ),
+            ),
+            (
+                staging_downstream_id.to_string(),
+                node(
+                    staging_downstream_id,
+                    "staging_downstream",
+                    None,
+                    None,
+                    vec![staging_id],
+                    Some(r#"select id from "warehouse"."staging"."orders""#),
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let raw_impact = compute_column_impact(
+        &manifest,
+        "raw_model",
+        "id",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(
+        raw_impact.errors.is_empty(),
+        "errors: {:?}",
+        raw_impact.errors
+    );
+    assert!(
+        raw_impact
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "raw_downstream"),
+        "raw impact: {:?}, errors: {:?}",
+        raw_impact.impacted_columns,
+        raw_impact.errors
+    );
+    assert!(
+        !raw_impact
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "staging_downstream")
+    );
+
+    let staging_impact = compute_column_impact(
+        &manifest,
+        "staging_model",
+        "id",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(
+        staging_impact.errors.is_empty(),
+        "errors: {:?}",
+        staging_impact.errors
+    );
+    assert!(
+        staging_impact
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "staging_downstream")
+    );
+    assert!(
+        !staging_impact
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "raw_downstream")
+    );
+}
+
+#[test]
+fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
+    // A manifest recording no database or schema gives nothing to compare a
+    // qualified reference against. Refusing there would drop a real edge, so the
+    // bare name decides when either side lacks qualification.
+    let source_id = "model.proj.source_model";
+    let downstream_id = "model.proj.downstream_model";
+    let columns = || {
+        HashMap::from([(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )])
+    };
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                source_id.to_string(),
+                ManifestNode {
+                    unique_id: source_id.to_string(),
+                    name: "source_model".to_string(),
+                    alias: None,
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn::default(),
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                    columns: columns(),
+                    compiled_code: None,
+                    database: None,
+                    schema: None,
+                },
+            ),
+            (
+                downstream_id.to_string(),
+                ManifestNode {
+                    unique_id: downstream_id.to_string(),
+                    name: "downstream_model".to_string(),
+                    alias: None,
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn {
+                        nodes: vec![source_id.to_string()],
+                    },
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                    columns: columns(),
+                    compiled_code: Some(
+                        "select id from \"warehouse\".\"raw\".\"source_model\"".to_string(),
+                    ),
+                    database: None,
+                    schema: None,
+                },
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let report = compute_column_impact(
+        &manifest,
+        "source_model",
+        "id",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert!(
+        report
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "downstream_model" && column.column == "id"),
+        "qualified reference should still reach an unqualified model relation: {:?}",
+        report.impacted_columns
+    );
+}
+
+#[test]
+fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
+    let source_id = "model.proj.source_model";
+    let downstream_id = "model.proj.downstream_model";
+    let columns = || {
+        HashMap::from([(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )])
+    };
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                source_id.to_string(),
+                ManifestNode {
+                    unique_id: source_id.to_string(),
+                    name: "source_model".to_string(),
+                    alias: Some("orders".to_string()),
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn::default(),
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                    columns: columns(),
+                    compiled_code: None,
+                    database: Some("warehouse".to_string()),
+                    schema: Some("raw".to_string()),
+                },
+            ),
+            (
+                downstream_id.to_string(),
+                ManifestNode {
+                    unique_id: downstream_id.to_string(),
+                    name: "downstream_model".to_string(),
+                    alias: None,
+                    resource_type: "model".to_string(),
+                    depends_on: DependsOn {
+                        nodes: vec![source_id.to_string()],
+                    },
+                    config: ManifestConfig::default(),
+                    description: None,
+                    path: None,
+                    original_file_path: None,
+                    columns: columns(),
+                    compiled_code: Some("select orders.id as id".to_string()),
+                    database: None,
+                    schema: None,
+                },
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let report = compute_column_impact(
+        &manifest,
+        "source_model",
+        "id",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert!(
+        report
+            .impacted_columns
+            .iter()
+            .any(|column| column.model == "downstream_model" && column.column == "id")
+    );
 }
 
 #[test]

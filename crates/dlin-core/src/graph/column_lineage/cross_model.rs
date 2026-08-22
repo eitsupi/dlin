@@ -122,8 +122,12 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
     map
 }
 
+pub(super) fn normalize_qualified_table_name(table: &str) -> String {
+    table.chars().filter(|c| *c != '"' && *c != '`').collect()
+}
+
 pub(super) fn normalize_table_name(table: &str) -> String {
-    let stripped: String = table.chars().filter(|c| *c != '"' && *c != '`').collect();
+    let stripped = normalize_qualified_table_name(table);
     stripped.rsplit('.').next().unwrap_or(&stripped).to_string()
 }
 
@@ -316,7 +320,11 @@ fn normalize_single_column_outcome(
     normalized_outcomes.into_iter().next()
 }
 
-fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
+pub(super) fn make_fq_table_name(
+    database: Option<&str>,
+    schema: Option<&str>,
+    name: &str,
+) -> String {
     match (database, schema) {
         (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
         (None, Some(s)) => format!("{}.{}", s, name),
