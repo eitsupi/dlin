@@ -200,16 +200,6 @@ pub fn normalize_column_outcomes(
 
         let request_index = match request_indices.get(&slot) {
             Some(index) => *index,
-            None if slot >= outputs.len() => {
-                diagnostics.push(BackendError {
-                    kind: BackendErrorKind::Internal,
-                    message: format!(
-                        "backend returned an outcome for slot {slot}, but {} outputs were requested",
-                        outputs.len()
-                    ),
-                });
-                continue;
-            }
             None => {
                 diagnostics.push(BackendError {
                     kind: BackendErrorKind::Internal,
@@ -598,7 +588,48 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == BackendErrorKind::Internal
                 && diagnostic.message
-                    == "backend returned an outcome for slot 1, but 1 outputs were requested"
+                    == "backend returned an outcome for slot 1, but no output requested that slot"
+        }));
+    }
+
+    #[test]
+    fn normalize_column_outcomes_rejects_unrequested_sparse_slot() {
+        let outputs = [request(0, "alpha"), request(5, "epsilon")];
+        let (normalized, diagnostics) = normalize_column_outcomes(
+            &outputs,
+            vec![
+                resolved(
+                    1,
+                    "beta",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+                resolved(
+                    3,
+                    "gamma",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+            ],
+        );
+
+        assert!(matches!(
+            &normalized[0],
+            BackendColumnOutcome::Failed(failure)
+                if failure.target.slot == AnalysisSlot(0)
+                    && failure.target.name == "alpha"
+                    && failure.resolution == ResolutionState::Indeterminate
+                    && failure.error.kind == BackendErrorKind::Internal
+                    && failure.error.message
+                        == "backend returned no outcome for column 'alpha' at slot 0"
+        ));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == BackendErrorKind::Internal
+                && diagnostic.message
+                    == "backend returned an outcome for slot 1, but no output requested that slot"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == BackendErrorKind::Internal
+                && diagnostic.message
+                    == "backend returned an outcome for slot 3, but no output requested that slot"
         }));
     }
 
