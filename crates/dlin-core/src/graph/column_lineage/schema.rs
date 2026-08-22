@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use super::backend::{DlinDialect, catalog::CatalogSnapshot, polyglot as polyglot_backend};
+use super::backend::{
+    DlinDialect, LineageBackend, OutputDiscoveryRequest, OutputName, catalog::CatalogSnapshot,
+};
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
@@ -17,13 +19,14 @@ pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
     dialect: DlinDialect,
+    backend: &dyn LineageBackend,
 ) -> Option<CatalogSnapshot> {
     let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
 
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let col_names = resolve_node_columns(dep_node, manifest, dialect);
+            let col_names = resolve_node_columns(dep_node, manifest, dialect, backend);
             if !col_names.is_empty() {
                 let fq_name = make_fq_table_name(
                     dep_node.database.as_deref(),
@@ -79,6 +82,7 @@ fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
     manifest: &Manifest,
     dialect: DlinDialect,
+    backend: &dyn LineageBackend,
 ) -> Vec<String> {
     let yaml_cols: HashSet<String> = dep_node.columns.keys().cloned().collect();
     let inferred_cols: HashSet<String> = dep_node
@@ -86,7 +90,32 @@ fn resolve_node_columns(
         .as_ref()
         .map(|code| {
             let schema = build_yaml_schema_for_node(manifest, dep_node);
-            polyglot_backend::infer_output_columns(code, dialect, schema.as_ref())
+            let request = OutputDiscoveryRequest {
+                sql: code,
+                dialect,
+                catalog: schema.as_ref(),
+            };
+            match backend.discover_output_columns(&request) {
+                Ok(discovery) => discovery
+                    .outputs
+                    .into_iter()
+                    .filter_map(|output| match output.name {
+                        OutputName::Named(name) => Some(name),
+                        OutputName::UnaliasedExpression => None,
+                    })
+                    .collect(),
+                Err(error) => {
+                    // Deliberately preserve the previous parse-failure behavior:
+                    // YAML columns remain usable when discovery cannot parse the SQL.
+                    // Surfacing discovery parse errors is an error-model change to decide on
+                    // its own merits, rather than inherit from this refactor.
+                    debug_assert!(matches!(
+                        error.kind,
+                        super::backend::BackendErrorKind::Parse
+                    ));
+                    HashSet::new()
+                }
+            }
         })
         .unwrap_or_default()
         .into_iter()

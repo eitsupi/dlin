@@ -152,6 +152,182 @@ fn test_no_columns_and_no_sql() {
 }
 
 #[test]
+fn test_yaml_and_sql_output_names_are_unioned() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns = ["yaml_only"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    node.compiled_code = Some("select id as sql_only from raw.orders".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_eq!(result.total_columns, 2);
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| column.column.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sql_only"]
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.what.contains("yaml_only")),
+        "YAML-only output must remain in the requested name set: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn test_parse_failure_keeps_yaml_output_names() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns = ["yaml_only"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    node.compiled_code = Some("INVALID SQL %%%".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert_eq!(result.total_columns, 1);
+    assert!(result.columns.is_empty());
+    assert_eq!(result.errors[0].kind, ColumnLineageErrorKind::ParseFailure);
+}
+
+#[test]
+fn test_top_level_set_operation_does_not_infer_output_names() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns.clear();
+    node.compiled_code =
+        Some("select id from raw.orders union all select id from raw.orders".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.columns.is_empty());
+    assert_eq!(
+        result.errors[0].kind,
+        ColumnLineageErrorKind::ColumnInferenceFailed
+    );
+}
+
+#[test]
+fn test_bare_select_star_without_catalog_does_not_infer_output_names() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns.clear();
+    node.depends_on.nodes.clear();
+    node.compiled_code = Some("select * from unknown_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.columns.is_empty());
+    assert_eq!(
+        result.errors[0].kind,
+        ColumnLineageErrorKind::ColumnInferenceFailed
+    );
+}
+
+#[test]
+fn test_catalog_expands_bare_select_star_output_names() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns.clear();
+    node.compiled_code =
+        Some("with source as (select * from raw.orders) select * from source".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.total_columns, 4);
+    assert_eq!(result.columns.len(), 4);
+}
+
+#[test]
+fn test_dependency_catalog_unions_yaml_and_compiled_sql_columns() {
+    let mut manifest = make_test_manifest();
+    let dependency = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    dependency.columns = ["yaml_only"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    dependency.compiled_code = Some("select id as sql_only from raw.orders".to_string());
+
+    let root = manifest.nodes.get_mut("model.proj.orders").unwrap();
+    root.columns.clear();
+    root.depends_on.nodes = vec!["model.proj.stg_orders".to_string()];
+    root.compiled_code = Some("select yaml_only, sql_only from stg_orders".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(
+        result
+            .columns
+            .iter()
+            .map(|column| column.column.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sql_only", "yaml_only"]
+    );
+}
+
+#[test]
 fn test_cte_select_star_in_manifest_model() {
     // Integration test: typical dbt pattern with CTE + SELECT *
     let mut manifest = make_test_manifest();

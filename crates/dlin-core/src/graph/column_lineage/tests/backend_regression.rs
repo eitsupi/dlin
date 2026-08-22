@@ -180,7 +180,8 @@ fn assert_resolved(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
         Ok(PathOutcome::Resolved {
@@ -218,7 +219,8 @@ fn assert_failed(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
         Ok(PathOutcome::Failed(message)) => {
@@ -391,7 +393,8 @@ fn unresolvable_column_fails_with_column_resolution_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(
         &manifest,
@@ -419,7 +422,8 @@ fn unparseable_sql_fails_with_parse_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), "anything") {
         Err((kind, _message)) => {

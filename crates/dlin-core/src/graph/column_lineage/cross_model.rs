@@ -252,7 +252,8 @@ fn compute_single_column_lineage(
 ) -> Option<(Vec<ColumnSource>, TransformationType)> {
     let node = find_model_by_name(manifest, model_name)?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
 
     let outputs = [OutputColumnRequest {
         slot: AnalysisSlot(0),
@@ -267,7 +268,6 @@ fn compute_single_column_lineage(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = backend.analyze(&request).ok()?;
     let statement = require_single_lineage_statement(analysis).ok()?;
     let outcome = normalize_single_column_outcome(&outputs, statement.columns)?;
