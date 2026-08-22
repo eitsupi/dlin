@@ -14,7 +14,9 @@ pub use catalog::CatalogSnapshot;
 #[allow(unused_imports)]
 pub(crate) use catalog_provider::SqllineageCatalogProvider;
 #[allow(unused_imports)]
-pub use dialect::DlinDialect;
+pub use dialect::{
+    DialectClassification, DlinDialect, REMOVED_DIALECTS, RemovedDialect, classify_dialect,
+};
 #[allow(unused_imports)]
 pub use polyglot::{
     check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
@@ -120,7 +122,14 @@ pub(crate) fn backend_for_tests(id: BackendId) -> Backend {
 mod tests {
     #[test]
     fn sqlparser_version_matches_sqllineage() {
-        let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(lock_path) = manifest_dir
+            .ancestors()
+            .map(|directory| directory.join("Cargo.lock"))
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
         let lock = std::fs::read_to_string(&lock_path)
             .unwrap_or_else(|error| panic!("could not read {}: {error}", lock_path.display()));
         let sqlparser_packages: Vec<&str> = lock

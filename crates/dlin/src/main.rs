@@ -13,8 +13,8 @@ mod mcp;
 
 use cli::{
     CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, ColumnOutputFormat, Command,
-    DebugCommand, DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, McpArgs,
-    SourceType, SummaryArgs, SummaryOutputFormat,
+    DebugCommand, DebugOutputFormat, DialectArg, Direction, ErrorFormat, GraphArgs, GroupBy,
+    ListArgs, McpArgs, SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
 use dlin_core::graph::column_lineage::{CatalogSnapshot, DlinDialect};
@@ -810,35 +810,71 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Resolve the SQL dialect to use for column lineage.
+/// The dialect a command will actually parse with, plus anything the user needs
+/// to be told about how it was arrived at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedDialect {
+    pub(crate) effective: DlinDialect,
+    pub(crate) warning: Option<String>,
+}
+
+fn dialect_warning(requested: &str) -> String {
+    format!(
+        "SQL dialect '{requested}' is not supported by the lineage engine. Generic parsing is being used, and lineage may be wrong for warehouse-specific SQL."
+    )
+}
+
+/// Resolve the requested SQL dialect to the effective parser and any warning to emit.
 ///
-/// Precedence: CLI flag > manifest adapter_type > error.
-/// Avoids silent fallback to Generic, which produces incorrect results for
-/// warehouse-specific SQL (e.g. BigQuery backtick quoting, Snowflake QUALIFY).
-fn resolve_dialect(
-    cli_dialect: Option<DlinDialect>,
+/// Precedence: CLI flag > manifest adapter_type > error. Removed dialects are
+/// intentionally degraded to Generic with an explicit warning; unknown names,
+/// missing adapter_type, and empty adapter_type remain errors.
+pub(crate) fn resolve_dialect(
+    cli_dialect: Option<&DialectArg>,
     manifest: &parser::manifest::Manifest,
-) -> Result<DlinDialect> {
-    if let Some(d) = cli_dialect {
-        return Ok(d);
-    }
-    match manifest.metadata.adapter_type.as_deref() {
-        Some(adapter) if !adapter.trim().is_empty() => {
-            adapter.trim().parse::<DlinDialect>().map_err(|_| {
-                anyhow::anyhow!(
-                    "manifest adapter_type '{}' has no matching SQL dialect; \
-                     use --dialect to specify one explicitly (e.g. --dialect postgres)",
-                    adapter.trim()
+) -> Result<ResolvedDialect> {
+    let (requested, classification) = match cli_dialect {
+        Some(dialect) => (dialect.requested.as_str(), dialect.classification),
+        None => match manifest.metadata.adapter_type.as_deref() {
+            Some(adapter) if !adapter.trim().is_empty() => {
+                let requested = adapter.trim();
+                (
+                    requested,
+                    dlin_core::graph::column_lineage::classify_dialect(requested),
                 )
+            }
+            Some(_) => {
+                anyhow::bail!(
+                    "manifest adapter_type is empty; \
+                     use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+                )
+            }
+            None => {
+                anyhow::bail!(
+                    "manifest does not specify an adapter_type; \
+                     use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+                )
+            }
+        },
+    };
+
+    match classification {
+        dlin_core::graph::column_lineage::DialectClassification::Supported(effective) => {
+            Ok(ResolvedDialect {
+                effective,
+                warning: None,
             })
         }
-        Some(_) => anyhow::bail!(
-            "manifest adapter_type is empty; \
-             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
-        ),
-        None => anyhow::bail!(
-            "manifest does not specify an adapter_type; \
-             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+        dlin_core::graph::column_lineage::DialectClassification::Removed { .. } => {
+            Ok(ResolvedDialect {
+                effective: DlinDialect::Generic,
+                warning: Some(dialect_warning(requested)),
+            })
+        }
+        dlin_core::graph::column_lineage::DialectClassification::Unknown => anyhow::bail!(
+            "manifest adapter_type '{}' has no matching SQL dialect; \
+             use --dialect to specify one explicitly (e.g. --dialect postgres)",
+            requested
         ),
     }
 }
@@ -850,7 +886,7 @@ fn run_column_lineage_command(
     cli_models: Vec<String>,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DlinDialect>,
+    dialect: Option<DialectArg>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -878,7 +914,11 @@ fn run_column_lineage_command(
     let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
 
-    let dialect = resolve_dialect(dialect, &manifest)?;
+    let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    if let Some(warning) = &resolved_dialect.warning {
+        dlin_core::warn!("{}", warning);
+    }
+    let dialect = resolved_dialect.effective;
 
     let models = if input::has_path_like_input(&raw_inputs) {
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
@@ -1064,7 +1104,7 @@ fn run_column_impact_command(
     model: &str,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DlinDialect>,
+    dialect: Option<DialectArg>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -1082,7 +1122,11 @@ fn run_column_impact_command(
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
 
-    let dialect = resolve_dialect(dialect, &manifest)?;
+    let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    if let Some(warning) = &resolved_dialect.warning {
+        dlin_core::warn!("{}", warning);
+    }
+    let dialect = resolved_dialect.effective;
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()
@@ -1644,5 +1688,55 @@ mod tests {
         let schema = parse_schema_string("t:a,,b").unwrap();
         let cols = schema.table_columns("t").unwrap().to_vec();
         assert_eq!(cols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn degraded_dialect_uses_generic_cache_key() {
+        let manifest = parser::manifest::Manifest {
+            metadata: parser::manifest::ManifestMetadata {
+                adapter_type: Some("duckdb".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let requested = DialectArg {
+            requested: "duckdb".to_string(),
+            classification: dlin_core::graph::column_lineage::DialectClassification::Removed {
+                canonical: "duckdb",
+            },
+        };
+        let resolved = resolve_dialect(Some(&requested), &manifest).unwrap();
+        assert_eq!(resolved.effective, DlinDialect::Generic);
+        assert!(resolved.warning.is_some());
+
+        let lineage = graph::column_lineage::ModelColumnLineage {
+            model: "model".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
+            columns: vec![],
+            errors: vec![],
+        };
+        let mut cache = graph::column_lineage::ColumnLineageCache::disabled();
+        cache.insert(
+            "model",
+            "SELECT 1",
+            resolved.effective,
+            graph::column_lineage::BackendId::Polyglot,
+            0,
+            None,
+            lineage,
+        );
+        assert!(
+            cache
+                .get(
+                    "model",
+                    "SELECT 1",
+                    DlinDialect::Generic,
+                    graph::column_lineage::BackendId::Polyglot,
+                    None,
+                    Some(0),
+                )
+                .is_some()
+        );
     }
 }

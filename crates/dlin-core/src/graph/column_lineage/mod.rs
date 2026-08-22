@@ -18,7 +18,8 @@ use backend::{
     normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
-    BackendId, CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
+    BackendId, CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS,
+    RemovedDialect, check_sql_parses, classify_dialect, debug_parse_sql_ast_debug,
     debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;

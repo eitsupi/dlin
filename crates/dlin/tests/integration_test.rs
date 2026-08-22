@@ -1434,8 +1434,6 @@ models:
                 "order_id",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1480,8 +1478,6 @@ models:
                 "some_col",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1522,8 +1518,6 @@ models:
                 "stg_partial_fail",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1549,8 +1543,6 @@ models:
                 "order_id",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1588,8 +1580,6 @@ models:
                 "this_column_does_not_exist",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1631,8 +1621,6 @@ models:
                 "some_col",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1671,8 +1659,6 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1712,8 +1698,6 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1776,8 +1760,6 @@ models:
                 "upstream",
                 "--project-dir",
                 tmp_dir.path().to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1851,8 +1833,6 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
                 "-o",
                 "json",
@@ -1912,8 +1892,6 @@ models:
                 "stg_accounts",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1978,8 +1956,6 @@ models:
                 "stg_orders",
                 "--project-dir",
                 fixture.to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
@@ -2534,7 +2510,7 @@ mod manifest_only_mode {
     fn test_column_upstream_auto_detects_dialect_from_manifest_adapter_type() {
         // When --dialect is omitted but manifest has adapter_type, dialect is auto-detected.
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
 
         let output = Command::new(binary_path())
             .args([
@@ -2553,6 +2529,58 @@ mod manifest_only_mode {
             "should succeed with auto-detected dialect from adapter_type; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("duckdb"));
+        assert!(stderr.contains("Generic parsing is being used"));
+        assert!(stderr.contains("lineage may be wrong for warehouse-specific SQL"));
+    }
+
+    #[test]
+    fn test_column_upstream_explicit_removed_dialect_warns_and_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--dialect",
+                "duckdb",
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("duckdb"));
+        assert!(stderr.contains("Generic parsing is being used"));
+    }
+
+    #[test]
+    fn test_column_upstream_explicit_generic_has_no_degradation_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--dialect",
+                "generic",
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Generic parsing is being used"));
     }
 
     #[test]

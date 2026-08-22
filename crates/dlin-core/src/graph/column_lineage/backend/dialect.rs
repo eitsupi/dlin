@@ -6,6 +6,125 @@ use std::str::FromStr;
 const SUPPORTED_DIALECTS: &str =
     "generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovedDialect {
+    pub canonical: &'static str,
+    pub aliases: &'static [&'static str],
+}
+
+/// Dialects removed from the lineage backend, retained here with their former
+/// aliases so they can be restored when contributed to sqllineage upstream.
+pub const REMOVED_DIALECTS: &[RemovedDialect] = &[
+    RemovedDialect {
+        canonical: "duckdb",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "sqlite",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "spark",
+        aliases: &["spark2"],
+    },
+    RemovedDialect {
+        canonical: "trino",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "presto",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "redshift",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "tsql",
+        aliases: &["mssql", "sqlserver"],
+    },
+    RemovedDialect {
+        canonical: "oracle",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "clickhouse",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "athena",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "teradata",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "doris",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "starrocks",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "materialize",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "risingwave",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "singlestore",
+        aliases: &["memsql"],
+    },
+    RemovedDialect {
+        canonical: "cockroachdb",
+        aliases: &["cockroach"],
+    },
+    RemovedDialect {
+        canonical: "tidb",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "druid",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "solr",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "tableau",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "dune",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "fabric",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "drill",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "dremio",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "exasol",
+        aliases: &[],
+    },
+    RemovedDialect {
+        canonical: "datafusion",
+        aliases: &["arrow-datafusion", "arrow_datafusion"],
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "clap",
@@ -23,6 +142,32 @@ pub enum DlinDialect {
     Databricks,
     Snowflake,
     BigQuery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialectClassification {
+    Supported(DlinDialect),
+    Removed { canonical: &'static str },
+    Unknown,
+}
+
+pub fn classify_dialect(s: &str) -> DialectClassification {
+    let normalized = s.to_ascii_lowercase();
+    if let Ok(dialect) = normalized.parse::<DlinDialect>() {
+        return DialectClassification::Supported(dialect);
+    }
+
+    REMOVED_DIALECTS
+        .iter()
+        .find(|removed| {
+            removed.canonical == normalized
+                || removed.aliases.iter().any(|alias| *alias == normalized)
+        })
+        .map_or(DialectClassification::Unknown, |removed| {
+            DialectClassification::Removed {
+                canonical: removed.canonical,
+            }
+        })
 }
 
 impl DlinDialect {
@@ -131,9 +276,22 @@ mod tests {
     }
 
     #[test]
-    fn test_removed_dialect_is_rejected() {
-        let error = DlinDialect::from_str("duckdb").expect_err("removed dialect must fail");
-        assert!(error.contains(SUPPORTED_DIALECTS));
+    fn test_dialect_classifier() {
+        assert_eq!(
+            classify_dialect("PostGreSQL"),
+            DialectClassification::Supported(DlinDialect::PostgreSQL)
+        );
+        assert_eq!(
+            classify_dialect("DuckDB"),
+            DialectClassification::Removed {
+                canonical: "duckdb"
+            }
+        );
+        assert_eq!(
+            classify_dialect("SQLServer"),
+            DialectClassification::Removed { canonical: "tsql" }
+        );
+        assert_eq!(classify_dialect("posgres"), DialectClassification::Unknown);
     }
 
     #[cfg(feature = "column-lineage")]

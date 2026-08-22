@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use dlin_core::graph::column_lineage::DlinDialect;
+use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, classify_dialect};
 use std::path::PathBuf;
 
 /// Parse a `--dialect` value via `DlinDialect`'s `FromStr` implementation.
@@ -10,8 +10,27 @@ use std::path::PathBuf;
 /// ever been documented (its accepted spellings are described in prose in
 /// each command's own help text instead). Pinning the parser to `FromStr`
 /// keeps the flag's parsing behavior — and `--help` output — unchanged.
-fn parse_dialect(s: &str) -> Result<DlinDialect, String> {
+fn parse_dialect(s: &str) -> Result<DialectArg, String> {
+    let classification = classify_dialect(s);
+    if matches!(classification, DialectClassification::Unknown) {
+        return Err(s.parse::<DlinDialect>().unwrap_err());
+    }
+    Ok(DialectArg {
+        requested: s.to_string(),
+        classification,
+    })
+}
+
+fn parse_supported_dialect(s: &str) -> Result<DlinDialect, String> {
     s.parse()
+}
+
+/// The original spelling and classification of a dialect supplied to a command
+/// that resolves dialects after manifest loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialectArg {
+    pub requested: String,
+    pub classification: DialectClassification,
 }
 
 #[derive(Parser, Debug)]
@@ -673,7 +692,7 @@ SQL dialect for parsing compiled SQL in get_column_lineage.
 This is required because the generic parser can produce incorrect or incomplete
 column lineage for warehouse-specific SQL."
     )]
-    pub dialect: DlinDialect,
+    pub dialect: DialectArg,
 }
 
 #[derive(Debug, clap::Args)]
@@ -772,7 +791,7 @@ pub struct DebugParseSqlArgs {
     pub sql: Option<String>,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
+    #[arg(long, default_value = "generic", value_parser = parse_supported_dialect)]
     pub dialect: DlinDialect,
 
     /// Output format: ast (Debug representation), json (JSON AST)
@@ -790,7 +809,7 @@ pub struct DebugTraceColumnArgs {
     pub column: String,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
+    #[arg(long, default_value = "generic", value_parser = parse_supported_dialect)]
     pub dialect: DlinDialect,
 
     /// Table schema definitions for accurate lineage resolution.
@@ -971,7 +990,7 @@ pub struct ColumnGraphArgs {
     /// does not declare an adapter_type.
     /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DlinDialect>,
+    pub dialect: Option<DialectArg>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1016,7 +1035,7 @@ pub struct ColumnImpactArgs {
     /// does not declare an adapter_type.
     /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DlinDialect>,
+    pub dialect: Option<DialectArg>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1967,7 +1986,10 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(DlinDialect::BigQuery));
+        assert_eq!(
+            args.dialect.as_ref().map(|dialect| dialect.classification),
+            Some(DialectClassification::Supported(DlinDialect::BigQuery))
+        );
     }
 
     #[test]
@@ -1993,7 +2015,10 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(DlinDialect::Snowflake));
+        assert_eq!(
+            args.dialect.as_ref().map(|dialect| dialect.classification),
+            Some(DialectClassification::Supported(DlinDialect::Snowflake))
+        );
     }
 
     #[test]
@@ -2022,12 +2047,33 @@ mod tests {
     }
 
     #[test]
-    fn test_dialect_invalid_value_rejected() {
+    fn test_removed_dialect_is_accepted_and_retains_spelling() {
         let result =
             Cli::try_parse_from(["dlin", "column", "upstream", "model", "--dialect", "duckdb"]);
-        let error = result.expect_err("removed dialect should be rejected by clap");
+        let args = unwrap_column_upstream(result.expect("removed dialect should be accepted"));
+        let dialect = args.dialect.expect("dialect should be retained");
+        assert_eq!(dialect.requested, "duckdb");
+        assert_eq!(
+            dialect.classification,
+            DialectClassification::Removed {
+                canonical: "duckdb"
+            }
+        );
+    }
+
+    #[test]
+    fn test_dialect_invalid_value_rejected() {
+        let result = Cli::try_parse_from([
+            "dlin",
+            "column",
+            "upstream",
+            "model",
+            "--dialect",
+            "posgres",
+        ]);
+        let error = result.expect_err("unknown dialect should be rejected by clap");
         let message = error.to_string();
-        assert!(message.contains("duckdb"));
+        assert!(message.contains("posgres"));
         assert!(message.contains(
             "generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery"
         ));
