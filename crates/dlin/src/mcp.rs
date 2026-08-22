@@ -126,7 +126,7 @@ impl McpState {
             resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
         let manifest = parser::manifest::load_manifest(&manifest_path)?;
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
-        let resolved_dialect = resolve_dialect(Some(&args.dialect), &manifest)?;
+        let resolved_dialect = resolve_dialect(args.dialect.as_ref(), &manifest)?;
 
         Ok(Self {
             project_dir,
@@ -880,7 +880,7 @@ mod tests {
         McpState::load(McpArgs {
             project_dir: fixture_project_dir(),
             manifest_path: None,
-            dialect: generic_dialect(),
+            dialect: Some(generic_dialect()),
         })
         .unwrap()
     }
@@ -889,7 +889,7 @@ mod tests {
         McpState::load(McpArgs {
             project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
-            dialect: generic_dialect(),
+            dialect: Some(generic_dialect()),
         })
         .unwrap()
     }
@@ -898,7 +898,7 @@ mod tests {
         McpState::load(McpArgs {
             project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
-            dialect: duckdb_dialect(),
+            dialect: Some(duckdb_dialect()),
         })
         .unwrap()
     }
@@ -924,8 +924,16 @@ mod tests {
     }
 
     #[test]
-    fn column_lineage_results_include_dialect_degradation_warning() {
+    fn mcp_explicit_removed_dialect_degrades_and_warns_in_column_lineage_results() {
         let state = degraded_column_lineage_state();
+        assert_eq!(state.dialect, DlinDialect::Generic);
+        assert!(
+            state
+                .dialect_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("duckdb"))
+        );
+
         let upstream = get_column_lineage(
             &json!({
                 "model": "stg_orders",
@@ -950,6 +958,71 @@ mod tests {
             assert!(result["warnings"][0].as_str().unwrap().contains("duckdb"));
             assert!(result.get("errors").is_none() || result["errors"].is_array());
         }
+    }
+
+    #[test]
+    fn mcp_auto_detects_manifest_dialect_and_propagates_degradation_warning() {
+        let state = McpState::load(McpArgs {
+            project_dir: column_lineage_fixture_project_dir(),
+            manifest_path: None,
+            dialect: None,
+        })
+        .unwrap();
+
+        assert_eq!(state.dialect, DlinDialect::Generic);
+        assert!(
+            state
+                .dialect_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("duckdb"))
+        );
+
+        let result = get_column_lineage(
+            &json!({
+                "model": "stg_orders",
+                "column": "order_id",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        assert!(result["warnings"][0].as_str().unwrap().contains("duckdb"));
+    }
+
+    #[test]
+    fn mcp_explicit_supported_dialect_has_no_warning() {
+        let state = column_lineage_state();
+
+        assert_eq!(state.dialect, DlinDialect::Generic);
+        assert!(state.dialect_warning.is_none());
+
+        let result = get_column_lineage(
+            &json!({
+                "model": "stg_orders",
+                "column": "order_id",
+                "direction": "upstream"
+            }),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(result["warnings"], json!([]));
+    }
+
+    #[test]
+    fn mcp_requires_dialect_when_manifest_has_no_adapter_type() {
+        let error = match McpState::load(McpArgs {
+            project_dir: fixture_project_dir(),
+            manifest_path: None,
+            dialect: None,
+        }) {
+            Ok(_) => panic!("MCP should require --dialect when the manifest has no adapter_type"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("use --dialect"));
     }
 
     #[test]
@@ -1383,7 +1456,7 @@ mod tests {
                 .unwrap()
                 .to_path_buf(),
             manifest_path: Some(manifest_path),
-            dialect: generic_dialect(),
+            dialect: Some(generic_dialect()),
         })
         .unwrap();
 

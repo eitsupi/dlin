@@ -681,18 +681,21 @@ pub struct McpArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// SQL dialect for column lineage parsing
+    /// SQL dialect for parsing compiled SQL.
+    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
+    /// does not declare an adapter_type.
+    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(
         long,
-        required = true,
         value_parser = parse_dialect,
         long_help = "\
 SQL dialect for parsing compiled SQL in get_column_lineage.
 
-This is required because the generic parser can produce incorrect or incomplete
-column lineage for warehouse-specific SQL."
+When omitted, the dialect is auto-detected from manifest.metadata.adapter_type.
+It is required only when the manifest does not declare an adapter_type. A dialect
+the lineage engine does not support uses generic parsing with a warning."
     )]
-    pub dialect: DialectArg,
+    pub dialect: Option<DialectArg>,
 }
 
 #[derive(Debug, clap::Args)]
