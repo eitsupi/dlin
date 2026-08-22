@@ -7,10 +7,10 @@ use serde::Serialize;
 use crate::parser::manifest::Manifest;
 
 use super::backend::DlinDialect;
-use super::cross_model::{make_fq_table_name, relation_names_match};
+use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::{
-    ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, TransformationType,
-    find_model_by_name,
+    ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, InternalModelColumnLineage,
+    TransformationType, find_model_by_name,
 };
 
 #[derive(Debug, Serialize)]
@@ -119,7 +119,7 @@ pub fn compute_column_impact_with_manifest_path(
     let mut impacted = Vec::new();
     let mut errors = Vec::new();
     let initial_uid = initial_node.unique_id.clone();
-    let mut lineage_cache: HashMap<String, super::ModelColumnLineage> = HashMap::new();
+    let mut lineage_cache: HashMap<String, InternalModelColumnLineage> = HashMap::new();
 
     // Each queue entry carries its own path-local set of visited (uid, col) pairs.
     // This allows a node to be processed once per unique path leading to it, while
@@ -136,13 +136,13 @@ pub fn compute_column_impact_with_manifest_path(
             .nodes
             .get(&source_uid)
             .map(|node| {
-                make_fq_table_name(
+                RelationRef::from_manifest(
                     node.database.as_deref(),
                     node.schema.as_deref(),
                     node.relation_name(),
                 )
             })
-            .unwrap_or_else(|| source_uid.clone());
+            .unwrap_or_else(|| RelationRef::bare(source_uid.clone()));
         let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
@@ -156,7 +156,7 @@ pub fn compute_column_impact_with_manifest_path(
             let dep_name = &dep_node.name;
 
             let lineage = lineage_cache.entry(dep_uid.clone()).or_insert_with(|| {
-                super::compute_column_lineage_with_manifest_path(
+                super::compute_column_lineage_internal(
                     manifest,
                     dep_uid,
                     dialect,
@@ -174,7 +174,8 @@ pub fn compute_column_impact_with_manifest_path(
                 }
 
                 let references_source = entry.sources.iter().any(|s| {
-                    relation_names_match(&s.table, &source_relation) && s.column == source_column
+                    relation_matches(&s.relation, &source_relation, dialect)
+                        && s.column == source_column
                 });
 
                 if references_source {
@@ -268,4 +269,11 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
     }
 
     map
+}
+
+fn relation_matches(query: &RelationRef, candidate: &RelationRef, dialect: DlinDialect) -> bool {
+    matches!(
+        resolve_unique(query, std::slice::from_ref(candidate), dialect),
+        RelationResolution::Unique(0)
+    )
 }

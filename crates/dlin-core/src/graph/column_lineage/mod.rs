@@ -98,7 +98,7 @@ pub fn compute_column_lineage_with_manifest_path(
         .into_public()
 }
 
-fn compute_column_lineage_internal(
+pub(super) fn compute_column_lineage_internal(
     manifest: &Manifest,
     model_name: &str,
     dialect: DlinDialect,
