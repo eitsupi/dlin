@@ -30,11 +30,13 @@ pub use impact::{
     ColumnImpactReport, ImpactedColumn, compute_column_impact,
     compute_column_impact_with_manifest_path,
 };
+use relation::RelationRef;
 use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
 };
+use types::{InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage};
 
 fn discover_named_output_columns(
     backend: &dyn LineageBackend,
@@ -83,7 +85,7 @@ pub fn compute_column_lineage(
     dialect: DlinDialect,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
-    compute_column_lineage_with_manifest_path(manifest, model_name, dialect, None, cache)
+    compute_column_lineage_internal(manifest, model_name, dialect, None, cache).into_public()
 }
 
 pub fn compute_column_lineage_with_manifest_path(
@@ -93,13 +95,24 @@ pub fn compute_column_lineage_with_manifest_path(
     manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
+    compute_column_lineage_internal(manifest, model_name, dialect, manifest_path, cache)
+        .into_public()
+}
+
+fn compute_column_lineage_internal(
+    manifest: &Manifest,
+    model_name: &str,
+    dialect: DlinDialect,
+    manifest_path: Option<&Path>,
+    cache: &mut ColumnLineageCache,
+) -> InternalModelColumnLineage {
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name));
 
     let node = match node {
         Some(n) => n,
         None => {
-            return ModelColumnLineage {
+            return InternalModelColumnLineage {
                 model: model_name.to_string(),
                 traced_columns: 0,
                 total_columns: 0,
@@ -119,7 +132,7 @@ pub fn compute_column_lineage_with_manifest_path(
     let compiled_code = match &node.compiled_code {
         Some(code) => code,
         None => {
-            return ModelColumnLineage {
+            return InternalModelColumnLineage {
                 model: display_name.to_string(),
                 traced_columns: 0,
                 total_columns: 0,
@@ -138,7 +151,7 @@ pub fn compute_column_lineage_with_manifest_path(
 
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
     let backend = Backend::Polyglot(PolyglotBackend::new());
-    if let Some(cached) = cache.get(
+    if let Some(cached) = cache.get_internal(
         model_name,
         compiled_code,
         dialect,
@@ -167,7 +180,7 @@ pub fn compute_column_lineage_with_manifest_path(
     };
 
     if column_names.is_empty() {
-        return ModelColumnLineage {
+        return InternalModelColumnLineage {
             model: display_name.to_string(),
             traced_columns: 0,
             total_columns: 0,
@@ -209,7 +222,7 @@ pub fn compute_column_lineage_with_manifest_path(
     let analysis = match backend.analyze(&request) {
         Ok(analysis) => analysis,
         Err(e) => {
-            return ModelColumnLineage {
+            return InternalModelColumnLineage {
                 model: display_name.to_string(),
                 traced_columns: 0,
                 total_columns: column_names.len(),
@@ -229,7 +242,7 @@ pub fn compute_column_lineage_with_manifest_path(
     let statement = match require_single_lineage_statement(analysis) {
         Ok(statement) => statement,
         Err(e) => {
-            return ModelColumnLineage {
+            return InternalModelColumnLineage {
                 model: display_name.to_string(),
                 traced_columns: 0,
                 total_columns: column_names.len(),
@@ -254,15 +267,16 @@ pub fn compute_column_lineage_with_manifest_path(
     let mut errors = Vec::new();
     for (col_name, outcome) in column_names.iter().zip(normalized_outcomes) {
         match outcome {
-            BackendColumnOutcome::Resolved(result) => columns.push(ColumnLineageEntry {
+            BackendColumnOutcome::Resolved(result) => columns.push(InternalColumnLineageEntry {
                 column: col_name.clone(),
                 transformation: result.transformation,
                 sources: result
                     .sources
                     .into_iter()
                     .map(|s| match s {
-                        BackendSource::Concrete { table, column } => ColumnSource {
-                            table,
+                        BackendSource::Concrete { table, column } => InternalColumnSource {
+                            relation: RelationRef::parse(&table)
+                                .unwrap_or_else(|_| RelationRef::bare(table)),
                             column,
                             model_path: vec![],
                         },
@@ -302,7 +316,7 @@ pub fn compute_column_lineage_with_manifest_path(
         hint: None,
     }));
 
-    let result = ModelColumnLineage {
+    let result = InternalModelColumnLineage {
         model: display_name.to_string(),
         traced_columns: columns.len(),
         total_columns: total,
@@ -310,7 +324,7 @@ pub fn compute_column_lineage_with_manifest_path(
         errors,
     };
 
-    cache.insert(
+    cache.insert_internal(
         model_name,
         compiled_code,
         dialect,

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::relation::RelationRef;
+
 /// Error kind discriminator for column lineage errors.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -86,4 +88,87 @@ pub struct ColumnSource {
     /// traversed to reach this source. Ordered from the target model outward toward the leaf source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_path: Vec<(String, String, TransformationType)>,
+}
+
+/// Internal source representation. The public `ColumnSource.table` remains a
+/// rendered string for JSON/API compatibility; analysis and cache code keeps
+/// the structural relation until the final conversion boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct InternalColumnSource {
+    pub relation: RelationRef,
+    pub column: String,
+    pub model_path: Vec<(String, String, TransformationType)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct InternalColumnLineageEntry {
+    pub column: String,
+    pub transformation: TransformationType,
+    pub sources: Vec<InternalColumnSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct InternalModelColumnLineage {
+    pub model: String,
+    pub traced_columns: usize,
+    pub total_columns: usize,
+    pub columns: Vec<InternalColumnLineageEntry>,
+    pub errors: Vec<ColumnLineageError>,
+}
+
+impl InternalModelColumnLineage {
+    pub(crate) fn into_public(self) -> ModelColumnLineage {
+        ModelColumnLineage {
+            model: self.model,
+            traced_columns: self.traced_columns,
+            total_columns: self.total_columns,
+            columns: self
+                .columns
+                .into_iter()
+                .map(|entry| ColumnLineageEntry {
+                    column: entry.column,
+                    transformation: entry.transformation,
+                    sources: entry
+                        .sources
+                        .into_iter()
+                        .map(|source| ColumnSource {
+                            table: source.relation.render(),
+                            column: source.column,
+                            model_path: source.model_path,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            errors: self.errors,
+        }
+    }
+}
+
+impl From<ModelColumnLineage> for InternalModelColumnLineage {
+    fn from(public: ModelColumnLineage) -> Self {
+        Self {
+            model: public.model,
+            traced_columns: public.traced_columns,
+            total_columns: public.total_columns,
+            columns: public
+                .columns
+                .into_iter()
+                .map(|entry| InternalColumnLineageEntry {
+                    column: entry.column,
+                    transformation: entry.transformation,
+                    sources: entry
+                        .sources
+                        .into_iter()
+                        .map(|source| InternalColumnSource {
+                            relation: RelationRef::parse(&source.table)
+                                .unwrap_or_else(|_| RelationRef::bare(source.table)),
+                            column: source.column,
+                            model_path: source.model_path,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            errors: public.errors,
+        }
+    }
 }

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::backend::DlinDialect;
 
 /// How an identifier was quoted at the point where it was constructed.
@@ -10,7 +12,7 @@ use super::backend::DlinDialect;
 /// resolved spelling, but not whether the adapter rendered that component as
 /// quoted SQL. Keeping that uncertainty explicit prevents it from being
 /// mistaken for an unquoted identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum QuoteStyle {
     Unquoted,
     Double,
@@ -25,7 +27,7 @@ impl QuoteStyle {
 }
 
 /// One component of a relation identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct Identifier {
     value: String,
     quote_style: QuoteStyle,
@@ -90,7 +92,7 @@ impl Identifier {
 
 /// A structurally represented relation, from bare table name to
 /// catalog.schema.table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct RelationRef {
     catalog: Option<Identifier>,
     schema: Option<Identifier>,

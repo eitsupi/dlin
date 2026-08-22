@@ -48,6 +48,56 @@ fn test_column_cache_hit() {
 }
 
 #[test]
+fn test_column_cache_persists_structural_relation_and_public_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let manifest = make_test_manifest();
+    let compiled_code = super::super::find_model_by_name(&manifest, "stg_orders")
+        .unwrap()
+        .compiled_code
+        .clone()
+        .unwrap();
+
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    let public = compute_column_lineage(&manifest, "stg_orders", DlinDialect::Generic, &mut cache);
+    cache.save();
+
+    let cache_path = project_dir
+        .join(CACHE_DIR)
+        .join(COLUMN_LINEAGE_CACHE_FILENAME);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache_path).unwrap()).unwrap();
+    let sources = json["entries"]["stg_orders"]["lineage"]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["sources"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    assert!(!sources.is_empty());
+    assert!(sources[0]["relation"].is_object());
+    assert!(sources[0].get("table").is_none());
+
+    let reloaded = ColumnLineageCache::load(project_dir, None);
+    let hit = reloaded
+        .get(
+            "stg_orders",
+            &compiled_code,
+            DlinDialect::Generic,
+            BackendId::Polyglot,
+            None,
+            Some(super::super::schema::compute_manifest_columns_hash(
+                &manifest,
+                super::super::find_model_by_name(&manifest, "stg_orders").unwrap(),
+            )),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(hit).unwrap(),
+        serde_json::to_value(public).unwrap()
+    );
+}
+
+#[test]
 fn test_column_cache_miss_on_code_change() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
