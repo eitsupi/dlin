@@ -2532,6 +2532,30 @@ mod manifest_only_mode {
     }
 
     #[test]
+    fn test_column_upstream_auto_detects_warehouse_dialect_without_warning() {
+        // A dialect the lineage engine's future backend cannot serve is still a
+        // first-class dlin dialect: it is inferred from adapter_type and says nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "should succeed; stderr: {stderr}");
+        assert!(stderr.trim().is_empty(), "unexpected stderr: {stderr}");
+    }
+
+    #[test]
     fn test_column_upstream_errors_when_no_adapter_type_and_no_dialect_flag() {
         // When both --dialect and manifest adapter_type are absent, the command must fail
         // with an actionable error rather than silently using Generic.

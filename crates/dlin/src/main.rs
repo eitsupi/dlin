@@ -810,36 +810,40 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Resolve the SQL dialect to use for column lineage.
+/// Resolve the requested SQL dialect.
 ///
-/// Precedence: CLI flag > manifest adapter_type > error.
-/// Avoids silent fallback to Generic, which produces incorrect results for
-/// warehouse-specific SQL (e.g. BigQuery backtick quoting, Snowflake QUALIFY).
-fn resolve_dialect(
-    cli_dialect: Option<DlinDialect>,
+/// Precedence: CLI flag > manifest adapter_type > error. Missing, empty, and
+/// unknown adapter_type values remain errors.
+pub(crate) fn resolve_dialect(
+    cli_dialect: Option<&DlinDialect>,
     manifest: &parser::manifest::Manifest,
 ) -> Result<DlinDialect> {
-    if let Some(d) = cli_dialect {
-        return Ok(d);
-    }
-    match manifest.metadata.adapter_type.as_deref() {
-        Some(adapter) if !adapter.trim().is_empty() => {
-            adapter.trim().parse::<DlinDialect>().map_err(|_| {
-                anyhow::anyhow!(
-                    "manifest adapter_type '{}' has no matching SQL dialect; \
-                     use --dialect to specify one explicitly (e.g. --dialect postgres)",
-                    adapter.trim()
+    match cli_dialect {
+        Some(dialect) => Ok(*dialect),
+        None => match manifest.metadata.adapter_type.as_deref() {
+            Some(adapter) if !adapter.trim().is_empty() => {
+                let requested = adapter.trim();
+                requested.parse::<DlinDialect>().map_err(|_| {
+                    anyhow::anyhow!(
+                        "manifest adapter_type '{}' has no matching SQL dialect; \
+                         use --dialect to specify one explicitly (e.g. --dialect postgres)",
+                        requested
+                    )
+                })
+            }
+            Some(_) => {
+                anyhow::bail!(
+                    "manifest adapter_type is empty; \
+                     use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
                 )
-            })
-        }
-        Some(_) => anyhow::bail!(
-            "manifest adapter_type is empty; \
-             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
-        ),
-        None => anyhow::bail!(
-            "manifest does not specify an adapter_type; \
-             use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
-        ),
+            }
+            None => {
+                anyhow::bail!(
+                    "manifest does not specify an adapter_type; \
+                     use --dialect to specify the SQL dialect (e.g. --dialect bigquery)"
+                )
+            }
+        },
     }
 }
 
@@ -878,7 +882,7 @@ fn run_column_lineage_command(
     let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
 
-    let dialect = resolve_dialect(dialect, &manifest)?;
+    let dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
 
     let models = if input::has_path_like_input(&raw_inputs) {
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
@@ -1082,7 +1086,7 @@ fn run_column_impact_command(
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
 
-    let dialect = resolve_dialect(dialect, &manifest)?;
+    let dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()

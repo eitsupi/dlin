@@ -15,9 +15,11 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::super::backend::{
-    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot,
-    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, PolyglotBackend,
-    normalize_column_outcomes, require_single_lineage_statement,
+    AnalysisCompleteness, AnalysisSlot, BackendColumnOutcome, BackendErrorKind, BackendId,
+    BackendSource, CatalogSnapshot, DlinDialect, LineageBackend, LineageRequest,
+    OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName,
+    SqllineageCatalogProvider, backend_for_tests, normalize_column_outcomes,
+    require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
@@ -130,7 +132,7 @@ fn analyze_one_column(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = backend_for_tests(BackendId::Polyglot);
     let analysis = backend.analyze(&request).map_err(|e| (e.kind, e.message))?;
     let statement = require_single_lineage_statement(analysis).map_err(|e| (e.kind, e.message))?;
     let (outcomes, diagnostics) = normalize_column_outcomes(&outputs, statement.columns);
@@ -179,7 +181,8 @@ fn assert_resolved(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
         Ok(PathOutcome::Resolved {
@@ -217,7 +220,8 @@ fn assert_failed(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
         Ok(PathOutcome::Failed(message)) => {
@@ -318,7 +322,7 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     assert_eq!(catalog.table_columns("t").unwrap(), ["b", "a"]);
 
     let sql = "select * from t union all select * from t";
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = backend_for_tests(BackendId::Polyglot);
     let duplicate_output_names = BTreeSet::new();
 
     for (column, expected_sources) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])].into_iter()
@@ -390,7 +394,8 @@ fn unresolvable_column_fails_with_column_resolution_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(
         &manifest,
@@ -418,7 +423,8 @@ fn unparseable_sql_fails_with_parse_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect);
+    let backend = backend_for_tests(BackendId::Polyglot);
+    let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), "anything") {
         Err((kind, _message)) => {
@@ -431,4 +437,737 @@ fn unparseable_sql_fails_with_parse_kind() {
         }
         Ok(outcome) => panic!("expected the analysis to fail to parse, got {:?}", outcome),
     }
+}
+
+fn sqllineage_statement(
+    sql: &str,
+    catalog: Option<&CatalogSnapshot>,
+    outputs: &[OutputColumnRequest],
+    duplicate_output_names: &BTreeSet<String>,
+) -> super::super::backend::BackendStatementResult {
+    let statement =
+        sqllineage_statement_without_completeness(sql, catalog, outputs, duplicate_output_names);
+    assert_eq!(statement.completeness, AnalysisCompleteness::Complete);
+    statement
+}
+
+fn sqllineage_statement_without_completeness(
+    sql: &str,
+    catalog: Option<&CatalogSnapshot>,
+    outputs: &[OutputColumnRequest],
+    duplicate_output_names: &BTreeSet<String>,
+) -> super::super::backend::BackendStatementResult {
+    let request = LineageRequest {
+        sql,
+        dialect: DlinDialect::Generic,
+        catalog,
+        outputs,
+        duplicate_output_names,
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+    backend
+        .analyze(&request)
+        .unwrap()
+        .statements
+        .into_iter()
+        .next()
+        .expect("one statement was analyzed")
+}
+
+fn sqllineage_outcome(
+    statement: &super::super::backend::BackendStatementResult,
+    slot: usize,
+) -> &BackendColumnOutcome {
+    statement
+        .columns
+        .iter()
+        .find(|outcome| match outcome {
+            BackendColumnOutcome::Resolved(result) => result.target.slot == AnalysisSlot(slot),
+            BackendColumnOutcome::Failed(failure) => failure.target.slot == AnalysisSlot(slot),
+        })
+        .unwrap_or_else(|| panic!("no outcome for slot {slot}: {:?}", statement.columns))
+}
+
+fn assert_leading_star_set_operation_is_indeterminate(sql: &str) {
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(0),
+            name: "id".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(1),
+            name: "explicit_col".to_string(),
+        },
+    ];
+    let statement =
+        sqllineage_statement_without_completeness(sql, None, &outputs, &BTreeSet::new());
+
+    let AnalysisCompleteness::Indeterminate { reason } = &statement.completeness else {
+        panic!(
+            "leading-star set operation should be indeterminate, got {:?}",
+            statement.completeness
+        );
+    };
+    assert!(
+        reason.contains("leading branch is SELECT *"),
+        "reason: {reason}"
+    );
+    assert!(reason.contains("lineage for this statement cannot be trusted"));
+
+    for slot in 0..outputs.len() {
+        match sqllineage_outcome(&statement, slot) {
+            BackendColumnOutcome::Failed(failure) => {
+                assert_eq!(
+                    failure.resolution,
+                    super::super::backend::ResolutionState::Indeterminate
+                );
+                assert!(failure.error.message.contains("leading branch is SELECT *"));
+            }
+            other => panic!("expected output {slot} to be indeterminate, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn sqllineage_union_with_leading_star_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_union_all_with_leading_star_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_qualified_leading_star_set_operation_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT first_source.* FROM first_source UNION SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_intersect_with_leading_star_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT * FROM first_source INTERSECT SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_except_with_leading_star_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT * FROM first_source EXCEPT SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_second_branch_star_does_not_guard_explicit_output() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "explicit_col".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => {
+            assert_eq!(result.target.name, "explicit_col");
+        }
+        other => panic!("the second-branch star must not guard explicit output: {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_guard_preserves_duplicate_output_ambiguity() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "explicit_col".to_string(),
+    }];
+    let duplicates = BTreeSet::from(["explicit_col".to_string()]);
+    let statement = sqllineage_statement_without_completeness(
+        "SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source",
+        None,
+        &outputs,
+        &duplicates,
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::Ambiguous
+            );
+            assert!(failure.error.message.contains("output name is duplicated"));
+        }
+        other => panic!("duplicate output ambiguity must take precedence: {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_cte_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "WITH combined AS (SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source) SELECT id, explicit_col FROM combined",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_derived_table_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, explicit_col FROM (SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source) combined",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_parenthesized_query_cte_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "(WITH combined AS (SELECT * FROM first_source UNION SELECT id FROM second_source) SELECT id, 1 AS explicit_col FROM combined) UNION SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_scalar_projection_subquery_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, (SELECT * FROM first_source UNION SELECT id FROM second_source) AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_case_arm_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, CASE WHEN id > 0 THEN (SELECT * FROM first_source UNION SELECT id FROM second_source) ELSE NULL END AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_function_argument_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, COALESCE((SELECT * FROM first_source UNION SELECT id FROM second_source), 0) AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_in_subquery_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col FROM orders WHERE id IN (SELECT * FROM first_source UNION SELECT id FROM second_source)",
+    );
+}
+
+#[test]
+fn sqllineage_nested_leading_star_set_operation_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT * FROM a UNION SELECT x FROM b UNION SELECT y FROM c",
+    );
+}
+
+#[test]
+fn sqllineage_plain_star_without_set_operation_keeps_existing_behavior() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement("SELECT * FROM orders", None, &outputs, &BTreeSet::new());
+
+    assert!(statement.has_unresolved_stars);
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => assert_eq!(
+            failure.resolution,
+            super::super::backend::ResolutionState::Indeterminate
+        ),
+        other => panic!("expected the existing unresolved-star behavior, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_plain_projection_resolves_case_folded_concrete_source() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(7),
+        name: "Output_ID".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "select ID as output_id from SOURCE_TABLE",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 7) {
+        BackendColumnOutcome::Resolved(result) => {
+            assert_eq!(result.target.name, "Output_ID");
+            assert_eq!(result.transformation, TransformationType::Direct);
+            assert_eq!(
+                result.sources,
+                vec![BackendSource::Concrete {
+                    table: "source_table".to_string(),
+                    // The fork normalizes relation identifiers, while its
+                    // expression visitor preserves this source column spelling.
+                    column: "ID".to_string(),
+                }]
+            );
+        }
+        other => panic!("expected a concrete projection, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_maps_expression_aggregate_and_case_transformations() {
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(10),
+            name: "total".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(20),
+            name: "sum_amount".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(30),
+            name: "flag".to_string(),
+        },
+    ];
+    let statement = sqllineage_statement(
+        "select amount + tax as total, sum(amount) as sum_amount, case when amount > 0 then amount else 0 end as flag from orders",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    for (slot, transformation) in [
+        (10, TransformationType::Expression),
+        (20, TransformationType::Aggregation),
+        (30, TransformationType::Conditional),
+    ] {
+        match sqllineage_outcome(&statement, slot) {
+            BackendColumnOutcome::Resolved(result) => {
+                assert_eq!(result.transformation, transformation);
+            }
+            other => panic!("expected resolved transformation, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn sqllineage_cast_is_direct_by_decision() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "cast_amount".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "select cast(amount as int) as cast_amount from orders",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => {
+            assert_eq!(result.transformation, TransformationType::Direct);
+        }
+        other => panic!("expected cast to resolve, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_join_without_catalog_reports_genuine_ambiguity() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "select id from left_table join right_table on left_table.id = right_table.id",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::Ambiguous
+            );
+            assert!(matches!(
+                failure.error.kind,
+                BackendErrorKind::ColumnResolution {
+                    state: super::super::backend::ResolutionState::Ambiguous
+                }
+            ));
+            assert!(failure.error.message.contains("left_table"));
+            assert!(failure.error.message.contains("right_table"));
+        }
+        other => panic!("expected genuine ambiguity, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("left_table", ["ID".to_string()]);
+    catalog.add_table("right_table", ["other".to_string()]);
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        // Unqualified so that sqllineage has to ask the catalog which table owns
+        // `id`. A qualified reference resolves from the binding alone and never
+        // reaches `resolve_column`, so it would not exercise the case folding.
+        "select id from left_table join right_table on left_table.id = right_table.other",
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => assert_eq!(
+            result.sources,
+            vec![BackendSource::Concrete {
+                table: "left_table".to_string(),
+                column: "id".to_string(),
+            }]
+        ),
+        other => panic!("expected catalog-resolved join column, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_column_without_visible_binding_reports_not_found() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement("select id", None, &outputs, &BTreeSet::new());
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::NotFound
+            );
+            assert!(matches!(
+                failure.error.kind,
+                BackendErrorKind::ColumnResolution {
+                    state: super::super::backend::ResolutionState::NotFound
+                }
+            ));
+        }
+        other => panic!("expected unresolved column, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_unknown_star_is_indeterminate_and_sets_star_flag() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement("select * from orders", None, &outputs, &BTreeSet::new());
+
+    assert!(statement.has_unresolved_stars);
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::Indeterminate
+            );
+        }
+        other => panic!("expected unresolved star, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_unmapped_output_depends_on_unresolved_star_state() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "missing".to_string(),
+    }];
+
+    let without_star =
+        sqllineage_statement("select id from orders", None, &outputs, &BTreeSet::new());
+    match sqllineage_outcome(&without_star, 0) {
+        BackendColumnOutcome::Failed(failure) => assert_eq!(
+            failure.resolution,
+            super::super::backend::ResolutionState::NotFound
+        ),
+        other => panic!("expected missing output without a star to be not found, got {other:?}"),
+    }
+
+    let with_unexpanded_star =
+        sqllineage_statement("select * from orders", None, &outputs, &BTreeSet::new());
+    match sqllineage_outcome(&with_unexpanded_star, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::Indeterminate
+            );
+            assert!(
+                failure
+                    .error
+                    .message
+                    .contains("unexpanded SELECT * leaves the output columns unknown")
+            );
+        }
+        other => panic!(
+            "expected missing output with an unexpanded star to be indeterminate, got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn sqllineage_catalog_expands_star_to_concrete_sources() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("orders", ["id".to_string(), "amount".to_string()]);
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(4),
+            name: "ID".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(9),
+            name: "amount".to_string(),
+        },
+    ];
+    let statement = sqllineage_statement(
+        "select * from ORDERS",
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    assert!(!statement.has_unresolved_stars);
+    match sqllineage_outcome(&statement, 4) {
+        BackendColumnOutcome::Resolved(result) => assert_eq!(
+            result.sources,
+            vec![BackendSource::Concrete {
+                table: "orders".to_string(),
+                column: "id".to_string(),
+            }]
+        ),
+        other => panic!("expected catalog-resolved star column, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_returns_failed_outcome_for_unmapped_requested_output() {
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(12),
+            name: "id".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(27),
+            name: "missing".to_string(),
+        },
+    ];
+    let statement = sqllineage_statement("select id from orders", None, &outputs, &BTreeSet::new());
+
+    assert_eq!(statement.columns.len(), outputs.len());
+    match sqllineage_outcome(&statement, 27) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(failure.target.name, "missing");
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::NotFound
+            );
+        }
+        other => panic!("expected missing output to fail, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_duplicate_output_name_fails_as_ambiguous() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "value".to_string(),
+    }];
+    let duplicates = BTreeSet::from(["value".to_string()]);
+    let statement = sqllineage_statement(
+        "select id as value, amount as value from orders",
+        None,
+        &outputs,
+        &duplicates,
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.resolution,
+                super::super::backend::ResolutionState::Ambiguous
+            );
+            assert!(failure.error.message.contains("output name is duplicated"));
+        }
+        other => panic!("expected duplicate output failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_parse_failure_is_parse_error() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "value".to_string(),
+    }];
+    let request = LineageRequest {
+        sql: "select * from",
+        dialect: DlinDialect::Generic,
+        catalog: None,
+        outputs: &outputs,
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
+fn sqllineage_unsupported_dialect_is_reported() {
+    let request = LineageRequest {
+        sql: "SELECT 1",
+        dialect: DlinDialect::DuckDB,
+        catalog: None,
+        outputs: &[],
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::UnsupportedDialect);
+    assert!(error.message.contains("duckdb"));
+}
+
+fn sqllineage_discovery(
+    sql: &str,
+    catalog: Option<&CatalogSnapshot>,
+) -> Result<OutputDiscovery, super::super::backend::BackendError> {
+    let request = OutputDiscoveryRequest {
+        sql,
+        dialect: DlinDialect::Generic,
+        catalog,
+    };
+    backend_for_tests(BackendId::Sqllineage).discover_output_columns(&request)
+}
+
+fn discovered_names(discovery: &OutputDiscovery) -> Vec<String> {
+    discovery
+        .outputs
+        .iter()
+        .map(|output| match &output.name {
+            OutputName::Named(name) => name.clone(),
+            OutputName::UnaliasedExpression => {
+                panic!("sqllineage discovery produced an unaliased expression")
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn sqllineage_discovery_plain_projection_preserves_order_and_aliases() {
+    let discovery =
+        sqllineage_discovery("SELECT id, amount AS total, status FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "total", "status"]);
+}
+
+#[test]
+fn sqllineage_discovery_top_level_set_operation_uses_projection_names() {
+    let discovery = sqllineage_discovery(
+        "SELECT id, amount AS total FROM first_source UNION ALL SELECT id, amount AS other FROM second_source",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "total"]);
+}
+
+#[test]
+fn sqllineage_discovery_unexpanded_star_has_no_name() {
+    let discovery = sqllineage_discovery("SELECT * FROM orders", None).unwrap();
+
+    assert!(discovery.outputs.is_empty());
+    assert!(!discovery.duplicate_names.contains("*"));
+}
+
+#[test]
+fn sqllineage_discovery_preserves_quoted_star_output_name() {
+    let discovery = sqllineage_discovery("SELECT id AS \"*\" FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["*"]);
+}
+
+#[test]
+fn sqllineage_discovery_expands_star_from_catalog() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("orders", ["id".to_string(), "amount".to_string()]);
+
+    let discovery = sqllineage_discovery("SELECT * FROM orders", Some(&catalog)).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["id", "amount"]);
+}
+
+#[test]
+fn sqllineage_discovery_cte_uses_outer_projection() {
+    let discovery = sqllineage_discovery(
+        "WITH base AS (SELECT id, amount AS inner_amount FROM orders) SELECT inner_amount AS outer_amount FROM base",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["outer_amount"]);
+}
+
+#[test]
+fn sqllineage_discovery_records_duplicate_names() {
+    let discovery =
+        sqllineage_discovery("SELECT id AS value, amount AS value FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["value", "value"]);
+    assert_eq!(
+        discovery.duplicate_names,
+        BTreeSet::from(["value".to_string()])
+    );
+}
+
+#[test]
+fn sqllineage_discovery_parse_failure_is_parse_error() {
+    let error = sqllineage_discovery("SELECT * FROM", None).unwrap_err();
+
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
+fn sqllineage_discovery_matches_analyze_mapping_targets() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table(
+        "orders",
+        ["id".to_string(), "amount".to_string(), "status".to_string()],
+    );
+    let sql = "SELECT id, amount AS total, status FROM orders";
+
+    let discovery = sqllineage_discovery(sql, Some(&catalog)).unwrap();
+    let discovered = discovered_names(&discovery);
+    let provider = SqllineageCatalogProvider::new(&catalog, DlinDialect::Generic);
+    let analyzed = sqllineage::analyze(
+        sql,
+        sqllineage::AnalyzeOptions {
+            dialect: DlinDialect::Generic.to_sqllineage().unwrap(),
+            catalog: Some(Box::new(provider)),
+            normalize_case: true,
+        },
+    )
+    .unwrap();
+    let analyzed_names: Vec<String> = analyzed[0]
+        .columns
+        .mappings
+        .iter()
+        .map(|mapping| mapping.target.column.clone())
+        .filter(|name| name != "*")
+        .collect();
+
+    assert_eq!(discovered, analyzed_names);
 }

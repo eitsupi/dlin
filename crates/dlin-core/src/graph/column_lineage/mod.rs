@@ -14,11 +14,11 @@ mod types;
 
 use backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
-    LineageRequest, OutputColumnRequest, PolyglotBackend, ResolutionState,
+    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, PolyglotBackend, ResolutionState,
     normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
-    CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
+    BackendId, CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
     debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
@@ -34,6 +34,43 @@ pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
 };
+
+fn discover_named_output_columns(
+    backend: &dyn LineageBackend,
+    request: &OutputDiscoveryRequest<'_>,
+) -> HashSet<String> {
+    // Deliberately preserve the previous parse-failure behavior:
+    // YAML columns remain usable when discovery cannot parse the SQL.
+    // Surfacing discovery parse errors is an error-model change to decide on
+    // its own merits, rather than inherit from this refactor.
+    match backend.discover_output_columns(request) {
+        Ok(discovery) => discovery
+            .outputs
+            .into_iter()
+            .filter_map(|output| match output.name {
+                backend::OutputName::Named(name) => Some(name),
+                backend::OutputName::UnaliasedExpression => None,
+            })
+            .collect(),
+        Err(error) => {
+            // These are the ways a backend says "I cannot name this model's outputs":
+            // the SQL does not parse, it is not a single statement, or the statement
+            // carries no lineage. Falling back to the YAML columns is right for all
+            // three. Any other kind means the backend failed for a reason this caller
+            // does not understand, and swallowing it would hide a bug.
+            debug_assert!(
+                matches!(
+                    error.kind,
+                    BackendErrorKind::Parse
+                        | BackendErrorKind::IncompleteAnalysis
+                        | BackendErrorKind::UnsupportedStatement
+                ),
+                "unexpected discovery error kind: {error:?}"
+            );
+            HashSet::new()
+        }
+    }
+}
 
 /// Compute column-level lineage for a model.
 ///
@@ -98,26 +135,30 @@ pub fn compute_column_lineage_with_manifest_path(
     };
 
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
+    let backend = Backend::Polyglot(PolyglotBackend::new());
     if let Some(cached) = cache.get(
         model_name,
         compiled_code,
         dialect,
+        backend.id(),
         manifest_path,
         Some(manifest_columns_hash),
     ) {
         return cached.clone();
     }
 
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
 
     let column_names: Vec<String> = {
         let mut names: HashSet<String> = node.columns.keys().cloned().collect();
         let yaml_schema = build_yaml_schema_for_node(manifest, node);
-        names.extend(backend::polyglot::infer_output_columns(
-            compiled_code,
+        let request = OutputDiscoveryRequest {
+            sql: compiled_code,
             dialect,
-            yaml_schema.as_ref(),
-        ));
+            catalog: yaml_schema.as_ref(),
+        };
+        let inferred_names = discover_named_output_columns(&backend, &request);
+        names.extend(inferred_names);
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
         names
@@ -163,7 +204,6 @@ pub fn compute_column_lineage_with_manifest_path(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = match backend.analyze(&request) {
         Ok(analysis) => analysis,
         Err(e) => {
@@ -272,6 +312,7 @@ pub fn compute_column_lineage_with_manifest_path(
         model_name,
         compiled_code,
         dialect,
+        backend.id(),
         manifest_columns_hash,
         manifest_path,
         result.clone(),

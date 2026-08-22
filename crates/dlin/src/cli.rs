@@ -662,18 +662,20 @@ pub struct McpArgs {
     #[arg(long)]
     pub manifest_path: Option<PathBuf>,
 
-    /// SQL dialect for column lineage parsing
+    /// SQL dialect for parsing compiled SQL.
+    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
+    /// does not declare an adapter_type.
     #[arg(
         long,
-        required = true,
         value_parser = parse_dialect,
         long_help = "\
 SQL dialect for parsing compiled SQL in get_column_lineage.
 
-This is required because the generic parser can produce incorrect or incomplete
-column lineage for warehouse-specific SQL."
+When omitted, the dialect is auto-detected from manifest.metadata.adapter_type.
+It is required only when the manifest does not declare an adapter_type; a missing,
+empty, or unknown adapter_type is an error."
     )]
-    pub dialect: DlinDialect,
+    pub dialect: Option<DlinDialect>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -969,7 +971,6 @@ pub struct ColumnGraphArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long, value_parser = parse_dialect)]
     pub dialect: Option<DlinDialect>,
 
@@ -1014,7 +1015,6 @@ pub struct ColumnImpactArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
     #[arg(long, value_parser = parse_dialect)]
     pub dialect: Option<DlinDialect>,
 
@@ -1999,20 +1999,26 @@ mod tests {
     #[test]
     fn test_dialect_all_known_values_parse() {
         let dialects = [
-            "bigquery",
-            "snowflake",
+            "generic",
+            "postgresql",
             "postgres",
-            "redshift",
-            "databricks",
-            "spark",
-            "trino",
-            "duckdb",
             "mysql",
-            "clickhouse",
-            "oracle",
             "hive",
+            "databricks",
+            "snowflake",
+            "bigquery",
+            "duckdb",
             "sqlite",
+            "spark",
+            "spark2",
+            "trino",
             "presto",
+            "redshift",
+            "tsql",
+            "mssql",
+            "sqlserver",
+            "oracle",
+            "clickhouse",
             "athena",
             "teradata",
             "doris",
@@ -2020,9 +2026,10 @@ mod tests {
             "materialize",
             "risingwave",
             "singlestore",
+            "memsql",
             "cockroachdb",
+            "cockroach",
             "tidb",
-            "tsql",
             "druid",
             "solr",
             "tableau",
@@ -2032,6 +2039,8 @@ mod tests {
             "dremio",
             "exasol",
             "datafusion",
+            "arrow-datafusion",
+            "arrow_datafusion",
         ];
         for dialect in dialects {
             let cli =
@@ -2053,12 +2062,12 @@ mod tests {
             "upstream",
             "model",
             "--dialect",
-            "unknown_db",
+            "posgres",
         ]);
-        assert!(
-            result.is_err(),
-            "invalid dialect should be rejected by clap"
-        );
+        let error = result.expect_err("unknown dialect should be rejected by clap");
+        let message = error.to_string();
+        assert!(message.contains("posgres"));
+        assert!(message.contains("generic, postgresql, postgres"));
     }
 
     // -- ColumnOutputFormat tests --------------------------------------------
