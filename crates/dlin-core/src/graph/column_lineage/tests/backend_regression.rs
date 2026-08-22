@@ -48,6 +48,7 @@ fn make_manifest(compiled_code: &str, known_table: Option<(&str, &[&str])>) -> (
             ManifestNode {
                 unique_id: dep_id.clone(),
                 name: table_name.to_string(),
+                alias: None,
                 resource_type: "model".to_string(),
                 depends_on: DependsOn { nodes: vec![] },
                 config: ManifestConfig::default(),
@@ -69,6 +70,7 @@ fn make_manifest(compiled_code: &str, known_table: Option<(&str, &[&str])>) -> (
         ManifestNode {
             unique_id: root_id.clone(),
             name: "root".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: depends_on },
             config: ManifestConfig::default(),
