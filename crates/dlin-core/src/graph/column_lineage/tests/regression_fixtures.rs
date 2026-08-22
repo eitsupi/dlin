@@ -158,7 +158,7 @@ fn test_star_passthrough_parenthesized_set_operand_is_traceable() {
 }
 
 #[test]
-fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
+fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
     // These cases assert SQL semantics, not a workaround for a particular
     // implementation: a set operation is traced when its leading operand
     // names the requested output and the branches align by ordinal.
@@ -730,7 +730,7 @@ fn test_nested_set_star_does_not_fabricate_lineage() {
 }
 
 #[test]
-fn test_every_explicit_set_operand_contributes_sources() {
+fn test_leading_star_hides_a_name_declared_by_several_operands() {
     // Even though later operands declare total, the leading unknown SELECT *
     // supplies no output name for the ordinally aligned column.
     let result = compute_star_shape(
@@ -743,7 +743,7 @@ fn test_every_explicit_set_operand_contributes_sources() {
 }
 
 #[test]
-fn test_set_operands_match_explicit_projections_by_ordinal() {
+fn test_leading_star_hides_a_name_despite_ordinal_alignment() {
     // Ordinal alignment cannot rescue total: the leading SELECT * still does
     // not name the output column.
     let result = compute_star_shape(
@@ -866,7 +866,7 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
 #[test]
 #[ignore = "polyglot currently traces a name introduced only by a non-leading branch through \
             a nested set operation, but SQL semantics leave the output unresolved"]
-fn test_set_operation_nested_in_from_subquery_uses_explicit_branch() {
+fn test_set_operation_in_from_subquery_does_not_adopt_a_non_leading_name() {
     let result = compute_star_shape(
         "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",
         &["col_a"],
