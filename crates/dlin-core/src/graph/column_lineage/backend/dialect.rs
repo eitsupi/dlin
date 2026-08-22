@@ -136,7 +136,7 @@ impl DlinDialect {
     }
 
     #[cfg(feature = "column-lineage")]
-    pub fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
+    pub(crate) fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
         match self {
             Self::Generic => Ok(sqllineage::Dialect::Generic),
             Self::PostgreSQL => Ok(sqllineage::Dialect::PostgreSql),
