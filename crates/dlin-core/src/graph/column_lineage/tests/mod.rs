@@ -926,6 +926,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
     }
 }
 
+mod backend_difference_matrix;
 mod backend_regression;
 mod cache;
 mod core;
