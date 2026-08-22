@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use super::super::backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot,
-    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, OutputName, PolyglotBackend,
+    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, PolyglotBackend,
     normalize_column_outcomes, require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
@@ -148,7 +148,7 @@ fn analyze_one_column(
         BackendColumnOutcome::Failed(failure) => &failure.target,
     };
     assert_eq!(target.slot, outputs[0].slot);
-    assert_eq!(target.name, OutputName::Named(outputs[0].name.clone()));
+    assert_eq!(target.name, outputs[0].name);
 
     Ok(match outcome {
         BackendColumnOutcome::Resolved(result) => PathOutcome::Resolved {
@@ -348,7 +348,7 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
             BackendColumnOutcome::Failed(failure) => &failure.target,
         };
         assert_eq!(target.slot, outputs[0].slot);
-        assert_eq!(target.name, OutputName::Named(outputs[0].name.clone()));
+        assert_eq!(target.name, outputs[0].name);
         let sources = match outcome {
             BackendColumnOutcome::Resolved(result) => result
                 .sources
