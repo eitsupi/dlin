@@ -3,14 +3,17 @@ use sqllineage::{CatalogProvider, TableRef};
 use super::{CatalogSnapshot, DlinDialect};
 
 /// Adapts dlin's manifest catalog to sqllineage's catalog interface.
-pub(crate) struct SqllineageCatalogProvider<'a> {
-    snapshot: &'a CatalogSnapshot,
+pub(crate) struct SqllineageCatalogProvider {
+    snapshot: CatalogSnapshot,
     dialect: DlinDialect,
 }
 
-impl<'a> SqllineageCatalogProvider<'a> {
-    pub(crate) fn new(snapshot: &'a CatalogSnapshot, dialect: DlinDialect) -> Self {
-        Self { snapshot, dialect }
+impl SqllineageCatalogProvider {
+    pub(crate) fn new(snapshot: &CatalogSnapshot, dialect: DlinDialect) -> Self {
+        Self {
+            snapshot: snapshot.clone(),
+            dialect,
+        }
     }
 
     fn table_parts(table: &TableRef) -> Vec<&str> {
@@ -57,11 +60,11 @@ impl<'a> SqllineageCatalogProvider<'a> {
 /// `TableRef` carries no quote metadata, so Snowflake `foo` and `"foo"` are
 /// indistinguishable here. Matching is the deliberate choice over guessing at
 /// the original quoting.
-fn identifiers_match(left: &str, right: &str, _dialect: DlinDialect) -> bool {
+pub(crate) fn identifiers_match(left: &str, right: &str, _dialect: DlinDialect) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 
-impl CatalogProvider for SqllineageCatalogProvider<'_> {
+impl CatalogProvider for SqllineageCatalogProvider {
     fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
         self.columns_for(table).map(<[String]>::to_vec)
     }
