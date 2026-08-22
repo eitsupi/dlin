@@ -46,6 +46,10 @@ pub struct Manifest {
 pub struct ManifestNode {
     pub unique_id: String,
     pub name: String,
+    /// Resolved physical relation identifier. dbt populates this from the
+    /// model config alias, falling back to the model name.
+    #[serde(default)]
+    pub alias: Option<String>,
     pub resource_type: String,
     #[serde(default)]
     pub depends_on: DependsOn,
@@ -173,9 +177,35 @@ pub struct DependsOn {
 /// Config section for nodes
 #[derive(Debug, Default, Deserialize)]
 pub struct ManifestConfig {
+    #[serde(default)]
+    pub alias: Option<String>,
     pub materialized: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+impl ManifestNode {
+    /// Return the identifier used by the database relation for this node.
+    ///
+    /// The node-level alias is dbt's resolved value and therefore takes
+    /// precedence over the raw config value. The config fallback is useful
+    /// for manifests that preserve config data but omit the resolved field.
+    pub fn relation_name(&self) -> &str {
+        // An alias present but empty is not an alias. dbt resolves an empty
+        // config alias to the node name rather than to an empty relation, and a
+        // manifest that records `""` here would otherwise name a relation
+        // nothing at all.
+        self.alias
+            .as_deref()
+            .filter(|alias| !alias.is_empty())
+            .or_else(|| {
+                self.config
+                    .alias
+                    .as_deref()
+                    .filter(|alias| !alias.is_empty())
+            })
+            .unwrap_or(&self.name)
+    }
 }
 
 /// Map a manifest resource_type string to our NodeType enum
@@ -767,11 +797,13 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.stg_orders".to_string(),
                     name: "stg_orders".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn {
                         nodes: vec!["source.proj.raw.orders".to_string()],
                     },
                     config: ManifestConfig {
+                        alias: None,
                         materialized: Some("view".to_string()),
                         tags: vec!["staging".to_string()],
                     },
@@ -836,6 +868,7 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn::default(),
                     config: ManifestConfig::default(),
@@ -959,6 +992,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "seed.proj.countries".to_string(),
                         name: "countries".to_string(),
+                        alias: None,
                         resource_type: "seed".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -976,9 +1010,11 @@ mod tests {
                     ManifestNode {
                         unique_id: "snapshot.proj.snap_orders".to_string(),
                         name: "snap_orders".to_string(),
+                        alias: None,
                         resource_type: "snapshot".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig {
+                            alias: None,
                             materialized: Some("snapshot".to_string()),
                             tags: vec![],
                         },
@@ -1021,6 +1057,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.orders".to_string(),
                         name: "orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1038,6 +1075,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "test.proj.assert_positive".to_string(),
                         name: "assert_positive".to_string(),
+                        alias: None,
                         resource_type: "test".to_string(),
                         depends_on: DependsOn {
                             nodes: vec!["model.proj.orders".to_string()],
@@ -1095,6 +1133,7 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn {
                         nodes: vec!["model.proj.nonexistent".to_string()],
@@ -1126,9 +1165,11 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.bare".to_string(),
                     name: "bare".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn::default(),
                     config: ManifestConfig {
+                        alias: None,
                         materialized: None,
                         tags: vec![],
                     },
@@ -1218,6 +1259,7 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.stg_orders".to_string(),
                     name: "stg_orders".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn::default(),
                     config: ManifestConfig::default(),
@@ -1250,6 +1292,7 @@ mod tests {
                 ManifestNode {
                     unique_id: "analysis.proj.my_analysis".to_string(),
                     name: "my_analysis".to_string(),
+                    alias: None,
                     resource_type: "analysis".to_string(),
                     depends_on: DependsOn::default(),
                     config: ManifestConfig::default(),
@@ -1281,11 +1324,13 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.stg_orders".to_string(),
                         name: "stg_orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn {
                             nodes: vec!["source.proj.raw.orders".to_string()],
                         },
                         config: ManifestConfig {
+                            alias: None,
                             materialized: Some("view".to_string()),
                             tags: vec![],
                         },
@@ -1303,6 +1348,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.stg_payments".to_string(),
                         name: "stg_payments".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn {
                             nodes: vec!["source.proj.raw.payments".to_string()],
@@ -1322,6 +1368,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.orders".to_string(),
                         name: "orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn {
                             nodes: vec![
@@ -1330,6 +1377,7 @@ mod tests {
                             ],
                         },
                         config: ManifestConfig {
+                            alias: None,
                             materialized: Some("table".to_string()),
                             tags: vec!["marts".to_string()],
                         },
@@ -1444,6 +1492,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.stg_orders".to_string(),
                         name: "stg_orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1461,6 +1510,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.orders".to_string(),
                         name: "orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1478,6 +1528,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.bare".to_string(),
                         name: "bare".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1588,6 +1639,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.stg_orders".to_string(),
                         name: "stg_orders".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1605,6 +1657,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "test.proj.not_null_orders_id.abc123".to_string(),
                         name: "not_null_orders_id".to_string(),
+                        alias: None,
                         resource_type: "test".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1624,6 +1677,7 @@ mod tests {
                     ManifestNode {
                         unique_id: "model.proj.no_compile".to_string(),
                         name: "no_compile".to_string(),
+                        alias: None,
                         resource_type: "model".to_string(),
                         depends_on: DependsOn::default(),
                         config: ManifestConfig::default(),
@@ -1691,6 +1745,7 @@ mod tests {
                 ManifestNode {
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
+                    alias: None,
                     resource_type: "model".to_string(),
                     depends_on: DependsOn::default(),
                     config: ManifestConfig::default(),

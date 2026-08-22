@@ -105,13 +105,14 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
             if dep_node.resource_type != "model" {
                 continue;
             }
-            map.insert(dep_node.name.clone(), dep_node.name.clone());
+            let relation_name = dep_node.relation_name();
+            map.insert(relation_name.to_string(), dep_node.name.clone());
             let fq = make_fq_table_name(
                 dep_node.database.as_deref(),
                 dep_node.schema.as_deref(),
-                &dep_node.name,
+                relation_name,
             );
-            if fq != dep_node.name {
+            if fq != relation_name {
                 map.insert(fq, dep_node.name.clone());
             }
         }

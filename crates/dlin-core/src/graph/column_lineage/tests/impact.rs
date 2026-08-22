@@ -391,6 +391,7 @@ fn make_off_path_error_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.source_model".to_string(),
             name: "source_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![] },
             config: ManifestConfig::default(),
@@ -417,6 +418,7 @@ fn make_off_path_error_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.relevant_model".to_string(),
             name: "relevant_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.source_model".to_string()],
@@ -451,6 +453,7 @@ fn make_off_path_error_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.sibling_model".to_string(),
             name: "sibling_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.source_model".to_string()],
@@ -541,6 +544,7 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
         crate::parser::manifest::ManifestNode {
             unique_id: "model.proj.broken_downstream".to_string(),
             name: "broken_downstream".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: crate::parser::manifest::DependsOn {
                 nodes: vec!["model.proj.source_model".to_string()],

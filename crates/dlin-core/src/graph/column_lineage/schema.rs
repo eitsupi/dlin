@@ -28,17 +28,18 @@ pub(super) fn build_schema_from_manifest(
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             let col_names = resolve_node_columns(dep_node, manifest, dialect, backend);
             if !col_names.is_empty() {
+                let relation_name = dep_node.relation_name();
                 let fq_name = make_fq_table_name(
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
-                    &dep_node.name,
+                    relation_name,
                 );
                 if !schema.tables().any(|table| table.name == fq_name) {
                     has_entries = true;
                 }
                 schema.add_table(&fq_name, col_names.iter().cloned());
-                if fq_name != dep_node.name {
-                    schema.add_table(&dep_node.name, col_names.iter().cloned());
+                if fq_name != relation_name {
+                    schema.add_table(relation_name, col_names.iter().cloned());
                 }
             }
             continue;
@@ -116,19 +117,20 @@ pub(super) fn build_yaml_schema_for_node(
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             if !dep_node.columns.is_empty() {
+                let relation_name = dep_node.relation_name();
                 let mut node_col_names: Vec<&String> = dep_node.columns.keys().collect();
                 node_col_names.sort_unstable();
                 let fq_name = make_fq_table_name(
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
-                    &dep_node.name,
+                    relation_name,
                 );
                 if !schema.tables().any(|table| table.name == fq_name) {
                     has_entries = true;
                 }
                 schema.add_table(&fq_name, node_col_names.iter().cloned().cloned());
-                if fq_name != dep_node.name {
-                    schema.add_table(&dep_node.name, node_col_names.iter().cloned().cloned());
+                if fq_name != relation_name {
+                    schema.add_table(relation_name, node_col_names.iter().cloned().cloned());
                 }
             }
             continue;

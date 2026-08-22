@@ -27,6 +27,7 @@ fn make_test_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.stg_orders".to_string(),
             name: "stg_orders".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.orders".to_string()],
@@ -58,6 +59,7 @@ fn make_test_manifest() -> Manifest {
     nodes.insert("model.proj.orders".to_string(), ManifestNode {
             unique_id: "model.proj.orders".to_string(),
             name: "orders".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![
                 "model.proj.stg_orders".to_string(),
@@ -88,6 +90,7 @@ fn make_test_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.stg_payments".to_string(),
             name: "stg_payments".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![] },
             config: ManifestConfig::default(),
@@ -213,6 +216,7 @@ fn make_cross_model_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.stg_orders".to_string(),
             name: "stg_orders".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.orders".to_string()],
@@ -246,6 +250,7 @@ fn make_cross_model_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.stg_payments".to_string(),
             name: "stg_payments".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.payments".to_string()],
@@ -279,6 +284,7 @@ fn make_cross_model_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.orders".to_string(),
             name: "orders".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec![
@@ -322,6 +328,7 @@ fn make_cross_model_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.customers".to_string(),
             name: "customers".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.orders".to_string()],
@@ -360,6 +367,7 @@ fn make_duplicate_name_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.pkg_a.stg_orders".to_string(),
             name: "stg_orders".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![] },
             config: ManifestConfig::default(),
@@ -388,6 +396,7 @@ fn make_duplicate_name_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.pkg_a.customers".to_string(),
             name: "customers".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.pkg_a.stg_orders".to_string()],
@@ -418,6 +427,7 @@ fn make_duplicate_name_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.pkg_b.customers".to_string(),
             name: "customers".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.pkg_a.stg_orders".to_string()],
@@ -517,6 +527,7 @@ fn make_diamond_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.raw_data".to_string(),
             name: "raw_data".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![] },
             config: ManifestConfig::default(),
@@ -545,6 +556,7 @@ fn make_diamond_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.shared".to_string(),
             name: "shared".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.raw_data".to_string()],
@@ -573,6 +585,7 @@ fn make_diamond_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.left_model".to_string(),
             name: "left_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.shared".to_string()],
@@ -601,6 +614,7 @@ fn make_diamond_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.right_model".to_string(),
             name: "right_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.shared".to_string()],
@@ -631,6 +645,7 @@ fn make_diamond_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.diamond_out".to_string(),
             name: "diamond_out".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec![
@@ -706,6 +721,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.scalar_funcs".to_string(),
             name: "scalar_funcs".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.orders".to_string()],
@@ -745,6 +761,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.passthrough_upper".to_string(),
             name: "passthrough_upper".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.orders".to_string()],
@@ -783,6 +800,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
         ManifestNode {
             unique_id: "model.proj.passthrough_coalesce".to_string(),
             name: "passthrough_coalesce".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.orders".to_string()],
@@ -839,6 +857,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
     let make_node = |uid: &str, name: &str, deps: Vec<String>, sql: &str| ManifestNode {
         unique_id: uid.to_string(),
         name: name.to_string(),
+        alias: None,
         resource_type: "model".to_string(),
         depends_on: DependsOn { nodes: deps },
         config: ManifestConfig::default(),
@@ -926,6 +945,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
     }
 }
 
+mod alias;
 mod backend_difference_matrix;
 mod backend_regression;
 mod cache;

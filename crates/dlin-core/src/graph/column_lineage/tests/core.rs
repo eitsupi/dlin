@@ -1156,6 +1156,7 @@ fn test_cte_alias_resolution() {
         ManifestNode {
             unique_id: "model.proj.stg_items".to_string(),
             name: "stg_items".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.items".to_string()],
@@ -1186,6 +1187,7 @@ fn test_cte_alias_resolution() {
         ManifestNode {
             unique_id: "model.proj.mart_items".to_string(),
             name: "mart_items".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["model.proj.stg_items".to_string()],
@@ -1320,6 +1322,7 @@ fn test_select_star_chain_with_join() {
         ManifestNode {
             unique_id: "model.proj.stg_users".to_string(),
             name: "stg_users".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.users".to_string()],
@@ -1350,6 +1353,7 @@ fn test_select_star_chain_with_join() {
         ManifestNode {
             unique_id: "model.proj.stg_regions".to_string(),
             name: "stg_regions".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.regions".to_string()],
@@ -1381,6 +1385,7 @@ fn test_select_star_chain_with_join() {
         ManifestNode {
             unique_id: "model.proj.mart_users".to_string(),
             name: "mart_users".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec![
@@ -1544,6 +1549,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         ManifestNode {
             unique_id: "model.proj.stg_users".to_string(),
             name: "stg_users".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.users".to_string()],
@@ -1574,6 +1580,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         ManifestNode {
             unique_id: "model.proj.stg_regions".to_string(),
             name: "stg_regions".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec!["source.proj.raw.regions".to_string()],
@@ -1605,6 +1612,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         ManifestNode {
             unique_id: "model.proj.mart_users".to_string(),
             name: "mart_users".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn {
                 nodes: vec![
@@ -1828,6 +1836,7 @@ fn test_bigquery_unnest_virtual_source_excluded() {
         ManifestNode {
             unique_id: "model.proj.unnest_model".to_string(),
             name: "unnest_model".to_string(),
+            alias: None,
             resource_type: "model".to_string(),
             depends_on: DependsOn { nodes: vec![] },
             config: ManifestConfig::default(),
