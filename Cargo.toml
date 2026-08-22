@@ -28,7 +28,7 @@ polyglot-sql = { version = "0.4.4", default-features = false, features = ["all-d
 sqllineage = { version = "0.2.0", default-features = false }
 # Must stay in lockstep with the sqlparser version sqllineage depends on; see
 # `sqlparser_version_matches_sqllineage` in dlin-core.
-sqlparser = "0.62"
+sqlparser = { version = "0.62", features = ["visitor"] }
 path-slash = "0.2.1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"

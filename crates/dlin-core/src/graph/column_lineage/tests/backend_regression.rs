@@ -625,6 +625,41 @@ fn sqllineage_leading_star_set_operation_inside_derived_table_is_indeterminate()
 }
 
 #[test]
+fn sqllineage_leading_star_set_operation_inside_parenthesized_query_cte_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "(WITH combined AS (SELECT * FROM first_source UNION SELECT id FROM second_source) SELECT id, 1 AS explicit_col FROM combined) UNION SELECT id, explicit_col FROM second_source",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_scalar_projection_subquery_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, (SELECT * FROM first_source UNION SELECT id FROM second_source) AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_case_arm_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, CASE WHEN id > 0 THEN (SELECT * FROM first_source UNION SELECT id FROM second_source) ELSE NULL END AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_function_argument_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col, COALESCE((SELECT * FROM first_source UNION SELECT id FROM second_source), 0) AS nested FROM orders",
+    );
+}
+
+#[test]
+fn sqllineage_leading_star_set_operation_inside_in_subquery_is_indeterminate() {
+    assert_leading_star_set_operation_is_indeterminate(
+        "SELECT id, 1 AS explicit_col FROM orders WHERE id IN (SELECT * FROM first_source UNION SELECT id FROM second_source)",
+    );
+}
+
+#[test]
 fn sqllineage_nested_leading_star_set_operation_is_indeterminate() {
     assert_leading_star_set_operation_is_indeterminate(
         "SELECT * FROM a UNION SELECT x FROM b UNION SELECT y FROM c",
@@ -1040,6 +1075,13 @@ fn sqllineage_discovery_unexpanded_star_has_no_name() {
 
     assert!(discovery.outputs.is_empty());
     assert!(!discovery.duplicate_names.contains("*"));
+}
+
+#[test]
+fn sqllineage_discovery_preserves_quoted_star_output_name() {
+    let discovery = sqllineage_discovery("SELECT id AS \"*\" FROM orders", None).unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["*"]);
 }
 
 #[test]

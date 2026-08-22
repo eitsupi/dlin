@@ -1,6 +1,7 @@
 use sqllineage::{self, AnalyzeOptions, ColumnMapping, ColumnOrigin, StatementType, TransformKind};
-use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, Statement, TableFactor};
+use sqlparser::ast::{Query, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::parser::Parser;
+use std::ops::ControlFlow;
 
 use super::catalog_provider::{SqllineageCatalogProvider, identifiers_match};
 use super::{
@@ -54,12 +55,15 @@ impl LineageBackend for SqllineageBackend {
         let mut seen = std::collections::BTreeSet::new();
         let mut outputs = Vec::new();
         for mapping in result.columns.mappings {
-            let name = mapping.target.column;
-            // sqllineage uses this target for an unexpanded SELECT *. It is a
-            // sentinel for unknown output columns, not an output column itself.
-            if name == "*" {
+            // Drop sqllineage's unexpanded-`SELECT *` sentinel. It takes both signals
+            // to identify: the target is named "*" and the origins are an unresolved
+            // wildcard. The name alone would discard a column legitimately aliased to
+            // "*", and the origins alone would discard a properly named column whose
+            // lineage happens to run through a star.
+            if mapping.target.column == "*" && mapping_has_unresolved_star(&mapping) {
                 continue;
             }
+            let name = mapping.target.column;
             if !seen.insert(name.clone()) {
                 duplicates.insert(name.clone());
             }
@@ -298,28 +302,23 @@ fn check_set_operation_shapes(
 }
 
 fn dangerous_set_operation_reason(statement: &Statement) -> Option<&'static str> {
-    statement_contains_dangerous_set_operation(statement).then_some(DANGEROUS_SET_OPERATION_REASON)
+    let mut visitor = DangerousSetOperationVisitor::default();
+    let _ = statement.visit(&mut visitor);
+    visitor.dangerous.then_some(DANGEROUS_SET_OPERATION_REASON)
 }
 
-fn statement_contains_dangerous_set_operation(statement: &Statement) -> bool {
-    match statement {
-        Statement::Query(query) => query_contains_dangerous_set_operation(query),
-        Statement::Insert(insert) => insert
-            .source
-            .as_ref()
-            .is_some_and(|query| query_contains_dangerous_set_operation(query)),
-        Statement::Directory { source, .. } => query_contains_dangerous_set_operation(source),
-        Statement::CreateView(view) => query_contains_dangerous_set_operation(&view.query),
-        _ => false,
+#[derive(Default)]
+struct DangerousSetOperationVisitor {
+    dangerous: bool,
+}
+
+impl Visitor for DangerousSetOperationVisitor {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.dangerous |= set_expr_contains_dangerous_operation(&query.body);
+        ControlFlow::Continue(())
     }
-}
-
-fn query_contains_dangerous_set_operation(query: &Query) -> bool {
-    query.with.as_ref().is_some_and(|with| {
-        with.cte_tables
-            .iter()
-            .any(|cte| query_contains_dangerous_set_operation(&cte.query))
-    }) || set_expr_contains_dangerous_operation(&query.body)
 }
 
 fn set_expr_contains_dangerous_operation(body: &SetExpr) -> bool {
@@ -329,82 +328,14 @@ fn set_expr_contains_dangerous_operation(body: &SetExpr) -> bool {
                 || set_expr_contains_dangerous_operation(left)
                 || set_expr_contains_dangerous_operation(right)
         }
-        SetExpr::Query(query) => set_expr_contains_dangerous_operation(&query.body),
-        SetExpr::Select(select) => {
-            select.from.iter().any(|table| {
-                table_factor_contains_dangerous_set_operation(&table.relation)
-                    || table
-                        .joins
-                        .iter()
-                        .any(|join| table_factor_contains_dangerous_set_operation(&join.relation))
-            }) || select
-                .projection
-                .iter()
-                .any(select_item_contains_dangerous_set_operation)
-                || select
-                    .selection
-                    .as_ref()
-                    .is_some_and(expr_contains_dangerous_set_operation)
-                || select
-                    .having
-                    .as_ref()
-                    .is_some_and(expr_contains_dangerous_set_operation)
-                || select
-                    .qualify
-                    .as_ref()
-                    .is_some_and(expr_contains_dangerous_set_operation)
-        }
-        SetExpr::Values(_)
+        SetExpr::Select(_)
+        | SetExpr::Query(_)
+        | SetExpr::Values(_)
         | SetExpr::Table(_)
         | SetExpr::Insert(_)
         | SetExpr::Update(_)
         | SetExpr::Delete(_)
         | SetExpr::Merge(_) => false,
-    }
-}
-
-fn table_factor_contains_dangerous_set_operation(factor: &TableFactor) -> bool {
-    match factor {
-        TableFactor::Derived { subquery, .. } => query_contains_dangerous_set_operation(subquery),
-        TableFactor::NestedJoin {
-            table_with_joins, ..
-        } => {
-            table_factor_contains_dangerous_set_operation(&table_with_joins.relation)
-                || table_with_joins
-                    .joins
-                    .iter()
-                    .any(|join| table_factor_contains_dangerous_set_operation(&join.relation))
-        }
-        _ => false,
-    }
-}
-
-fn select_item_contains_dangerous_set_operation(item: &SelectItem) -> bool {
-    match item {
-        SelectItem::UnnamedExpr(expr)
-        | SelectItem::ExprWithAlias { expr, .. }
-        | SelectItem::ExprWithAliases { expr, .. } => expr_contains_dangerous_set_operation(expr),
-        SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(..) => false,
-    }
-}
-
-fn expr_contains_dangerous_set_operation(expr: &Expr) -> bool {
-    match expr {
-        Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
-            query_contains_dangerous_set_operation(subquery)
-        }
-        Expr::InSubquery { expr, subquery, .. } => {
-            expr_contains_dangerous_set_operation(expr)
-                || query_contains_dangerous_set_operation(subquery)
-        }
-        Expr::Nested(expr) | Expr::UnaryOp { expr, .. } => {
-            expr_contains_dangerous_set_operation(expr)
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            expr_contains_dangerous_set_operation(left)
-                || expr_contains_dangerous_set_operation(right)
-        }
-        _ => false,
     }
 }
 
