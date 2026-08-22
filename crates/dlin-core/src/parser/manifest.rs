@@ -191,9 +191,19 @@ impl ManifestNode {
     /// precedence over the raw config value. The config fallback is useful
     /// for manifests that preserve config data but omit the resolved field.
     pub fn relation_name(&self) -> &str {
+        // An alias present but empty is not an alias. dbt resolves an empty
+        // config alias to the node name rather than to an empty relation, and a
+        // manifest that records `""` here would otherwise name a relation
+        // nothing at all.
         self.alias
             .as_deref()
-            .or(self.config.alias.as_deref())
+            .filter(|alias| !alias.is_empty())
+            .or_else(|| {
+                self.config
+                    .alias
+                    .as_deref()
+                    .filter(|alias| !alias.is_empty())
+            })
             .unwrap_or(&self.name)
     }
 }

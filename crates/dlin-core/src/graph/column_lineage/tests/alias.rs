@@ -177,6 +177,32 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
     );
     assert_eq!(no_alias.relation_name(), "model_name");
+
+    let empty_node_alias = node(
+        "model.proj.empty_node_alias",
+        "model_name",
+        Some(""),
+        Some("config_alias"),
+        vec![],
+        &[],
+        None,
+        None,
+        None,
+    );
+    assert_eq!(empty_node_alias.relation_name(), "config_alias");
+
+    let empty_both = node(
+        "model.proj.empty_both",
+        "model_name",
+        Some(""),
+        Some(""),
+        vec![],
+        &[],
+        None,
+        None,
+        None,
+    );
+    assert_eq!(empty_both.relation_name(), "model_name");
 }
 
 #[test]
