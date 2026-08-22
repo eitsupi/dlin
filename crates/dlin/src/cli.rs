@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, classify_dialect};
+use dlin_core::graph::column_lineage::DlinDialect;
 use std::path::PathBuf;
 
 /// Parse a `--dialect` value via `DlinDialect`'s `FromStr` implementation.
@@ -10,27 +10,8 @@ use std::path::PathBuf;
 /// ever been documented (its accepted spellings are described in prose in
 /// each command's own help text instead). Pinning the parser to `FromStr`
 /// keeps the flag's parsing behavior — and `--help` output — unchanged.
-fn parse_dialect(s: &str) -> Result<DialectArg, String> {
-    let classification = classify_dialect(s);
-    if matches!(classification, DialectClassification::Unknown) {
-        return Err(s.parse::<DlinDialect>().unwrap_err());
-    }
-    Ok(DialectArg {
-        requested: s.to_string(),
-        classification,
-    })
-}
-
-fn parse_supported_dialect(s: &str) -> Result<DlinDialect, String> {
+fn parse_dialect(s: &str) -> Result<DlinDialect, String> {
     s.parse()
-}
-
-/// The original spelling and classification of a dialect supplied to a command
-/// that resolves dialects after manifest loading.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DialectArg {
-    pub requested: String,
-    pub classification: DialectClassification,
 }
 
 #[derive(Parser, Debug)]
@@ -684,7 +665,6 @@ pub struct McpArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(
         long,
         value_parser = parse_dialect,
@@ -692,10 +672,10 @@ pub struct McpArgs {
 SQL dialect for parsing compiled SQL in get_column_lineage.
 
 When omitted, the dialect is auto-detected from manifest.metadata.adapter_type.
-It is required only when the manifest does not declare an adapter_type. A dialect
-the lineage engine does not support uses generic parsing with a warning."
+It is required only when the manifest does not declare an adapter_type; a missing,
+empty, or unknown adapter_type is an error."
     )]
-    pub dialect: Option<DialectArg>,
+    pub dialect: Option<DlinDialect>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -794,7 +774,7 @@ pub struct DebugParseSqlArgs {
     pub sql: Option<String>,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_supported_dialect)]
+    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
     pub dialect: DlinDialect,
 
     /// Output format: ast (Debug representation), json (JSON AST)
@@ -812,7 +792,7 @@ pub struct DebugTraceColumnArgs {
     pub column: String,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_supported_dialect)]
+    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
     pub dialect: DlinDialect,
 
     /// Table schema definitions for accurate lineage resolution.
@@ -991,9 +971,8 @@ pub struct ColumnGraphArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DialectArg>,
+    pub dialect: Option<DlinDialect>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1036,9 +1015,8 @@ pub struct ColumnImpactArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DialectArg>,
+    pub dialect: Option<DlinDialect>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1989,10 +1967,7 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(
-            args.dialect.as_ref().map(|dialect| dialect.classification),
-            Some(DialectClassification::Supported(DlinDialect::BigQuery))
-        );
+        assert_eq!(args.dialect, Some(DlinDialect::BigQuery));
     }
 
     #[test]
@@ -2018,17 +1993,13 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(
-            args.dialect.as_ref().map(|dialect| dialect.classification),
-            Some(DialectClassification::Supported(DlinDialect::Snowflake))
-        );
+        assert_eq!(args.dialect, Some(DlinDialect::Snowflake));
     }
 
     #[test]
     fn test_dialect_all_known_values_parse() {
         let dialects = [
             "generic",
-            "ansi",
             "postgresql",
             "postgres",
             "mysql",
@@ -2036,6 +2007,40 @@ mod tests {
             "databricks",
             "snowflake",
             "bigquery",
+            "duckdb",
+            "sqlite",
+            "spark",
+            "spark2",
+            "trino",
+            "presto",
+            "redshift",
+            "tsql",
+            "mssql",
+            "sqlserver",
+            "oracle",
+            "clickhouse",
+            "athena",
+            "teradata",
+            "doris",
+            "starrocks",
+            "materialize",
+            "risingwave",
+            "singlestore",
+            "memsql",
+            "cockroachdb",
+            "cockroach",
+            "tidb",
+            "druid",
+            "solr",
+            "tableau",
+            "dune",
+            "fabric",
+            "drill",
+            "dremio",
+            "exasol",
+            "datafusion",
+            "arrow-datafusion",
+            "arrow_datafusion",
         ];
         for dialect in dialects {
             let cli =
@@ -2047,21 +2052,6 @@ mod tests {
                 cli.err()
             );
         }
-    }
-
-    #[test]
-    fn test_removed_dialect_is_accepted_and_retains_spelling() {
-        let result =
-            Cli::try_parse_from(["dlin", "column", "upstream", "model", "--dialect", "duckdb"]);
-        let args = unwrap_column_upstream(result.expect("removed dialect should be accepted"));
-        let dialect = args.dialect.expect("dialect should be retained");
-        assert_eq!(dialect.requested, "duckdb");
-        assert_eq!(
-            dialect.classification,
-            DialectClassification::Removed {
-                canonical: "duckdb"
-            }
-        );
     }
 
     #[test]
@@ -2077,9 +2067,7 @@ mod tests {
         let error = result.expect_err("unknown dialect should be rejected by clap");
         let message = error.to_string();
         assert!(message.contains("posgres"));
-        assert!(message.contains(
-            "generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery"
-        ));
+        assert!(message.contains("generic, postgresql, postgres"));
     }
 
     // -- ColumnOutputFormat tests --------------------------------------------

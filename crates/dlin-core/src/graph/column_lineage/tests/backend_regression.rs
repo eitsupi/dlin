@@ -1025,6 +1025,22 @@ fn sqllineage_parse_failure_is_parse_error() {
     assert_eq!(error.kind, BackendErrorKind::Parse);
 }
 
+#[test]
+fn sqllineage_unsupported_dialect_is_reported() {
+    let request = LineageRequest {
+        sql: "SELECT 1",
+        dialect: DlinDialect::DuckDB,
+        catalog: None,
+        outputs: &[],
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::UnsupportedDialect);
+    assert!(error.message.contains("duckdb"));
+}
+
 fn sqllineage_discovery(
     sql: &str,
     catalog: Option<&CatalogSnapshot>,
@@ -1139,7 +1155,7 @@ fn sqllineage_discovery_matches_analyze_mapping_targets() {
     let analyzed = sqllineage::analyze(
         sql,
         sqllineage::AnalyzeOptions {
-            dialect: DlinDialect::Generic.to_sqllineage(),
+            dialect: DlinDialect::Generic.to_sqllineage().unwrap(),
             catalog: Some(Box::new(provider)),
             normalize_case: true,
         },

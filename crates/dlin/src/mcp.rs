@@ -49,7 +49,6 @@ struct McpState {
     project_dir: PathBuf,
     manifest_path: PathBuf,
     dialect: DlinDialect,
-    dialect_warning: Option<String>,
     manifest: parser::manifest::Manifest,
     dag: LineageGraph,
     column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
@@ -69,13 +68,6 @@ pub fn run(args: McpArgs) -> Result<()> {
     eprintln!("  project:  {project_name}");
     eprintln!("  manifest: {}", state.manifest_path.display());
     eprintln!("  dialect:  {}", state.dialect);
-    if let Some(warning) = &state.dialect_warning {
-        // MCP runs quiet so that stray diagnostics cannot be mistaken for
-        // protocol output, so this goes out with the other startup lines rather
-        // than through `warn!`. The client is told separately: every column
-        // lineage result carries the same warning.
-        eprintln!("Warning: {warning}");
-    }
     let mut parts = vec![format!("{} models", counts.model)];
     if counts.source > 0 {
         parts.push(format!("{} sources", counts.source));
@@ -131,8 +123,7 @@ impl McpState {
         Ok(Self {
             project_dir,
             manifest_path,
-            dialect: resolved_dialect.effective,
-            dialect_warning: resolved_dialect.warning,
+            dialect: resolved_dialect,
             manifest,
             dag,
             column_lineage_cache: RefCell::new(
@@ -737,7 +728,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                         });
                 }
             }
-            serialize_column_lineage_report(&report, state)
+            Ok(serde_json::to_value(&report)?)
         }
         "downstream" => {
             let report = graph::column_lineage::compute_column_impact_with_manifest_path(
@@ -748,16 +739,10 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 Some(&state.manifest_path),
                 &mut cache,
             );
-            serialize_column_lineage_report(&report, state)
+            Ok(serde_json::to_value(&report)?)
         }
         _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),
     }
-}
-
-fn serialize_column_lineage_report<T: Serialize>(report: &T, state: &McpState) -> Result<Value> {
-    let mut value = serde_json::to_value(report)?;
-    value["warnings"] = json!(state.dialect_warning.iter().cloned().collect::<Vec<_>>());
-    Ok(value)
 }
 
 fn resolve_node_unique_id(state: &McpState, name: &str) -> Option<String> {
@@ -858,22 +843,8 @@ mod tests {
             .join("column_lineage_project")
     }
 
-    fn generic_dialect() -> crate::cli::DialectArg {
-        crate::cli::DialectArg {
-            requested: "generic".to_string(),
-            classification: dlin_core::graph::column_lineage::DialectClassification::Supported(
-                DlinDialect::Generic,
-            ),
-        }
-    }
-
-    fn duckdb_dialect() -> crate::cli::DialectArg {
-        crate::cli::DialectArg {
-            requested: "duckdb".to_string(),
-            classification: dlin_core::graph::column_lineage::DialectClassification::Removed {
-                canonical: "duckdb",
-            },
-        }
+    fn generic_dialect() -> DlinDialect {
+        DlinDialect::Generic
     }
 
     fn state() -> McpState {
@@ -890,15 +861,6 @@ mod tests {
             project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
             dialect: Some(generic_dialect()),
-        })
-        .unwrap()
-    }
-
-    fn degraded_column_lineage_state() -> McpState {
-        McpState::load(McpArgs {
-            project_dir: column_lineage_fixture_project_dir(),
-            manifest_path: None,
-            dialect: Some(duckdb_dialect()),
         })
         .unwrap()
     }
@@ -924,44 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_explicit_removed_dialect_degrades_and_warns_in_column_lineage_results() {
-        let state = degraded_column_lineage_state();
-        assert_eq!(state.dialect, DlinDialect::Generic);
-        assert!(
-            state
-                .dialect_warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("duckdb"))
-        );
-
-        let upstream = get_column_lineage(
-            &json!({
-                "model": "stg_orders",
-                "column": "order_id",
-                "direction": "upstream"
-            }),
-            &state,
-        )
-        .unwrap();
-        let downstream = get_column_lineage(
-            &json!({
-                "model": "stg_orders",
-                "column": "order_id",
-                "direction": "downstream"
-            }),
-            &state,
-        )
-        .unwrap();
-
-        for result in [upstream, downstream] {
-            assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
-            assert!(result["warnings"][0].as_str().unwrap().contains("duckdb"));
-            assert!(result.get("errors").is_none() || result["errors"].is_array());
-        }
-    }
-
-    #[test]
-    fn mcp_auto_detects_manifest_dialect_and_propagates_degradation_warning() {
+    fn mcp_auto_detects_manifest_dialect() {
         let state = McpState::load(McpArgs {
             project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
@@ -969,13 +894,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(state.dialect, DlinDialect::Generic);
-        assert!(
-            state
-                .dialect_warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("duckdb"))
-        );
+        assert_eq!(state.dialect, DlinDialect::DuckDB);
 
         let result = get_column_lineage(
             &json!({
@@ -987,8 +906,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
-        assert!(result["warnings"][0].as_str().unwrap().contains("duckdb"));
+        assert!(result.get("warnings").is_none());
     }
 
     #[test]
@@ -996,7 +914,6 @@ mod tests {
         let state = column_lineage_state();
 
         assert_eq!(state.dialect, DlinDialect::Generic);
-        assert!(state.dialect_warning.is_none());
 
         let result = get_column_lineage(
             &json!({
@@ -1008,7 +925,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result["warnings"], json!([]));
+        assert!(result.get("warnings").is_none());
     }
 
     #[test]

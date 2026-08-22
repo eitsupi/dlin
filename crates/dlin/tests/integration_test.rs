@@ -2510,7 +2510,7 @@ mod manifest_only_mode {
     fn test_column_upstream_auto_detects_dialect_from_manifest_adapter_type() {
         // When --dialect is omitted but manifest has adapter_type, dialect is auto-detected.
         let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
 
         let output = Command::new(binary_path())
             .args([
@@ -2529,39 +2529,12 @@ mod manifest_only_mode {
             "should succeed with auto-detected dialect from adapter_type; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("duckdb"));
-        assert!(stderr.contains("Generic parsing is being used"));
-        assert!(stderr.contains("lineage may be wrong for warehouse-specific SQL"));
     }
 
     #[test]
-    fn test_column_upstream_explicit_removed_dialect_warns_and_succeeds() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
-
-        let output = Command::new(binary_path())
-            .args([
-                "column",
-                "upstream",
-                "stg_orders",
-                "--project-dir",
-                tmp.path().to_str().unwrap(),
-                "--dialect",
-                "duckdb",
-                "--no-cache",
-            ])
-            .output()
-            .expect("Failed to run binary");
-
-        assert!(output.status.success());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("duckdb"));
-        assert!(stderr.contains("Generic parsing is being used"));
-    }
-
-    #[test]
-    fn test_column_upstream_explicit_generic_has_no_degradation_warning() {
+    fn test_column_upstream_auto_detects_warehouse_dialect_without_warning() {
+        // A dialect the lineage engine's future backend cannot serve is still a
+        // first-class dlin dialect: it is inferred from adapter_type and says nothing.
         let tmp = tempfile::tempdir().unwrap();
         write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
 
@@ -2572,15 +2545,14 @@ mod manifest_only_mode {
                 "stg_orders",
                 "--project-dir",
                 tmp.path().to_str().unwrap(),
-                "--dialect",
-                "generic",
                 "--no-cache",
             ])
             .output()
             .expect("Failed to run binary");
 
-        assert!(output.status.success());
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("Generic parsing is being used"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "should succeed; stderr: {stderr}");
+        assert!(stderr.trim().is_empty(), "unexpected stderr: {stderr}");
     }
 
     #[test]

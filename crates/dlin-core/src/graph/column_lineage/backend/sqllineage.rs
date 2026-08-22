@@ -82,6 +82,11 @@ impl LineageBackend for SqllineageBackend {
         let results = analyze_sql(request.sql, request.dialect, request.catalog)?;
 
         let shape_check = check_set_operation_shapes(request.sql, request.dialect);
+        if let Err(error) = &shape_check
+            && matches!(&error.kind, BackendErrorKind::UnsupportedDialect)
+        {
+            return Err(error.clone());
+        }
 
         Ok(BackendAnalysis {
             statements: results
@@ -92,7 +97,7 @@ impl LineageBackend for SqllineageBackend {
                         Ok(statements) => statements
                             .get(statement_ordinal)
                             .and_then(dangerous_set_operation_reason),
-                        Err(error) => Some(error.as_str()),
+                        Err(error) => Some(error.message.as_str()),
                     };
                     let has_unresolved_stars = result
                         .columns
@@ -140,6 +145,7 @@ fn analyze_sql(
     dialect: super::dialect::DlinDialect,
     catalog: Option<&super::CatalogSnapshot>,
 ) -> Result<Vec<sqllineage::AnalyzeResult>, BackendError> {
+    let sqllineage_dialect = dialect.to_sqllineage()?;
     let catalog = catalog.map(|snapshot| {
         Box::new(SqllineageCatalogProvider::new(snapshot, dialect))
             as Box<dyn sqllineage::CatalogProvider>
@@ -147,7 +153,7 @@ fn analyze_sql(
     sqllineage::analyze(
         sql,
         AnalyzeOptions {
-            dialect: dialect.to_sqllineage(),
+            dialect: sqllineage_dialect,
             catalog,
             normalize_case: true,
         },
@@ -287,7 +293,7 @@ const DANGEROUS_SET_OPERATION_REASON: &str = "a set operation whose leading bran
 fn check_set_operation_shapes(
     sql: &str,
     dialect: super::dialect::DlinDialect,
-) -> Result<Vec<Statement>, String> {
+) -> Result<Vec<Statement>, BackendError> {
     // Obtain the parser dialect through sqllineage so this guard uses exactly the grammar that
     // produced the lineage result; maintaining a second hand-written dialect mapping could let
     // the guard inspect a different parse from sqllineage's.
@@ -296,9 +302,11 @@ fn check_set_operation_shapes(
     // emits one result per statement in order, so the statement list here matches the analysis
     // results position for position. Keep it that way: parsing by some other route would let the
     // two lists drift, and a statement whose shape went unchecked would silently lose its guard.
-    let parser_dialect = dialect.to_sqllineage().to_sqlparser_dialect();
-    Parser::parse_sql(&*parser_dialect, sql)
-        .map_err(|error| format!("dlin could not verify the shape: {error}"))
+    let parser_dialect = dialect.to_sqllineage()?.to_sqlparser_dialect();
+    Parser::parse_sql(&*parser_dialect, sql).map_err(|error| BackendError {
+        kind: BackendErrorKind::Parse,
+        message: format!("dlin could not verify the shape: {error}"),
+    })
 }
 
 fn dangerous_set_operation_reason(statement: &Statement) -> Option<&'static str> {
