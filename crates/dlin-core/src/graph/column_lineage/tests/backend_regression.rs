@@ -589,6 +589,37 @@ fn sqllineage_join_without_catalog_reports_genuine_ambiguity() {
 }
 
 #[test]
+fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("left_table", ["ID".to_string()]);
+    catalog.add_table("right_table", ["other".to_string()]);
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        // Unqualified so that sqllineage has to ask the catalog which table owns
+        // `id`. A qualified reference resolves from the binding alone and never
+        // reaches `resolve_column`, so it would not exercise the case folding.
+        "select id from left_table join right_table on left_table.id = right_table.other",
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => assert_eq!(
+            result.sources,
+            vec![BackendSource::Concrete {
+                table: "left_table".to_string(),
+                column: "id".to_string(),
+            }]
+        ),
+        other => panic!("expected catalog-resolved join column, got {other:?}"),
+    }
+}
+
+#[test]
 fn sqllineage_column_without_visible_binding_reports_not_found() {
     let outputs = [OutputColumnRequest {
         slot: AnalysisSlot(0),

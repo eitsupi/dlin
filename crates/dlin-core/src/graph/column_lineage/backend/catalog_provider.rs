@@ -73,8 +73,11 @@ impl CatalogProvider for SqllineageCatalogProvider {
         let qualifying: Vec<&TableRef> = candidates
             .iter()
             .filter(|candidate| {
-                self.columns_for(candidate)
-                    .is_some_and(|columns| columns.iter().any(|known| known == column))
+                self.columns_for(candidate).is_some_and(|columns| {
+                    columns
+                        .iter()
+                        .any(|known| identifiers_match(known, column, self.dialect))
+                })
             })
             .collect();
         (qualifying.len() == 1).then(|| qualifying[0].clone())
@@ -204,5 +207,17 @@ mod tests {
         );
         assert!(provider.resolve_column("id", &[unknown]).is_none());
         assert!(provider.resolve_column("missing", &[one]).is_none());
+    }
+
+    #[test]
+    fn resolve_column_folds_catalog_column_case() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("orders", ["ID".to_string()]);
+        let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::Generic);
+
+        assert_eq!(
+            provider.resolve_column("id", &[table(None, None, "orders")]),
+            Some(table(None, None, "orders"))
+        );
     }
 }
