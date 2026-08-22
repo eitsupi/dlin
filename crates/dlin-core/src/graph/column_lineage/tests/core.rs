@@ -555,6 +555,8 @@ fn test_normalize_table_name() {
     );
     assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
     assert_eq!(normalize_table_name("schema.table"), "table");
+    assert_eq!(normalize_table_name("\"foo.bar\""), "foo.bar");
+    assert_eq!(normalize_table_name("\"foo.bar\".\"orders\""), "orders");
 }
 
 #[test]

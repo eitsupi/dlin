@@ -195,7 +195,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
                     vec![raw_id, staging_id],
                     &["raw_id", "staging_id"],
                     Some(
-                        "select raw.id as raw_id, staging.id as staging_id from raw.orders raw join staging.orders staging on raw.id = staging.id",
+                        "select raw.id as raw_id, staging.id as staging_id from warehouse.raw.orders raw join warehouse.staging.orders staging on raw.id = staging.id",
                     ),
                 ),
             ),
