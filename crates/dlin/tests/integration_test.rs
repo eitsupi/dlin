@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use filetime::{FileTime, set_file_mtime};
+use std::path::{Path, PathBuf};
 
 // We need to reference the library modules — use the binary crate via process for CLI tests,
 // but for unit-level integration tests, we'll test the core logic inline.
@@ -48,6 +49,17 @@ fn copy_fixture_to_temp() -> tempfile::TempDir {
 
     copy_dir_recursive(&fixture, tmp.path());
     tmp
+}
+
+const MTIME_OFFSET_SECS: i64 = 10;
+
+fn set_mtime_newer_than(newer: &Path, older: &Path) {
+    let older_mtime = FileTime::from_last_modification_time(&std::fs::metadata(older).unwrap());
+    let newer_mtime = FileTime::from_unix_time(
+        older_mtime.unix_seconds() + MTIME_OFFSET_SECS,
+        older_mtime.nanoseconds(),
+    );
+    set_file_mtime(newer, newer_mtime).unwrap();
 }
 
 mod parsing {
@@ -175,18 +187,15 @@ mod freshness {
     use super::*;
     use std::fs;
     use std::process::Command;
-    use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn test_check_manifest_up_to_date() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest to make it newer than all files
-        // Sleep briefly to ensure mtime difference
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
 
         let output = Command::new(binary_path())
             .args([
@@ -206,15 +215,13 @@ mod freshness {
     fn test_check_manifest_detects_stale_file() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest first
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
 
         // Now touch a model file to make it newer
-        thread::sleep(Duration::from_millis(50));
-        let model_path = tmp.path().join("models/staging/stg_orders.sql");
-        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+        set_mtime_newer_than(&model_path, &manifest_path);
 
         let output = Command::new(binary_path())
             .args([
@@ -236,13 +243,12 @@ mod freshness {
     fn test_check_manifest_detects_deleted_file() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest to make it newer than all files
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
 
         // Delete a model file that's referenced in the manifest
-        let model_path = tmp.path().join("models/staging/stg_orders.sql");
         fs::remove_file(&model_path).unwrap();
 
         let output = Command::new(binary_path())
@@ -275,13 +281,13 @@ mod freshness {
     fn test_check_manifest_json_deleted_files() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest to make it newer
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
 
         // Delete a model file
-        fs::remove_file(tmp.path().join("models/staging/stg_orders.sql")).unwrap();
+        fs::remove_file(&model_path).unwrap();
 
         let output = Command::new(binary_path())
             .args([
@@ -313,18 +319,17 @@ mod freshness {
     fn test_check_manifest_stale_and_deleted_combined() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let deleted_model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest first
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &deleted_model_path);
 
         // Delete one file
-        fs::remove_file(tmp.path().join("models/staging/stg_orders.sql")).unwrap();
+        fs::remove_file(&deleted_model_path).unwrap();
 
         // Touch another file to make it newer
-        thread::sleep(Duration::from_millis(50));
         let model_path = tmp.path().join("models/marts/orders.sql");
-        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+        set_mtime_newer_than(&model_path, &manifest_path);
 
         let output = Command::new(binary_path())
             .args([
@@ -349,10 +354,10 @@ mod freshness {
     fn test_check_manifest_json_up_to_date_has_empty_arrays() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest to make it newer
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
 
         let output = Command::new(binary_path())
             .args([
@@ -862,19 +867,13 @@ mod cli {
 
     /// Create a temp fixture where manifest is stale (SQL files are newer).
     fn stale_fixture() -> tempfile::TempDir {
-        use std::fs;
-        use std::thread;
-        use std::time::Duration;
-
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
+        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
         // Touch manifest first, then touch a SQL file to make it newer
-        thread::sleep(Duration::from_millis(50));
-        fs::write(&manifest_path, fs::read(&manifest_path).unwrap()).unwrap();
-        thread::sleep(Duration::from_millis(50));
-        let model_path = tmp.path().join("models/staging/stg_orders.sql");
-        fs::write(&model_path, fs::read(&model_path).unwrap()).unwrap();
+        set_mtime_newer_than(&manifest_path, &model_path);
+        set_mtime_newer_than(&model_path, &manifest_path);
 
         tmp
     }
