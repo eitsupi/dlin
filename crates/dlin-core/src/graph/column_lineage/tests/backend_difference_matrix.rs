@@ -824,16 +824,6 @@ const LEDGER: &[LedgerEntry] = &[
         authority: "dlin backend comparison",
     },
     LedgerEntry {
-        case_id: "aggregate",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"\\\",column=\\\"order_count\\\")\"]",
-        sqllineage: "[]",
-        status: LedgerStatus::Open {
-            to_settle: "For COUNT(*), settle whether dlin should emit no sources, as sqllineage does because COUNT(*) reads no column, or the polyglot source with an empty table name naming the output column, which is a fabrication.",
-        },
-        authority: "dlin backend comparison",
-    },
-    LedgerEntry {
         case_id: "unqualified_join_without_catalog",
         field: "statement[0].column[0].outcome_kind",
         polyglot: "resolved",
@@ -1016,10 +1006,10 @@ const LEDGER: &[LedgerEntry] = &[
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
         field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"\\\",column=\\\"col_a\\\")\", \"concrete(table=\\\"ext_a\\\",column=\\\"*\\\")\"]",
+        polyglot: "[\"concrete(table=\\\"ext_a\\\",column=\\\"*\\\")\"]",
         sqllineage: "[]",
         status: LedgerStatus::Open {
-            to_settle: "Sqllineage reports a resolved constant with no sources, so the star branch contribution disappears without a trace; this is a finding, not an accepted preference.",
+            to_settle: "Sqllineage reports a resolved constant with no sources, so the star branch contribution disappears without a trace. Polyglot keeps the contribution but names the column \"*\", which is a star rather than a column name and is not a source a consumer can follow either. Neither is an accepted preference.",
         },
         authority: "column-lineage review finding; neither backend",
     },
@@ -1090,16 +1080,6 @@ const LEDGER: &[LedgerEntry] = &[
         sqllineage: "Direct",
         status: LedgerStatus::Open {
             to_settle: "Settle whether the BigQuery quoted-identifier projection should be classified as Unknown, as polyglot reports, or Direct, as sqllineage reports. The corpus shows the classification difference but does not establish why it occurs or which behavior dlin should publish.",
-        },
-        authority: "dlin backend comparison",
-    },
-    LedgerEntry {
-        case_id: "bigquery_quoted_identifier",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"\\\",column=\\\"quoted_result\\\")\"]",
-        sqllineage: "[]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether the BigQuery quoted-identifier projection should emit no sources, as sqllineage reports, or the concrete source with an empty table name and the output column as its column, as polyglot reports. The corpus shows the difference but does not establish why it occurs or which source behavior dlin should publish.",
         },
         authority: "dlin backend comparison",
     },

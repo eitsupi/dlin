@@ -528,11 +528,9 @@ fn collect_leaves(node: &polyglot_sql::lineage::LineageNode, sources: &mut Vec<C
                 model_path: vec![],
             });
         } else {
-            sources.push(ColumnSource {
-                table: String::new(),
-                column: name.to_string(),
-                model_path: vec![],
-            });
+            // A leaf with no table qualification cannot be named as an upstream
+            // column; reporting it with an empty table name states a source that
+            // does not exist.
         }
     } else {
         for child in &node.downstream {
