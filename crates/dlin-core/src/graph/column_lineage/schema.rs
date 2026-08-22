@@ -3,17 +3,10 @@ use std::collections::HashSet;
 use super::backend::{
     DlinDialect, LineageBackend, OutputDiscoveryRequest, catalog::CatalogSnapshot,
 };
+use super::relation::RelationRef;
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
-
-fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
-    match (database, schema) {
-        (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
-        (None, Some(s)) => format!("{}.{}", s, name),
-        _ => name.to_string(),
-    }
-}
 
 pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
@@ -28,19 +21,13 @@ pub(super) fn build_schema_from_manifest(
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             let col_names = resolve_node_columns(dep_node, manifest, dialect, backend);
             if !col_names.is_empty() {
-                let relation_name = dep_node.relation_name();
-                let fq_name = make_fq_table_name(
+                has_entries |= register_model_relation(
+                    &mut schema,
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
-                    relation_name,
+                    dep_node.relation_name(),
+                    &col_names,
                 );
-                if !schema.tables().any(|table| table.name == fq_name) {
-                    has_entries = true;
-                }
-                schema.add_table(&fq_name, col_names.iter().cloned());
-                if fq_name != relation_name {
-                    schema.add_table(relation_name, col_names.iter().cloned());
-                }
             }
             continue;
         }
@@ -51,28 +38,15 @@ pub(super) fn build_schema_from_manifest(
             let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
             source_col_names.sort_unstable();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
-            let physical_fq = make_fq_table_name(
+            has_entries |= register_source_relation(
+                &mut schema,
                 dep_source.database.as_deref(),
                 dep_source.schema.as_deref(),
                 physical_identifier,
+                &dep_source.source_name,
+                &dep_source.name,
+                source_col_names.iter().cloned().cloned().collect(),
             );
-            if !schema.tables().any(|table| table.name == physical_fq) {
-                has_entries = true;
-            }
-            schema.add_table(&physical_fq, source_col_names.iter().cloned().cloned());
-            let schema_fq =
-                make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
-            let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
-            for alias in [
-                schema_fq.as_str(),
-                physical_identifier,
-                dep_source.name.as_str(),
-                source_qualified.as_str(),
-            ] {
-                if alias != physical_fq {
-                    schema.add_table(alias, source_col_names.iter().cloned().cloned());
-                }
-            }
         }
     }
 
@@ -117,21 +91,15 @@ pub(super) fn build_yaml_schema_for_node(
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             if !dep_node.columns.is_empty() {
-                let relation_name = dep_node.relation_name();
                 let mut node_col_names: Vec<&String> = dep_node.columns.keys().collect();
                 node_col_names.sort_unstable();
-                let fq_name = make_fq_table_name(
+                has_entries |= register_model_relation(
+                    &mut schema,
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
-                    relation_name,
+                    dep_node.relation_name(),
+                    &node_col_names.iter().cloned().cloned().collect::<Vec<_>>(),
                 );
-                if !schema.tables().any(|table| table.name == fq_name) {
-                    has_entries = true;
-                }
-                schema.add_table(&fq_name, node_col_names.iter().cloned().cloned());
-                if fq_name != relation_name {
-                    schema.add_table(relation_name, node_col_names.iter().cloned().cloned());
-                }
             }
             continue;
         }
@@ -142,32 +110,65 @@ pub(super) fn build_yaml_schema_for_node(
             let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
             source_col_names.sort_unstable();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
-            let physical_fq = make_fq_table_name(
+            has_entries |= register_source_relation(
+                &mut schema,
                 dep_source.database.as_deref(),
                 dep_source.schema.as_deref(),
                 physical_identifier,
+                &dep_source.source_name,
+                &dep_source.name,
+                source_col_names.iter().cloned().cloned().collect(),
             );
-            if !schema.tables().any(|table| table.name == physical_fq) {
-                has_entries = true;
-            }
-            schema.add_table(&physical_fq, source_col_names.iter().cloned().cloned());
-            let schema_fq =
-                make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
-            let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
-            for alias in [
-                schema_fq.as_str(),
-                physical_identifier,
-                dep_source.name.as_str(),
-                source_qualified.as_str(),
-            ] {
-                if alias != physical_fq {
-                    schema.add_table(alias, source_col_names.iter().cloned().cloned());
-                }
-            }
         }
     }
 
     if has_entries { Some(schema) } else { None }
+}
+
+fn register_model_relation(
+    schema: &mut CatalogSnapshot,
+    database: Option<&str>,
+    schema_name: Option<&str>,
+    relation_name: &str,
+    columns: &[String],
+) -> bool {
+    let relation = RelationRef::from_manifest(database, schema_name, relation_name);
+    let was_present = schema.contains_relation(&relation);
+    schema.add_relation(relation.clone(), relation.render(), columns.iter().cloned());
+    if relation.qualification_len() > 1 {
+        schema.add_alias(
+            RelationRef::from_manifest(None, None, relation_name),
+            relation,
+        );
+    }
+    !was_present
+}
+
+fn register_source_relation(
+    schema: &mut CatalogSnapshot,
+    database: Option<&str>,
+    schema_name: Option<&str>,
+    physical_identifier: &str,
+    source_name: &str,
+    logical_name: &str,
+    columns: Vec<String>,
+) -> bool {
+    let physical = RelationRef::from_manifest(database, schema_name, physical_identifier);
+    let was_present = schema.contains_relation(&physical);
+    schema.add_relation(physical.clone(), physical.render(), columns);
+
+    let aliases = [
+        RelationRef::from_manifest(None, schema_name, physical_identifier),
+        RelationRef::from_manifest(None, None, physical_identifier),
+        RelationRef::from_manifest(None, None, logical_name),
+        RelationRef::from_manifest(None, Some(source_name), logical_name),
+    ];
+    for alias in aliases {
+        if alias != physical {
+            schema.add_alias(alias, physical.clone());
+        }
+    }
+    !was_present
 }
 
 pub(super) fn compute_manifest_columns_hash(

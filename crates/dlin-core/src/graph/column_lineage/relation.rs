@@ -114,6 +114,20 @@ impl RelationRef {
         }
     }
 
+    pub(crate) fn as_manifest(&self) -> Self {
+        Self {
+            catalog: self
+                .catalog
+                .as_ref()
+                .map(|component| Identifier::manifest(component.value.clone())),
+            schema: self
+                .schema
+                .as_ref()
+                .map(|component| Identifier::manifest(component.value.clone())),
+            name: Identifier::manifest(self.name.value.clone()),
+        }
+    }
+
     pub(crate) fn parse(input: &str) -> Result<Self, RelationParseError> {
         let parts = split_relation(input)?;
         let identifiers = parts
