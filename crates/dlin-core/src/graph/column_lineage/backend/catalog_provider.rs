@@ -23,8 +23,17 @@ impl SqllineageCatalogProvider {
             table.schema.as_deref(),
             &table.table,
         );
-        self.snapshot
-            .resolve_table_exact(&query, self.dialect)
+        let table = match self.dialect {
+            // sqllineage's TableRef has already lost quote metadata and
+            // lowercases identifiers on this path. Generic and BigQuery need
+            // the boundary-specific case-insensitive fallback to find a
+            // mixed-case manifest relation.
+            DlinDialect::Generic | DlinDialect::BigQuery => {
+                self.snapshot.resolve_table_exact_case_insensitive(&query)
+            }
+            _ => self.snapshot.resolve_table_exact(&query, self.dialect),
+        };
+        table
             .and_then(|candidate| {
                 self.snapshot
                     .unambiguous_columns_for_relation(&candidate.relation)
@@ -146,12 +155,26 @@ mod tests {
 
     #[test]
     fn list_columns_matches_bigquery_identifiers_case_insensitively() {
-        let snapshot = catalog();
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("Warehouse.Analytics.Orders", ["id".to_string()]);
         let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::BigQuery);
 
         assert!(
             provider
                 .list_columns(&table(Some("WAREHOUSE"), Some("ANALYTICS"), "ORDERS"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn list_columns_matches_mixed_case_generic_relation_after_backend_lowercasing() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("Warehouse.Analytics.Orders", ["id".to_string()]);
+        let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::Generic);
+
+        assert!(
+            provider
+                .list_columns(&table(Some("warehouse"), Some("analytics"), "orders"))
                 .is_some()
         );
     }

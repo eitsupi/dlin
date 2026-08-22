@@ -15,7 +15,7 @@ pub struct CatalogSnapshot {
     /// Compatibility views for backend adapters that still consume the
     /// legacy string-facing `tables()` iterator. These are never identity
     /// storage; their `relation` points back to the physical entry.
-    alias_views: Vec<CatalogTable>,
+    alias_views: Vec<(RelationRef, CatalogTable)>,
     conflicted: BTreeSet<RelationRef>,
 }
 
@@ -73,7 +73,7 @@ impl CatalogSnapshot {
                 relation: relation.clone(),
             },
         );
-        for view in &mut self.alias_views {
+        for (_, view) in &mut self.alias_views {
             if view.relation == relation {
                 view.columns = cols.clone();
             }
@@ -97,11 +97,14 @@ impl CatalogSnapshot {
                 .tables
                 .get(&relation)
                 .expect("catalog alias points at a registered relation");
-            self.alias_views.push(CatalogTable {
-                name: alias.render(),
-                columns: physical.columns.clone(),
-                relation,
-            });
+            self.alias_views.push((
+                alias.clone(),
+                CatalogTable {
+                    name: alias.render(),
+                    columns: physical.columns.clone(),
+                    relation,
+                },
+            ));
         }
     }
 
@@ -177,6 +180,31 @@ impl CatalogSnapshot {
         self.tables.values().nth(index)
     }
 
+    /// Resolve a backend relation after its quote metadata and original case
+    /// have been discarded. This fallback is deliberately opt-in at the
+    /// catalog-provider boundary; the general relation matcher keeps its
+    /// dialect-specific case policy.
+    pub(crate) fn resolve_table_exact_case_insensitive(
+        &self,
+        query: &RelationRef,
+    ) -> Option<&CatalogTable> {
+        let candidates = self
+            .aliases
+            .iter()
+            .filter(|(alias, _)| {
+                alias.qualification_len() == query.qualification_len()
+                    && alias.matches_case_insensitive(query)
+            })
+            .flat_map(|(_, relations)| relations.iter())
+            .collect::<BTreeSet<_>>();
+        let Some(relation) = (candidates.len() == 1)
+            .then(|| candidates.iter().next().expect("length checked above"))
+        else {
+            return None;
+        };
+        self.tables.get(*relation)
+    }
+
     pub(crate) fn unambiguous_columns_for_relation(
         &self,
         relation: &RelationRef,
@@ -217,7 +245,15 @@ impl CatalogSnapshot {
     }
 
     pub fn tables(&self) -> impl Iterator<Item = &CatalogTable> {
-        self.tables.values().chain(self.alias_views.iter())
+        self.tables
+            .values()
+            .chain(self.alias_views.iter().filter_map(|(alias, view)| {
+                (self
+                    .aliases
+                    .get(alias)
+                    .is_some_and(|targets| targets.len() == 1))
+                .then_some(view)
+            }))
     }
 }
 
@@ -320,5 +356,7 @@ mod tests {
         catalog.add_alias(alias.clone(), second);
 
         assert_eq!(catalog.table_columns("orders"), None);
+        let names: Vec<_> = catalog.tables().map(|table| table.name.as_str()).collect();
+        assert!(!names.contains(&"orders"));
     }
 }

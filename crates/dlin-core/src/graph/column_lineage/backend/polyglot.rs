@@ -614,6 +614,23 @@ select * from renamed"#;
     }
 
     #[test]
+    fn polyglot_schema_skips_ambiguous_alias_views() {
+        use polyglot_sql::Schema as _;
+
+        let mut snapshot = CatalogSnapshot::new();
+        let first = RelationRef::from_manifest(Some("db_a"), Some("raw"), "orders");
+        let second = RelationRef::from_manifest(Some("db_b"), Some("raw"), "orders");
+        let alias = RelationRef::from_manifest(None, None, "orders");
+        snapshot.add_relation(first.clone(), first.render(), ["id".to_string()]);
+        snapshot.add_relation(second.clone(), second.render(), ["id".to_string()]);
+        snapshot.add_alias(alias.clone(), first);
+        snapshot.add_alias(alias, second);
+
+        let schema = to_polyglot_schema(&snapshot);
+        assert!(schema.column_names("orders").is_err());
+    }
+
+    #[test]
     fn debug_trace_rejects_schema_conversion_errors() {
         let mut snapshot = CatalogSnapshot::new();
         snapshot.add_table("a", ["root_col".to_string()]);

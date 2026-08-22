@@ -85,9 +85,24 @@ impl Identifier {
         match self.quote_style {
             QuoteStyle::Double => format!("\"{}\"", self.value.replace('"', "\"\"")),
             QuoteStyle::Backtick => format!("`{}`", self.value.replace('`', "``")),
+            QuoteStyle::Unquoted | QuoteStyle::Unknown if needs_quoting(&self.value) => {
+                format!("\"{}\"", self.value.replace('"', "\"\""))
+            }
             QuoteStyle::Unquoted | QuoteStyle::Unknown => self.value.clone(),
         }
     }
+}
+
+/// Keep a component's boundaries intact when rendering a relation. Manifest
+/// and backend APIs sometimes provide a component containing a dot (for
+/// example, a table named `orders.v2`) even though they do not preserve the
+/// original SQL quote token. Such values must be quoted before they are
+/// rendered back into a dotted relation.
+fn needs_quoting(value: &str) -> bool {
+    value.is_empty()
+        || value
+            .chars()
+            .any(|character| matches!(character, '.' | '"' | '`'))
 }
 
 /// A structurally represented relation, from bare table name to
@@ -215,17 +230,40 @@ impl RelationRef {
             return self.name.matches(&other.name, dialect);
         }
 
-        let catalog_matches = match (self.catalog.as_ref(), other.catalog.as_ref()) {
-            (Some(left), Some(right)) => left.matches(right, dialect),
-            (None, None) => true,
-            _ => false,
-        };
-        let schema_matches = match (self.schema.as_ref(), other.schema.as_ref()) {
-            (Some(left), Some(right)) => left.matches(right, dialect),
-            (None, None) => true,
-            _ => false,
-        };
-        catalog_matches && schema_matches && self.name.matches(&other.name, dialect)
+        // Two-part SQL names are parsed as schema.name, while manifests may
+        // represent the same positional name as catalog.name when schema is
+        // absent. Once qualification arity agrees, compare visible parts in
+        // order rather than requiring the optional field labels to agree.
+        self.components()
+            .iter()
+            .zip(other.components())
+            .all(|(left, right)| left.matches(right, dialect))
+    }
+
+    /// Compare a backend lookup whose quote metadata has been discarded.
+    /// This is intentionally separate from [`Self::matches`]: only the
+    /// sqllineage catalog-provider boundary is allowed to use this
+    /// case-insensitive fallback for Generic and BigQuery.
+    pub(crate) fn matches_case_insensitive(&self, other: &Self) -> bool {
+        if self.qualification_len() != other.qualification_len() {
+            return false;
+        }
+        self.components()
+            .iter()
+            .zip(other.components())
+            .all(|(left, right)| left.value.to_lowercase() == right.value.to_lowercase())
+    }
+
+    fn components(&self) -> Vec<&Identifier> {
+        let mut components = Vec::with_capacity(self.qualification_len());
+        if let Some(catalog) = &self.catalog {
+            components.push(catalog);
+        }
+        if let Some(schema) = &self.schema {
+            components.push(schema);
+        }
+        components.push(&self.name);
+        components
     }
 
     pub(crate) fn render(&self) -> String {
@@ -459,7 +497,33 @@ mod tests {
         let relation = RelationRef::from_manifest(Some("warehouse"), Some("raw"), "orders.v2");
         assert_eq!(relation.qualification_len(), 3);
         assert_eq!(relation.name().value(), "orders.v2");
-        assert_eq!(relation.to_string(), "warehouse.raw.orders.v2");
+        assert_eq!(relation.to_string(), "warehouse.raw.\"orders.v2\"");
+        let reparsed = parsed(&relation.to_string());
+        assert_eq!(reparsed.name().value(), "orders.v2");
+        assert_eq!(reparsed.qualification_len(), relation.qualification_len());
+    }
+
+    #[test]
+    fn backend_dotted_identifier_renders_losslessly() {
+        let relation = RelationRef::from_backend(None, Some("raw"), "orders.v2");
+        let rendered = relation.to_string();
+        assert_eq!(rendered, "raw.\"orders.v2\"");
+        let reparsed = parsed(&rendered);
+        assert_eq!(reparsed.schema().unwrap().value(), "raw");
+        assert_eq!(reparsed.name().value(), "orders.v2");
+        assert!(
+            RelationRef::from_manifest(None, Some("raw"), "orders.v2")
+                .matches(&reparsed, DlinDialect::Generic)
+        );
+    }
+
+    #[test]
+    fn catalog_only_two_part_relation_matches_sql_two_part_positionally() {
+        let catalog_only = RelationRef::from_manifest(Some("warehouse"), None, "orders");
+        let sql_two_part = parsed("warehouse.orders");
+        assert_eq!(catalog_only.qualification_len(), 2);
+        assert!(catalog_only.matches(&sql_two_part, DlinDialect::Generic));
+        assert!(!catalog_only.matches(&parsed("raw.warehouse.orders"), DlinDialect::Generic));
     }
 
     #[test]
