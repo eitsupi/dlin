@@ -7,6 +7,7 @@ mod backend;
 mod cache;
 mod cross_model;
 mod impact;
+mod relation;
 mod schema;
 #[cfg(test)]
 mod tests;
