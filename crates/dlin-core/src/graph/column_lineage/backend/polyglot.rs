@@ -212,7 +212,7 @@ fn analyze_single_output(
 ) -> BackendColumnOutcome {
     let target = OutputTarget {
         slot: output.slot.clone(),
-        name: OutputName::Named(output.name.clone()),
+        name: output.name.clone(),
     };
 
     if duplicate_output_names.contains(&output.name) {
@@ -301,7 +301,7 @@ fn run_column_lineage_as_backend_result(
         // This target is placeholder data; the caller replaces it before returning the result.
         target: OutputTarget {
             slot: AnalysisSlot(0),
-            name: OutputName::Named(String::new()),
+            name: String::new(),
         },
         resolution: ResolutionState::Resolved,
         transformation: raw.transformation,

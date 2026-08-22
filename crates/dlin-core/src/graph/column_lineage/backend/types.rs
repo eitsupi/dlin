@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalysisCompleteness {
@@ -8,10 +8,10 @@ pub enum AnalysisCompleteness {
     Indeterminate { reason: String },
 }
 
-/// Index of an output column within an analysis request. The request order is
-/// the alphabetically sorted set of output column names rather than the SQL
-/// projection order, so this is not a SQL projection position or output
-/// ordinal.
+/// Identifier of an output column within an analysis request. The request
+/// order is the alphabetically sorted set of output column names rather than
+/// the SQL projection order, so this is not a SQL projection position or
+/// output ordinal. Slots need not be contiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisSlot(pub usize);
 
@@ -76,8 +76,9 @@ pub struct BackendStatementResult {
     pub completeness: AnalysisCompleteness,
     pub has_unresolved_stars: bool,
     /// One outcome is required for every output in the corresponding
-    /// [`LineageRequest`]. Each outcome's slot must be in range, distinct from
-    /// the other outcomes' slots, and name-matching for that requested slot.
+    /// [`LineageRequest`]. Each outcome's slot must match one requested slot,
+    /// be distinct from the other outcomes' slots, and be name-matching for
+    /// that requested slot.
     /// Outcomes may be returned in any order: vector position has no meaning,
     /// and is not a SQL projection position. A backend that cannot analyze an
     /// output must return [`BackendColumnOutcome::Failed`] for it rather than
@@ -103,7 +104,7 @@ pub struct BackendColumnFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputTarget {
     pub slot: AnalysisSlot,
-    pub name: OutputName,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,15 +145,46 @@ pub struct LineageRequest<'a> {
     pub duplicate_output_names: &'a BTreeSet<String>,
 }
 
-/// Put backend column outcomes into request-slot order while preserving every
-/// unaffected outcome. A backend is required to return one outcome for each
-/// requested slot, but malformed outcomes are diagnosed and replaced with a
-/// visible internal failure for the affected slot.
+/// Put backend column outcomes into request order while preserving every
+/// unaffected outcome. Request slots need not be contiguous or match vector
+/// positions; the returned vector always follows `outputs` order. A backend is
+/// required to return one outcome for each requested slot, but malformed
+/// outcomes are diagnosed and replaced with a visible internal failure for the
+/// affected slot.
 pub fn normalize_column_outcomes(
     outputs: &[OutputColumnRequest],
     outcomes: Vec<BackendColumnOutcome>,
 ) -> (Vec<BackendColumnOutcome>, Vec<BackendError>) {
-    let mut indexed: Vec<Option<BackendColumnOutcome>> = (0..outputs.len()).map(|_| None).collect();
+    let mut request_indices = BTreeMap::new();
+    let mut invalid_reasons = BTreeMap::new();
+    for (index, output) in outputs.iter().enumerate() {
+        if request_indices.insert(output.slot.0, index).is_some() {
+            invalid_reasons.insert(
+                output.slot.0,
+                format!("request declared slot {} more than once", output.slot.0),
+            );
+        }
+    }
+
+    let mut incoming_counts = BTreeMap::new();
+    for outcome in &outcomes {
+        let slot = match outcome {
+            BackendColumnOutcome::Resolved(result) => result.target.slot.0,
+            BackendColumnOutcome::Failed(failure) => failure.target.slot.0,
+        };
+        *incoming_counts.entry(slot).or_insert(0) += 1;
+    }
+
+    for (&slot, &count) in &incoming_counts {
+        if count > 1 && !invalid_reasons.contains_key(&slot) {
+            invalid_reasons.insert(
+                slot,
+                format!("backend returned more than one outcome for slot {slot}"),
+            );
+        }
+    }
+
+    let mut accepted = BTreeMap::new();
     let mut diagnostics = Vec::new();
 
     for outcome in outcomes {
@@ -162,52 +194,76 @@ pub fn normalize_column_outcomes(
         };
         let slot = target.slot.0;
 
-        if slot >= outputs.len() {
-            diagnostics.push(BackendError {
-                kind: BackendErrorKind::Internal,
-                message: format!(
-                    "backend returned an outcome for slot {slot}, but {} outputs were requested",
-                    outputs.len()
-                ),
-            });
+        if incoming_counts[&slot] > 1 {
             continue;
         }
 
-        if indexed[slot].is_some() {
-            diagnostics.push(BackendError {
-                kind: BackendErrorKind::Internal,
-                message: format!(
-                    "backend returned a duplicate outcome for slot {slot}; the later outcome was rejected"
-                ),
-            });
+        let request_index = match request_indices.get(&slot) {
+            Some(index) => *index,
+            None => {
+                diagnostics.push(BackendError {
+                    kind: BackendErrorKind::Internal,
+                    message: format!(
+                        "backend returned an outcome for slot {slot}, but no output requested that slot"
+                    ),
+                });
+                continue;
+            }
+        };
+
+        if invalid_reasons.contains_key(&slot) {
             continue;
         }
 
-        // `UnaliasedExpression` has no textual name to compare with the
-        // request. Its slot is still validated; only `Named` carries a name
-        // that can be checked here.
-        if let OutputName::Named(target_name) = &target.name
-            && target_name != &outputs[slot].name
-        {
-            diagnostics.push(BackendError {
-                kind: BackendErrorKind::Internal,
-                message: format!(
-                    "backend outcome for slot {slot} named '{target_name}', but the request names that slot '{}'",
-                    outputs[slot].name
+        if target.name != outputs[request_index].name {
+            invalid_reasons.insert(
+                slot,
+                format!(
+                    "backend outcome for slot {slot} named '{}', but the request names that slot '{}'",
+                    target.name, outputs[request_index].name
                 ),
-            });
+            );
             continue;
         }
 
-        indexed[slot] = Some(outcome);
+        accepted.insert(slot, outcome);
     }
 
-    let normalized = indexed
-        .into_iter()
-        .enumerate()
-        .map(|(slot, outcome)| {
-            outcome.unwrap_or_else(|| {
-                let request = &outputs[slot];
+    let mut reported_slots = BTreeSet::new();
+    for (&slot, &count) in &incoming_counts {
+        if count > 1 && !request_indices.contains_key(&slot) {
+            reported_slots.insert(slot);
+            diagnostics.push(BackendError {
+                kind: BackendErrorKind::Internal,
+                message: invalid_reasons[&slot].clone(),
+            });
+        }
+    }
+    let normalized = outputs
+        .iter()
+        .map(|request| {
+            let slot = request.slot.0;
+            if let Some(reason) = invalid_reasons.get(&slot) {
+                if reported_slots.insert(slot) {
+                    diagnostics.push(BackendError {
+                        kind: BackendErrorKind::Internal,
+                        message: reason.clone(),
+                    });
+                }
+                return BackendColumnOutcome::Failed(BackendColumnFailure {
+                    target: OutputTarget {
+                        slot: request.slot.clone(),
+                        name: request.name.clone(),
+                    },
+                    resolution: ResolutionState::Indeterminate,
+                    error: BackendError {
+                        kind: BackendErrorKind::Internal,
+                        message: reason.clone(),
+                    },
+                });
+            }
+
+            accepted.remove(&slot).unwrap_or_else(|| {
                 let message = format!(
                     "backend returned no outcome for column '{}' at slot {slot}",
                     request.name
@@ -218,8 +274,8 @@ pub fn normalize_column_outcomes(
                 });
                 BackendColumnOutcome::Failed(BackendColumnFailure {
                     target: OutputTarget {
-                        slot: AnalysisSlot(slot),
-                        name: OutputName::Named(request.name.clone()),
+                        slot: request.slot.clone(),
+                        name: request.name.clone(),
                     },
                     resolution: ResolutionState::Indeterminate,
                     error: BackendError {
@@ -293,7 +349,7 @@ mod tests {
         BackendColumnOutcome::Resolved(BackendColumnResult {
             target: OutputTarget {
                 slot: AnalysisSlot(slot),
-                name: OutputName::Named(name.to_string()),
+                name: name.to_string(),
             },
             resolution: ResolutionState::Resolved,
             transformation,
@@ -305,7 +361,7 @@ mod tests {
         BackendColumnOutcome::Failed(BackendColumnFailure {
             target: OutputTarget {
                 slot: AnalysisSlot(slot),
-                name: OutputName::Named(name.to_string()),
+                name: name.to_string(),
             },
             resolution: ResolutionState::NotFound,
             error: BackendError {
@@ -342,14 +398,14 @@ mod tests {
             &normalized[0],
             BackendColumnOutcome::Resolved(result)
                 if result.target.slot == AnalysisSlot(0)
-                    && result.target.name == OutputName::Named("alpha".to_string())
+                    && result.target.name == "alpha"
                     && result.transformation == crate::graph::column_lineage::TransformationType::Direct
         ));
         assert!(matches!(
             &normalized[1],
             BackendColumnOutcome::Resolved(result)
                 if result.target.slot == AnalysisSlot(1)
-                    && result.target.name == OutputName::Named("beta".to_string())
+                    && result.target.name == "beta"
                     && result.transformation == crate::graph::column_lineage::TransformationType::Expression
         ));
     }
@@ -371,7 +427,7 @@ mod tests {
             &normalized[0],
             BackendColumnOutcome::Failed(failure)
                 if failure.target.slot == AnalysisSlot(0)
-                    && failure.target.name == OutputName::Named("alpha".to_string())
+                    && failure.target.name == "alpha"
                     && failure.resolution == ResolutionState::Indeterminate
                     && failure.error.kind == BackendErrorKind::Internal
                     && failure.error.message == "backend returned no outcome for column 'alpha' at slot 0"
@@ -380,8 +436,9 @@ mod tests {
             &normalized[1],
             BackendColumnOutcome::Resolved(result)
                 if result.target.slot == AnalysisSlot(1)
-                    && result.target.name == OutputName::Named("beta".to_string())
+                    && result.target.name == "beta"
         ));
+        assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == BackendErrorKind::Internal
                 && diagnostic.message == "backend returned no outcome for column 'alpha' at slot 0"
@@ -389,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_column_outcomes_rejects_duplicate_without_displacing_first() {
+    fn normalize_column_outcomes_rejects_all_duplicate_outcomes() {
         let outputs = [request(0, "alpha")];
         let (normalized, diagnostics) = normalize_column_outcomes(
             &outputs,
@@ -405,15 +462,109 @@ mod tests {
 
         assert!(matches!(
             &normalized[0],
-            BackendColumnOutcome::Resolved(result)
-                if result.target.slot == AnalysisSlot(0)
-                    && result.transformation == crate::graph::column_lineage::TransformationType::Direct
+            BackendColumnOutcome::Failed(failure)
+                if failure.target.slot == AnalysisSlot(0)
+                    && failure.target.name == "alpha"
+                    && failure.resolution == ResolutionState::Indeterminate
+                    && failure.error.kind == BackendErrorKind::Internal
+                    && failure.error.message == "backend returned more than one outcome for slot 0"
         ));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind == BackendErrorKind::Internal
-                && diagnostic.message
-                    == "backend returned a duplicate outcome for slot 0; the later outcome was rejected"
-        }));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, BackendErrorKind::Internal);
+        assert_eq!(
+            diagnostics[0].message,
+            "backend returned more than one outcome for slot 0"
+        );
+    }
+
+    #[test]
+    fn normalize_column_outcomes_detects_duplicate_before_name_validation() {
+        let outputs = [request(0, "alpha")];
+        let (normalized, diagnostics) = normalize_column_outcomes(
+            &outputs,
+            vec![
+                resolved(
+                    0,
+                    "wrong",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+                resolved(
+                    0,
+                    "alpha",
+                    crate::graph::column_lineage::TransformationType::Expression,
+                ),
+            ],
+        );
+
+        assert!(matches!(
+            &normalized[0],
+            BackendColumnOutcome::Failed(failure)
+                if failure.target.slot == AnalysisSlot(0)
+                    && failure.target.name == "alpha"
+                    && failure.error.message == "backend returned more than one outcome for slot 0"
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message,
+            "backend returned more than one outcome for slot 0"
+        );
+    }
+
+    #[test]
+    fn normalize_column_outcomes_uses_declared_slots_in_request_order() {
+        let outputs = [request(7, "alpha"), request(2, "beta")];
+        let (normalized, diagnostics) = normalize_column_outcomes(
+            &outputs,
+            vec![
+                resolved(
+                    2,
+                    "beta",
+                    crate::graph::column_lineage::TransformationType::Expression,
+                ),
+                resolved(
+                    7,
+                    "alpha",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+            ],
+        );
+
+        assert!(diagnostics.is_empty());
+        assert!(matches!(
+            &normalized[..],
+            [
+                BackendColumnOutcome::Resolved(alpha),
+                BackendColumnOutcome::Resolved(beta),
+            ] if alpha.target.slot == AnalysisSlot(7)
+                && alpha.target.name == "alpha"
+                && beta.target.slot == AnalysisSlot(2)
+                && beta.target.name == "beta"
+        ));
+    }
+
+    #[test]
+    fn normalize_column_outcomes_reports_duplicate_request_slots() {
+        let outputs = [request(4, "alpha"), request(4, "beta")];
+        let (normalized, diagnostics) = normalize_column_outcomes(
+            &outputs,
+            vec![resolved(
+                4,
+                "alpha",
+                crate::graph::column_lineage::TransformationType::Direct,
+            )],
+        );
+
+        assert!(normalized.iter().all(|outcome| matches!(
+            outcome,
+            BackendColumnOutcome::Failed(failure)
+                if failure.resolution == ResolutionState::Indeterminate
+                    && failure.error.message == "request declared slot 4 more than once"
+        )));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message,
+            "request declared slot 4 more than once"
+        );
     }
 
     #[test]
@@ -432,12 +583,53 @@ mod tests {
             &normalized[0],
             BackendColumnOutcome::Failed(failure)
                 if failure.target.slot == AnalysisSlot(0)
-                    && failure.target.name == OutputName::Named("alpha".to_string())
+                    && failure.target.name == "alpha"
         ));
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == BackendErrorKind::Internal
                 && diagnostic.message
-                    == "backend returned an outcome for slot 1, but 1 outputs were requested"
+                    == "backend returned an outcome for slot 1, but no output requested that slot"
+        }));
+    }
+
+    #[test]
+    fn normalize_column_outcomes_rejects_unrequested_sparse_slot() {
+        let outputs = [request(0, "alpha"), request(5, "epsilon")];
+        let (normalized, diagnostics) = normalize_column_outcomes(
+            &outputs,
+            vec![
+                resolved(
+                    1,
+                    "beta",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+                resolved(
+                    3,
+                    "gamma",
+                    crate::graph::column_lineage::TransformationType::Direct,
+                ),
+            ],
+        );
+
+        assert!(matches!(
+            &normalized[0],
+            BackendColumnOutcome::Failed(failure)
+                if failure.target.slot == AnalysisSlot(0)
+                    && failure.target.name == "alpha"
+                    && failure.resolution == ResolutionState::Indeterminate
+                    && failure.error.kind == BackendErrorKind::Internal
+                    && failure.error.message
+                        == "backend returned no outcome for column 'alpha' at slot 0"
+        ));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == BackendErrorKind::Internal
+                && diagnostic.message
+                    == "backend returned an outcome for slot 1, but no output requested that slot"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == BackendErrorKind::Internal
+                && diagnostic.message
+                    == "backend returned an outcome for slot 3, but no output requested that slot"
         }));
     }
 
@@ -457,14 +649,16 @@ mod tests {
             &normalized[0],
             BackendColumnOutcome::Failed(failure)
                 if failure.target.slot == AnalysisSlot(0)
-                    && failure.target.name == OutputName::Named("alpha".to_string())
+                    && failure.target.name == "alpha"
                     && failure.error.kind == BackendErrorKind::Internal
+                    && failure.error.message
+                        == "backend outcome for slot 0 named 'beta', but the request names that slot 'alpha'"
         ));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind == BackendErrorKind::Internal
-                && diagnostic.message
-                    == "backend outcome for slot 0 named 'beta', but the request names that slot 'alpha'"
-        }));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message,
+            "backend outcome for slot 0 named 'beta', but the request names that slot 'alpha'"
+        );
     }
 
     #[test]

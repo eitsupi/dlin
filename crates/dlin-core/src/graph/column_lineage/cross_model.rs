@@ -270,12 +270,7 @@ fn compute_single_column_lineage(
     let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = backend.analyze(&request).ok()?;
     let statement = require_single_lineage_statement(analysis).ok()?;
-    let (normalized_outcomes, contract_errors) =
-        normalize_column_outcomes(&outputs, statement.columns);
-    if !contract_errors.is_empty() {
-        return None;
-    }
-    let outcome = normalized_outcomes.into_iter().next()?;
+    let outcome = normalize_single_column_outcome(&outputs, statement.columns)?;
 
     match outcome {
         BackendColumnOutcome::Resolved(result) => Some((
@@ -300,10 +295,74 @@ fn compute_single_column_lineage(
     }
 }
 
+fn normalize_single_column_outcome(
+    outputs: &[OutputColumnRequest],
+    outcomes: Vec<BackendColumnOutcome>,
+) -> Option<BackendColumnOutcome> {
+    let (normalized_outcomes, _contract_errors) = normalize_column_outcomes(outputs, outcomes);
+    normalized_outcomes.into_iter().next()
+}
+
 fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) -> String {
     match (database, schema) {
         (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
         (None, Some(s)) => format!("{}.{}", s, name),
         _ => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::column_lineage::backend::{
+        BackendColumnFailure, BackendError, BackendErrorKind,
+    };
+    use crate::graph::column_lineage::backend::{BackendColumnResult, ResolutionState};
+
+    #[test]
+    fn cross_model_keeps_requested_outcome_with_unrelated_contract_diagnostic() {
+        let outputs = [OutputColumnRequest {
+            slot: AnalysisSlot(0),
+            name: "alpha".to_string(),
+        }];
+        let outcome = normalize_single_column_outcome(
+            &outputs,
+            vec![
+                BackendColumnOutcome::Resolved(BackendColumnResult {
+                    target: crate::graph::column_lineage::backend::OutputTarget {
+                        slot: AnalysisSlot(0),
+                        name: "alpha".to_string(),
+                    },
+                    resolution: ResolutionState::Resolved,
+                    transformation: TransformationType::Direct,
+                    sources: vec![BackendSource::Concrete {
+                        table: "upstream".to_string(),
+                        column: "alpha".to_string(),
+                    }],
+                }),
+                BackendColumnOutcome::Failed(BackendColumnFailure {
+                    target: crate::graph::column_lineage::backend::OutputTarget {
+                        slot: AnalysisSlot(9),
+                        name: "unrelated".to_string(),
+                    },
+                    resolution: ResolutionState::Indeterminate,
+                    error: BackendError {
+                        kind: BackendErrorKind::Internal,
+                        message: "unrelated diagnostic".to_string(),
+                    },
+                }),
+            ],
+        );
+
+        assert!(matches!(
+            outcome,
+            Some(BackendColumnOutcome::Resolved(result))
+                if result.target.slot == AnalysisSlot(0)
+                    && result.target.name == "alpha"
+                    && result.sources == vec![BackendSource::Concrete {
+                        table: "upstream".to_string(),
+                        column: "alpha".to_string(),
+                    }]
+        ));
     }
 }
