@@ -585,6 +585,80 @@ fn sqllineage_second_branch_star_does_not_guard_explicit_output() {
 }
 
 #[test]
+fn sqllineage_nonleading_name_after_leading_star_is_indeterminate() {
+    // The leading SELECT * determines the CTE's output names. Since its schema
+    // is unknown, the second branch's col_a cannot establish the requested
+    // output name or its ordinal alignment.
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "col_a".to_string(),
+    }];
+    let statement = sqllineage_statement_without_completeness(
+        "WITH u AS (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) SELECT col_a FROM u",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => assert_eq!(
+            failure.resolution,
+            super::super::backend::ResolutionState::Indeterminate
+        ),
+        other => panic!("expected unresolved output to be indeterminate, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_leading_name_with_unresolved_aligned_branch_is_not_found() {
+    // c1 is correctly named by the leading operand, but the ordinally aligned
+    // a.col_x in the other branch cannot resolve because a is an unknown-schema
+    // SELECT * CTE, so sqllineage reports the requested output as NotFound.
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "c1".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c1, 2 AS c2 UNION ALL SELECT a.col_x, a.col_y FROM a) SELECT c1 FROM u",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => assert_eq!(
+            failure.resolution,
+            super::super::backend::ResolutionState::NotFound
+        ),
+        other => panic!("expected unresolved output to be not found, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_nonleading_set_output_name_is_not_found() {
+    // c9 is named only by the non-leading operand. Set-operation output names
+    // come from c1 in the leading operand, so c9 has no output mapping.
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "c9".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "WITH u AS (SELECT 1 AS c1 UNION ALL SELECT 2 AS c9) SELECT c9 FROM u",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => assert_eq!(
+            failure.resolution,
+            super::super::backend::ResolutionState::NotFound
+        ),
+        other => panic!("expected unresolved output to be not found, got {other:?}"),
+    }
+}
+
+#[test]
 fn sqllineage_guard_preserves_duplicate_output_ambiguity() {
     let outputs = [OutputColumnRequest {
         slot: AnalysisSlot(0),
