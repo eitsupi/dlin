@@ -5,7 +5,7 @@ fn test_rename_detection() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -40,7 +40,7 @@ fn test_join_lineage() {
     let result = compute_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -72,7 +72,7 @@ fn test_model_not_found() {
     let result = compute_column_lineage(
         &manifest,
         "nonexistent",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -93,7 +93,7 @@ fn test_no_compiled_code() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -114,7 +114,7 @@ fn test_no_yaml_columns_uses_sql_inference() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -138,7 +138,7 @@ fn test_no_columns_and_no_sql() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -148,39 +148,6 @@ fn test_no_columns_and_no_sql() {
         result.errors[0]
             .what
             .contains("could not determine output columns")
-    );
-}
-
-#[test]
-fn test_cte_select_star() {
-    // CTE + SELECT * now works with the expand_cte_stars preprocessing
-    let sql = r#"with renamed as (select id as customer_id from source) select * from renamed"#;
-    let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-    let result = polyglot_sql::lineage::lineage("customer_id", &expr, None, false);
-    assert!(
-        result.is_ok(),
-        "CTE + SELECT * should work: {:?}",
-        result.err()
-    );
-    let node = result.unwrap();
-    assert_eq!(node.name, "customer_id");
-}
-
-#[test]
-fn test_nested_cte_select_star() {
-    // Nested CTE: cte2 references cte1 via SELECT *
-    let sql = r#"
-            with
-                cte1 as (select id as order_id, amount from raw_orders),
-                cte2 as (select * from cte1)
-            select * from cte2
-        "#;
-    let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-    let result = polyglot_sql::lineage::lineage("order_id", &expr, None, false);
-    assert!(
-        result.is_ok(),
-        "nested CTE + SELECT * should work: {:?}",
-        result.err()
     );
 }
 
@@ -205,7 +172,7 @@ fn test_cte_select_star_in_manifest_model() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -221,98 +188,12 @@ fn test_cte_select_star_in_manifest_model() {
 }
 
 #[test]
-fn test_schema_resolves_cte_star_from_external_table() {
-    // Test that lineage_with_schema can resolve columns through CTEs that
-    // reference external tables registered in the schema.
-    let sql = r#"with
-orders as (
-    select * from stg_orders
-),
-enriched as (
-    select orders.*, 'extra' as extra_col
-    from orders
-)
-select * from enriched"#;
-    let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-
-    let mut schema = polyglot_sql::MappingSchema::new();
-    let cols = vec![
-        (
-            "order_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-        (
-            "customer_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-        (
-            "order_total".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-    ];
-    schema.add_table("stg_orders", &cols, None).unwrap();
-
-    let result = polyglot_sql::lineage::lineage_with_schema(
-        "order_id",
-        &expr,
-        Some(&schema as &dyn polyglot_sql::Schema),
-        None,
-        false,
-    );
-    assert!(
-        result.is_ok(),
-        "should resolve order_id: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-fn test_schema_resolves_three_part_name() {
-    // Test with fully-qualified 3-part table name as dbt generates
-    let sql = r#"with
-orders as (
-    select * from "jaffle_shop"."main"."stg_orders"
-)
-select * from orders"#;
-    let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-
-    let mut schema = polyglot_sql::MappingSchema::new();
-    let cols = vec![
-        (
-            "order_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-        (
-            "customer_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-    ];
-    // Register with 3-part name
-    schema
-        .add_table("jaffle_shop.main.stg_orders", &cols, None)
-        .unwrap();
-
-    let result = polyglot_sql::lineage::lineage_with_schema(
-        "order_id",
-        &expr,
-        Some(&schema as &dyn polyglot_sql::Schema),
-        None,
-        false,
-    );
-    assert!(
-        result.is_ok(),
-        "should resolve order_id via 3-part name: {:?}",
-        result.err()
-    );
-}
-
-#[test]
 fn test_json_serialization() {
     let manifest = make_test_manifest();
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_string_pretty(&result).unwrap();
@@ -331,7 +212,7 @@ fn test_cross_model_single_hop() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -367,7 +248,7 @@ fn test_cross_model_two_hops() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "customers",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -422,7 +303,7 @@ fn test_cross_model_join_sources() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -459,13 +340,13 @@ fn test_cross_model_source_table_is_leaf() {
     let single = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let cross = compute_cross_model_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -482,7 +363,7 @@ fn test_cross_model_model_not_found() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "nonexistent",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(!result.errors.is_empty());
@@ -501,38 +382,6 @@ fn test_normalize_table_name() {
 }
 
 #[test]
-fn test_format_lineage_error_strips_position() {
-    let err = polyglot_sql::Error::parse("Cannot find column 'x' in query", 0, 0, 0, 0);
-    let formatted = format_lineage_error(&err);
-    assert_eq!(formatted, "lineage failed: Cannot find column 'x' in query");
-    assert!(
-        !formatted.contains("line 0"),
-        "should strip meaningless position info"
-    );
-}
-
-#[test]
-fn test_format_lineage_error_preserves_real_position() {
-    let err = polyglot_sql::Error::parse("unexpected token", 5, 10, 0, 0);
-    let formatted = format_lineage_error(&err);
-    assert!(
-        formatted.contains("line 5"),
-        "should preserve real position info: {}",
-        formatted
-    );
-}
-
-#[test]
-fn test_format_lineage_error_internal() {
-    let err = polyglot_sql::Error::internal("lineage recursion depth exceeded");
-    let formatted = format_lineage_error(&err);
-    assert_eq!(
-        formatted,
-        "lineage failed: lineage recursion depth exceeded"
-    );
-}
-
-#[test]
 fn test_partial_failure_summary() {
     // Model with some columns that can be traced and some that fail
     let mut manifest = make_test_manifest();
@@ -547,7 +396,7 @@ fn test_partial_failure_summary() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -588,7 +437,7 @@ fn test_column_not_found_hint_when_select_star_unresolved() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -619,7 +468,7 @@ fn test_column_not_found_hint_when_cte_select_star_unresolved() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -647,7 +496,7 @@ fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -677,7 +526,7 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -698,7 +547,7 @@ fn test_transformation_classification() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "customers",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -734,7 +583,7 @@ fn test_source_table_has_empty_model_path() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -757,7 +606,7 @@ fn test_json_includes_new_fields() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "customers",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_string_pretty(&result).unwrap();
@@ -793,7 +642,7 @@ fn test_traced_total_columns_success() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert_eq!(result.total_columns, 4);
@@ -809,7 +658,7 @@ fn test_scalar_function_transformation() {
     let result = compute_column_lineage(
         &manifest,
         "scalar_funcs",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -852,7 +701,7 @@ fn test_cte_passthrough_inherits_transformation() {
     let result_upper = compute_column_lineage(
         &manifest,
         "passthrough_upper",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(
@@ -875,7 +724,7 @@ fn test_cte_passthrough_inherits_transformation() {
     let result_coalesce = compute_column_lineage(
         &manifest,
         "passthrough_coalesce",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(
@@ -908,7 +757,7 @@ fn test_traced_total_columns_partial_failure() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert_eq!(result.total_columns, 5);
@@ -921,7 +770,7 @@ fn test_traced_total_columns_model_not_found() {
     let result = compute_column_lineage(
         &manifest,
         "nonexistent",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert_eq!(result.total_columns, 0);
@@ -934,7 +783,7 @@ fn test_traced_total_columns_in_json() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_string(&result).unwrap();
@@ -1057,7 +906,7 @@ fn test_cte_alias_resolution() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "mart_items",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -1263,7 +1112,7 @@ fn test_select_star_chain_with_join() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "mart_users",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -1484,7 +1333,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "mart_users",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -1540,7 +1389,7 @@ fn test_cross_model_diamond_different_columns_through_shared_model() {
     let left = compute_cross_model_column_lineage(
         &manifest,
         "left_model",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(left.errors.is_empty(), "left errors: {:?}", left.errors);
@@ -1555,7 +1404,7 @@ fn test_cross_model_diamond_different_columns_through_shared_model() {
     let right = compute_cross_model_column_lineage(
         &manifest,
         "right_model",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(right.errors.is_empty(), "right errors: {:?}", right.errors);
@@ -1586,7 +1435,7 @@ fn test_join_alias_resolves_to_model_name() {
     let result = compute_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -1624,7 +1473,7 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
     let result = compute_cross_model_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -1688,7 +1537,7 @@ fn test_bigquery_unnest_virtual_source_excluded() {
     let result = compute_column_lineage(
         &manifest,
         "unnest_model",
-        DialectType::BigQuery,
+        DlinDialect::BigQuery,
         &mut ColumnLineageCache::disabled(),
     );
 

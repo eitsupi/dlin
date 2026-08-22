@@ -1,7 +1,6 @@
 #![cfg(feature = "column-lineage")]
 
-use dlin_core::graph::column_lineage::ColumnLineageCache;
-use polyglot_sql::DialectType;
+use dlin_core::graph::column_lineage::{ColumnLineageCache, DlinDialect};
 use std::path::PathBuf;
 
 fn column_lineage_fixture_dir() -> PathBuf {
@@ -27,7 +26,7 @@ fn test_stg_orders_cte_star_with_rename() {
     let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -69,7 +68,7 @@ fn test_orders_cte_star_with_schema_and_join() {
     let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -105,7 +104,7 @@ fn test_customers_sql_inference_without_yaml_columns() {
     let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "customers",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -127,7 +126,7 @@ fn test_order_enriched_nested_cte_star() {
     let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "order_enriched",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -177,7 +176,7 @@ fn test_source_table_not_empty() {
         let result = dlin_core::graph::column_lineage::compute_column_lineage(
             &manifest,
             model,
-            DialectType::Generic,
+            DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
         for entry in &result.columns {
@@ -210,7 +209,7 @@ fn test_yaml_columns_supplement_partial_sql_inference() {
     let result = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "mart_yaml_star",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -242,7 +241,7 @@ fn test_cross_model_orders_traces_to_raw_sources() {
     let result = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -299,13 +298,13 @@ fn test_cross_model_stg_orders_unchanged() {
     let single = dlin_core::graph::column_lineage::compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
     let cross = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -329,7 +328,7 @@ fn test_cross_model_customers_three_levels() {
     let result = dlin_core::graph::column_lineage::compute_cross_model_column_lineage(
         &manifest,
         "customers",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 

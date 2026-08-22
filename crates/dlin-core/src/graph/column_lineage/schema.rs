@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use polyglot_sql::{DialectType, Expression, Schema};
+use super::backend::{DlinDialect, catalog::CatalogSnapshot, polyglot as polyglot_backend};
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
@@ -16,30 +16,26 @@ fn make_fq_table_name(database: Option<&str>, schema: Option<&str>, name: &str) 
 pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
-    dialect: DialectType,
-) -> Option<polyglot_sql::MappingSchema> {
-    let mut schema = polyglot_sql::MappingSchema::new();
+    dialect: DlinDialect,
+) -> Option<CatalogSnapshot> {
+    let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
 
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
             let col_names = resolve_node_columns(dep_node, manifest, dialect);
             if !col_names.is_empty() {
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = col_names
-                    .iter()
-                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                    .collect();
-
                 let fq_name = make_fq_table_name(
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
                     &dep_node.name,
                 );
-                if schema.add_table(&fq_name, &cols, None).is_ok() {
+                if !schema.tables().any(|table| table.name == fq_name) {
                     has_entries = true;
                 }
+                schema.add_table(&fq_name, col_names.iter().cloned());
                 if fq_name != dep_node.name {
-                    let _ = schema.add_table(&dep_node.name, &cols, None);
+                    schema.add_table(&dep_node.name, col_names.iter().cloned());
                 }
             }
             continue;
@@ -50,19 +46,16 @@ pub(super) fn build_schema_from_manifest(
         {
             let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
             source_col_names.sort_unstable();
-            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = source_col_names
-                .into_iter()
-                .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                .collect();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
             let physical_fq = make_fq_table_name(
                 dep_source.database.as_deref(),
                 dep_source.schema.as_deref(),
                 physical_identifier,
             );
-            if schema.add_table(&physical_fq, &cols, None).is_ok() {
+            if !schema.tables().any(|table| table.name == physical_fq) {
                 has_entries = true;
             }
+            schema.add_table(&physical_fq, source_col_names.iter().cloned().cloned());
             let schema_fq =
                 make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
             let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
@@ -73,7 +66,7 @@ pub(super) fn build_schema_from_manifest(
                 source_qualified.as_str(),
             ] {
                 if alias != physical_fq {
-                    let _ = schema.add_table(alias, &cols, None);
+                    schema.add_table(alias, source_col_names.iter().cloned().cloned());
                 }
             }
         }
@@ -85,7 +78,7 @@ pub(super) fn build_schema_from_manifest(
 fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
     manifest: &Manifest,
-    dialect: DialectType,
+    dialect: DlinDialect,
 ) -> Vec<String> {
     let yaml_cols: HashSet<String> = dep_node.columns.keys().cloned().collect();
     let inferred_cols: HashSet<String> = dep_node
@@ -93,7 +86,7 @@ fn resolve_node_columns(
         .as_ref()
         .map(|code| {
             let schema = build_yaml_schema_for_node(manifest, dep_node);
-            infer_output_columns(code, dialect, schema.as_ref(), None)
+            polyglot_backend::infer_output_columns(code, dialect, schema.as_ref())
         })
         .unwrap_or_default()
         .into_iter()
@@ -107,8 +100,8 @@ fn resolve_node_columns(
 pub(super) fn build_yaml_schema_for_node(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
-) -> Option<polyglot_sql::MappingSchema> {
-    let mut schema = polyglot_sql::MappingSchema::new();
+) -> Option<CatalogSnapshot> {
+    let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
 
     for dep_id in &node.depends_on.nodes {
@@ -116,20 +109,17 @@ pub(super) fn build_yaml_schema_for_node(
             if !dep_node.columns.is_empty() {
                 let mut node_col_names: Vec<&String> = dep_node.columns.keys().collect();
                 node_col_names.sort_unstable();
-                let cols: Vec<(String, polyglot_sql::expressions::DataType)> = node_col_names
-                    .into_iter()
-                    .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                    .collect();
                 let fq_name = make_fq_table_name(
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
                     &dep_node.name,
                 );
-                if schema.add_table(&fq_name, &cols, None).is_ok() {
+                if !schema.tables().any(|table| table.name == fq_name) {
                     has_entries = true;
                 }
+                schema.add_table(&fq_name, node_col_names.iter().cloned().cloned());
                 if fq_name != dep_node.name {
-                    let _ = schema.add_table(&dep_node.name, &cols, None);
+                    schema.add_table(&dep_node.name, node_col_names.iter().cloned().cloned());
                 }
             }
             continue;
@@ -140,19 +130,16 @@ pub(super) fn build_yaml_schema_for_node(
         {
             let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
             source_col_names.sort_unstable();
-            let cols: Vec<(String, polyglot_sql::expressions::DataType)> = source_col_names
-                .into_iter()
-                .map(|name| (name.clone(), polyglot_sql::expressions::DataType::Unknown))
-                .collect();
             let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
             let physical_fq = make_fq_table_name(
                 dep_source.database.as_deref(),
                 dep_source.schema.as_deref(),
                 physical_identifier,
             );
-            if schema.add_table(&physical_fq, &cols, None).is_ok() {
+            if !schema.tables().any(|table| table.name == physical_fq) {
                 has_entries = true;
             }
+            schema.add_table(&physical_fq, source_col_names.iter().cloned().cloned());
             let schema_fq =
                 make_fq_table_name(None, dep_source.schema.as_deref(), physical_identifier);
             let source_qualified = format!("{}.{}", dep_source.source_name, dep_source.name);
@@ -163,32 +150,13 @@ pub(super) fn build_yaml_schema_for_node(
                 source_qualified.as_str(),
             ] {
                 if alias != physical_fq {
-                    let _ = schema.add_table(alias, &cols, None);
+                    schema.add_table(alias, source_col_names.iter().cloned().cloned());
                 }
             }
         }
     }
 
     if has_entries { Some(schema) } else { None }
-}
-
-pub(super) fn infer_output_columns(
-    sql: &str,
-    dialect: DialectType,
-    schema: Option<&polyglot_sql::MappingSchema>,
-    parsed_expr: Option<&Expression>,
-) -> Vec<String> {
-    let expr = match parsed_expr {
-        Some(e) => e.clone(),
-        None => match polyglot_sql::parse_one(sql, dialect) {
-            Ok(e) => e,
-            Err(_) => return vec![],
-        },
-    };
-    crate::parser::columns::extract_select_columns_from_expr(
-        &expr,
-        schema.map(|s| s as &dyn polyglot_sql::Schema),
-    )
 }
 
 pub(super) fn compute_manifest_columns_hash(

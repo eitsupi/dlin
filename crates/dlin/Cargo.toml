@@ -22,7 +22,6 @@ regex = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 path-slash = { workspace = true }
-polyglot-sql = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

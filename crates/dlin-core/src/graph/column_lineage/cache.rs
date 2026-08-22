@@ -2,25 +2,45 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use polyglot_sql::DialectType;
 use serde::{Deserialize, Serialize};
 
 use crate::parser::cache::hash_str;
 
 use super::ModelColumnLineage;
+use super::backend::{BackendId, DlinDialect};
 
 // --- Column lineage disk cache ---
 
 pub(super) const COLUMN_LINEAGE_CACHE_FILENAME: &str = "column_lineage_cache.json";
 pub(super) const CACHE_DIR: &str = ".dlin_cache";
 
+/// Cache key identifying which backend and dialect produced a cached analysis.
+/// Distinct from the source-code hash: two analyses of the same SQL under a
+/// different backend or dialect are not interchangeable.
+fn analysis_key(backend: BackendId, dialect: DlinDialect) -> String {
+    format!(
+        "column-lineage/v2;backend={};dialect={}",
+        backend.as_str(),
+        dialect.as_str()
+    )
+}
+
+/// The cache file format version. Bumped independently of `analysis_key` so
+/// that changing what a cache entry's key looks like (as opposed to what it
+/// contains) also invalidates old entries: their key was computed from a
+/// different, incompatible scheme (the debug-formatted spelling of an
+/// external dialect enum, with no backend identity at all).
+fn cache_format_version() -> String {
+    format!("{}:column-lineage-cache-v2", env!("CARGO_PKG_VERSION"))
+}
+
 /// A single cached column lineage entry for one model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ColumnLineageCacheEntry {
     /// FNV-1a hash of the model's compiled SQL
     compiled_code_hash: u64,
-    /// Dialect used for parsing (e.g. "bigquery", "generic")
-    dialect: String,
+    /// Backend and dialect that produced this entry (see [`analysis_key`])
+    analysis_key: String,
     /// FNV-1a hash covering the model's YAML columns, compiled SQL, and the same
     /// for all transitive upstream dependencies. Captures any schema or SQL change
     /// that could alter the lineage result, not just manifest column definitions.
@@ -77,7 +97,7 @@ impl ColumnLineageCache {
                 .join(CACHE_DIR)
                 .join(COLUMN_LINEAGE_CACHE_FILENAME),
         };
-        let version = env!("CARGO_PKG_VERSION").to_string();
+        let version = cache_format_version();
 
         let entries = std::fs::read_to_string(&cache_path)
             .ok()
@@ -104,7 +124,7 @@ impl ColumnLineageCache {
                 .join(COLUMN_LINEAGE_CACHE_FILENAME),
         };
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: cache_format_version(),
             entries: HashMap::new(),
             cache_path: Some(cache_path),
             dirty: false,
@@ -117,14 +137,14 @@ impl ColumnLineageCache {
         &self,
         model_name: &str,
         compiled_code: &str,
-        dialect: DialectType,
+        dialect: DlinDialect,
         manifest_path: Option<&Path>,
         manifest_columns_hash: Option<u64>,
     ) -> Option<&ModelColumnLineage> {
         let entry = self.entries.get(model_name)?;
         let code_hash = hash_str(compiled_code);
-        let dialect_str = format!("{:?}", dialect);
-        if entry.compiled_code_hash != code_hash || entry.dialect != dialect_str {
+        let key = analysis_key(BackendId::Polyglot, dialect);
+        if entry.compiled_code_hash != code_hash || entry.analysis_key != key {
             return None;
         }
         // Fast negative check: if manifest stat differs, this cache entry is stale.
@@ -149,7 +169,7 @@ impl ColumnLineageCache {
         &mut self,
         model_name: &str,
         compiled_code: &str,
-        dialect: DialectType,
+        dialect: DlinDialect,
         manifest_columns_hash: u64,
         manifest_path: Option<&Path>,
         lineage: ModelColumnLineage,
@@ -159,7 +179,7 @@ impl ColumnLineageCache {
             model_name.to_string(),
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
-                dialect: format!("{:?}", dialect),
+                analysis_key: analysis_key(BackendId::Polyglot, dialect),
                 manifest_columns_hash,
                 manifest_mtime_secs: stat.as_ref().map_or(0, |s| s.mtime_secs),
                 manifest_mtime_nanos: stat.as_ref().map_or(0, |s| s.mtime_nanos),

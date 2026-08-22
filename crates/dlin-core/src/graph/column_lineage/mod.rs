@@ -1,20 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
-
-use polyglot_sql::DialectType;
-use rayon::prelude::*;
 
 use crate::parser::manifest::Manifest;
 
+mod backend;
 mod cache;
 mod cross_model;
 mod impact;
 mod schema;
-mod single_model;
 #[cfg(test)]
 mod tests;
 mod types;
 
+use backend::{
+    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
+    LineageRequest, OutputColumnRequest, PolyglotBackend, ResolutionState,
+    normalize_column_outcomes, require_single_lineage_statement,
+};
+pub use backend::{
+    CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
+    debug_parse_sql_json, debug_trace_column_json,
+};
 pub use cache::ColumnLineageCache;
 pub use cross_model::{
     compute_cross_model_column_lineage, compute_cross_model_column_lineage_with_manifest_path,
@@ -23,21 +29,20 @@ pub use impact::{
     ColumnImpactReport, ImpactedColumn, compute_column_impact,
     compute_column_impact_with_manifest_path,
 };
-use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash, infer_output_columns};
-use single_model::{has_unresolved_stars, prepare_lineage_context_with_expr, run_column_lineage};
+use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
 };
 
-/// Compute column-level lineage for a model using polyglot-sql.
+/// Compute column-level lineage for a model.
 ///
 /// Takes the manifest and a model name (short label like "orders"),
 /// and returns the column lineage for that model.
 pub fn compute_column_lineage(
     manifest: &Manifest,
     model_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
     compute_column_lineage_with_manifest_path(manifest, model_name, dialect, None, cache)
@@ -46,7 +51,7 @@ pub fn compute_column_lineage(
 pub fn compute_column_lineage_with_manifest_path(
     manifest: &Manifest,
     model_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
@@ -103,16 +108,15 @@ pub fn compute_column_lineage_with_manifest_path(
         return cached.clone();
     }
 
-    let parsed_expr = polyglot_sql::parse_one(compiled_code, dialect).ok();
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
 
     let column_names: Vec<String> = {
         let mut names: HashSet<String> = node.columns.keys().cloned().collect();
-        let schema = build_yaml_schema_for_node(manifest, node);
-        names.extend(infer_output_columns(
+        let yaml_schema = build_yaml_schema_for_node(manifest, node);
+        names.extend(backend::polyglot::infer_output_columns(
             compiled_code,
             dialect,
-            schema.as_ref(),
-            parsed_expr.as_ref(),
+            yaml_schema.as_ref(),
         ));
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
@@ -136,14 +140,32 @@ pub fn compute_column_lineage_with_manifest_path(
         };
     }
 
-    let ctx = match prepare_lineage_context_with_expr(
-        compiled_code,
-        manifest,
-        node,
+    let total = column_names.len();
+
+    let outputs: Vec<OutputColumnRequest> = column_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| OutputColumnRequest {
+            // The slot index follows the alphabetically sorted name list above.
+            slot: AnalysisSlot(i),
+            name: name.clone(),
+        })
+        .collect();
+    // Duplicate detection is a backend capability that mod.rs's own caller never
+    // triggers: `column_names` above is built from a `HashSet`, so it never contains
+    // duplicate names.
+    let duplicate_output_names: BTreeSet<String> = BTreeSet::new();
+    let request = LineageRequest {
+        sql: compiled_code,
         dialect,
-        parsed_expr.as_ref(),
-    ) {
-        Ok(ctx) => ctx,
+        catalog: catalog.as_ref(),
+        outputs: &outputs,
+        duplicate_output_names: &duplicate_output_names,
+    };
+
+    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let analysis = match backend.analyze(&request) {
+        Ok(analysis) => analysis,
         Err(e) => {
             return ModelColumnLineage {
                 model: display_name.to_string(),
@@ -153,7 +175,7 @@ pub fn compute_column_lineage_with_manifest_path(
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::ParseFailure,
                     what: format!("failed to parse SQL for '{}'", display_name),
-                    why: Some(e),
+                    why: Some(e.message),
                     hint: Some(
                         "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set".to_string(),
                     ),
@@ -162,41 +184,81 @@ pub fn compute_column_lineage_with_manifest_path(
         }
     };
 
-    let total = column_names.len();
-    let has_star_columns = has_unresolved_stars(&ctx.expanded_expr);
+    let statement = match require_single_lineage_statement(analysis) {
+        Ok(statement) => statement,
+        Err(e) => {
+            return ModelColumnLineage {
+                model: display_name.to_string(),
+                traced_columns: 0,
+                total_columns: column_names.len(),
+                columns: vec![],
+                errors: vec![ColumnLineageError {
+                    kind: ColumnLineageErrorKind::ParseFailure,
+                    what: format!("failed to parse SQL for '{}'", display_name),
+                    why: Some(e.message),
+                    hint: Some(
+                        "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set".to_string(),
+                    ),
+                }],
+            };
+        }
+    };
 
-    let results: Vec<_> = column_names
-        .par_iter()
-        .map(|col_name| match run_column_lineage(col_name, &ctx) {
-            Ok(result) => Ok(ColumnLineageEntry {
+    let has_star_columns = statement.has_unresolved_stars;
+    let (normalized_outcomes, contract_errors) =
+        normalize_column_outcomes(&outputs, statement.columns);
+
+    let mut columns = Vec::new();
+    let mut errors = Vec::new();
+    for (col_name, outcome) in column_names.iter().zip(normalized_outcomes) {
+        match outcome {
+            BackendColumnOutcome::Resolved(result) => columns.push(ColumnLineageEntry {
                 column: col_name.clone(),
                 transformation: result.transformation,
-                sources: result.sources,
+                sources: result
+                    .sources
+                    .into_iter()
+                    .map(|s| match s {
+                        BackendSource::Concrete { table, column } => ColumnSource {
+                            table,
+                            column,
+                            model_path: vec![],
+                        },
+                        other => unreachable!(
+                            "the polyglot backend never produces this source variant: {:?}",
+                            other
+                        ),
+                    })
+                    .collect(),
             }),
-            Err(e) => {
-                let hint = (has_star_columns && e.contains("Cannot find column")).then(|| {
+            BackendColumnOutcome::Failed(failure) => {
+                let hint = (has_star_columns
+                    && matches!(
+                        failure.error.kind,
+                        BackendErrorKind::ColumnResolution {
+                            state: ResolutionState::NotFound
+                        }
+                    ))
+                .then(|| {
                     "column may be introduced via SELECT * that could not be expanded; \
                      define upstream columns in the model YAML to enable full resolution"
                         .to_string()
                 });
-                Err(ColumnLineageError {
+                errors.push(ColumnLineageError {
                     kind: ColumnLineageErrorKind::ColumnNotFound,
-                    what: format!("column '{}': {}", col_name, e),
+                    what: format!("column '{}': {}", col_name, failure.error.message),
                     why: None,
                     hint,
-                })
+                });
             }
-        })
-        .collect();
-
-    let mut columns = Vec::new();
-    let mut errors = Vec::new();
-    for result in results {
-        match result {
-            Ok(entry) => columns.push(entry),
-            Err(e) => errors.push(e),
         }
     }
+    errors.extend(contract_errors.into_iter().map(|error| ColumnLineageError {
+        kind: ColumnLineageErrorKind::ColumnNotFound,
+        what: "backend contract violation while correlating column outcomes".to_string(),
+        why: Some(error.message),
+        hint: None,
+    }));
 
     let result = ModelColumnLineage {
         model: display_name.to_string(),

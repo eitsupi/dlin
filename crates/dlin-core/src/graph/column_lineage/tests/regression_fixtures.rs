@@ -12,52 +12,6 @@
 use super::*;
 
 #[test]
-fn test_schema_resolves_cte_star_from_unknown_source() {
-    // Test that lineage_with_schema can resolve columns through CTEs that
-    // reference external tables registered in the schema.
-    let sql = r#"with
-orders as (
-    select * from stg_orders
-),
-enriched as (
-    select orders.*, 'extra' as extra_col
-    from orders
-)
-select * from enriched"#;
-    let expr = polyglot_sql::parse_one(sql, polyglot_sql::DialectType::Generic).unwrap();
-
-    let mut schema = polyglot_sql::MappingSchema::new();
-    let cols = vec![
-        (
-            "order_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-        (
-            "customer_id".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-        (
-            "order_total".to_string(),
-            polyglot_sql::expressions::DataType::Unknown,
-        ),
-    ];
-    schema.add_table("stg_orders", &cols, None).unwrap();
-
-    let result = polyglot_sql::lineage::lineage_with_schema(
-        "order_id",
-        &expr,
-        Some(&schema as &dyn polyglot_sql::Schema),
-        None,
-        false,
-    );
-    assert!(
-        result.is_ok(),
-        "should resolve order_id: {:?}",
-        result.err()
-    );
-}
-
-#[test]
 fn test_cte_select_star_passthrough_is_traced() {
     // When a CTE body has SELECT * from an external table, the hint should still
     // fire for the outer query's ColumnNotFound errors even though the outermost
@@ -73,7 +27,7 @@ fn test_cte_select_star_passthrough_is_traced() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -99,7 +53,7 @@ fn test_derived_table_select_star_passthrough_is_traced() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -127,7 +81,7 @@ fn test_join_select_star_passthrough_is_traced() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -179,7 +133,7 @@ fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
         let result = compute_column_lineage(
             &manifest,
             "stg_orders",
-            DialectType::Generic,
+            DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
         assert!(
@@ -259,7 +213,7 @@ fn test_set_operation_oracle_shapes_remain_traced_when_explicit_anywhere() {
         let result = compute_column_lineage(
             &manifest,
             "stg_orders",
-            DialectType::Generic,
+            DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
         assert!(
@@ -362,7 +316,7 @@ fn test_unresolved_star_does_not_reject_unrelated_explicit_column() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -386,7 +340,7 @@ fn test_annotated_star_and_explicit_projection_are_classified_independently() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -412,7 +366,7 @@ fn test_known_manifest_source_succeeds_alongside_external_join_star() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -455,7 +409,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
         let result = compute_column_lineage(
             &manifest,
             "stg_orders",
-            DialectType::Generic,
+            DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
 
@@ -474,7 +428,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
             let result = compute_column_lineage(
                 &manifest,
                 "stg_orders",
-                DialectType::Generic,
+                DlinDialect::Generic,
                 &mut ColumnLineageCache::disabled(),
             );
 
@@ -514,7 +468,7 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -552,7 +506,7 @@ fn test_set_operation_star_only_branch_keeps_explicit_left_names() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -590,7 +544,7 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -598,33 +552,11 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
 }
 
 #[test]
-#[ignore = "has_unresolved_stars in the 0.4.4-era implementation does not recurse into \
-            Expression::Paren, so a double-parenthesized derived table with SELECT * is not \
-            detected as unresolved"]
-fn test_parenthesized_unresolved_star_is_detected() {
-    // In polyglot-sql 0.6.2, a nested parenthesized query in a FROM clause
-    // preserves a Paren node around the inner query.
-    let expr = polyglot_sql::parse_one(
-        "SELECT id FROM ((SELECT * FROM some_unknown_source))",
-        DialectType::Generic,
-    )
-    .unwrap();
-
-    assert!(format!("{expr:?}").contains("Paren"));
-    assert!(has_unresolved_stars(&expr), "expr: {expr:?}");
-}
-
-#[test]
 fn test_nested_set_operations_guard_unresolved_star_branch() {
-    // The 0.6.2 parser represents an unparenthesized UNION chain as a
-    // left-nested Union(Union(...), ...).
+    // The parser represents an unparenthesized UNION chain as a left-nested
+    // Union(Union(...), ...); see `test_union_chain_is_left_nested` for a
+    // pinned assertion of that raw shape.
     let sql = "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, 2 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source";
-    let expr = polyglot_sql::parse_one(sql, DialectType::Generic).unwrap();
-    assert!(matches!(
-        &expr,
-        polyglot_sql::Expression::Union(union)
-            if matches!(union.left, polyglot_sql::Expression::Union(_))
-    ));
 
     let mut manifest = make_test_manifest();
     manifest
@@ -651,7 +583,7 @@ fn test_nested_set_operations_guard_unresolved_star_branch() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -670,7 +602,7 @@ fn test_explicit_output_case_normalization_with_unresolved_star() {
     let result = compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Snowflake,
+        DlinDialect::Snowflake,
         &mut ColumnLineageCache::disabled(),
     );
 
@@ -717,7 +649,7 @@ fn compute_star_shape(sql: &str, columns: &[&str]) -> ModelColumnLineage {
     compute_column_lineage(
         &manifest,
         "stg_orders",
-        DialectType::Generic,
+        DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     )
 }

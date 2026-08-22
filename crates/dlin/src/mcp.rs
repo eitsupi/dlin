@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use dlin_core::graph::column_lineage::DlinDialect;
 use path_slash::PathExt as _;
-use polyglot_sql::DialectType;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -48,7 +48,7 @@ struct JsonRpcError {
 struct McpState {
     project_dir: PathBuf,
     manifest_path: PathBuf,
-    dialect: DialectType,
+    dialect: DlinDialect,
     manifest: parser::manifest::Manifest,
     dag: LineageGraph,
     column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
@@ -846,7 +846,7 @@ mod tests {
         McpState::load(McpArgs {
             project_dir: fixture_project_dir(),
             manifest_path: None,
-            dialect: DialectType::Generic,
+            dialect: DlinDialect::Generic,
         })
         .unwrap()
     }
@@ -855,7 +855,7 @@ mod tests {
         McpState::load(McpArgs {
             project_dir: column_lineage_fixture_project_dir(),
             manifest_path: None,
-            dialect: DialectType::Generic,
+            dialect: DlinDialect::Generic,
         })
         .unwrap()
     }
@@ -1311,7 +1311,7 @@ mod tests {
                 .unwrap()
                 .to_path_buf(),
             manifest_path: Some(manifest_path),
-            dialect: DialectType::Generic,
+            dialect: DlinDialect::Generic,
         })
         .unwrap();
 

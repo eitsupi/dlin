@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use polyglot_sql::DialectType;
 use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
 
+use super::backend::DlinDialect;
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, TransformationType,
     find_model_by_name,
@@ -75,7 +75,7 @@ pub fn compute_column_impact(
     manifest: &Manifest,
     model_name: &str,
     column_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
     compute_column_impact_with_manifest_path(
@@ -92,7 +92,7 @@ pub fn compute_column_impact_with_manifest_path(
     manifest: &Manifest,
     model_name: &str,
     column_name: &str,
-    dialect: DialectType,
+    dialect: DlinDialect,
     manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
