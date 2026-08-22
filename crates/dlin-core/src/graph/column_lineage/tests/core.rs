@@ -788,6 +788,108 @@ fn test_transformation_classification() {
 }
 
 #[test]
+fn test_count_star_has_no_sources() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns = ["order_count"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    node.compiled_code = Some("SELECT COUNT(*) AS order_count FROM raw_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let order_count = result
+        .columns
+        .iter()
+        .find(|entry| entry.column == "order_count")
+        .expect("COUNT(*) output should be traced");
+    assert!(
+        order_count.sources.is_empty(),
+        "sources: {:?}",
+        order_count.sources
+    );
+    assert!(
+        order_count
+            .sources
+            .iter()
+            .all(|source| !source.table.is_empty()),
+        "COUNT(*) must not publish an empty-table source: {:?}",
+        order_count.sources
+    );
+}
+
+#[test]
+fn test_unattributable_leaves_never_publish_empty_tables() {
+    for (sql, column) in [
+        (
+            "SELECT COUNT(*) AS order_count FROM raw_table",
+            "order_count",
+        ),
+        (
+            "SELECT 1 AS constant_value FROM raw_table",
+            "constant_value",
+        ),
+        ("SELECT CURRENT_DATE AS run_date FROM raw_table", "run_date"),
+    ] {
+        let mut manifest = make_test_manifest();
+        let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+        node.columns = [column]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    ManifestColumn {
+                        name: name.to_string(),
+                    },
+                )
+            })
+            .collect();
+        node.compiled_code = Some(sql.to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DlinDialect::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(
+            result.errors.is_empty(),
+            "errors for {sql}: {:?}",
+            result.errors
+        );
+        assert!(
+            result.columns.iter().any(|entry| entry.column == column),
+            "missing output column {column} for {sql}: {:?}",
+            result.columns
+        );
+        assert!(
+            result
+                .columns
+                .iter()
+                .flat_map(|entry| &entry.sources)
+                .all(|source| !source.table.is_empty()),
+            "unattributable leaf published an empty-table source for {sql}: {:?}",
+            result.columns
+        );
+    }
+}
+
+#[test]
 fn test_source_table_has_empty_model_path() {
     // stg_orders references raw source directly — model_path should be empty
     let manifest = make_cross_model_manifest();
