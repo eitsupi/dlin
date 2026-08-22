@@ -197,11 +197,8 @@ impl CatalogSnapshot {
             })
             .flat_map(|(_, relations)| relations.iter())
             .collect::<BTreeSet<_>>();
-        let Some(relation) = (candidates.len() == 1)
-            .then(|| candidates.iter().next().expect("length checked above"))
-        else {
-            return None;
-        };
+        let relation = (candidates.len() == 1)
+            .then(|| candidates.iter().next().expect("length checked above"))?;
         self.tables.get(*relation)
     }
 
@@ -244,15 +241,19 @@ impl CatalogSnapshot {
             .map(|table| table.columns.as_slice())
     }
 
+    fn has_single_target(&self, key: &RelationRef) -> bool {
+        self.aliases
+            .get(key)
+            .is_some_and(|targets| targets.len() == 1)
+    }
+
     pub fn tables(&self) -> impl Iterator<Item = &CatalogTable> {
         self.tables
-            .values()
+            .iter()
+            .filter(|(relation, _)| self.has_single_target(relation))
+            .map(|(_, table)| table)
             .chain(self.alias_views.iter().filter_map(|(alias, view)| {
-                (self
-                    .aliases
-                    .get(alias)
-                    .is_some_and(|targets| targets.len() == 1))
-                .then_some(view)
+                self.has_single_target(alias).then_some(view)
             }))
     }
 }
@@ -357,6 +358,20 @@ mod tests {
 
         assert_eq!(catalog.table_columns("orders"), None);
         let names: Vec<_> = catalog.tables().map(|table| table.name.as_str()).collect();
+        assert!(!names.contains(&"orders"));
+    }
+
+    #[test]
+    fn ambiguous_physical_relation_is_hidden_from_tables() {
+        let mut catalog = CatalogSnapshot::new();
+        let bare = RelationRef::from_manifest(None, None, "orders");
+        let qualified = RelationRef::from_manifest(Some("db_a"), Some("raw"), "orders");
+        catalog.add_relation(bare.clone(), bare.render(), ["id".to_string()]);
+        catalog.add_relation(qualified.clone(), qualified.render(), ["id".to_string()]);
+        catalog.add_alias(bare, qualified.clone());
+
+        let names: Vec<_> = catalog.tables().map(|table| table.name.as_str()).collect();
+        assert_eq!(names, vec![qualified.render()]);
         assert!(!names.contains(&"orders"));
     }
 }
