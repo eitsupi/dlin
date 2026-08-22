@@ -108,14 +108,26 @@ impl RelationRef {
         }
     }
 
-    /// Construct a relation from a backend's normalized table reference.
-    /// Backends expose component values but not their original quote tokens,
-    /// so the normalized spelling is represented as unquoted SQL.
+    /// Construct a relation from a backend table reference. Backends expose
+    /// component values but not their original quote tokens, so the spelling
+    /// is represented as unquoted SQL.
     pub(crate) fn from_backend(catalog: Option<&str>, schema: Option<&str>, name: &str) -> Self {
         Self {
             catalog: catalog.map(Identifier::unquoted),
             schema: schema.map(Identifier::unquoted),
             name: Identifier::unquoted(name),
+        }
+    }
+
+    pub(crate) fn from_backend_lookup(
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        name: &str,
+    ) -> Self {
+        Self {
+            catalog: catalog.map(|value| Identifier::unquoted(value.to_lowercase())),
+            schema: schema.map(|value| Identifier::unquoted(value.to_lowercase())),
+            name: Identifier::unquoted(name.to_lowercase()),
         }
     }
 
@@ -203,16 +215,17 @@ impl RelationRef {
             return self.name.matches(&other.name, dialect);
         }
 
-        self.catalog
-            .as_ref()
-            .zip(other.catalog.as_ref())
-            .is_some_and(|(left, right)| left.matches(right, dialect))
-            && self
-                .schema
-                .as_ref()
-                .zip(other.schema.as_ref())
-                .is_some_and(|(left, right)| left.matches(right, dialect))
-            && self.name.matches(&other.name, dialect)
+        let catalog_matches = match (self.catalog.as_ref(), other.catalog.as_ref()) {
+            (Some(left), Some(right)) => left.matches(right, dialect),
+            (None, None) => true,
+            _ => false,
+        };
+        let schema_matches = match (self.schema.as_ref(), other.schema.as_ref()) {
+            (Some(left), Some(right)) => left.matches(right, dialect),
+            (None, None) => true,
+            _ => false,
+        };
+        catalog_matches && schema_matches && self.name.matches(&other.name, dialect)
     }
 
     pub(crate) fn render(&self) -> String {
@@ -454,6 +467,7 @@ mod tests {
         assert!(
             !parsed("warehouse.raw.orders").matches(&parsed("raw.orders"), DlinDialect::Generic)
         );
+        assert!(parsed("raw.orders").matches(&parsed("raw.orders"), DlinDialect::Generic));
         assert!(parsed("warehouse.raw.orders").matches(&parsed("orders"), DlinDialect::Generic));
         assert!(
             !parsed("db_a.raw.orders").matches(&parsed("db_b.raw.orders"), DlinDialect::Generic)

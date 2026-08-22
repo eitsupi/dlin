@@ -110,10 +110,30 @@ impl CatalogSnapshot {
     }
 
     pub(crate) fn resolve(&self, query: &RelationRef, dialect: DlinDialect) -> RelationResolution {
+        self.resolve_filtered(query, dialect, false)
+    }
+
+    pub(crate) fn resolve_exact(
+        &self,
+        query: &RelationRef,
+        dialect: DlinDialect,
+    ) -> RelationResolution {
+        self.resolve_filtered(query, dialect, true)
+    }
+
+    fn resolve_filtered(
+        &self,
+        query: &RelationRef,
+        dialect: DlinDialect,
+        exact_arity: bool,
+    ) -> RelationResolution {
         let candidates = self
             .aliases
             .iter()
-            .filter(|(alias, _)| alias.matches(query, dialect))
+            .filter(|(alias, _)| {
+                (!exact_arity || alias.qualification_len() == query.qualification_len())
+                    && alias.matches(query, dialect)
+            })
             .flat_map(|(_, relations)| relations.iter())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -133,6 +153,40 @@ impl CatalogSnapshot {
 
     pub(crate) fn table_for_relation(&self, relation: &RelationRef) -> Option<&CatalogTable> {
         self.tables.get(relation)
+    }
+
+    pub(crate) fn resolve_table(
+        &self,
+        query: &RelationRef,
+        dialect: DlinDialect,
+    ) -> Option<&CatalogTable> {
+        let RelationResolution::Unique(index) = self.resolve(query, dialect) else {
+            return None;
+        };
+        self.tables.values().nth(index)
+    }
+
+    pub(crate) fn resolve_table_exact(
+        &self,
+        query: &RelationRef,
+        dialect: DlinDialect,
+    ) -> Option<&CatalogTable> {
+        let RelationResolution::Unique(index) = self.resolve_exact(query, dialect) else {
+            return None;
+        };
+        self.tables.values().nth(index)
+    }
+
+    pub(crate) fn unambiguous_columns_for_relation(
+        &self,
+        relation: &RelationRef,
+    ) -> Option<&[String]> {
+        if self.conflicted.contains(relation) {
+            return None;
+        }
+        self.tables
+            .get(relation)
+            .map(|table| table.columns.as_slice())
     }
 
     pub fn table_columns(&self, name: &str) -> Option<&[String]> {

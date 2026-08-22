@@ -3,7 +3,7 @@ use sqlparser::ast::{Query, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
-use super::catalog_provider::{SqllineageCatalogProvider, identifiers_match};
+use super::catalog_provider::{SqllineageCatalogProvider, column_identifiers_match};
 use super::{
     AnalysisCompleteness, BackendAnalysis, BackendColumnFailure, BackendColumnOutcome,
     BackendColumnResult, BackendError, BackendErrorKind, BackendId, BackendSource,
@@ -197,7 +197,7 @@ fn analyze_output(
 
     let matching: Vec<&ColumnMapping> = mappings
         .iter()
-        .filter(|mapping| identifiers_match(&mapping.target.column, &output.name, dialect))
+        .filter(|mapping| column_identifiers_match(&mapping.target.column, &output.name, dialect))
         .collect();
 
     let [mapping] = matching.as_slice() else {
