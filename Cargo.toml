@@ -48,7 +48,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 # Upstream PR: https://github.com/funcpp/sqllineage/pull/12
 # Drop this once they are released.
 [patch.crates-io]
-sqllineage = { git = "https://github.com/eitsupi/sqllineage.git", rev = "e8e47908536232b28f1252045394a412eb865b09" }
+sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "e8e47908536232b28f1252045394a412eb865b09" }
 
 [profile.dist]
 inherits = "release"
