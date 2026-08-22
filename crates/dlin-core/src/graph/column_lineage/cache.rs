@@ -138,12 +138,13 @@ impl ColumnLineageCache {
         model_name: &str,
         compiled_code: &str,
         dialect: DlinDialect,
+        backend: BackendId,
         manifest_path: Option<&Path>,
         manifest_columns_hash: Option<u64>,
     ) -> Option<&ModelColumnLineage> {
         let entry = self.entries.get(model_name)?;
         let code_hash = hash_str(compiled_code);
-        let key = analysis_key(BackendId::Polyglot, dialect);
+        let key = analysis_key(backend, dialect);
         if entry.compiled_code_hash != code_hash || entry.analysis_key != key {
             return None;
         }
@@ -165,11 +166,13 @@ impl ColumnLineageCache {
     }
 
     /// Insert a lineage result into the cache.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
         model_name: &str,
         compiled_code: &str,
         dialect: DlinDialect,
+        backend: BackendId,
         manifest_columns_hash: u64,
         manifest_path: Option<&Path>,
         lineage: ModelColumnLineage,
@@ -179,7 +182,7 @@ impl ColumnLineageCache {
             model_name.to_string(),
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
-                analysis_key: analysis_key(BackendId::Polyglot, dialect),
+                analysis_key: analysis_key(backend, dialect),
                 manifest_columns_hash,
                 manifest_mtime_secs: stat.as_ref().map_or(0, |s| s.mtime_secs),
                 manifest_mtime_nanos: stat.as_ref().map_or(0, |s| s.mtime_nanos),

@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogSnapshot {
     tables: BTreeMap<String, CatalogTable>,
+    conflicted: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,7 @@ impl CatalogSnapshot {
     pub fn new() -> Self {
         Self {
             tables: BTreeMap::new(),
+            conflicted: BTreeSet::new(),
         }
     }
 
@@ -27,6 +29,11 @@ impl CatalogSnapshot {
     ) {
         let table_name = name.into();
         let cols = columns.into_iter().collect::<Vec<_>>();
+        if let Some(existing) = self.tables.get(&table_name)
+            && existing.columns != cols
+        {
+            self.conflicted.insert(table_name.clone());
+        }
         self.tables.insert(
             table_name.clone(),
             CatalogTable {
@@ -38,6 +45,13 @@ impl CatalogSnapshot {
 
     pub fn table_columns(&self, name: &str) -> Option<&[String]> {
         self.tables.get(name).map(|table| table.columns.as_slice())
+    }
+
+    pub(crate) fn unambiguous_table_columns(&self, name: &str) -> Option<&[String]> {
+        if self.conflicted.contains(name) {
+            return None;
+        }
+        self.table_columns(name)
     }
 
     pub fn tables(&self) -> impl Iterator<Item = &CatalogTable> {
@@ -77,6 +91,31 @@ mod tests {
             .expect("table should exist")
             .to_vec();
         assert_eq!(cols, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn catalog_snapshot_identical_reregistration_stays_resolvable() {
+        let mut catalog = CatalogSnapshot::new();
+        catalog.add_table("model_a", vec!["a".into()]);
+        catalog.add_table("model_a", vec!["a".into()]);
+
+        assert_eq!(
+            catalog.unambiguous_table_columns("model_a"),
+            Some(["a".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn catalog_snapshot_differing_reregistration_becomes_unresolvable() {
+        let mut catalog = CatalogSnapshot::new();
+        catalog.add_table("model_a", vec!["a".into()]);
+        catalog.add_table("model_a", vec!["b".into()]);
+
+        assert_eq!(
+            catalog.table_columns("model_a"),
+            Some(["b".to_string()].as_slice())
+        );
+        assert_eq!(catalog.unambiguous_table_columns("model_a"), None);
     }
 
     #[test]

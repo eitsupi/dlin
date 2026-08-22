@@ -18,7 +18,7 @@ use backend::{
     normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
-    CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
+    BackendId, CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
     debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
@@ -98,10 +98,12 @@ pub fn compute_column_lineage_with_manifest_path(
     };
 
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
+    let backend = Backend::Polyglot(PolyglotBackend::new());
     if let Some(cached) = cache.get(
         model_name,
         compiled_code,
         dialect,
+        backend.id(),
         manifest_path,
         Some(manifest_columns_hash),
     ) {
@@ -163,7 +165,6 @@ pub fn compute_column_lineage_with_manifest_path(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = Backend::Polyglot(PolyglotBackend::new());
     let analysis = match backend.analyze(&request) {
         Ok(analysis) => analysis,
         Err(e) => {
@@ -272,6 +273,7 @@ pub fn compute_column_lineage_with_manifest_path(
         model_name,
         compiled_code,
         dialect,
+        backend.id(),
         manifest_columns_hash,
         manifest_path,
         result.clone(),

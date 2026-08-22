@@ -15,9 +15,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::super::backend::{
-    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, CatalogSnapshot,
-    DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest, PolyglotBackend,
-    normalize_column_outcomes, require_single_lineage_statement,
+    AnalysisSlot, BackendColumnOutcome, BackendErrorKind, BackendId, BackendSource,
+    CatalogSnapshot, DlinDialect, LineageBackend, LineageRequest, OutputColumnRequest,
+    backend_for_tests, normalize_column_outcomes, require_single_lineage_statement,
 };
 use super::super::{TransformationType, schema};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
@@ -130,7 +130,7 @@ fn analyze_one_column(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = backend_for_tests(BackendId::Polyglot);
     let analysis = backend.analyze(&request).map_err(|e| (e.kind, e.message))?;
     let statement = require_single_lineage_statement(analysis).map_err(|e| (e.kind, e.message))?;
     let (outcomes, diagnostics) = normalize_column_outcomes(&outputs, statement.columns);
@@ -318,7 +318,7 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     assert_eq!(catalog.table_columns("t").unwrap(), ["b", "a"]);
 
     let sql = "select * from t union all select * from t";
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = backend_for_tests(BackendId::Polyglot);
     let duplicate_output_names = BTreeSet::new();
 
     for (column, expected_sources) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])].into_iter()

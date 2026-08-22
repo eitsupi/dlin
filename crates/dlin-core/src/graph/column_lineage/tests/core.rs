@@ -1495,6 +1495,7 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
 }
 
 #[test]
+#[allow(clippy::single_element_loop)]
 fn test_bigquery_unnest_virtual_source_excluded() {
     // BigQuery UNNEST produces a Virtual source node. Before the fix, collect_leaves
     // would include it as a leaf with an empty/synthetic table name. After the fix,
