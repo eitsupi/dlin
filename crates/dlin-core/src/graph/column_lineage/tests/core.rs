@@ -717,6 +717,41 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
 }
 
 #[test]
+fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    node.columns = ["c1"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    node.compiled_code = Some("SELECT * FROM some_external_table".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "stg_orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let c1_error = result
+        .errors
+        .iter()
+        .find(|error| error.what.starts_with("column 'c1':"))
+        .expect("c1 should have a column-lineage error");
+    assert!(
+        c1_error.hint.as_deref().unwrap_or("").contains("SELECT *"),
+        "the public result should retain the SELECT * hint: {c1_error:?}"
+    );
+}
+
+#[test]
 fn test_transformation_classification() {
     // customers model has: customer_id (direct) and order_count (aggregation via count(*))
     let manifest = make_cross_model_manifest();
