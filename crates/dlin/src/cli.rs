@@ -969,7 +969,7 @@ pub struct ColumnGraphArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
     pub dialect: Option<DlinDialect>,
 
@@ -1014,7 +1014,7 @@ pub struct ColumnImpactArgs {
     /// SQL dialect for parsing compiled SQL.
     /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
     /// does not declare an adapter_type.
-    /// [possible values: generic, bigquery, snowflake, postgres, duckdb, redshift, databricks, spark, trino, mysql, clickhouse, oracle, hive, sqlite, presto, athena, teradata, doris, starrocks, materialize, risingwave, singlestore, cockroachdb, tidb, tsql, druid, solr, tableau, dune, fabric, drill, dremio, exasol, datafusion]
+    /// [possible values: generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery]
     #[arg(long, value_parser = parse_dialect)]
     pub dialect: Option<DlinDialect>,
 
@@ -1999,39 +1999,15 @@ mod tests {
     #[test]
     fn test_dialect_all_known_values_parse() {
         let dialects = [
-            "bigquery",
-            "snowflake",
+            "generic",
+            "ansi",
+            "postgresql",
             "postgres",
-            "redshift",
-            "databricks",
-            "spark",
-            "trino",
-            "duckdb",
             "mysql",
-            "clickhouse",
-            "oracle",
             "hive",
-            "sqlite",
-            "presto",
-            "athena",
-            "teradata",
-            "doris",
-            "starrocks",
-            "materialize",
-            "risingwave",
-            "singlestore",
-            "cockroachdb",
-            "tidb",
-            "tsql",
-            "druid",
-            "solr",
-            "tableau",
-            "dune",
-            "fabric",
-            "drill",
-            "dremio",
-            "exasol",
-            "datafusion",
+            "databricks",
+            "snowflake",
+            "bigquery",
         ];
         for dialect in dialects {
             let cli =
@@ -2047,18 +2023,14 @@ mod tests {
 
     #[test]
     fn test_dialect_invalid_value_rejected() {
-        let result = Cli::try_parse_from([
-            "dlin",
-            "column",
-            "upstream",
-            "model",
-            "--dialect",
-            "unknown_db",
-        ]);
-        assert!(
-            result.is_err(),
-            "invalid dialect should be rejected by clap"
-        );
+        let result =
+            Cli::try_parse_from(["dlin", "column", "upstream", "model", "--dialect", "duckdb"]);
+        let error = result.expect_err("removed dialect should be rejected by clap");
+        let message = error.to_string();
+        assert!(message.contains("duckdb"));
+        assert!(message.contains(
+            "generic, ansi, postgresql, postgres, mysql, hive, databricks, snowflake, bigquery"
+        ));
     }
 
     // -- ColumnOutputFormat tests --------------------------------------------

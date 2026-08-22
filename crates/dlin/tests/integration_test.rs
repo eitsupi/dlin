@@ -1434,6 +1434,8 @@ models:
                 "order_id",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1478,6 +1480,8 @@ models:
                 "some_col",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1518,6 +1522,8 @@ models:
                 "stg_partial_fail",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1543,6 +1549,8 @@ models:
                 "order_id",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1580,6 +1588,8 @@ models:
                 "this_column_does_not_exist",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1621,6 +1631,8 @@ models:
                 "some_col",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1659,6 +1671,8 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1698,6 +1712,8 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1760,6 +1776,8 @@ models:
                 "upstream",
                 "--project-dir",
                 tmp_dir.path().to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .stdin(std::process::Stdio::piped())
@@ -1833,6 +1851,8 @@ models:
                 "upstream",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
                 "-o",
                 "json",
@@ -1892,6 +1912,8 @@ models:
                 "stg_accounts",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
@@ -1956,6 +1978,8 @@ models:
                 "stg_orders",
                 "--project-dir",
                 fixture.to_str().unwrap(),
+                "--dialect",
+                "generic",
                 "--no-cache",
             ])
             .output()
