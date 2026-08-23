@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::super::backend::{
     AnalysisCompleteness, AnalysisSlot, BackendColumnOutcome, BackendErrorKind, BackendId,
     BackendSource, CatalogSnapshot, DlinDialect, LineageBackend, LineageRequest,
-    OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName,
+    OutputColumnRequest, OutputDiscovery, OutputDiscoveryRequest, OutputName, ResolutionState,
     SqllineageCatalogProvider, backend_for_tests, normalize_column_outcomes,
     require_single_lineage_statement,
 };
@@ -517,99 +517,45 @@ fn sqllineage_outcome(
         .unwrap_or_else(|| panic!("no outcome for slot {slot}: {:?}", statement.columns))
 }
 
-fn assert_leading_star_set_operation_is_indeterminate(sql: &str) {
-    let outputs = [
-        OutputColumnRequest {
-            slot: AnalysisSlot(0),
-            name: "id".to_string(),
-        },
-        OutputColumnRequest {
-            slot: AnalysisSlot(1),
-            name: "explicit_col".to_string(),
-        },
+#[test]
+fn sqllineage_unknown_set_operation_outputs_are_indeterminate() {
+    let cases = [
+        (
+            "SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source",
+            ["id", "explicit_col"].as_slice(),
+        ),
+        (
+            "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source",
+            ["explicit_col"].as_slice(),
+        ),
+        (
+            "WITH u AS (SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source) SELECT id, explicit_col FROM u",
+            ["id", "explicit_col"].as_slice(),
+        ),
     ];
-    let statement =
-        sqllineage_statement_without_completeness(sql, None, &outputs, &BTreeSet::new());
-
-    let AnalysisCompleteness::Indeterminate { reason } = &statement.completeness else {
-        panic!(
-            "leading-star set operation should be indeterminate, got {:?}",
-            statement.completeness
-        );
-    };
-    assert!(
-        reason.contains("leading branch is SELECT *"),
-        "reason: {reason}"
-    );
-    assert!(reason.contains("lineage for this statement cannot be trusted"));
-
-    for slot in 0..outputs.len() {
-        match sqllineage_outcome(&statement, slot) {
-            BackendColumnOutcome::Failed(failure) => {
-                assert_eq!(
+    for (sql, names) in cases {
+        let outputs: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| OutputColumnRequest {
+                slot: AnalysisSlot(slot),
+                name: (*name).to_string(),
+            })
+            .collect();
+        let statement = sqllineage_statement(sql, None, &outputs, &BTreeSet::new());
+        assert_eq!(statement.completeness, AnalysisCompleteness::Complete);
+        for slot in 0..outputs.len() {
+            match sqllineage_outcome(&statement, slot) {
+                BackendColumnOutcome::Failed(failure) => assert_eq!(
                     failure.resolution,
-                    super::super::backend::ResolutionState::Indeterminate
-                );
-                assert!(failure.error.message.contains("leading branch is SELECT *"));
+                    super::super::backend::ResolutionState::Indeterminate,
+                    "SQL: {sql}, slot: {slot}"
+                ),
+                other => {
+                    panic!("expected output {slot} to be indeterminate for {sql}, got {other:?}")
+                }
             }
-            other => panic!("expected output {slot} to be indeterminate, got {other:?}"),
         }
-    }
-}
-
-#[test]
-fn sqllineage_union_with_leading_star_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_union_all_with_leading_star_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_qualified_leading_star_set_operation_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT first_source.* FROM first_source UNION SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_intersect_with_leading_star_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT * FROM first_source INTERSECT SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_except_with_leading_star_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT * FROM first_source EXCEPT SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_second_branch_star_does_not_guard_explicit_output() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "explicit_col".to_string(),
-    }];
-    let statement = sqllineage_statement(
-        "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source",
-        None,
-        &outputs,
-        &BTreeSet::new(),
-    );
-
-    match sqllineage_outcome(&statement, 0) {
-        BackendColumnOutcome::Resolved(result) => {
-            assert_eq!(result.target.name, "explicit_col");
-        }
-        other => panic!("the second-branch star must not guard explicit output: {other:?}"),
     }
 }
 
@@ -714,7 +660,7 @@ fn sqllineage_nonleading_set_output_name_is_not_found() {
 }
 
 #[test]
-fn sqllineage_guard_preserves_duplicate_output_ambiguity() {
+fn sqllineage_duplicate_output_ambiguity_takes_precedence() {
     let outputs = [OutputColumnRequest {
         slot: AnalysisSlot(0),
         name: "explicit_col".to_string(),
@@ -737,62 +683,6 @@ fn sqllineage_guard_preserves_duplicate_output_ambiguity() {
         }
         other => panic!("duplicate output ambiguity must take precedence: {other:?}"),
     }
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_cte_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "WITH combined AS (SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source) SELECT id, explicit_col FROM combined",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_derived_table_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT id, explicit_col FROM (SELECT * FROM first_source UNION SELECT id, explicit_col FROM second_source) combined",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_parenthesized_query_cte_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "(WITH combined AS (SELECT * FROM first_source UNION SELECT id FROM second_source) SELECT id, 1 AS explicit_col FROM combined) UNION SELECT id, explicit_col FROM second_source",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_scalar_projection_subquery_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT id, 1 AS explicit_col, (SELECT * FROM first_source UNION SELECT id FROM second_source) AS nested FROM orders",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_case_arm_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT id, 1 AS explicit_col, CASE WHEN id > 0 THEN (SELECT * FROM first_source UNION SELECT id FROM second_source) ELSE NULL END AS nested FROM orders",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_function_argument_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT id, 1 AS explicit_col, COALESCE((SELECT * FROM first_source UNION SELECT id FROM second_source), 0) AS nested FROM orders",
-    );
-}
-
-#[test]
-fn sqllineage_leading_star_set_operation_inside_in_subquery_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT id, 1 AS explicit_col FROM orders WHERE id IN (SELECT * FROM first_source UNION SELECT id FROM second_source)",
-    );
-}
-
-#[test]
-fn sqllineage_nested_leading_star_set_operation_is_indeterminate() {
-    assert_leading_star_set_operation_is_indeterminate(
-        "SELECT * FROM a UNION SELECT x FROM b UNION SELECT y FROM c",
-    );
 }
 
 #[test]
@@ -1111,6 +1001,62 @@ fn sqllineage_catalog_expands_star_to_concrete_sources() {
 }
 
 #[test]
+fn sqllineage_catalog_set_operation_with_literal_branch_is_indeterminate() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("ext_a", ["col_x".to_string(), "col_y".to_string()]);
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(0),
+            name: "col_x".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(1),
+            name: "col_y".to_string(),
+        },
+    ];
+    let statement = sqllineage_statement(
+        "SELECT * FROM ext_a UNION ALL SELECT 1 AS col_x, 2 AS col_y",
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    for slot in [0, 1] {
+        match sqllineage_outcome(&statement, slot) {
+            BackendColumnOutcome::Failed(failure) => {
+                assert_eq!(failure.resolution, ResolutionState::Indeterminate);
+                assert!(failure.error.message.contains("source-free"));
+            }
+            other => panic!("expected conservative indeterminate outcome, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn sqllineage_source_free_branch_is_indeterminate_even_with_catalog() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("ext_a", ["col_x".to_string(), "col_y".to_string()]);
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "col_a".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Failed(failure) => {
+            assert_eq!(failure.resolution, ResolutionState::Indeterminate);
+            assert!(failure.error.message.contains("source-free"));
+        }
+        other => panic!("expected conservative indeterminate outcome, got {other:?}"),
+    }
+}
+
+#[test]
 fn sqllineage_returns_failed_outcome_for_unmapped_requested_output() {
     let outputs = [
         OutputColumnRequest {
@@ -1243,7 +1189,7 @@ fn sqllineage_empty_projection_in_nested_subquery_is_parse_error() {
 fn sqllineage_unsupported_dialect_is_reported() {
     let request = LineageRequest {
         sql: "SELECT 1",
-        dialect: DlinDialect::DuckDB,
+        dialect: DlinDialect::Presto,
         catalog: None,
         outputs: &[],
         duplicate_output_names: &BTreeSet::new(),
@@ -1252,7 +1198,7 @@ fn sqllineage_unsupported_dialect_is_reported() {
 
     let error = backend.analyze(&request).unwrap_err();
     assert_eq!(error.kind, BackendErrorKind::UnsupportedDialect);
-    assert!(error.message.contains("duckdb"));
+    assert!(error.message.contains("presto"));
 }
 
 fn sqllineage_discovery(

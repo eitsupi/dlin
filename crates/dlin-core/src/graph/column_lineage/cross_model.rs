@@ -5,7 +5,7 @@ use crate::parser::manifest::Manifest;
 
 use super::backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend,
-    LineageRequest, OutputColumnRequest, PolyglotBackend, normalize_column_outcomes,
+    LineageRequest, OutputColumnRequest, SqllineageBackend, normalize_column_outcomes,
     require_single_lineage_statement,
 };
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
@@ -261,7 +261,7 @@ fn compute_single_column_lineage(
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = Backend::Sqllineage(SqllineageBackend::new());
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
 
     let outputs = [OutputColumnRequest {

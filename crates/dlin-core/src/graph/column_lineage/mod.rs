@@ -15,12 +15,12 @@ mod types;
 
 use backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
-    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, PolyglotBackend, ResolutionState,
-    normalize_column_outcomes, require_single_lineage_statement,
+    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, ResolutionState,
+    SqllineageBackend, normalize_column_outcomes, require_single_lineage_statement,
 };
 pub use backend::{
-    BackendId, CatalogSnapshot, DlinDialect, check_sql_parses, debug_parse_sql_ast_debug,
-    debug_parse_sql_json, debug_trace_column_json,
+    BackendId, CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS,
+    check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
 pub use cross_model::{
@@ -149,7 +149,7 @@ pub(super) fn compute_column_lineage_internal(
     };
 
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
-    let backend = Backend::Polyglot(PolyglotBackend::new());
+    let backend = Backend::Sqllineage(SqllineageBackend::new());
     if let Some(cached) = cache.get_internal(
         model_name,
         compiled_code,

@@ -14,6 +14,27 @@ fn parse_dialect(s: &str) -> Result<DlinDialect, String> {
     s.parse()
 }
 
+/// A dialect supplied by a user, retaining the original spelling for
+/// compatibility diagnostics while exposing the parsed enum to callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialectArg {
+    pub dialect: DlinDialect,
+    pub requested: String,
+}
+
+impl PartialEq<DlinDialect> for DialectArg {
+    fn eq(&self, other: &DlinDialect) -> bool {
+        self.dialect == *other
+    }
+}
+
+fn parse_dialect_arg(s: &str) -> Result<DialectArg, String> {
+    Ok(DialectArg {
+        dialect: parse_dialect(s)?,
+        requested: s.to_string(),
+    })
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dlin",
@@ -663,19 +684,19 @@ pub struct McpArgs {
     pub manifest_path: Option<PathBuf>,
 
     /// SQL dialect for parsing compiled SQL.
-    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
-    /// does not declare an adapter_type.
+    /// Auto-detected from manifest.metadata.adapter_type when omitted. Recognized dialects
+    /// removed from the active backend fall back to Generic with a warning.
     #[arg(
         long,
-        value_parser = parse_dialect,
+        value_parser = parse_dialect_arg,
         long_help = "\
 SQL dialect for parsing compiled SQL in get_column_lineage.
 
 When omitted, the dialect is auto-detected from manifest.metadata.adapter_type.
-It is required only when the manifest does not declare an adapter_type; a missing,
-empty, or unknown adapter_type is an error."
+Recognized dialects removed from the active backend fall back to Generic with a warning;
+a missing, empty, or unknown adapter_type is an error."
     )]
-    pub dialect: Option<DlinDialect>,
+    pub dialect: Option<DialectArg>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -969,10 +990,10 @@ pub struct ColumnGraphArgs {
     pub output: ColumnOutputFormat,
 
     /// SQL dialect for parsing compiled SQL.
-    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
-    /// does not declare an adapter_type.
-    #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DlinDialect>,
+    /// Auto-detected from manifest.metadata.adapter_type when omitted. Recognized dialects
+    /// removed from the active backend fall back to Generic with a warning.
+    #[arg(long, value_parser = parse_dialect_arg)]
+    pub dialect: Option<DialectArg>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1013,10 +1034,10 @@ pub struct ColumnImpactArgs {
     pub output: ColumnOutputFormat,
 
     /// SQL dialect for parsing compiled SQL.
-    /// Auto-detected from manifest.metadata.adapter_type when omitted; required if the manifest
-    /// does not declare an adapter_type.
-    #[arg(long, value_parser = parse_dialect)]
-    pub dialect: Option<DlinDialect>,
+    /// Auto-detected from manifest.metadata.adapter_type when omitted. Recognized dialects
+    /// removed from the active backend fall back to Generic with a warning.
+    #[arg(long, value_parser = parse_dialect_arg)]
+    pub dialect: Option<DialectArg>,
 
     /// Path to dbt project directory
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
@@ -1967,7 +1988,13 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(DlinDialect::BigQuery));
+        assert_eq!(
+            args.dialect,
+            Some(DialectArg {
+                dialect: DlinDialect::BigQuery,
+                requested: "bigquery".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1993,7 +2020,13 @@ mod tests {
             ])
             .unwrap(),
         );
-        assert_eq!(args.dialect, Some(DlinDialect::Snowflake));
+        assert_eq!(
+            args.dialect,
+            Some(DialectArg {
+                dialect: DlinDialect::Snowflake,
+                requested: "snowflake".to_string(),
+            })
+        );
     }
 
     #[test]

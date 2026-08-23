@@ -13,11 +13,11 @@ mod mcp;
 
 use cli::{
     CheckManifestArgs, CheckManifestOutputFormat, Cli, ColumnCommand, ColumnOutputFormat, Command,
-    DebugCommand, DebugOutputFormat, Direction, ErrorFormat, GraphArgs, GroupBy, ListArgs, McpArgs,
-    SourceType, SummaryArgs, SummaryOutputFormat,
+    DebugCommand, DebugOutputFormat, DialectArg, Direction, ErrorFormat, GraphArgs, GroupBy,
+    ListArgs, McpArgs, SourceType, SummaryArgs, SummaryOutputFormat,
 };
 use dlin_core::graph;
-use dlin_core::graph::column_lineage::{CatalogSnapshot, DlinDialect};
+use dlin_core::graph::column_lineage::{CatalogSnapshot, DialectClassification, DlinDialect};
 use dlin_core::input;
 use dlin_core::parser;
 use dlin_core::render;
@@ -810,20 +810,44 @@ fn resolve_manifest_path(manifest_arg: &Path) -> Result<PathBuf> {
     }
 }
 
+/// The effective dialect and an optional compatibility warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedDialect {
+    pub(crate) dialect: DlinDialect,
+    pub(crate) warning: Option<String>,
+}
+
+fn classify_dialect(requested: &str) -> Result<ResolvedDialect> {
+    match DlinDialect::classify(requested).map_err(anyhow::Error::msg)? {
+        DialectClassification::Supported(dialect) => Ok(ResolvedDialect {
+            dialect,
+            warning: None,
+        }),
+        DialectClassification::Removed(_dialect) => Ok(ResolvedDialect {
+            dialect: DlinDialect::Generic,
+            warning: Some(format!(
+                "dialect '{}' is no longer supported by the column-lineage backend; using generic instead",
+                requested
+            )),
+        }),
+    }
+}
+
 /// Resolve the requested SQL dialect.
 ///
-/// Precedence: CLI flag > manifest adapter_type > error. Missing, empty, and
-/// unknown adapter_type values remain errors.
+/// Precedence: CLI flag > manifest adapter_type > error. Recognized dialects
+/// that the active backend has removed are downgraded to Generic with a
+/// warning; missing, empty, and unknown adapter_type values remain errors.
 pub(crate) fn resolve_dialect(
-    cli_dialect: Option<&DlinDialect>,
+    cli_dialect: Option<&DialectArg>,
     manifest: &parser::manifest::Manifest,
-) -> Result<DlinDialect> {
+) -> Result<ResolvedDialect> {
     match cli_dialect {
-        Some(dialect) => Ok(*dialect),
+        Some(dialect) => classify_dialect(&dialect.requested),
         None => match manifest.metadata.adapter_type.as_deref() {
             Some(adapter) if !adapter.trim().is_empty() => {
                 let requested = adapter.trim();
-                requested.parse::<DlinDialect>().map_err(|_| {
+                classify_dialect(requested).map_err(|_| {
                     anyhow::anyhow!(
                         "manifest adapter_type '{}' has no matching SQL dialect; \
                          use --dialect to specify one explicitly (e.g. --dialect postgres)",
@@ -854,7 +878,7 @@ fn run_column_lineage_command(
     cli_models: Vec<String>,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DlinDialect>,
+    dialect: Option<DialectArg>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -882,7 +906,11 @@ fn run_column_lineage_command(
     let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
 
-    let dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    if let Some(warning) = &resolved_dialect.warning {
+        dlin_core::warn!("{}", warning);
+    }
+    let dialect = resolved_dialect.dialect;
 
     let models = if input::has_path_like_input(&raw_inputs) {
         let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
@@ -1068,7 +1096,7 @@ fn run_column_impact_command(
     model: &str,
     columns: &[String],
     output: &ColumnOutputFormat,
-    dialect: Option<DlinDialect>,
+    dialect: Option<DialectArg>,
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     cache_dir: Option<&Path>,
@@ -1086,7 +1114,11 @@ fn run_column_impact_command(
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
     let manifest = parser::manifest::load_manifest(&resolved)?;
 
-    let dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
+    if let Some(warning) = &resolved_dialect.warning {
+        dlin_core::warn!("{}", warning);
+    }
+    let dialect = resolved_dialect.dialect;
 
     let mut cache = if no_cache {
         graph::column_lineage::ColumnLineageCache::disabled()
@@ -1597,6 +1629,30 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_dialect_is_preserved_without_warning() {
+        let resolved = classify_dialect("duckdb").unwrap();
+        assert_eq!(resolved.dialect, DlinDialect::DuckDB);
+        assert_eq!(resolved.warning, None);
+    }
+
+    #[test]
+    fn removed_dialect_is_downgraded_to_generic_with_warning() {
+        let resolved = classify_dialect("presto").unwrap();
+        assert_eq!(resolved.dialect, DlinDialect::Generic);
+        assert!(
+            resolved.warning.as_deref().is_some_and(|warning| {
+                warning.contains("presto") && warning.contains("generic")
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_dialect_is_rejected_instead_of_downgraded() {
+        let error = classify_dialect("ducckdb").unwrap_err();
+        assert!(error.to_string().contains("Unknown dialect"));
+    }
 
     #[test]
     fn test_parse_schema_string_single_table() {

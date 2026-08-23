@@ -14,7 +14,7 @@ pub use catalog::CatalogSnapshot;
 #[allow(unused_imports)]
 pub(crate) use catalog_provider::SqllineageCatalogProvider;
 #[allow(unused_imports)]
-pub use dialect::DlinDialect;
+pub use dialect::{DialectClassification, DlinDialect, REMOVED_DIALECTS};
 #[allow(unused_imports)]
 pub use polyglot::{
     check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,

@@ -83,7 +83,7 @@ fn test_column_cache_persists_structural_relation_and_public_view() {
             "stg_orders",
             &compiled_code,
             DlinDialect::Generic,
-            BackendId::Polyglot,
+            BackendId::Sqllineage,
             None,
             Some(super::super::schema::compute_manifest_columns_hash(
                 &manifest,

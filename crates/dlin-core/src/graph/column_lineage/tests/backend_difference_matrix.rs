@@ -799,7 +799,6 @@ fn compare_field<T: std::fmt::Debug + PartialEq>(
 
 enum LedgerStatus {
     Decided { verdict: &'static str },
-    Open { to_settle: &'static str },
 }
 
 struct LedgerEntry {
@@ -898,63 +897,33 @@ const LEDGER: &[LedgerEntry] = &[
     },
     LedgerEntry {
         case_id: "union_star_leading_operand",
-        field: "statement[0].completeness",
-        polyglot: "\"Complete\"",
-        sqllineage: "\"Indeterminate(reason=\\\"a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted\\\")\"",
+        field: "analysis.shape",
+        polyglot: "1 statement(s)",
+        sqllineage: "error(Parse)",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
+            verdict: "sqllineage is right. Semantic arity validation rejects an exact known-width set-operation mismatch instead of silently truncating a branch; the polyglot result is an overclaim.",
         },
-        authority: "sqllineage safety guard and dlin comparison",
-    },
-    LedgerEntry {
-        case_id: "union_star_leading_operand",
-        field: "statement[0].column[0].outcome_kind",
-        polyglot: "resolved",
-        sqllineage: "failed",
-        status: LedgerStatus::Decided {
-            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
-        },
-        authority: "sqllineage safety guard and dlin comparison",
-    },
-    LedgerEntry {
-        case_id: "union_star_leading_operand",
-        field: "statement[0].column[0].resolution",
-        polyglot: "Resolved",
-        sqllineage: "Indeterminate",
-        status: LedgerStatus::Decided {
-            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
-        },
-        authority: "sqllineage safety guard and dlin comparison",
-    },
-    LedgerEntry {
-        case_id: "union_star_leading_operand_matching_arity",
-        field: "statement[0].completeness",
-        polyglot: "\"Complete\"",
-        sqllineage: "\"Indeterminate(reason=\\\"a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted\\\")\"",
-        status: LedgerStatus::Open {
-            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches. Review whether refusing this alignable case is a false positive before the production backend changes.",
-        },
-        authority: "sqllineage safety guard and dlin comparison",
+        authority: "sqllineage semantic arity validation and dlin comparison",
     },
     LedgerEntry {
         case_id: "union_star_leading_operand_matching_arity",
         field: "statement[0].column[0].outcome_kind",
         polyglot: "resolved",
         sqllineage: "failed",
-        status: LedgerStatus::Open {
-            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches: polyglot resolves the output while sqllineage refuses it. Review this as a possible false positive before the production backend changes.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is conservatively correct. The leading SELECT * remains unresolved in the public result, so dlin must not expose concrete output lineage even when the visible branch has matching arity.",
         },
-        authority: "sqllineage safety guard and dlin comparison",
+        authority: "sqllineage unresolved-star result flag and dlin uncertainty contract",
     },
     LedgerEntry {
         case_id: "union_star_leading_operand_matching_arity",
         field: "statement[0].column[0].resolution",
         polyglot: "Resolved",
         sqllineage: "Indeterminate",
-        status: LedgerStatus::Open {
-            to_settle: "The guard fires even when the catalog determines the leading star's width and the set-operation arity matches: polyglot resolves the output while sqllineage marks it Indeterminate. Review this as a possible false positive before the production backend changes.",
+        status: LedgerStatus::Decided {
+            verdict: "The unresolved leading star prevents a safe concrete attribution; dlin preserves that uncertainty.",
         },
-        authority: "sqllineage safety guard and dlin comparison",
+        authority: "sqllineage unresolved-star result flag and dlin uncertainty contract",
     },
     LedgerEntry {
         case_id: "known_polyglot_overclaim",
@@ -978,13 +947,23 @@ const LEDGER: &[LedgerEntry] = &[
     },
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
-        field: "statement[0].column[0].transformation",
-        polyglot: "Unknown",
-        sqllineage: "Direct",
-        status: LedgerStatus::Open {
-            to_settle: "Sqllineage resolves the literal branch as Direct while the polyglot set-operation result is Unknown; record the observed result.",
+        field: "statement[0].column[0].outcome_kind",
+        polyglot: "resolved",
+        sqllineage: "failed",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is conservatively correct. A source-free literal branch mixed with a star-derived branch cannot be represented as complete concrete lineage by the current public API, so dlin reports an incomplete result.",
         },
-        authority: "column-lineage review finding; neither backend",
+        authority: "sqllineage unresolved-star/source-free result and dlin uncertainty contract",
+    },
+    LedgerEntry {
+        case_id: "known_star_contribution_disappears",
+        field: "statement[0].column[0].resolution",
+        polyglot: "Resolved",
+        sqllineage: "Indeterminate",
+        status: LedgerStatus::Decided {
+            verdict: "The source-free branch and unresolved star leave the complete set-operation lineage uncertain; dlin preserves that uncertainty instead of presenting a partial concrete result.",
+        },
+        authority: "sqllineage unresolved-star/source-free result and dlin uncertainty contract",
     },
     LedgerEntry {
         case_id: "requested_output_missing",
@@ -1005,16 +984,6 @@ const LEDGER: &[LedgerEntry] = &[
             verdict: "Neither backend has a semantic advantage here. Both correctly classify this SQL as unparseable; the exact diagnostic wording is backend-specific implementation detail, not a shared contract, and dlin is not required to match either backend's message text verbatim.",
         },
         authority: "dlin backend comparison and production error reporting",
-    },
-    LedgerEntry {
-        case_id: "known_star_contribution_disappears",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"ext_a\\\",column=\\\"*\\\")\"]",
-        sqllineage: "[]",
-        status: LedgerStatus::Open {
-            to_settle: "Sqllineage reports a resolved constant with no sources, so the star branch contribution disappears without a trace. Polyglot keeps the contribution but names the column \"*\", which is a star rather than a column name and is not a source a consumer can follow either. Neither is an accepted preference.",
-        },
-        authority: "column-lineage review finding; neither backend",
     },
 ];
 
@@ -1095,41 +1064,7 @@ fn backend_difference_matrix_is_adjudicated() {
             LedgerStatus::Decided { verdict } => {
                 assert!(!verdict.is_empty(), "ledger verdict is empty");
             }
-            LedgerStatus::Open { to_settle } => {
-                assert!(!to_settle.is_empty(), "ledger open question is empty");
-            }
         }
         assert!(!entry.authority.is_empty(), "ledger authority is empty");
-    }
-}
-
-#[test]
-fn backend_difference_matrix_reports_open_findings() {
-    let mut findings = Vec::new();
-
-    for case in corpus() {
-        let polyglot = run(&case, BackendId::Polyglot);
-        let sqllineage = run(&case, BackendId::Sqllineage);
-        for difference in differences(&case, &polyglot, &sqllineage) {
-            let Some(entry) = ledger_entry(difference.case_id, &difference.field) else {
-                continue;
-            };
-            let LedgerStatus::Open { to_settle } = &entry.status else {
-                continue;
-            };
-            findings.push(format!(
-                "case '{}' field '{}': polyglot={} sqllineage={} — to settle: {}",
-                difference.case_id,
-                difference.field,
-                difference.polyglot,
-                difference.sqllineage,
-                to_settle
-            ));
-        }
-    }
-
-    println!("open backend difference findings ({}):", findings.len());
-    for finding in findings {
-        println!("- {finding}");
     }
 }

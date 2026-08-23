@@ -33,8 +33,8 @@ fn test_cte_select_star_passthrough_is_traced() {
 
     assert_exact_column_outcomes(
         &result,
-        &["id"],
-        &["customer_id", "order_date", "order_id", "status"],
+        &[],
+        &["customer_id", "order_date", "order_id", "status", "id"],
     );
     assert_select_star_hint(&result);
 }
@@ -59,8 +59,8 @@ fn test_derived_table_select_star_passthrough_is_traced() {
 
     assert_exact_column_outcomes(
         &result,
-        &["id"],
-        &["customer_id", "order_date", "order_id", "status"],
+        &[],
+        &["customer_id", "order_date", "order_id", "status", "id"],
     );
     assert_select_star_hint(&result);
 }
@@ -94,12 +94,15 @@ fn test_join_select_star_passthrough_is_traced() {
 }
 
 const STAR_PASSTHROUGH_TRACEABLE_CASES: &[&str] = &[
-    "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
     "SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders",
+    "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
+];
+
+const STAR_PASSTHROUGH_INDETERMINATE_CASES: &[&str] = &[
+    "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
     "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT COALESCE(a.id, b.id) AS id FROM a JOIN b ON true",
     "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT CASE WHEN a.id IS NULL THEN b.id ELSE a.id END AS id FROM a JOIN b ON true",
     "WITH left_side AS (SELECT id FROM raw.orders), right_side AS (SELECT * FROM some_unknown_source) SELECT id FROM left_side UNION ALL SELECT id FROM right_side",
-    "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
 ];
 
 // Split out of the list above so the shapes that do resolve keep their
@@ -145,9 +148,46 @@ fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
     }
 }
 
+fn assert_star_passthrough_shapes_are_indeterminate(cases: &[&str]) {
+    for sql in cases {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = [(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some((*sql).to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DlinDialect::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert_exact_column_outcomes(&result, &[], &["id"]);
+        assert_select_star_hint(&result);
+    }
+}
+
 #[test]
 fn test_star_passthrough_query_shapes_are_traceable() {
     assert_star_passthrough_shapes_are_traceable(STAR_PASSTHROUGH_TRACEABLE_CASES);
+}
+
+#[test]
+fn test_star_passthrough_query_shapes_with_unknown_sources_are_indeterminate() {
+    assert_star_passthrough_shapes_are_indeterminate(STAR_PASSTHROUGH_INDETERMINATE_CASES);
 }
 
 #[test]
@@ -169,18 +209,21 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
+            true,
         ),
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), lit2 AS (SELECT 2 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM lit2) SELECT col_a FROM u",
+            false,
         ),
         (
             "c",
             "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c UNION ALL SELECT a.col_a FROM a UNION ALL SELECT 3 AS c3) SELECT c FROM u",
+            true,
         ),
     ];
 
-    for (column, sql) in cases {
+    for (column, sql, has_unknown_star) in cases {
         let mut manifest = make_test_manifest();
         manifest
             .nodes
@@ -206,12 +249,16 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
             DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
-        assert!(
-            result.errors.is_empty(),
-            "SQL: {sql}\nerrors: {:?}",
-            result.errors
-        );
-        assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+        if has_unknown_star {
+            assert_exact_column_outcomes(&result, &[], &[column]);
+        } else {
+            assert!(
+                result.errors.is_empty(),
+                "SQL: {sql}\nerrors: {:?}",
+                result.errors
+            );
+            assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+        }
     }
 }
 
@@ -414,7 +461,7 @@ fn test_known_manifest_source_succeeds_alongside_external_join_star() {
 }
 
 #[test]
-fn test_set_operations_guard_unresolved_star_branches() {
+fn test_set_operations_with_unresolved_star_branches_are_conservative() {
     for operator in ["UNION", "INTERSECT", "EXCEPT"] {
         let mut manifest = make_test_manifest();
         manifest
@@ -449,7 +496,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
             &mut ColumnLineageCache::disabled(),
         );
 
-        assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
 
         for wrapper in [
             format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
@@ -468,7 +515,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
                 &mut ColumnLineageCache::disabled(),
             );
 
-            assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
         }
     }
 }
@@ -508,7 +555,7 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
+    assert_exact_column_outcomes(&result, &[], &["a", "b", "c"]);
 }
 
 #[test]
@@ -546,7 +593,7 @@ fn test_set_operation_star_only_branch_keeps_explicit_left_names() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b"], &[]);
+    assert_exact_column_outcomes(&result, &[], &["a", "b"]);
 }
 
 #[test]
@@ -584,11 +631,11 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
+    assert_exact_column_outcomes(&result, &["extra_col"], &["a", "b", "c"]);
 }
 
 #[test]
-fn test_nested_set_operations_guard_unresolved_star_branch() {
+fn test_nested_set_operations_with_unresolved_star_branch_are_conservative() {
     // The parser represents an unparenthesized UNION chain as a left-nested
     // Union(Union(...), ...); see `test_union_chain_is_left_nested` for a
     // pinned assertion of that raw shape.
@@ -623,7 +670,7 @@ fn test_nested_set_operations_guard_unresolved_star_branch() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+    assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
 }
 
 #[test]
@@ -715,7 +762,7 @@ fn test_set_star_with_unknown_source_does_not_fabricate_lineage() {
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -726,7 +773,7 @@ fn test_nested_set_star_does_not_fabricate_lineage() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -739,7 +786,7 @@ fn test_leading_star_hides_a_name_declared_by_several_operands() {
          UNION ALL SELECT id, fee AS total FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -752,7 +799,7 @@ fn test_leading_star_hides_a_name_despite_ordinal_alignment() {
          UNION ALL SELECT id, fee FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -763,7 +810,7 @@ fn test_set_operands_do_not_match_explicit_projections_by_name_at_other_ordinal(
          UNION ALL SELECT fee AS total, id FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
     assert!(result.columns.is_empty());
 }
 
@@ -784,7 +831,7 @@ fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["amt", "id", "total"]);
     assert!(result.columns.iter().all(|entry| {
         entry.sources.iter().all(|source| {
             source.table != "real_x"
@@ -883,7 +930,7 @@ fn test_nested_cte_name_does_not_shadow_outer_sibling_scope() {
         &["outer_id"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_sources_for(&result, "outer_id", &[("raw.orders", "id")]);
+    assert_sources_for(&result, "outer_id", &[("orders", "id")]);
 }
 
 #[test]
@@ -908,7 +955,7 @@ fn test_real_underscore_one_column_is_not_synthetic_ordinal() {
     let result = compute_star_shape("SELECT id AS _1 FROM raw.orders", &["_1"]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.traced_columns, 1);
-    assert_sources_for(&result, "_1", &[("raw.orders", "id")]);
+    assert_sources_for(&result, "_1", &[("orders", "id")]);
 }
 
 #[test]
