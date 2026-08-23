@@ -348,7 +348,7 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
 }
 
 #[test]
-fn test_cross_model_normalizes_duplicate_column_errors_deterministically() {
+fn test_cross_model_preserves_distinct_same_column_errors() {
     let manifest = duplicate_column_error_manifest();
     let result = compute_cross_model_column_lineage(
         &manifest,
@@ -362,8 +362,39 @@ fn test_cross_model_normalizes_duplicate_column_errors_deterministically() {
         .iter()
         .filter(|error| error.what.starts_with("column 'dup_col':"))
         .collect();
-    assert_eq!(duplicate_errors.len(), 1, "errors: {:?}", result.errors);
-    assert!(duplicate_errors[0].hint.is_some());
+    assert_eq!(duplicate_errors.len(), 2, "errors: {:?}", result.errors);
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_some())
+            .count(),
+        1,
+        "expected one unresolved-star hint: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_none())
+            .count(),
+        1,
+        "expected one no-mapping diagnostic: {:?}",
+        result.errors
+    );
+    assert!(
+        duplicate_errors
+            .iter()
+            .any(|error| error.what.contains("unexpanded SELECT *")),
+        "expected unresolved-star reason: {:?}",
+        result.errors
+    );
+    assert!(
+        duplicate_errors
+            .iter()
+            .any(|error| error.what.contains("no sqllineage mapping")),
+        "expected no-mapping reason: {:?}",
+        result.errors
+    );
 }
 
 #[test]

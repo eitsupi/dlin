@@ -81,7 +81,7 @@ fn duplicate_column_impact_manifest() -> Manifest {
 }
 
 #[test]
-fn test_column_impact_normalizes_duplicate_column_errors() {
+fn test_column_impact_preserves_distinct_same_column_errors() {
     let manifest = duplicate_column_impact_manifest();
     let result = compute_column_impact(
         &manifest,
@@ -96,10 +96,37 @@ fn test_column_impact_normalizes_duplicate_column_errors() {
         .iter()
         .filter(|error| error.what.starts_with("column 'dup_col':"))
         .collect();
-    assert_eq!(duplicate_errors.len(), 1, "errors: {:?}", result.errors);
+    assert_eq!(duplicate_errors.len(), 2, "errors: {:?}", result.errors);
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_some())
+            .count(),
+        1,
+        "expected one unresolved-star hint: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_none())
+            .count(),
+        1,
+        "expected one no-mapping diagnostic: {:?}",
+        result.errors
+    );
     assert!(
-        duplicate_errors[0].hint.is_some(),
-        "expected star hint, errors: {:?}",
+        duplicate_errors.iter().any(|error| {
+            error.what.contains("unexpanded SELECT *") || error.what.contains("unexpanded wildcard")
+        }),
+        "expected unresolved-star reason: {:?}",
+        result.errors
+    );
+    assert!(
+        duplicate_errors
+            .iter()
+            .any(|error| error.what.contains("no sqllineage mapping")),
+        "expected no-mapping reason: {:?}",
         result.errors
     );
 }
