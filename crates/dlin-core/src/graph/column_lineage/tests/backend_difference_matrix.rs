@@ -832,7 +832,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "Aggregation",
         sqllineage: "Direct",
         status: LedgerStatus::Open {
-            to_settle: "For COUNT(*), settle whether the transformation should be Direct as sqllineage reports or Aggregation as polyglot reports. Sqllineage reports Aggregation for aggregates that take a column argument, so this appears specific to aggregates with no column argument and needs confirming upstream.",
+            to_settle: "Polyglot is right: COUNT(*) is an aggregate even though it has no column origin, and classifying it as Direct confuses source absence with expression shape. sqllineage needs to preserve the Aggregation classification for source-free aggregates like COUNT(*) before dlin can rely on its transformation output for aggregates in general.",
         },
         authority: "dlin backend comparison",
     },
@@ -861,8 +861,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].has_unresolved_stars",
         polyglot: "true",
         sqllineage: "false",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether catalog expansion of SELECT * should clear the unresolved-star marker, as sqllineage reports, or retain it, as polyglot reports; the observed values do not establish which metadata dlin should publish.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right. `has_unresolved_stars` should indicate a star whose output columns remain unknown, not the mere presence of a `SELECT *` token. Catalog expansion resolves this star to a concrete output column, so the marker should clear.",
         },
         authority: "dlin backend comparison",
     },
@@ -881,8 +881,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].error.kind",
         polyglot: "\"ColumnResolution { state: NotFound }\"",
         sqllineage: "\"ColumnResolution { state: Indeterminate }\"",
-        status: LedgerStatus::Open {
-            to_settle: "This is a behavioral finding, not a wording change: polyglot reports NotFound while sqllineage reports Indeterminate for an unexpanded star. The error kind controls the production hint, so the correct state must be reviewed before the production backend changes.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right. Without catalog information, an unexpanded SELECT * does not establish whether the requested column exists, so the honest result is Indeterminate rather than a confident NotFound.",
         },
         authority: "dlin backend comparison and production error-hint behavior",
     },
@@ -891,8 +891,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].error.message",
         polyglot: "\"lineage failed: Cannot find column 'col_x' in query\"",
         sqllineage: "\"cannot match output 'col_x' because an unexpanded SELECT * leaves the output columns unknown\"",
-        status: LedgerStatus::Open {
-            to_settle: "This is a finding as well as a wording change: polyglot says the column cannot be found, while sqllineage identifies the unexpanded SELECT * as the reason the output is unknown. Review the user-visible diagnosis before the production backend changes.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right, for the same reason as this case's error.kind field: the message correctly identifies the unexpanded SELECT * as the reason the output is unknown, rather than confidently claiming the column cannot be found.",
         },
         authority: "dlin backend comparison and production error reporting",
     },
@@ -901,8 +901,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].transformation",
         polyglot: "Unknown",
         sqllineage: "Direct",
-        status: LedgerStatus::Open {
-            to_settle: "Settle whether a set operation with named leading operands should classify its output as Unknown, as polyglot reports, or Direct, as sqllineage reports; the corpus does not establish which transformation dlin should publish.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right. Both UNION ALL branches select a named column positionally, so the output is a direct passthrough. Polyglot's Unknown reflects its accepted, structural gap in top-level set-operation output inference, not a substantive disagreement about transformation classification.",
         },
         authority: "dlin backend comparison",
     },
@@ -912,7 +912,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "\"Complete\"",
         sqllineage: "\"Indeterminate(reason=\\\"a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted\\\")\"",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
@@ -922,7 +922,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "resolved",
         sqllineage: "failed",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
@@ -932,7 +932,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "Resolved",
         sqllineage: "Indeterminate",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
@@ -971,8 +971,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].outcome_kind",
         polyglot: "resolved",
         sqllineage: "failed",
-        status: LedgerStatus::Open {
-            to_settle: "This is a finding, not a preference: polyglot overclaims the mixed set-operation lineage and sqllineage is incomplete.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right for dlin's safety contract. The requested output mixes a source-free literal branch with lineage through a star-derived CTE in the other UNION ALL branch, and dlin has no representation proving the complete mixed-branch lineage was captured. Polyglot's Resolved result is an overclaim; sqllineage's conservative Indeterminate is the desired end state. A future richer representation for constant-plus-source unions would be an enhancement, not a migration blocker.",
         },
         authority: "column-lineage review finding; neither backend",
     },
@@ -981,8 +981,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].resolution",
         polyglot: "Resolved",
         sqllineage: "Indeterminate",
-        status: LedgerStatus::Open {
-            to_settle: "Neither backend is right for this known finding: polyglot overclaims and sqllineage is incomplete. The resolution states make that distinction explicit.",
+        status: LedgerStatus::Decided {
+            verdict: "sqllineage is right for dlin's safety contract. The requested output mixes a source-free literal branch with lineage through a star-derived CTE in the other UNION ALL branch, and dlin has no representation proving the complete mixed-branch lineage was captured. Polyglot's Resolved result is an overclaim; sqllineage's conservative Indeterminate is the desired end state. A future richer representation for constant-plus-source unions would be an enhancement, not a migration blocker.",
         },
         authority: "column-lineage review finding; neither backend",
     },
@@ -1001,8 +1001,8 @@ const LEDGER: &[LedgerEntry] = &[
         field: "statement[0].column[0].error.message",
         polyglot: "\"lineage failed: Cannot find column 'missing' in query\"",
         sqllineage: "\"no sqllineage mapping for output 'missing'\"",
-        status: LedgerStatus::Open {
-            to_settle: "The two backends describe a missing requested output differently. Review the new user-visible wording before the production backend changes.",
+        status: LedgerStatus::Decided {
+            verdict: "Neither backend has a semantic advantage. The requested name is absent from the query's own output list, which is a not-found condition rather than an ambiguous resolution failure; dlin owns this message text and is not required to match either backend's exact wording verbatim.",
         },
         authority: "dlin backend comparison and production error reporting",
     },
@@ -1012,7 +1012,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "error(Parse)",
         sqllineage: "1 statement(s)",
         status: LedgerStatus::Open {
-            to_settle: "Polyglot rejects the malformed statement while sqllineage returns a statement with no mapping for the requested output. Review whether malformed SQL should fail the whole analysis consistently before the production backend changes.",
+            to_settle: "Polyglot's whole-analysis parse failure is dlin's established contract for this SQL shape (a dedicated regression test elsewhere already pins this for Polyglot). sqllineage's Generic dialect currently accepts this malformed statement and returns a result instead of failing the analysis; the sqllineage backend needs an explicit guard for this shape before dlin can rely on parse-failure semantics being consistent across backends.",
         },
         authority: "dlin backend comparison and parse-error behavior",
     },
