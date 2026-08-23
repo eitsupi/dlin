@@ -105,6 +105,97 @@ fn source_free_union_manifest() -> Manifest {
     }
 }
 
+fn bigquery_compound_field_access_manifest() -> Manifest {
+    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn model(
+        unique_id: &str,
+        name: &str,
+        dependencies: &[&str],
+        output_columns: &[&str],
+        sql: &str,
+    ) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+
+    let source_id = "source.proj.external_table_a";
+    let upstream_id = "model.proj.upstream_model";
+    let array_id = "model.proj.array_model";
+    let mut sources = HashMap::new();
+    sources.insert(
+        source_id.to_string(),
+        ManifestSource {
+            unique_id: source_id.to_string(),
+            name: "external_table_a".to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(&["id", "items_array"]),
+            database: None,
+            schema: None,
+            identifier: None,
+        },
+    );
+
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        upstream_id.to_string(),
+        model(
+            upstream_id,
+            "upstream_model",
+            &[source_id],
+            &["id", "items_array"],
+            "SELECT id, items_array FROM external_table_a",
+        ),
+    );
+    nodes.insert(
+        array_id.to_string(),
+        model(
+            array_id,
+            "array_model",
+            &[upstream_id],
+            &["first_item"],
+            "SELECT base.items_array[OFFSET(0)] AS first_item FROM upstream_model AS base",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        sources,
+        ..Default::default()
+    }
+}
+
 fn duplicate_column_error_manifest() -> Manifest {
     let mut manifest = make_cross_model_manifest();
     let columns = |names: &[&str]| {
@@ -344,6 +435,40 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     assert_eq!(
         id_sources,
         vec![("external_table_a", "id"), ("external_table_b", "id")]
+    );
+}
+
+#[test]
+fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column() {
+    let manifest = bigquery_compound_field_access_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "array_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let first_item = result
+        .columns
+        .iter()
+        .find(|column| column.column == "first_item")
+        .expect("first_item should be present");
+    assert_eq!(
+        first_item.sources.len(),
+        1,
+        "sources: {:?}",
+        first_item.sources
+    );
+    let source = &first_item.sources[0];
+    assert_eq!(source.column, "items_array");
+    assert_eq!(source.table, "external_table_a");
+    assert!(
+        source
+            .model_path
+            .iter()
+            .any(|(model, column, _)| model == "upstream_model" && column == "items_array"),
+        "expected upstream model path, got: {:?}",
+        source.model_path
     );
 }
 
