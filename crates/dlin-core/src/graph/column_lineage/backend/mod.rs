@@ -3,7 +3,6 @@
 
 pub mod catalog;
 pub mod dialect;
-pub mod polyglot;
 pub mod sqllineage;
 pub mod types;
 
@@ -14,27 +13,24 @@ pub use catalog::CatalogSnapshot;
 #[allow(unused_imports)]
 pub(crate) use catalog_provider::SqllineageCatalogProvider;
 #[allow(unused_imports)]
-pub use dialect::DlinDialect;
+pub use dialect::{DialectClassification, DlinDialect, REMOVED_DIALECTS};
 #[allow(unused_imports)]
-pub use polyglot::{
-    check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
+pub use sqllineage::{
+    SqllineageBackend, check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json,
+    debug_trace_column_json,
 };
-#[allow(unused_imports)]
-pub use sqllineage::SqllineageBackend;
 #[allow(unused_imports)]
 pub use types::*;
 
 /// Backend identities for the column-lineage dispatch layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendId {
-    Polyglot,
     Sqllineage,
 }
 
 impl BackendId {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Polyglot => "polyglot",
             Self::Sqllineage => "sqllineage",
         }
     }
@@ -52,14 +48,12 @@ pub trait LineageBackend: Send + Sync {
 
 /// Concrete backend variants.
 pub enum Backend {
-    Polyglot(PolyglotBackend),
     Sqllineage(SqllineageBackend),
 }
 
 impl LineageBackend for Backend {
     fn id(&self) -> BackendId {
         match self {
-            Self::Polyglot(_) => BackendId::Polyglot,
             Self::Sqllineage(_) => BackendId::Sqllineage,
         }
     }
@@ -69,51 +63,20 @@ impl LineageBackend for Backend {
         request: &OutputDiscoveryRequest<'_>,
     ) -> Result<OutputDiscovery, BackendError> {
         match self {
-            Self::Polyglot(backend) => backend.discover_output_columns(request),
             Self::Sqllineage(backend) => backend.discover_output_columns(request),
         }
     }
 
     fn analyze(&self, request: &LineageRequest<'_>) -> Result<BackendAnalysis, BackendError> {
         match self {
-            Self::Polyglot(backend) => backend.analyze(request),
             Self::Sqllineage(backend) => backend.analyze(request),
         }
     }
 }
 
-/// The `polyglot-sql`-backed lineage backend.
-pub struct PolyglotBackend;
-
-impl PolyglotBackend {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl LineageBackend for PolyglotBackend {
-    fn id(&self) -> BackendId {
-        BackendId::Polyglot
-    }
-
-    fn discover_output_columns(
-        &self,
-        _request: &OutputDiscoveryRequest<'_>,
-    ) -> Result<OutputDiscovery, BackendError> {
-        crate::graph::column_lineage::backend::polyglot::discover_output_columns(_request)
-    }
-
-    fn analyze(&self, _request: &LineageRequest<'_>) -> Result<BackendAnalysis, BackendError> {
-        crate::graph::column_lineage::backend::polyglot::analyze(_request)
-    }
-}
-
 #[cfg(test)]
-pub(crate) fn backend_for_tests(id: BackendId) -> Backend {
-    match id {
-        BackendId::Polyglot => Backend::Polyglot(PolyglotBackend::new()),
-        BackendId::Sqllineage => Backend::Sqllineage(SqllineageBackend::new()),
-    }
+pub(crate) fn backend_for_tests(_id: BackendId) -> Backend {
+    Backend::Sqllineage(SqllineageBackend::new())
 }
 
 #[cfg(test)]

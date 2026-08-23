@@ -24,7 +24,7 @@ fn test_column_cache_hit() {
         "test_model",
         "SELECT id FROM raw",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -38,7 +38,7 @@ fn test_column_cache_hit() {
             "test_model",
             "SELECT id FROM raw",
             DlinDialect::Generic,
-            BackendId::Polyglot,
+            BackendId::Sqllineage,
             None,
             Some(0),
         )
@@ -83,7 +83,7 @@ fn test_column_cache_persists_structural_relation_and_public_view() {
             "stg_orders",
             &compiled_code,
             DlinDialect::Generic,
-            BackendId::Polyglot,
+            BackendId::Sqllineage,
             None,
             Some(super::super::schema::compute_manifest_columns_hash(
                 &manifest,
@@ -114,7 +114,7 @@ fn test_column_cache_miss_on_code_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -128,7 +128,7 @@ fn test_column_cache_miss_on_code_change() {
                 "m",
                 "SELECT 2",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(0)
             )
@@ -153,7 +153,7 @@ fn test_column_cache_miss_on_dialect_change() {
         "m",
         "SELECT 1",
         DlinDialect::BigQuery,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -167,48 +167,9 @@ fn test_column_cache_miss_on_dialect_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Snowflake,
-                BackendId::Polyglot,
-                None,
-                Some(0)
-            )
-            .is_none()
-    );
-}
-
-#[test]
-fn test_column_cache_miss_on_backend_change() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project_dir = tmp.path();
-
-    let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
-        model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
-        errors: vec![],
-    };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        BackendId::Polyglot,
-        0,
-        None,
-        lineage,
-    );
-    cache.save();
-
-    let cache2 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
                 BackendId::Sqllineage,
                 None,
-                Some(0),
+                Some(0)
             )
             .is_none()
     );
@@ -231,7 +192,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         42,
         None,
         lineage,
@@ -246,7 +207,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(42)
             )
@@ -259,7 +220,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(99)
             )
@@ -284,7 +245,7 @@ fn test_column_cache_version_invalidation() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -307,7 +268,7 @@ fn test_column_cache_version_invalidation() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(0)
             )
@@ -329,7 +290,7 @@ fn test_column_cache_disabled() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -341,7 +302,7 @@ fn test_column_cache_disabled() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(0)
             )
@@ -369,7 +330,7 @@ fn test_column_cache_fresh() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage,
@@ -384,7 +345,7 @@ fn test_column_cache_fresh() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(0)
             )
@@ -404,7 +365,7 @@ fn test_column_cache_fresh() {
         "m2",
         "SELECT 2",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         0,
         None,
         lineage2,
@@ -418,7 +379,7 @@ fn test_column_cache_fresh() {
                 "m2",
                 "SELECT 2",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 None,
                 Some(0)
             )
@@ -445,7 +406,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         42,
         Some(&manifest_path),
         lineage,
@@ -459,7 +420,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -476,7 +437,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Polyglot,
+                BackendId::Sqllineage,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -511,7 +472,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
         model_name,
         compiled_code,
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         manifest_columns_hash,
         Some(&manifest_path),
         sentinel,
@@ -555,7 +516,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         "orders",
         compiled_code,
         DlinDialect::Generic,
-        BackendId::Polyglot,
+        BackendId::Sqllineage,
         initial_hash,
         None,
         sentinel,

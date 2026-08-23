@@ -49,6 +49,7 @@ struct McpState {
     project_dir: PathBuf,
     manifest_path: PathBuf,
     dialect: DlinDialect,
+    dialect_warning: Option<String>,
     manifest: parser::manifest::Manifest,
     dag: LineageGraph,
     column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
@@ -123,7 +124,8 @@ impl McpState {
         Ok(Self {
             project_dir,
             manifest_path,
-            dialect: resolved_dialect,
+            dialect: resolved_dialect.dialect,
+            dialect_warning: resolved_dialect.warning,
             manifest,
             dag,
             column_lineage_cache: RefCell::new(
@@ -317,12 +319,17 @@ fn call_tool(params: &Value, state: &McpState) -> std::result::Result<Value, (i3
     };
 
     Ok(match result {
-        Ok(value) => tool_result(value, false),
-        Err(err) => tool_result(json!({ "error": err.to_string() }), true),
+        Ok(value) => tool_result(value, false, state),
+        Err(err) => tool_result(json!({ "error": err.to_string() }), true, state),
     })
 }
 
-fn tool_result(value: Value, is_error: bool) -> Value {
+fn tool_result(mut value: Value, is_error: bool, state: &McpState) -> Value {
+    if let Some(warning) = &state.dialect_warning
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("warnings".to_string(), json!([warning]));
+    }
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     json!({
         "content": [{ "type": "text", "text": text }],
@@ -824,6 +831,7 @@ fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::DialectArg;
 
     fn fixture_project_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -843,8 +851,11 @@ mod tests {
             .join("column_lineage_project")
     }
 
-    fn generic_dialect() -> DlinDialect {
-        DlinDialect::Generic
+    fn generic_dialect() -> DialectArg {
+        DialectArg {
+            dialect: DlinDialect::Generic,
+            requested: "generic".to_string(),
+        }
     }
 
     fn state() -> McpState {
@@ -895,18 +906,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.dialect, DlinDialect::DuckDB);
+        assert!(state.dialect_warning.is_none());
 
-        let result = get_column_lineage(
+        let result = call_tool(
             &json!({
-                "model": "stg_orders",
-                "column": "order_id",
-                "direction": "upstream"
+                "name": "get_column_lineage",
+                "arguments": {
+                    "model": "stg_orders",
+                    "column": "order_id",
+                    "direction": "upstream"
+                }
             }),
             &state,
         )
         .unwrap();
 
-        assert!(result.get("warnings").is_none());
+        assert!(result["structuredContent"].get("warnings").is_none());
     }
 
     #[test]
@@ -915,17 +930,20 @@ mod tests {
 
         assert_eq!(state.dialect, DlinDialect::Generic);
 
-        let result = get_column_lineage(
+        let result = call_tool(
             &json!({
-                "model": "stg_orders",
-                "column": "order_id",
-                "direction": "upstream"
+                "name": "get_column_lineage",
+                "arguments": {
+                    "model": "stg_orders",
+                    "column": "order_id",
+                    "direction": "upstream"
+                }
             }),
             &state,
         )
         .unwrap();
 
-        assert!(result.get("warnings").is_none());
+        assert!(result["structuredContent"].get("warnings").is_none());
     }
 
     #[test]

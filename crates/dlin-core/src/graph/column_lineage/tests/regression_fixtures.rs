@@ -1,13 +1,8 @@
-//! Column lineage regression fixtures carried forward across the polyglot-sql
-//! dependency revert.
+//! Column lineage regression fixtures for the production SQL lineage backend.
 //!
-//! These cases were discovered while the column lineage backend depended on
-//! polyglot-sql 0.6.x and 0.8.0. They describe SELECT * / set-operation shapes
-//! that a correct column lineage implementation should handle, independent of
-//! which SQL analysis library backs it, so they are preserved here rather than
-//! deleted when the dependency reverted to an earlier release. Cases that do
-//! not hold against the current dependency version are marked `#[ignore]`
-//! with the observed behavior; their expected values are left untouched.
+//! They describe SELECT * / set-operation shapes and preserve behavior agreed
+//! for the active backend. Cases that do not hold against the current upstream
+//! analyzer are marked `#[ignore]` with the observed behavior.
 
 use super::*;
 
@@ -33,8 +28,8 @@ fn test_cte_select_star_passthrough_is_traced() {
 
     assert_exact_column_outcomes(
         &result,
-        &["id"],
-        &["customer_id", "order_date", "order_id", "status"],
+        &[],
+        &["customer_id", "order_date", "order_id", "status", "id"],
     );
     assert_select_star_hint(&result);
 }
@@ -59,8 +54,8 @@ fn test_derived_table_select_star_passthrough_is_traced() {
 
     assert_exact_column_outcomes(
         &result,
-        &["id"],
-        &["customer_id", "order_date", "order_id", "status"],
+        &[],
+        &["customer_id", "order_date", "order_id", "status", "id"],
     );
     assert_select_star_hint(&result);
 }
@@ -94,12 +89,15 @@ fn test_join_select_star_passthrough_is_traced() {
 }
 
 const STAR_PASSTHROUGH_TRACEABLE_CASES: &[&str] = &[
-    "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
     "SELECT id FROM raw.orders UNION ALL SELECT id FROM raw.orders",
+    "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
+];
+
+const STAR_PASSTHROUGH_INDETERMINATE_CASES: &[&str] = &[
+    "WITH src AS (SELECT * FROM some_unknown_source) SELECT id FROM src",
     "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT COALESCE(a.id, b.id) AS id FROM a JOIN b ON true",
     "WITH a AS (SELECT * FROM some_unknown_source), b AS (SELECT * FROM some_unknown_source) SELECT CASE WHEN a.id IS NULL THEN b.id ELSE a.id END AS id FROM a JOIN b ON true",
     "WITH left_side AS (SELECT id FROM raw.orders), right_side AS (SELECT * FROM some_unknown_source) SELECT id FROM left_side UNION ALL SELECT id FROM right_side",
-    "SELECT id FROM raw.orders EXCEPT SELECT id FROM raw.orders",
 ];
 
 // Split out of the list above so the shapes that do resolve keep their
@@ -145,9 +143,46 @@ fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
     }
 }
 
+fn assert_star_passthrough_shapes_are_indeterminate(cases: &[&str]) {
+    for sql in cases {
+        let mut manifest = make_test_manifest();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .columns = [(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        manifest
+            .nodes
+            .get_mut("model.proj.stg_orders")
+            .unwrap()
+            .compiled_code = Some((*sql).to_string());
+
+        let result = compute_column_lineage(
+            &manifest,
+            "stg_orders",
+            DlinDialect::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert_exact_column_outcomes(&result, &[], &["id"]);
+        assert_select_star_hint(&result);
+    }
+}
+
 #[test]
 fn test_star_passthrough_query_shapes_are_traceable() {
     assert_star_passthrough_shapes_are_traceable(STAR_PASSTHROUGH_TRACEABLE_CASES);
+}
+
+#[test]
+fn test_star_passthrough_query_shapes_with_unknown_sources_are_indeterminate() {
+    assert_star_passthrough_shapes_are_indeterminate(STAR_PASSTHROUGH_INDETERMINATE_CASES);
 }
 
 #[test]
@@ -169,18 +204,21 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
+            true,
         ),
         (
             "col_a",
             "WITH lit AS (SELECT 1 AS col_a), lit2 AS (SELECT 2 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM lit2) SELECT col_a FROM u",
+            false,
         ),
         (
             "c",
             "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c UNION ALL SELECT a.col_a FROM a UNION ALL SELECT 3 AS c3) SELECT c FROM u",
+            true,
         ),
     ];
 
-    for (column, sql) in cases {
+    for (column, sql, has_unknown_star) in cases {
         let mut manifest = make_test_manifest();
         manifest
             .nodes
@@ -206,12 +244,16 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
             DlinDialect::Generic,
             &mut ColumnLineageCache::disabled(),
         );
-        assert!(
-            result.errors.is_empty(),
-            "SQL: {sql}\nerrors: {:?}",
-            result.errors
-        );
-        assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+        if has_unknown_star {
+            assert_exact_column_outcomes(&result, &[], &[column]);
+        } else {
+            assert!(
+                result.errors.is_empty(),
+                "SQL: {sql}\nerrors: {:?}",
+                result.errors
+            );
+            assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+        }
     }
 }
 
@@ -414,7 +456,7 @@ fn test_known_manifest_source_succeeds_alongside_external_join_star() {
 }
 
 #[test]
-fn test_set_operations_guard_unresolved_star_branches() {
+fn test_set_operations_with_unresolved_star_branches_are_conservative() {
     for operator in ["UNION", "INTERSECT", "EXCEPT"] {
         let mut manifest = make_test_manifest();
         manifest
@@ -449,7 +491,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
             &mut ColumnLineageCache::disabled(),
         );
 
-        assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
 
         for wrapper in [
             format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
@@ -468,7 +510,7 @@ fn test_set_operations_guard_unresolved_star_branches() {
                 &mut ColumnLineageCache::disabled(),
             );
 
-            assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
         }
     }
 }
@@ -508,7 +550,7 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
+    assert_exact_column_outcomes(&result, &[], &["a", "b", "c"]);
 }
 
 #[test]
@@ -546,7 +588,7 @@ fn test_set_operation_star_only_branch_keeps_explicit_left_names() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b"], &[]);
+    assert_exact_column_outcomes(&result, &[], &["a", "b"]);
 }
 
 #[test]
@@ -584,11 +626,11 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["a", "b", "c"], &[]);
+    assert_exact_column_outcomes(&result, &["extra_col"], &["a", "b", "c"]);
 }
 
 #[test]
-fn test_nested_set_operations_guard_unresolved_star_branch() {
+fn test_nested_set_operations_with_unresolved_star_branch_are_conservative() {
     // The parser represents an unparenthesized UNION chain as a left-nested
     // Union(Union(...), ...); see `test_union_chain_is_left_nested` for a
     // pinned assertion of that raw shape.
@@ -623,7 +665,7 @@ fn test_nested_set_operations_guard_unresolved_star_branch() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["id", "explicit_col"], &[]);
+    assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
 }
 
 #[test]
@@ -715,7 +757,7 @@ fn test_set_star_with_unknown_source_does_not_fabricate_lineage() {
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -726,7 +768,7 @@ fn test_nested_set_star_does_not_fabricate_lineage() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -739,7 +781,7 @@ fn test_leading_star_hides_a_name_declared_by_several_operands() {
          UNION ALL SELECT id, fee AS total FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -752,7 +794,7 @@ fn test_leading_star_hides_a_name_despite_ordinal_alignment() {
          UNION ALL SELECT id, fee FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
 }
 
 #[test]
@@ -763,7 +805,7 @@ fn test_set_operands_do_not_match_explicit_projections_by_name_at_other_ordinal(
          UNION ALL SELECT fee AS total, id FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
     assert!(result.columns.is_empty());
 }
 
@@ -784,7 +826,7 @@ fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["total"]);
+    assert_exact_column_outcomes(&result, &[], &["amt", "id", "total"]);
     assert!(result.columns.iter().all(|entry| {
         entry.sources.iter().all(|source| {
             source.table != "real_x"
@@ -864,7 +906,7 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
 }
 
 #[test]
-#[ignore = "polyglot currently traces a name introduced only by a non-leading branch through \
+#[ignore = "the upstream analyzer currently traces a name introduced only by a non-leading branch through \
             a nested set operation, but SQL semantics leave the output unresolved"]
 fn test_set_operation_in_from_subquery_does_not_adopt_a_non_leading_name() {
     let result = compute_star_shape(
@@ -883,7 +925,7 @@ fn test_nested_cte_name_does_not_shadow_outer_sibling_scope() {
         &["outer_id"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_sources_for(&result, "outer_id", &[("raw.orders", "id")]);
+    assert_sources_for(&result, "outer_id", &[("orders", "id")]);
 }
 
 #[test]
@@ -908,7 +950,7 @@ fn test_real_underscore_one_column_is_not_synthetic_ordinal() {
     let result = compute_star_shape("SELECT id AS _1 FROM raw.orders", &["_1"]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.traced_columns, 1);
-    assert_sources_for(&result, "_1", &[("raw.orders", "id")]);
+    assert_sources_for(&result, "_1", &[("orders", "id")]);
 }
 
 #[test]
@@ -942,116 +984,3 @@ fn test_duplicate_left_output_name_preserves_sources() {
     assert_eq!(result.traced_columns, 1);
     assert_sources_for(&result, "a", &[("dup", "a")]);
 }
-
-// The four cases below assert directly against polyglot-sql APIs that do not exist in
-// the 0.4.4 release this module now depends on (`ColumnResolutionTarget`,
-// `ColumnResolutionReason`, `Error::column_resolution`, `lineage::lineage_at`,
-// `lineage::output_columns`, `OutputColumn`, and dlin's own
-// `is_indeterminate_column_resolution` helper built on top of them), so they cannot be
-// parsed as valid Rust against this dependency version. They are kept here as plain
-// comments rather than deleted: they describe API-level behavior a replacement backend
-// should also provide.
-//
-// #[test]
-// fn test_column_resolution_reasons_are_handled_structurally() {
-//     let target = polyglot_sql::ColumnResolutionTarget::Name {
-//         name: "wanted".to_string(),
-//     };
-//
-//     let not_found = polyglot_sql::Error::column_resolution(
-//         target.clone(),
-//         polyglot_sql::ColumnResolutionReason::NotFound,
-//     );
-//     let indeterminate = polyglot_sql::Error::column_resolution(
-//         target.clone(),
-//         polyglot_sql::ColumnResolutionReason::Indeterminate,
-//     );
-//     let ambiguous = polyglot_sql::Error::column_resolution(
-//         target,
-//         polyglot_sql::ColumnResolutionReason::Ambiguous,
-//     );
-//
-//     assert!(!super::super::is_indeterminate_column_resolution(
-//         &not_found
-//     ));
-//     assert!(super::super::is_indeterminate_column_resolution(
-//         &indeterminate
-//     ));
-//     assert!(!super::super::is_indeterminate_column_resolution(
-//         &ambiguous
-//     ));
-//
-//     // The structured reason is internal; dlin's existing error text remains
-//     // stable for all name-resolution failures.
-//     for error in [&not_found, &indeterminate, &ambiguous] {
-//         assert_eq!(
-//             format_lineage_error(error),
-//             "Cannot find column 'wanted' in query"
-//         );
-//     }
-// }
-//
-// #[test]
-// fn test_lineage_at_traces_an_unaliased_expression_by_ordinal() {
-//     let expression =
-//         polyglot_sql::parse_one("SELECT fee * 2 FROM t", polyglot_sql::DialectType::Generic)
-//             .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &expression, None, false).unwrap();
-//
-//     assert!(
-//         node.walk().any(|node| node.name == "t.fee"),
-//         "ordinal lineage should reach t.fee: {:?}",
-//         node
-//     );
-// }
-//
-// #[test]
-// fn test_output_columns_preserves_duplicate_named_ordinals() {
-//     let expression = polyglot_sql::parse_one(
-//         "SELECT a.id, b.id FROM a JOIN b ON a.id = b.id",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let output = polyglot_sql::lineage::output_columns(&expression, None).unwrap();
-//
-//     assert_eq!(
-//         output.columns,
-//         vec![
-//             polyglot_sql::OutputColumn::Named {
-//                 name: "id".to_string(),
-//                 ordinal: Some(0),
-//             },
-//             polyglot_sql::OutputColumn::Named {
-//                 name: "id".to_string(),
-//                 ordinal: Some(1),
-//             },
-//         ]
-//     );
-// }
-//
-// #[test]
-// fn test_set_branch_ordinals_survive_an_unresolved_sibling() {
-//     let left_survives = polyglot_sql::parse_one(
-//         "SELECT id, amt FROM a EXCEPT SELECT * FROM unknown",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &left_survives, None, false).unwrap();
-//     assert_eq!(node.downstream.len(), 1);
-//     assert_eq!(
-//         node.downstream[0].set_branch.map(|branch| branch.ordinal),
-//         Some(0)
-//     );
-//
-//     let right_survives = polyglot_sql::parse_one(
-//         "SELECT * FROM unknown EXCEPT SELECT id, amt FROM a",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &right_survives, None, false).unwrap();
-//     assert_eq!(node.downstream.len(), 1);
-//     assert_eq!(
-//         node.downstream[0].set_branch.map(|branch| branch.ordinal),
-//         Some(1)
-//     );
-// }

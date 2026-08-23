@@ -2569,9 +2569,9 @@ mod manifest_only_mode {
     }
 
     #[test]
-    fn test_column_upstream_auto_detects_warehouse_dialect_without_warning() {
-        // A dialect the lineage engine's future backend cannot serve is still a
-        // first-class dlin dialect: it is inferred from adapter_type and says nothing.
+    fn test_column_upstream_supported_warehouse_dialect_has_no_warning() {
+        // A dialect with a native sqllineage mapping is used directly, without
+        // the compatibility downgrade that applies to removed dialects.
         let tmp = tempfile::tempdir().unwrap();
         write_manifest(tmp.path(), &manifest_json_with_adapter(Some("duckdb")));
 
@@ -2589,7 +2589,40 @@ mod manifest_only_mode {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "should succeed; stderr: {stderr}");
-        assert!(stderr.trim().is_empty(), "unexpected stderr: {stderr}");
+        assert!(
+            !stderr.contains("no longer supported"),
+            "unexpected warning: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_column_upstream_explicit_removed_dialect_warns_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_manifest(tmp.path(), &manifest_json_with_adapter(Some("postgres")));
+
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "upstream",
+                "stg_orders",
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "--dialect",
+                "presto",
+                "--no-cache",
+            ])
+            .output()
+            .expect("Failed to run binary");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "should succeed; stderr: {stderr}");
+        assert_eq!(
+            stderr
+                .matches("no longer supported by the column-lineage backend")
+                .count(),
+            1,
+            "expected exactly one dialect warning: {stderr}"
+        );
     }
 
     #[test]

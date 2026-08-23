@@ -1,6 +1,6 @@
 use super::*;
 #[test]
-fn test_top_level_set_operation_does_not_infer_output_names() {
+fn test_top_level_set_operation_infers_output_names() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns.clear();
@@ -14,11 +14,9 @@ fn test_top_level_set_operation_does_not_infer_output_names() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(result.columns.is_empty());
-    assert_eq!(
-        result.errors[0].kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
-    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].column, "id");
 }
 
 #[test]

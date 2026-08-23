@@ -3,6 +3,44 @@
 use std::fmt;
 use std::str::FromStr;
 
+/// Dialects understood by dlin but no longer implemented by the active
+/// column-lineage backend.  The first item is the canonical spelling and the
+/// second item contains all accepted spellings (including aliases).
+///
+/// Keep this table next to [`DlinDialect`] so command-line parsing and
+/// manifest auto-detection classify exactly the same set of names.
+pub const REMOVED_DIALECTS: &[(&str, &[&str])] = &[
+    ("presto", &["presto"]),
+    ("oracle", &["oracle"]),
+    ("athena", &["athena"]),
+    ("teradata", &["teradata"]),
+    ("doris", &["doris"]),
+    ("starrocks", &["starrocks"]),
+    ("materialize", &["materialize"]),
+    ("risingwave", &["risingwave"]),
+    ("singlestore", &["singlestore", "memsql"]),
+    ("cockroachdb", &["cockroachdb", "cockroach"]),
+    ("tidb", &["tidb"]),
+    ("druid", &["druid"]),
+    ("solr", &["solr"]),
+    ("tableau", &["tableau"]),
+    ("dune", &["dune"]),
+    ("fabric", &["fabric"]),
+    ("drill", &["drill"]),
+    ("dremio", &["dremio"]),
+    ("exasol", &["exasol"]),
+    (
+        "datafusion",
+        &["datafusion", "arrow-datafusion", "arrow_datafusion"],
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialectClassification {
+    Supported(DlinDialect),
+    Removed(DlinDialect),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "clap",
@@ -57,6 +95,56 @@ pub enum DlinDialect {
 }
 
 impl DlinDialect {
+    /// Classify a user-provided spelling after validating it against the full
+    /// dlin dialect vocabulary.  An unknown spelling is an error; recognized
+    /// dialects that the active backend does not implement are explicitly
+    /// classified as removed so callers can warn and fall back safely.
+    pub fn classify(input: &str) -> Result<DialectClassification, String> {
+        let dialect = input.parse::<Self>()?;
+        let classification = if matches!(
+            dialect,
+            Self::Generic
+                | Self::PostgreSQL
+                | Self::MySQL
+                | Self::Hive
+                | Self::Databricks
+                | Self::Snowflake
+                | Self::BigQuery
+                | Self::DuckDB
+                | Self::SQLite
+                | Self::Spark
+                | Self::Trino
+                | Self::Redshift
+                | Self::TSQL
+                | Self::ClickHouse
+        ) {
+            DialectClassification::Supported(dialect)
+        } else {
+            DialectClassification::Removed(dialect)
+        };
+        Ok(classification)
+    }
+
+    pub fn is_supported_by_column_lineage(self) -> bool {
+        matches!(
+            self,
+            Self::Generic
+                | Self::PostgreSQL
+                | Self::MySQL
+                | Self::Hive
+                | Self::Databricks
+                | Self::Snowflake
+                | Self::BigQuery
+                | Self::DuckDB
+                | Self::SQLite
+                | Self::Spark
+                | Self::Trino
+                | Self::Redshift
+                | Self::TSQL
+                | Self::ClickHouse
+        )
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Generic => "generic",
@@ -96,45 +184,6 @@ impl DlinDialect {
         }
     }
 
-    pub fn to_polyglot(self) -> polyglot_sql::DialectType {
-        match self {
-            Self::Generic => polyglot_sql::DialectType::Generic,
-            Self::PostgreSQL => polyglot_sql::DialectType::PostgreSQL,
-            Self::MySQL => polyglot_sql::DialectType::MySQL,
-            Self::Hive => polyglot_sql::DialectType::Hive,
-            Self::Databricks => polyglot_sql::DialectType::Databricks,
-            Self::Snowflake => polyglot_sql::DialectType::Snowflake,
-            Self::BigQuery => polyglot_sql::DialectType::BigQuery,
-            Self::DuckDB => polyglot_sql::DialectType::DuckDB,
-            Self::SQLite => polyglot_sql::DialectType::SQLite,
-            Self::Spark => polyglot_sql::DialectType::Spark,
-            Self::Trino => polyglot_sql::DialectType::Trino,
-            Self::Presto => polyglot_sql::DialectType::Presto,
-            Self::Redshift => polyglot_sql::DialectType::Redshift,
-            Self::TSQL => polyglot_sql::DialectType::TSQL,
-            Self::Oracle => polyglot_sql::DialectType::Oracle,
-            Self::ClickHouse => polyglot_sql::DialectType::ClickHouse,
-            Self::Athena => polyglot_sql::DialectType::Athena,
-            Self::Teradata => polyglot_sql::DialectType::Teradata,
-            Self::Doris => polyglot_sql::DialectType::Doris,
-            Self::StarRocks => polyglot_sql::DialectType::StarRocks,
-            Self::Materialize => polyglot_sql::DialectType::Materialize,
-            Self::RisingWave => polyglot_sql::DialectType::RisingWave,
-            Self::SingleStore => polyglot_sql::DialectType::SingleStore,
-            Self::CockroachDB => polyglot_sql::DialectType::CockroachDB,
-            Self::TiDB => polyglot_sql::DialectType::TiDB,
-            Self::Druid => polyglot_sql::DialectType::Druid,
-            Self::Solr => polyglot_sql::DialectType::Solr,
-            Self::Tableau => polyglot_sql::DialectType::Tableau,
-            Self::Dune => polyglot_sql::DialectType::Dune,
-            Self::Fabric => polyglot_sql::DialectType::Fabric,
-            Self::Drill => polyglot_sql::DialectType::Drill,
-            Self::Dremio => polyglot_sql::DialectType::Dremio,
-            Self::Exasol => polyglot_sql::DialectType::Exasol,
-            Self::DataFusion => polyglot_sql::DialectType::DataFusion,
-        }
-    }
-
     #[cfg(feature = "column-lineage")]
     pub(crate) fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
         match self {
@@ -145,15 +194,15 @@ impl DlinDialect {
             Self::Databricks => Ok(sqllineage::Dialect::Databricks),
             Self::Snowflake => Ok(sqllineage::Dialect::Snowflake),
             Self::BigQuery => Ok(sqllineage::Dialect::BigQuery),
-            Self::DuckDB
-            | Self::SQLite
-            | Self::Spark
-            | Self::Trino
-            | Self::Presto
-            | Self::Redshift
-            | Self::TSQL
+            Self::DuckDB => Ok(sqllineage::Dialect::DuckDb),
+            Self::SQLite => Ok(sqllineage::Dialect::SQLite),
+            Self::Spark => Ok(sqllineage::Dialect::Spark),
+            Self::Trino => Ok(sqllineage::Dialect::Trino),
+            Self::Redshift => Ok(sqllineage::Dialect::Redshift),
+            Self::TSQL => Ok(sqllineage::Dialect::MsSql),
+            Self::ClickHouse => Ok(sqllineage::Dialect::ClickHouse),
+            Self::Presto
             | Self::Oracle
-            | Self::ClickHouse
             | Self::Athena
             | Self::Teradata
             | Self::Doris
@@ -279,7 +328,6 @@ mod tests {
         for dialect in all_variants() {
             let variant = DlinDialect::from_str(dialect.as_str()).expect("known variant parses");
             assert_eq!(variant, dialect);
-            assert_eq!(dialect.to_polyglot(), variant.to_polyglot());
             assert_eq!(dialect.to_string(), variant.to_string());
         }
     }
@@ -331,12 +379,40 @@ mod tests {
             DlinDialect::BigQuery.to_sqllineage().unwrap(),
             sqllineage::Dialect::BigQuery
         ));
+        assert!(matches!(
+            DlinDialect::DuckDB.to_sqllineage().unwrap(),
+            sqllineage::Dialect::DuckDb
+        ));
+        assert!(matches!(
+            DlinDialect::SQLite.to_sqllineage().unwrap(),
+            sqllineage::Dialect::SQLite
+        ));
+        assert!(matches!(
+            DlinDialect::Spark.to_sqllineage().unwrap(),
+            sqllineage::Dialect::Spark
+        ));
+        assert!(matches!(
+            DlinDialect::Trino.to_sqllineage().unwrap(),
+            sqllineage::Dialect::Trino
+        ));
+        assert!(matches!(
+            DlinDialect::Redshift.to_sqllineage().unwrap(),
+            sqllineage::Dialect::Redshift
+        ));
+        assert!(matches!(
+            DlinDialect::TSQL.to_sqllineage().unwrap(),
+            sqllineage::Dialect::MsSql
+        ));
+        assert!(matches!(
+            DlinDialect::ClickHouse.to_sqllineage().unwrap(),
+            sqllineage::Dialect::ClickHouse
+        ));
 
-        let error = DlinDialect::DuckDB.to_sqllineage().unwrap_err();
+        let error = DlinDialect::Presto.to_sqllineage().unwrap_err();
         assert_eq!(
             error.kind,
             super::super::BackendErrorKind::UnsupportedDialect
         );
-        assert!(error.message.contains("duckdb"));
+        assert!(error.message.contains("presto"));
     }
 }

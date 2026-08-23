@@ -1,5 +1,5 @@
 use sqllineage::{self, AnalyzeOptions, ColumnMapping, ColumnOrigin, StatementType, TransformKind};
-use sqlparser::ast::{Query, SelectItem, SetExpr, Statement, Visit, Visitor};
+use sqlparser::ast::{Query, SetExpr, Statement, Visit, Visitor};
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
@@ -22,6 +22,91 @@ impl SqllineageBackend {
     pub const fn new() -> Self {
         Self
     }
+}
+
+/// Parse-only check used by the CLI debug commands before validating any
+/// optional schema arguments.
+pub fn check_sql_parses(sql: &str, dialect: super::dialect::DlinDialect) -> Result<(), String> {
+    parse_statements(sql, dialect).map(|_| ())
+}
+
+/// Parse SQL and render its sqlparser AST using Rust's debug representation.
+pub fn debug_parse_sql_ast_debug(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+) -> Result<String, String> {
+    parse_statements(sql, dialect)
+        .map(|statements| format!("{statements:#?}"))
+        .map_err(|error| format!("parse error: {error}"))
+}
+
+/// Parse SQL and render its sqlparser AST as JSON.
+pub fn debug_parse_sql_json(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+    pretty: bool,
+) -> Result<String, String> {
+    let statements =
+        parse_statements(sql, dialect).map_err(|error| format!("parse error: {error}"))?;
+    if pretty {
+        serde_json::to_string_pretty(&statements)
+    } else {
+        serde_json::to_string(&statements)
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// Analyze SQL and render the requested column's sqllineage mappings as JSON.
+/// The result intentionally exposes the upstream analyzer's public shape,
+/// including statement-wide unresolved-star information.
+pub fn debug_trace_column_json(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+    catalog: Option<&super::CatalogSnapshot>,
+    column: &str,
+    pretty: bool,
+) -> Result<String, String> {
+    let mut results = analyze_sql(sql, dialect, catalog).map_err(|error| error.message)?;
+    if results.len() != 1 {
+        let message = if results.is_empty() {
+            "no statements in analysis result".to_string()
+        } else {
+            format!("expected exactly one statement, found {}", results.len())
+        };
+        return Err(message);
+    }
+    let result = results.pop().expect("result length checked above");
+    let mappings = result
+        .columns
+        .mappings
+        .iter()
+        .filter(|mapping| column_identifiers_match(&mapping.target.column, column, dialect))
+        .collect::<Vec<_>>();
+    if mappings.is_empty() {
+        return Err(format!("lineage error: no mapping for column '{column}'"));
+    }
+    let value = serde_json::json!({
+        "column": column,
+        "mappings": mappings,
+        "has_unresolved_stars": result.columns.has_unresolved_stars,
+    });
+    if pretty {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&value)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn parse_statements(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+) -> Result<Vec<Statement>, String> {
+    let parser_dialect = dialect
+        .to_sqllineage()
+        .map_err(|error| error.message)?
+        .to_sqlparser_dialect();
+    Parser::parse_sql(&*parser_dialect, sql).map_err(|error| error.to_string())
 }
 
 impl LineageBackend for SqllineageBackend {
@@ -105,17 +190,10 @@ impl LineageBackend for SqllineageBackend {
                 .into_iter()
                 .enumerate()
                 .map(|(statement_ordinal, result)| {
-                    let guard_reason = match &shape_check {
-                        Ok(statements) => statements
-                            .get(statement_ordinal)
-                            .and_then(dangerous_set_operation_reason),
-                        Err(error) => Some(error.message.as_str()),
-                    };
-                    let has_unresolved_stars = result
-                        .columns
-                        .mappings
-                        .iter()
-                        .any(mapping_has_unresolved_star);
+                    // The public result flag includes unresolved stars nested in
+                    // expressions (for example, inside a JOIN) that do not produce a
+                    // column mapping. Do not infer completeness from mappings alone.
+                    let has_unresolved_stars = result.columns.has_unresolved_stars;
                     let columns = request
                         .outputs
                         .iter()
@@ -127,7 +205,6 @@ impl LineageBackend for SqllineageBackend {
                                 request.catalog,
                                 request.duplicate_output_names,
                                 has_unresolved_stars,
-                                guard_reason,
                             )
                         })
                         .collect();
@@ -138,12 +215,7 @@ impl LineageBackend for SqllineageBackend {
                         // lineage graph. `Other` is deliberately non-lineage-bearing because
                         // sqllineage documents it as DDL/DCL/other input with empty lineage.
                         lineage_bearing: !matches!(result.statement_type, StatementType::Other),
-                        completeness: match guard_reason {
-                            Some(reason) => AnalysisCompleteness::Indeterminate {
-                                reason: reason.to_string(),
-                            },
-                            None => AnalysisCompleteness::Complete,
-                        },
+                        completeness: AnalysisCompleteness::Complete,
                         has_unresolved_stars,
                         columns,
                     }
@@ -184,7 +256,6 @@ fn analyze_output(
     catalog: Option<&super::catalog::CatalogSnapshot>,
     duplicate_output_names: &std::collections::BTreeSet<String>,
     has_unresolved_stars: bool,
-    guard_reason: Option<&str>,
 ) -> BackendColumnOutcome {
     let target = OutputTarget {
         slot: output.slot.clone(),
@@ -200,12 +271,6 @@ fn analyze_output(
                 output.name
             ),
         );
-    }
-
-    if let Some(reason) = guard_reason {
-        // Conservatively reject every requested output for the statement. A more precise
-        // version could track which outputs actually descend from the affected set operation.
-        return failed_output(target, ResolutionState::Indeterminate, reason.to_string());
     }
 
     let matching: Vec<&ColumnMapping> = mappings
@@ -298,11 +363,35 @@ fn analyze_output(
                     format!("column origin remains wildcard for table '{}'", table),
                 );
             }
+            ColumnOrigin::NamedWildcard { table, column } => {
+                return failed_output(
+                    target,
+                    ResolutionState::Indeterminate,
+                    format!(
+                        "column '{}' remains behind an unexpanded wildcard for table '{}'",
+                        column, table
+                    ),
+                );
+            }
+            ColumnOrigin::SourceFree { column } => {
+                return failed_output(
+                    target,
+                    ResolutionState::Indeterminate,
+                    format!("column '{}' has a source-free set-operation branch", column),
+                );
+            }
             ColumnOrigin::Recursive { .. } => {
                 return failed_output(
                     target,
                     ResolutionState::Indeterminate,
                     "column origin is recursive and cannot be represented by dlin".to_string(),
+                );
+            }
+            _ => {
+                return failed_output(
+                    target,
+                    ResolutionState::Indeterminate,
+                    "column origin is not recognized by this dlin adapter".to_string(),
                 );
             }
         }
@@ -316,8 +405,6 @@ fn analyze_output(
     })
 }
 
-const DANGEROUS_SET_OPERATION_REASON: &str = "a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted";
-
 fn check_statement_shapes(
     sql: &str,
     dialect: super::dialect::DlinDialect,
@@ -326,23 +413,17 @@ fn check_statement_shapes(
     // structural checks here so their statements stay aligned with the lineage results.
     // Obtain the parser dialect through sqllineage so these statement-shape checks use exactly
     // the grammar that produced the lineage result; maintaining a second hand-written dialect
-    // mapping could let the guard inspect a different parse from sqllineage's.
+    // mapping could let the shape check inspect a different parse from sqllineage's.
     //
     // `sqllineage::analyze` makes this same `Parser::parse_sql` call with this same dialect and
     // emits one result per statement in order, so the statement list here matches the analysis
     // results position for position. Keep it that way: parsing by some other route would let the
-    // two lists drift, and a statement whose shape went unchecked would silently lose its guards.
+    // two lists drift, and a statement whose shape went unchecked could bypass validation.
     let parser_dialect = dialect.to_sqllineage()?.to_sqlparser_dialect();
     Parser::parse_sql(&*parser_dialect, sql).map_err(|error| BackendError {
         kind: BackendErrorKind::Parse,
         message: format!("dlin could not verify the shape: {error}"),
     })
-}
-
-fn dangerous_set_operation_reason(statement: &Statement) -> Option<&'static str> {
-    let mut visitor = DangerousSetOperationVisitor::default();
-    let _ = statement.visit(&mut visitor);
-    visitor.dangerous.then_some(DANGEROUS_SET_OPERATION_REASON)
 }
 
 fn statement_has_empty_projection(statement: &Statement) -> bool {
@@ -373,57 +454,6 @@ fn set_expr_contains_empty_projection(body: &SetExpr) -> bool {
         }
         SetExpr::Query(_)
         | SetExpr::Values(_)
-        | SetExpr::Table(_)
-        | SetExpr::Insert(_)
-        | SetExpr::Update(_)
-        | SetExpr::Delete(_)
-        | SetExpr::Merge(_) => false,
-    }
-}
-
-#[derive(Default)]
-struct DangerousSetOperationVisitor {
-    dangerous: bool,
-}
-
-impl Visitor for DangerousSetOperationVisitor {
-    type Break = ();
-
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        self.dangerous |= set_expr_contains_dangerous_operation(&query.body);
-        ControlFlow::Continue(())
-    }
-}
-
-fn set_expr_contains_dangerous_operation(body: &SetExpr) -> bool {
-    match body {
-        SetExpr::SetOperation { left, right, .. } => {
-            leading_select_has_wildcard(left)
-                || set_expr_contains_dangerous_operation(left)
-                || set_expr_contains_dangerous_operation(right)
-        }
-        SetExpr::Select(_)
-        | SetExpr::Query(_)
-        | SetExpr::Values(_)
-        | SetExpr::Table(_)
-        | SetExpr::Insert(_)
-        | SetExpr::Update(_)
-        | SetExpr::Delete(_)
-        | SetExpr::Merge(_) => false,
-    }
-}
-
-fn leading_select_has_wildcard(body: &SetExpr) -> bool {
-    match body {
-        SetExpr::Select(select) => select.projection.iter().any(|item| {
-            matches!(
-                item,
-                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
-            )
-        }),
-        SetExpr::SetOperation { left, .. } => leading_select_has_wildcard(left),
-        SetExpr::Query(query) => leading_select_has_wildcard(&query.body),
-        SetExpr::Values(_)
         | SetExpr::Table(_)
         | SetExpr::Insert(_)
         | SetExpr::Update(_)
@@ -468,10 +498,40 @@ fn mapping_has_unresolved_star(mapping: &ColumnMapping) -> bool {
 
 fn origin_has_unresolved_star(origin: &ColumnOrigin) -> bool {
     match origin {
-        ColumnOrigin::Concrete { .. } | ColumnOrigin::Ambiguous { .. } => false,
-        ColumnOrigin::Wildcard { .. } => true,
+        ColumnOrigin::Concrete { .. }
+        | ColumnOrigin::Ambiguous { .. }
+        | ColumnOrigin::SourceFree { .. } => false,
+        ColumnOrigin::Wildcard { .. } | ColumnOrigin::NamedWildcard { .. } => true,
         ColumnOrigin::Recursive { base_sources } => {
             base_sources.iter().any(origin_has_unresolved_star)
         }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{debug_parse_sql_ast_debug, debug_trace_column_json};
+    use crate::graph::column_lineage::DlinDialect;
+
+    #[test]
+    fn debug_parse_error_has_a_single_prefix() {
+        let error = debug_parse_sql_ast_debug("SELECT FROM", DlinDialect::Generic)
+            .expect_err("invalid SQL should fail to parse");
+        assert!(error.starts_with("parse error: "));
+        assert!(!error.contains("parse error: parse error:"));
+    }
+
+    #[test]
+    fn debug_trace_rejects_multiple_statements() {
+        let error = debug_trace_column_json(
+            "SELECT id FROM orders; SELECT id FROM customers",
+            DlinDialect::Generic,
+            None,
+            "id",
+            false,
+        )
+        .expect_err("debug trace accepts exactly one statement");
+        assert_eq!(error, "expected exactly one statement, found 2");
     }
 }
