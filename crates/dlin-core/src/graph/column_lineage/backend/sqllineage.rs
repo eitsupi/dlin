@@ -3,7 +3,7 @@ use sqlparser::ast::{Query, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
-use super::catalog_provider::{SqllineageCatalogProvider, identifiers_match};
+use super::catalog_provider::{SqllineageCatalogProvider, column_identifiers_match};
 use super::{
     AnalysisCompleteness, BackendAnalysis, BackendColumnFailure, BackendColumnOutcome,
     BackendColumnResult, BackendError, BackendErrorKind, BackendId, BackendSource,
@@ -11,6 +11,7 @@ use super::{
     OutputDiscoveryRequest, OutputTarget, ResolutionState,
 };
 use crate::graph::column_lineage::TransformationType;
+use crate::graph::column_lineage::relation::RelationRef;
 
 /// The sqllineage-backed lineage implementation.
 pub struct SqllineageBackend;
@@ -196,7 +197,7 @@ fn analyze_output(
 
     let matching: Vec<&ColumnMapping> = mappings
         .iter()
-        .filter(|mapping| identifiers_match(&mapping.target.column, &output.name, dialect))
+        .filter(|mapping| column_identifiers_match(&mapping.target.column, &output.name, dialect))
         .collect();
 
     let [mapping] = matching.as_slice() else {
@@ -237,7 +238,11 @@ fn analyze_output(
             // while non-empty candidates mean genuine ambiguity.
             ColumnOrigin::Concrete { table, column } => {
                 sources.push(BackendSource::Concrete {
-                    table: table.to_string(),
+                    relation: RelationRef::from_backend(
+                        table.catalog.as_deref(),
+                        table.schema.as_deref(),
+                        &table.table,
+                    ),
                     column: column.clone(),
                 });
             }

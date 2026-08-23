@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use super::cache::{CACHE_DIR, COLUMN_LINEAGE_CACHE_FILENAME, ColumnLineageCacheFile};
-use super::cross_model::normalize_table_name;
 use super::impact::build_downstream_model_map;
 use super::*;
 use crate::parser::manifest::{

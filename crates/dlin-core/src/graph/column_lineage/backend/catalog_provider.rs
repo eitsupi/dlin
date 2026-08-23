@@ -1,6 +1,7 @@
 use sqllineage::{CatalogProvider, TableRef};
 
 use super::{CatalogSnapshot, DlinDialect};
+use crate::graph::column_lineage::relation::RelationRef;
 
 /// Adapts dlin's manifest catalog to sqllineage's catalog interface.
 pub(crate) struct SqllineageCatalogProvider {
@@ -16,35 +17,27 @@ impl SqllineageCatalogProvider {
         }
     }
 
-    fn table_parts(table: &TableRef) -> Vec<&str> {
-        match (table.catalog.as_deref(), table.schema.as_deref()) {
-            (Some(catalog), Some(schema)) => vec![catalog, schema, table.table.as_str()],
-            (None, Some(schema)) => vec![schema, table.table.as_str()],
-            _ => vec![table.table.as_str()],
-        }
-    }
-
-    fn relation_matches(&self, key: &str, table: &TableRef) -> bool {
-        let table_parts = Self::table_parts(table);
-        let key_parts: Vec<&str> = key.split('.').collect();
-        key_parts.len() == table_parts.len()
-            && key_parts
-                .iter()
-                .enumerate()
-                .all(|(index, part)| identifiers_match(part, table_parts[index], self.dialect))
-    }
-
     fn columns_for(&self, table: &TableRef) -> Option<&[String]> {
-        let matching: Vec<&super::catalog::CatalogTable> = self
-            .snapshot
-            .tables()
-            .filter(|candidate| self.relation_matches(&candidate.name, table))
-            .collect();
-        let [candidate] = matching.as_slice() else {
-            return None;
+        let query = RelationRef::from_backend_lookup(
+            table.catalog.as_deref(),
+            table.schema.as_deref(),
+            &table.table,
+        );
+        let table = match self.dialect {
+            // sqllineage's TableRef has already lost quote metadata and
+            // lowercases identifiers on this path. Generic and BigQuery need
+            // the boundary-specific case-insensitive fallback to find a
+            // mixed-case manifest relation.
+            DlinDialect::Generic | DlinDialect::BigQuery => {
+                self.snapshot.resolve_table_exact_case_insensitive(&query)
+            }
+            _ => self.snapshot.resolve_table_exact(&query, self.dialect),
         };
-        self.snapshot
-            .unambiguous_table_columns(&candidate.name)
+        table
+            .and_then(|candidate| {
+                self.snapshot
+                    .unambiguous_columns_for_relation(&candidate.relation)
+            })
             .filter(|columns| !columns.is_empty())
     }
 }
@@ -60,7 +53,7 @@ impl SqllineageCatalogProvider {
 /// `TableRef` carries no quote metadata, so Snowflake `foo` and `"foo"` are
 /// indistinguishable here. Matching is the deliberate choice over guessing at
 /// the original quoting.
-pub(crate) fn identifiers_match(left: &str, right: &str, _dialect: DlinDialect) -> bool {
+pub(crate) fn column_identifiers_match(left: &str, right: &str, _dialect: DlinDialect) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 
@@ -76,7 +69,7 @@ impl CatalogProvider for SqllineageCatalogProvider {
                 self.columns_for(candidate).is_some_and(|columns| {
                     columns
                         .iter()
-                        .any(|known| identifiers_match(known, column, self.dialect))
+                        .any(|known| column_identifiers_match(known, column, self.dialect))
                 })
             })
             .collect();
@@ -162,12 +155,26 @@ mod tests {
 
     #[test]
     fn list_columns_matches_bigquery_identifiers_case_insensitively() {
-        let snapshot = catalog();
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("Warehouse.Analytics.Orders", ["id".to_string()]);
         let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::BigQuery);
 
         assert!(
             provider
                 .list_columns(&table(Some("WAREHOUSE"), Some("ANALYTICS"), "ORDERS"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn list_columns_matches_mixed_case_generic_relation_after_backend_lowercasing() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("Warehouse.Analytics.Orders", ["id".to_string()]);
+        let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::Generic);
+
+        assert!(
+            provider
+                .list_columns(&table(Some("warehouse"), Some("analytics"), "orders"))
                 .is_some()
         );
     }

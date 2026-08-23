@@ -188,14 +188,53 @@ mod freshness {
     use std::fs;
     use std::process::Command;
 
+    /// Make the manifest newer than every file copied from the fixture. A
+    /// single model is not sufficient here: macros, YAML, seeds, and tests
+    /// are all inputs to freshness checks and may have a later fixture mtime.
+    fn set_mtime_newer_than_fixture(manifest: &Path, fixture_root: &Path) {
+        fn latest_file(root: &Path, excluded: &Path) -> Option<PathBuf> {
+            let mut latest = None;
+            let mut paths: Vec<PathBuf> = fs::read_dir(root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            paths.sort();
+            for path in paths {
+                if path == excluded {
+                    continue;
+                }
+                if path.is_dir() {
+                    if let Some(candidate) = latest_file(&path, excluded)
+                        && latest.as_ref().is_none_or(|current: &PathBuf| {
+                            fs::metadata(candidate.as_path())
+                                .unwrap()
+                                .modified()
+                                .unwrap()
+                                > fs::metadata(current.as_path()).unwrap().modified().unwrap()
+                        })
+                    {
+                        latest = Some(candidate);
+                    }
+                } else if latest.as_ref().is_none_or(|current: &PathBuf| {
+                    fs::metadata(&path).unwrap().modified().unwrap()
+                        > fs::metadata(current).unwrap().modified().unwrap()
+                }) {
+                    latest = Some(path);
+                }
+            }
+            latest
+        }
+
+        let latest = latest_file(fixture_root, manifest).expect("fixture should contain files");
+        set_mtime_newer_than(manifest, &latest);
+    }
+
     #[test]
     fn test_check_manifest_up_to_date() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
-        let model_path = tmp.path().join("models/staging/stg_orders.sql");
-
-        // Touch manifest to make it newer than all files
-        set_mtime_newer_than(&manifest_path, &model_path);
+        // Touch manifest to make it newer than every fixture input.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         let output = Command::new(binary_path())
             .args([
@@ -217,8 +256,8 @@ mod freshness {
         let manifest_path = tmp.path().join("target/manifest.json");
         let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
-        // Touch manifest first
-        set_mtime_newer_than(&manifest_path, &model_path);
+        // Touch manifest first, after all fixture inputs.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         // Now touch a model file to make it newer
         set_mtime_newer_than(&model_path, &manifest_path);
@@ -245,8 +284,8 @@ mod freshness {
         let manifest_path = tmp.path().join("target/manifest.json");
         let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
-        // Touch manifest to make it newer than all files
-        set_mtime_newer_than(&manifest_path, &model_path);
+        // Touch manifest to make it newer than every fixture input.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         // Delete a model file that's referenced in the manifest
         fs::remove_file(&model_path).unwrap();
@@ -283,8 +322,8 @@ mod freshness {
         let manifest_path = tmp.path().join("target/manifest.json");
         let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
-        // Touch manifest to make it newer
-        set_mtime_newer_than(&manifest_path, &model_path);
+        // Touch manifest to make it newer than every fixture input.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         // Delete a model file
         fs::remove_file(&model_path).unwrap();
@@ -321,8 +360,8 @@ mod freshness {
         let manifest_path = tmp.path().join("target/manifest.json");
         let deleted_model_path = tmp.path().join("models/staging/stg_orders.sql");
 
-        // Touch manifest first
-        set_mtime_newer_than(&manifest_path, &deleted_model_path);
+        // Touch manifest first, after all fixture inputs.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         // Delete one file
         fs::remove_file(&deleted_model_path).unwrap();
@@ -354,10 +393,9 @@ mod freshness {
     fn test_check_manifest_json_up_to_date_has_empty_arrays() {
         let tmp = copy_fixture_to_temp();
         let manifest_path = tmp.path().join("target/manifest.json");
-        let model_path = tmp.path().join("models/staging/stg_orders.sql");
 
-        // Touch manifest to make it newer
-        set_mtime_newer_than(&manifest_path, &model_path);
+        // Touch manifest to make it newer than every fixture input.
+        set_mtime_newer_than_fixture(&manifest_path, tmp.path());
 
         let output = Command::new(binary_path())
             .args([

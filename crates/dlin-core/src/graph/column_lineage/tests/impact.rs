@@ -409,6 +409,104 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
 }
 
 #[test]
+fn test_column_impact_does_not_attribute_ambiguous_bare_source() {
+    let columns = || {
+        HashMap::from([(
+            "id".to_string(),
+            ManifestColumn {
+                name: "id".to_string(),
+            },
+        )])
+    };
+    let node = |unique_id: &str,
+                name: &str,
+                alias: Option<&str>,
+                database: Option<&str>,
+                schema: Option<&str>,
+                depends_on: Vec<&str>,
+                compiled_code: &str| ManifestNode {
+        unique_id: unique_id.to_string(),
+        name: name.to_string(),
+        alias: alias.map(str::to_string),
+        resource_type: "model".to_string(),
+        depends_on: DependsOn {
+            nodes: depends_on.into_iter().map(str::to_string).collect(),
+        },
+        config: ManifestConfig::default(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: columns(),
+        compiled_code: Some(compiled_code.to_string()),
+        database: database.map(str::to_string),
+        schema: schema.map(str::to_string),
+    };
+
+    let orders_a_id = "model.pkg.orders_a";
+    let orders_b_id = "model.pkg.orders_b";
+    let downstream_id = "model.pkg.downstream";
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                orders_a_id.to_string(),
+                node(
+                    orders_a_id,
+                    "orders_a",
+                    Some("orders"),
+                    Some("db_a"),
+                    Some("raw"),
+                    vec![],
+                    "select id",
+                ),
+            ),
+            (
+                orders_b_id.to_string(),
+                node(
+                    orders_b_id,
+                    "orders_b",
+                    Some("orders"),
+                    Some("db_b"),
+                    Some("raw"),
+                    vec![],
+                    "select id",
+                ),
+            ),
+            (
+                downstream_id.to_string(),
+                node(
+                    downstream_id,
+                    "downstream",
+                    None,
+                    None,
+                    None,
+                    vec![orders_a_id, orders_b_id],
+                    "select id from orders",
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    for upstream_id in [orders_a_id, orders_b_id] {
+        let result = compute_column_impact(
+            &manifest,
+            upstream_id,
+            "id",
+            DlinDialect::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert!(
+            !result
+                .impacted_columns
+                .iter()
+                .any(|column| column.model == "downstream"),
+            "ambiguous bare source should not impact downstream from {upstream_id}: {:?}",
+            result.impacted_columns
+        );
+    }
+}
+
+#[test]
 fn test_column_impact_json_serialization() {
     let manifest = make_cross_model_manifest();
     let result = compute_column_impact(

@@ -8,10 +8,11 @@ use super::backend::{
     LineageRequest, OutputColumnRequest, PolyglotBackend, normalize_column_outcomes,
     require_single_lineage_statement,
 };
+use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::schema;
 use super::{
-    ColumnLineageCache, ColumnLineageError, ColumnSource, ModelColumnLineage, TransformationType,
-    find_model_by_name, find_model_by_unique_id,
+    ColumnLineageCache, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
+    ModelColumnLineage, TransformationType, find_model_by_name, find_model_by_unique_id,
 };
 
 pub fn compute_cross_model_column_lineage(
@@ -40,14 +41,14 @@ pub fn compute_cross_model_column_lineage_with_manifest_path(
         computing: HashSet::new(),
     };
     ctx.computing.insert(model_name.to_string());
-    compute_cross_model_inner(model_name, &mut ctx, cache)
+    compute_cross_model_inner(model_name, &mut ctx, cache).into_public()
 }
 
 struct CrossModelContext<'a> {
     manifest: &'a Manifest,
     dialect: DlinDialect,
     manifest_path: Option<&'a Path>,
-    in_memory_cache: HashMap<String, ModelColumnLineage>,
+    in_memory_cache: HashMap<String, InternalModelColumnLineage>,
     computing: HashSet<String>,
 }
 
@@ -55,15 +56,15 @@ fn compute_cross_model_inner(
     model_name: &str,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
-) -> ModelColumnLineage {
-    let mut result = super::compute_column_lineage_with_manifest_path(
+) -> InternalModelColumnLineage {
+    let mut result = super::compute_column_lineage_internal(
         ctx.manifest,
         model_name,
         ctx.dialect,
         ctx.manifest_path,
         disk_cache,
     );
-    let upstream_models = build_upstream_model_names(ctx.manifest, model_name);
+    let upstream_models = build_upstream_model_relations(ctx.manifest, model_name);
 
     for entry in &mut result.columns {
         let mut resolved_sources = Vec::new();
@@ -83,7 +84,7 @@ fn compute_cross_model_inner(
             );
         }
 
-        resolved_sources.sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
+        resolved_sources.sort_by(|a, b| (&a.relation, &a.column).cmp(&(&b.relation, &b.column)));
         resolved_sources.dedup();
         entry.sources = resolved_sources;
     }
@@ -91,14 +92,17 @@ fn compute_cross_model_inner(
     result
 }
 
-fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub(super) fn build_upstream_model_relations(
+    manifest: &Manifest,
+    model_name: &str,
+) -> Vec<(RelationRef, String)> {
+    let mut relations = Vec::new();
 
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name));
     let node = match node {
         Some(n) => n,
-        None => return map,
+        None => return relations,
     };
 
     for dep_id in &node.depends_on.nodes {
@@ -106,83 +110,37 @@ fn build_upstream_model_names(manifest: &Manifest, model_name: &str) -> HashMap<
             if dep_node.resource_type != "model" {
                 continue;
             }
-            let relation_name = dep_node.relation_name();
-            map.insert(relation_name.to_string(), dep_node.unique_id.clone());
-            let fq = make_fq_table_name(
+            let relation = RelationRef::from_manifest(
                 dep_node.database.as_deref(),
                 dep_node.schema.as_deref(),
-                relation_name,
+                dep_node.relation_name(),
             );
-            if fq != relation_name {
-                map.insert(fq, dep_node.unique_id.clone());
-            }
+            relations.push((relation, dep_node.unique_id.clone()));
         }
     }
 
-    map
-}
-
-pub(super) fn normalize_table_name(table: &str) -> String {
-    split_qualified_table_name(table).pop().unwrap_or_default()
-}
-
-pub(super) fn relation_names_match(left: &str, right: &str) -> bool {
-    let left_parts = split_qualified_table_name(left);
-    let right_parts = split_qualified_table_name(right);
-
-    if left_parts.len() == 1 || right_parts.len() == 1 {
-        left_parts.last() == right_parts.last()
-    } else {
-        left_parts == right_parts
-    }
-}
-
-fn split_qualified_table_name(table: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut component = String::new();
-    let mut quote = None;
-
-    for character in table.chars() {
-        match quote {
-            Some(delimiter) if character == delimiter => quote = None,
-            Some(_) => {
-                if character != '"' && character != '`' {
-                    component.push(character);
-                }
-            }
-            None => match character {
-                '"' | '`' => quote = Some(character),
-                '.' => parts.push(std::mem::take(&mut component)),
-                character if character != '"' && character != '`' => {
-                    component.push(character);
-                }
-                _ => {}
-            },
-        }
-    }
-
-    parts.push(component);
-    parts
+    relations
 }
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
-    source: &ColumnSource,
-    upstream_models: &HashMap<String, String>,
+    source: &InternalColumnSource,
+    upstream_models: &[(RelationRef, String)],
     visited: &mut HashSet<(String, String)>,
-    resolved: &mut Vec<ColumnSource>,
+    resolved: &mut Vec<InternalColumnSource>,
     errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_>,
     disk_cache: &mut ColumnLineageCache,
     current_path: &[(String, String, TransformationType)],
 ) {
-    let model_unique_id = upstream_models
-        .get(&source.table)
-        .or_else(|| {
-            let normalized = normalize_table_name(&source.table);
-            upstream_models.get(&normalized)
-        })
-        .cloned();
+    let candidates = upstream_models
+        .iter()
+        .map(|(relation, _)| relation.clone())
+        .collect::<Vec<_>>();
+    let model_unique_id = match resolve_unique(&source.relation, &candidates, ctx.dialect) {
+        RelationResolution::Unique(index) => Some(upstream_models[index].1.clone()),
+        RelationResolution::Ambiguous | RelationResolution::NotFound => None,
+    };
 
     let model_unique_id = match model_unique_id {
         Some(unique_id) => {
@@ -277,7 +235,7 @@ fn resolve_source_recursive(
             leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
-            let further_upstream = build_upstream_model_names(ctx.manifest, &model_unique_id);
+            let further_upstream = build_upstream_model_relations(ctx.manifest, &model_unique_id);
             for s in &on_demand_sources {
                 resolve_source_recursive(
                     s,
@@ -299,7 +257,7 @@ fn compute_single_column_lineage(
     model_name: &str,
     column_name: &str,
     dialect: DlinDialect,
-) -> Option<(Vec<ColumnSource>, TransformationType)> {
+) -> Option<(Vec<InternalColumnSource>, TransformationType)> {
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
@@ -329,8 +287,8 @@ fn compute_single_column_lineage(
                 .sources
                 .into_iter()
                 .map(|s| match s {
-                    BackendSource::Concrete { table, column } => ColumnSource {
-                        table,
+                    BackendSource::Concrete { relation, column } => InternalColumnSource {
+                        relation,
                         column,
                         model_path: vec![],
                     },
@@ -354,66 +312,14 @@ fn normalize_single_column_outcome(
     normalized_outcomes.into_iter().next()
 }
 
-pub(super) fn make_fq_table_name(
-    database: Option<&str>,
-    schema: Option<&str>,
-    name: &str,
-) -> String {
-    match (database, schema) {
-        (Some(db), Some(s)) => format!("{}.{}.{}", db, s, name),
-        (None, Some(s)) => format!("{}.{}", s, name),
-        _ => name.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::relation::RelationRef;
     use super::*;
     use crate::graph::column_lineage::backend::{
         BackendColumnFailure, BackendError, BackendErrorKind,
     };
     use crate::graph::column_lineage::backend::{BackendColumnResult, ResolutionState};
-
-    #[test]
-    fn relation_names_match_respects_qualification_depth() {
-        let cases = [
-            ("warehouse.raw.orders", "raw.orders", false),
-            ("db_a.raw.orders", "db_b.raw.orders", false),
-            ("raw.orders", "staging.orders", false),
-            ("orders", "warehouse.raw.orders", true),
-            ("warehouse.raw.orders", "orders", true),
-            ("warehouse.raw.orders", "warehouse.raw.orders", true),
-            (
-                "warehouse.raw.orders",
-                "\"warehouse\".\"raw\".\"orders\"",
-                true,
-            ),
-        ];
-
-        for (left, right, expected) in cases {
-            assert_eq!(
-                relation_names_match(left, right),
-                expected,
-                "{left} vs {right}"
-            );
-        }
-    }
-
-    #[test]
-    fn relation_names_match_keeps_dots_inside_quoted_components() {
-        assert!(!relation_names_match(
-            "\"foo.bar\".\"orders\"",
-            "\"foo\".\"bar\".\"orders\""
-        ));
-        assert!(relation_names_match(
-            "\"foo.bar\".\"orders\"",
-            "\"foo.bar\".\"orders\""
-        ));
-        assert!(relation_names_match(
-            "`foo.bar`.`orders`",
-            "`foo.bar`.`orders`"
-        ));
-    }
 
     #[test]
     fn cross_model_keeps_requested_outcome_with_unrelated_contract_diagnostic() {
@@ -432,7 +338,7 @@ mod tests {
                     resolution: ResolutionState::Resolved,
                     transformation: TransformationType::Direct,
                     sources: vec![BackendSource::Concrete {
-                        table: "upstream".to_string(),
+                        relation: RelationRef::bare("upstream"),
                         column: "alpha".to_string(),
                     }],
                 }),
@@ -456,7 +362,7 @@ mod tests {
                 if result.target.slot == AnalysisSlot(0)
                     && result.target.name == "alpha"
                     && result.sources == vec![BackendSource::Concrete {
-                        table: "upstream".to_string(),
+                        relation: RelationRef::bare("upstream"),
                         column: "alpha".to_string(),
                     }]
         ));

@@ -547,19 +547,6 @@ fn test_cross_model_model_not_found() {
 }
 
 #[test]
-fn test_normalize_table_name() {
-    assert_eq!(normalize_table_name("stg_orders"), "stg_orders");
-    assert_eq!(
-        normalize_table_name("\"jaffle_shop\".\"main\".\"stg_orders\""),
-        "stg_orders"
-    );
-    assert_eq!(normalize_table_name("`raw`.`orders`"), "orders");
-    assert_eq!(normalize_table_name("schema.table"), "table");
-    assert_eq!(normalize_table_name("\"foo.bar\""), "foo.bar");
-    assert_eq!(normalize_table_name("\"foo.bar\".\"orders\""), "orders");
-}
-
-#[test]
 fn test_partial_failure_summary() {
     // Model with some columns that can be traced and some that fail
     let mut manifest = make_test_manifest();
