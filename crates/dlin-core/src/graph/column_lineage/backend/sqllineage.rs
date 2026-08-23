@@ -35,7 +35,9 @@ pub fn debug_parse_sql_ast_debug(
     sql: &str,
     dialect: super::dialect::DlinDialect,
 ) -> Result<String, String> {
-    parse_statements(sql, dialect).map(|statements| format!("{statements:#?}"))
+    parse_statements(sql, dialect)
+        .map(|statements| format!("{statements:#?}"))
+        .map_err(|error| format!("parse error: {error}"))
 }
 
 /// Parse SQL and render its sqlparser AST as JSON.
@@ -44,7 +46,8 @@ pub fn debug_parse_sql_json(
     dialect: super::dialect::DlinDialect,
     pretty: bool,
 ) -> Result<String, String> {
-    let statements = parse_statements(sql, dialect)?;
+    let statements =
+        parse_statements(sql, dialect).map_err(|error| format!("parse error: {error}"))?;
     if pretty {
         serde_json::to_string_pretty(&statements)
     } else {
@@ -63,23 +66,29 @@ pub fn debug_trace_column_json(
     column: &str,
     pretty: bool,
 ) -> Result<String, String> {
-    let results = analyze_sql(sql, dialect, catalog).map_err(|error| error.message)?;
-    let mappings =
-        results
-            .iter()
-            .flat_map(|result| {
-                result.columns.mappings.iter().filter(|mapping| {
-                    column_identifiers_match(&mapping.target.column, column, dialect)
-                })
-            })
-            .collect::<Vec<_>>();
+    let mut results = analyze_sql(sql, dialect, catalog).map_err(|error| error.message)?;
+    if results.len() != 1 {
+        let message = if results.is_empty() {
+            "no statements in analysis result".to_string()
+        } else {
+            format!("expected exactly one statement, found {}", results.len())
+        };
+        return Err(message);
+    }
+    let result = results.pop().expect("result length checked above");
+    let mappings = result
+        .columns
+        .mappings
+        .iter()
+        .filter(|mapping| column_identifiers_match(&mapping.target.column, column, dialect))
+        .collect::<Vec<_>>();
     if mappings.is_empty() {
         return Err(format!("lineage error: no mapping for column '{column}'"));
     }
     let value = serde_json::json!({
         "column": column,
         "mappings": mappings,
-        "has_unresolved_stars": results.iter().any(|result| result.columns.has_unresolved_stars),
+        "has_unresolved_stars": result.columns.has_unresolved_stars,
     });
     if pretty {
         serde_json::to_string_pretty(&value)
@@ -97,7 +106,7 @@ fn parse_statements(
         .to_sqllineage()
         .map_err(|error| error.message)?
         .to_sqlparser_dialect();
-    Parser::parse_sql(&*parser_dialect, sql).map_err(|error| format!("parse error: {error}"))
+    Parser::parse_sql(&*parser_dialect, sql).map_err(|error| error.to_string())
 }
 
 impl LineageBackend for SqllineageBackend {
@@ -497,5 +506,32 @@ fn origin_has_unresolved_star(origin: &ColumnOrigin) -> bool {
             base_sources.iter().any(origin_has_unresolved_star)
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{debug_parse_sql_ast_debug, debug_trace_column_json};
+    use crate::graph::column_lineage::DlinDialect;
+
+    #[test]
+    fn debug_parse_error_has_a_single_prefix() {
+        let error = debug_parse_sql_ast_debug("SELECT FROM", DlinDialect::Generic)
+            .expect_err("invalid SQL should fail to parse");
+        assert!(error.starts_with("parse error: "));
+        assert!(!error.contains("parse error: parse error:"));
+    }
+
+    #[test]
+    fn debug_trace_rejects_multiple_statements() {
+        let error = debug_trace_column_json(
+            "SELECT id FROM orders; SELECT id FROM customers",
+            DlinDialect::Generic,
+            None,
+            "id",
+            false,
+        )
+        .expect_err("debug trace accepts exactly one statement");
+        assert_eq!(error, "expected exactly one statement, found 2");
     }
 }

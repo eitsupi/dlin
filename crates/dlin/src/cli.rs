@@ -795,8 +795,9 @@ pub struct DebugParseSqlArgs {
     pub sql: Option<String>,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
-    pub dialect: DlinDialect,
+    /// Recognized dialects removed from the active backend fall back to Generic with a warning.
+    #[arg(long, default_value = "generic", value_parser = parse_dialect_arg)]
+    pub dialect: DialectArg,
 
     /// Output format: ast (Debug representation), json (JSON AST)
     #[arg(long, default_value = "ast")]
@@ -813,8 +814,9 @@ pub struct DebugTraceColumnArgs {
     pub column: String,
 
     /// SQL dialect for parsing (default: generic)
-    #[arg(long, default_value = "generic", value_parser = parse_dialect)]
-    pub dialect: DlinDialect,
+    /// Recognized dialects removed from the active backend fall back to Generic with a warning.
+    #[arg(long, default_value = "generic", value_parser = parse_dialect_arg)]
+    pub dialect: DialectArg,
 
     /// Table schema definitions for accurate lineage resolution.
     /// Format: table1:col1,col2;table2:col3,col4

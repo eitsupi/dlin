@@ -1527,24 +1527,34 @@ fn run_debug_command(args: cli::DebugArgs) -> Result<()> {
     }
 }
 
+fn resolve_debug_dialect(argument: &DialectArg) -> Result<ResolvedDialect> {
+    let resolved = classify_dialect(&argument.requested)?;
+    if let Some(warning) = &resolved.warning {
+        dlin_core::warn!("{}", warning);
+    }
+    Ok(resolved)
+}
+
 /// Run `debug parse-sql`
 #[cfg(not(tarpaulin_include))]
 fn run_debug_parse_sql(args: cli::DebugParseSqlArgs) -> Result<()> {
     use std::io::Write;
 
     let sql = read_sql_input(args.sql.as_deref())?;
+    let resolved_dialect = resolve_debug_dialect(&args.dialect)?;
+    let dialect = resolved_dialect.dialect;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     match args.format {
         DebugOutputFormat::Ast => {
-            let text = graph::column_lineage::debug_parse_sql_ast_debug(&sql, args.dialect)
+            let text = graph::column_lineage::debug_parse_sql_ast_debug(&sql, dialect)
                 .map_err(|e| anyhow::anyhow!(e))?;
             writeln!(out, "{}", text)?;
         }
         DebugOutputFormat::Json => {
             let pretty = std::io::IsTerminal::is_terminal(&stdout);
-            let text = graph::column_lineage::debug_parse_sql_json(&sql, args.dialect, pretty)
+            let text = graph::column_lineage::debug_parse_sql_json(&sql, dialect, pretty)
                 .map_err(|e| anyhow::anyhow!(e))?;
             if let Err(e) = writeln!(out, "{}", text)
                 && e.kind() != std::io::ErrorKind::BrokenPipe
@@ -1593,10 +1603,12 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
     use std::io::Write;
 
     let sql = read_sql_input(args.sql.as_deref())?;
+    let resolved_dialect = resolve_debug_dialect(&args.dialect)?;
+    let dialect = resolved_dialect.dialect;
     // Check that the SQL parses before validating `--schema`, so a bad SQL
     // string is reported even when `--schema` is also malformed — matching
     // the order these two inputs have always been evaluated in.
-    graph::column_lineage::check_sql_parses(&sql, args.dialect)
+    graph::column_lineage::check_sql_parses(&sql, dialect)
         .map_err(|e| anyhow::anyhow!("parse error: {}", e))?;
 
     let catalog = args
@@ -1609,7 +1621,7 @@ fn run_debug_trace_column(args: cli::DebugTraceColumnArgs) -> Result<()> {
     let pretty = std::io::IsTerminal::is_terminal(&stdout);
     let text = graph::column_lineage::debug_trace_column_json(
         &sql,
-        args.dialect,
+        dialect,
         catalog.as_ref(),
         &args.column,
         pretty,
@@ -1645,6 +1657,22 @@ mod tests {
             resolved.warning.as_deref().is_some_and(|warning| {
                 warning.contains("presto") && warning.contains("generic")
             })
+        );
+    }
+
+    #[test]
+    fn debug_removed_dialect_keeps_requested_spelling_for_warning() {
+        let argument = DialectArg {
+            dialect: "memsql".parse().unwrap(),
+            requested: "memsql".to_string(),
+        };
+        let resolved = resolve_debug_dialect(&argument).unwrap();
+        assert_eq!(resolved.dialect, DlinDialect::Generic);
+        assert!(
+            resolved
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("memsql"))
         );
     }
 
