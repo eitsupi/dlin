@@ -283,7 +283,7 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 ## Column-level lineage (Experimental)
 
 > [!WARNING]
-> Column-level lineage depends on [polyglot-sql](https://github.com/tobilg/polyglot) for SQL parsing. Coverage varies by SQL complexity and dialect. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may not resolve correctly.
+> Column-level lineage uses [sqllineage](https://github.com/funcpp/sqllineage) for SQL parsing and lineage extraction. The production backend directly supports Generic, PostgreSQL, MySQL, Hive, Databricks, Snowflake, BigQuery, DuckDB, SQLite, Spark, Trino, Redshift, T-SQL, and ClickHouse; other recognized dialects fall back to Generic with a warning. Coverage still varies by SQL complexity and dialect, and patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may remain unresolved.
 
 `dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json`. Run `dbt compile` first.
 
