@@ -454,6 +454,32 @@ fn sqllineage_statement(
     statement
 }
 
+fn sqllineage_statement_with_dialect(
+    sql: &str,
+    dialect: DlinDialect,
+    catalog: Option<&CatalogSnapshot>,
+    outputs: &[OutputColumnRequest],
+    duplicate_output_names: &BTreeSet<String>,
+) -> super::super::backend::BackendStatementResult {
+    let request = LineageRequest {
+        sql,
+        dialect,
+        catalog,
+        outputs,
+        duplicate_output_names,
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+    let statement = backend
+        .analyze(&request)
+        .unwrap()
+        .statements
+        .into_iter()
+        .next()
+        .expect("one statement was analyzed");
+    assert_eq!(statement.completeness, AnalysisCompleteness::Complete);
+    statement
+}
+
 fn sqllineage_statement_without_completeness(
     sql: &str,
     catalog: Option<&CatalogSnapshot>,
@@ -936,6 +962,34 @@ fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
             }]
         ),
         other => panic!("expected catalog-resolved join column, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_preserve_case_does_not_restore_differently_cased_catalog_relation() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table("MixedCaseTable", ["id".to_string()]);
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "id".to_string(),
+    }];
+    let statement = sqllineage_statement_with_dialect(
+        "select id from mixedcasetable",
+        DlinDialect::MySQL,
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => assert_eq!(
+            result.sources,
+            vec![BackendSource::Concrete {
+                relation: RelationRef::from_backend(None, None, "mixedcasetable"),
+                column: "id".to_string(),
+            }]
+        ),
+        other => panic!("expected raw-spelling source, got {other:?}"),
     }
 }
 

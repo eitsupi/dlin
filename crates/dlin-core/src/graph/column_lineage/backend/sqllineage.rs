@@ -245,8 +245,12 @@ fn analyze_output(
                     &table.table,
                 );
                 let relation = catalog
-                    .and_then(|catalog| {
-                        catalog.resolve_table_exact_case_insensitive(&raw_relation)
+                    .and_then(|catalog| match dialect {
+                        super::dialect::DlinDialect::Generic
+                        | super::dialect::DlinDialect::BigQuery => {
+                            catalog.resolve_table_exact_case_insensitive(&raw_relation)
+                        }
+                        _ => catalog.resolve_table_exact(&raw_relation, dialect),
                     })
                     .map(|catalog_table| catalog_table.relation.clone())
                     .unwrap_or(raw_relation);
