@@ -1397,7 +1397,7 @@ fn sqllineage_discovery_unexpanded_star_has_no_name() {
 
 #[test]
 fn sqllineage_discovery_preserves_quoted_star_output_name() {
-    let discovery = sqllineage_discovery("SELECT id AS \"*\" FROM orders", None).unwrap();
+    let discovery = sqllineage_discovery(r#"SELECT id AS "*" FROM orders"#, None).unwrap();
 
     assert_eq!(discovered_names(&discovery), ["*"]);
 }
@@ -1405,7 +1405,7 @@ fn sqllineage_discovery_preserves_quoted_star_output_name() {
 #[test]
 fn sqllineage_discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
     let discovery = sqllineage_discovery_with_dialect(
-        "SELECT id AS \"*\", base.event.* FROM source AS base",
+        r#"SELECT id AS "*", base.event.* FROM source AS base"#,
         DlinDialect::BigQuery,
         None,
     )
