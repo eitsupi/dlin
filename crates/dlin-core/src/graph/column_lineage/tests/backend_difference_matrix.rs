@@ -827,16 +827,6 @@ const LEDGER: &[LedgerEntry] = &[
         authority: "dlin transformation contract and the backend implementation notes",
     },
     LedgerEntry {
-        case_id: "aggregate",
-        field: "statement[0].column[0].transformation",
-        polyglot: "Aggregation",
-        sqllineage: "Direct",
-        status: LedgerStatus::Open {
-            to_settle: "Polyglot is right: COUNT(*) is an aggregate even though it has no column origin, and classifying it as Direct confuses source absence with expression shape. sqllineage needs to preserve the Aggregation classification for source-free aggregates like COUNT(*) before dlin can rely on its transformation output for aggregates in general.",
-        },
-        authority: "dlin backend comparison",
-    },
-    LedgerEntry {
         case_id: "unqualified_join_without_catalog",
         field: "statement[0].column[0].outcome_kind",
         polyglot: "resolved",

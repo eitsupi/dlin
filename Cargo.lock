@@ -874,7 +874,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "sqllineage"
 version = "0.2.0"
-source = "git+https://github.com/funcpp/sqllineage.git?rev=e8e47908536232b28f1252045394a412eb865b09#e8e47908536232b28f1252045394a412eb865b09"
+source = "git+https://github.com/funcpp/sqllineage.git?rev=38149bf689f0e4a3557e192c68bc94dcabc4eea8#38149bf689f0e4a3557e192c68bc94dcabc4eea8"
 dependencies = [
  "serde",
  "serde_json",
