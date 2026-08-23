@@ -252,9 +252,11 @@ impl CatalogSnapshot {
             .iter()
             .filter(|(relation, _)| self.has_single_target(relation))
             .map(|(_, table)| table)
-            .chain(self.alias_views.iter().filter_map(|(alias, view)| {
-                self.has_single_target(alias).then_some(view)
-            }))
+            .chain(
+                self.alias_views
+                    .iter()
+                    .filter_map(|(alias, view)| self.has_single_target(alias).then_some(view)),
+            )
     }
 }
 
