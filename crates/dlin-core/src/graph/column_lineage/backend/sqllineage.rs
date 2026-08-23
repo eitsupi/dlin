@@ -143,12 +143,14 @@ impl LineageBackend for SqllineageBackend {
         let mut seen = std::collections::BTreeSet::new();
         let mut outputs = Vec::new();
         for mapping in result.columns.mappings {
-            // Drop sqllineage's unexpanded-`SELECT *` sentinel. It takes both signals
-            // to identify: the target is named "*" and the origins are an unresolved
-            // wildcard. The name alone would discard a column legitimately aliased to
-            // "*", and the origins alone would discard a properly named column whose
-            // lineage happens to run through a star.
-            if mapping.target.column == "*" && mapping_has_unresolved_star(&mapping) {
+            // Drop sqllineage's unexpanded-star sentinels. The statement-level flag,
+            // target name, and an origin-side shape marker must all agree. In particular,
+            // an explicit alias named "*" remains an output when its source is concrete,
+            // even if another projection in the same statement contains a star.
+            if result.columns.has_unresolved_stars
+                && mapping.target.column == "*"
+                && mapping_has_unresolved_star(&mapping)
+            {
                 continue;
             }
             let name = mapping.target.column;
@@ -498,13 +500,15 @@ fn mapping_has_unresolved_star(mapping: &ColumnMapping) -> bool {
 
 fn origin_has_unresolved_star(origin: &ColumnOrigin) -> bool {
     match origin {
-        ColumnOrigin::Concrete { .. }
-        | ColumnOrigin::Ambiguous { .. }
-        | ColumnOrigin::SourceFree { .. } => false,
+        ColumnOrigin::Concrete { .. } | ColumnOrigin::SourceFree { .. } => false,
+        ColumnOrigin::Ambiguous { column, candidates } => column == "*" && candidates.is_empty(),
         ColumnOrigin::Wildcard { .. } | ColumnOrigin::NamedWildcard { .. } => true,
         ColumnOrigin::Recursive { base_sources } => {
             base_sources.iter().any(origin_has_unresolved_star)
         }
+        // Preserve the adapter's conservative behavior for future origin kinds
+        // introduced by sqllineage: an unknown shape must not become an output
+        // name merely because this adapter does not know how to classify it yet.
         _ => true,
     }
 }
