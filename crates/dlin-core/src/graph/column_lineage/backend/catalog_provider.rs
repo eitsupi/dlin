@@ -1,7 +1,22 @@
 use sqllineage::{CatalogProvider, TableRef};
 
+use super::catalog::CatalogTable;
 use super::{CatalogSnapshot, DlinDialect};
 use crate::graph::column_lineage::relation::RelationRef;
+
+/// sqllineage's `TableRef` has already lost quote metadata and lowercases identifiers before reaching this function. Generic and BigQuery therefore need the boundary-specific case-insensitive fallback to find mixed-case manifest relations.
+pub(crate) fn resolve_table_for_sqllineage<'a>(
+    snapshot: &'a CatalogSnapshot,
+    query: &RelationRef,
+    dialect: DlinDialect,
+) -> Option<&'a CatalogTable> {
+    match dialect {
+        DlinDialect::Generic | DlinDialect::BigQuery => {
+            snapshot.resolve_table_exact_case_insensitive(query)
+        }
+        _ => snapshot.resolve_table_exact(query, dialect),
+    }
+}
 
 /// Adapts dlin's manifest catalog to sqllineage's catalog interface.
 pub(crate) struct SqllineageCatalogProvider {
@@ -23,16 +38,7 @@ impl SqllineageCatalogProvider {
             table.schema.as_deref(),
             &table.table,
         );
-        let table = match self.dialect {
-            // sqllineage's TableRef has already lost quote metadata and
-            // lowercases identifiers on this path. Generic and BigQuery need
-            // the boundary-specific case-insensitive fallback to find a
-            // mixed-case manifest relation.
-            DlinDialect::Generic | DlinDialect::BigQuery => {
-                self.snapshot.resolve_table_exact_case_insensitive(&query)
-            }
-            _ => self.snapshot.resolve_table_exact(&query, self.dialect),
-        };
+        let table = resolve_table_for_sqllineage(&self.snapshot, &query, self.dialect);
         table
             .and_then(|candidate| {
                 self.snapshot
