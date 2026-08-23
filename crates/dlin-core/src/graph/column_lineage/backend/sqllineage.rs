@@ -113,6 +113,7 @@ impl LineageBackend for SqllineageBackend {
                                 output,
                                 &result.columns.mappings,
                                 request.dialect,
+                                request.catalog,
                                 request.duplicate_output_names,
                                 has_unresolved_stars,
                                 guard_reason,
@@ -169,6 +170,7 @@ fn analyze_output(
     output: &super::types::OutputColumnRequest,
     mappings: &[ColumnMapping],
     dialect: super::dialect::DlinDialect,
+    catalog: Option<&super::catalog::CatalogSnapshot>,
     duplicate_output_names: &std::collections::BTreeSet<String>,
     has_unresolved_stars: bool,
     guard_reason: Option<&str>,
@@ -237,12 +239,19 @@ fn analyze_output(
             // each origin structural: empty Ambiguous candidates mean unresolved,
             // while non-empty candidates mean genuine ambiguity.
             ColumnOrigin::Concrete { table, column } => {
+                let raw_relation = RelationRef::from_backend(
+                    table.catalog.as_deref(),
+                    table.schema.as_deref(),
+                    &table.table,
+                );
+                let relation = catalog
+                    .and_then(|catalog| {
+                        catalog.resolve_table_exact_case_insensitive(&raw_relation)
+                    })
+                    .map(|catalog_table| catalog_table.relation.clone())
+                    .unwrap_or(raw_relation);
                 sources.push(BackendSource::Concrete {
-                    relation: RelationRef::from_backend(
-                        table.catalog.as_deref(),
-                        table.schema.as_deref(),
-                        &table.table,
-                    ),
+                    relation,
                     column: column.clone(),
                 });
             }

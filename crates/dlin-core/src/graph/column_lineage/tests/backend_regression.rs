@@ -931,7 +931,7 @@ fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
         BackendColumnOutcome::Resolved(result) => assert_eq!(
             result.sources,
             vec![BackendSource::Concrete {
-                relation: RelationRef::bare("left_table"),
+                relation: RelationRef::from_manifest(None, None, "left_table"),
                 column: "id".to_string(),
             }]
         ),
@@ -1048,7 +1048,7 @@ fn sqllineage_catalog_expands_star_to_concrete_sources() {
         BackendColumnOutcome::Resolved(result) => assert_eq!(
             result.sources,
             vec![BackendSource::Concrete {
-                relation: RelationRef::bare("orders"),
+                relation: RelationRef::from_manifest(None, None, "orders"),
                 column: "id".to_string(),
             }]
         ),

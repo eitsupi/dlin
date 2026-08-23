@@ -1026,66 +1026,6 @@ const LEDGER: &[LedgerEntry] = &[
         },
         authority: "column-lineage review finding; neither backend",
     },
-    LedgerEntry {
-        case_id: "snowflake_qualified_mixed",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
-    LedgerEntry {
-        case_id: "snowflake_unqualified_mixed",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
-    LedgerEntry {
-        case_id: "snowflake_alias_case",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
-    LedgerEntry {
-        case_id: "bigquery_qualified_mixed",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
-    LedgerEntry {
-        case_id: "bigquery_unqualified_mixed",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
-    LedgerEntry {
-        case_id: "bigquery_alias_case",
-        field: "statement[0].column[0].sources",
-        polyglot: "[\"concrete(table=\\\"RawTable\\\",column=\\\"OrderID\\\")\"]",
-        sqllineage: "[\"concrete(table=\\\"rawtable\\\",column=\\\"OrderID\\\")\"]",
-        status: LedgerStatus::Open {
-            to_settle: "Settle which spelling dlin should publish in ColumnSource.table: polyglot's catalog spelling RawTable or sqllineage's lowercased spelling rawtable. This is public output that changes what users see, and it must be settled before the production backend changes.",
-        },
-        authority: "identifier-normalization regression coverage",
-    },
 ];
 
 fn ledger_entry(case_id: &str, field: &str) -> Option<&'static LedgerEntry> {
