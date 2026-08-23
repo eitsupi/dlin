@@ -912,7 +912,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "\"Complete\"",
         sqllineage: "\"Indeterminate(reason=\\\"a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted\\\")\"",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
@@ -922,7 +922,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "resolved",
         sqllineage: "failed",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
@@ -932,7 +932,7 @@ const LEDGER: &[LedgerEntry] = &[
         polyglot: "Resolved",
         sqllineage: "Indeterminate",
         status: LedgerStatus::Decided {
-            verdict: "sqllineage is right. A set operation whose leading branch is `SELECT *` cannot be aligned with its other branches, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is the behavior dlin's guard exists to produce.",
+            verdict: "sqllineage is right for this case's mismatched arity. This set operation's leading `SELECT *` branch cannot be aligned with another branch of a different width, so refusing is correct and polyglot reporting a complete, resolved result is an overclaim. This is distinct from the `union_star_leading_operand_matching_arity` case, where the catalog resolves the leading star to a width that DOES match the other branch's arity — that alignable sub-case is tracked separately and remains open.",
         },
         authority: "sqllineage safety guard and dlin comparison",
     },
