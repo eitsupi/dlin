@@ -1,13 +1,8 @@
-//! Column lineage regression fixtures carried forward across the polyglot-sql
-//! dependency revert.
+//! Column lineage regression fixtures for the production SQL lineage backend.
 //!
-//! These cases were discovered while the column lineage backend depended on
-//! polyglot-sql 0.6.x and 0.8.0. They describe SELECT * / set-operation shapes
-//! that a correct column lineage implementation should handle, independent of
-//! which SQL analysis library backs it, so they are preserved here rather than
-//! deleted when the dependency reverted to an earlier release. Cases that do
-//! not hold against the current dependency version are marked `#[ignore]`
-//! with the observed behavior; their expected values are left untouched.
+//! They describe SELECT * / set-operation shapes and preserve behavior agreed
+//! for the active backend. Cases that do not hold against the current upstream
+//! analyzer are marked `#[ignore]` with the observed behavior.
 
 use super::*;
 
@@ -911,7 +906,7 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
 }
 
 #[test]
-#[ignore = "polyglot currently traces a name introduced only by a non-leading branch through \
+#[ignore = "the upstream analyzer currently traces a name introduced only by a non-leading branch through \
             a nested set operation, but SQL semantics leave the output unresolved"]
 fn test_set_operation_in_from_subquery_does_not_adopt_a_non_leading_name() {
     let result = compute_star_shape(
@@ -989,116 +984,3 @@ fn test_duplicate_left_output_name_preserves_sources() {
     assert_eq!(result.traced_columns, 1);
     assert_sources_for(&result, "a", &[("dup", "a")]);
 }
-
-// The four cases below assert directly against polyglot-sql APIs that do not exist in
-// the 0.4.4 release this module now depends on (`ColumnResolutionTarget`,
-// `ColumnResolutionReason`, `Error::column_resolution`, `lineage::lineage_at`,
-// `lineage::output_columns`, `OutputColumn`, and dlin's own
-// `is_indeterminate_column_resolution` helper built on top of them), so they cannot be
-// parsed as valid Rust against this dependency version. They are kept here as plain
-// comments rather than deleted: they describe API-level behavior a replacement backend
-// should also provide.
-//
-// #[test]
-// fn test_column_resolution_reasons_are_handled_structurally() {
-//     let target = polyglot_sql::ColumnResolutionTarget::Name {
-//         name: "wanted".to_string(),
-//     };
-//
-//     let not_found = polyglot_sql::Error::column_resolution(
-//         target.clone(),
-//         polyglot_sql::ColumnResolutionReason::NotFound,
-//     );
-//     let indeterminate = polyglot_sql::Error::column_resolution(
-//         target.clone(),
-//         polyglot_sql::ColumnResolutionReason::Indeterminate,
-//     );
-//     let ambiguous = polyglot_sql::Error::column_resolution(
-//         target,
-//         polyglot_sql::ColumnResolutionReason::Ambiguous,
-//     );
-//
-//     assert!(!super::super::is_indeterminate_column_resolution(
-//         &not_found
-//     ));
-//     assert!(super::super::is_indeterminate_column_resolution(
-//         &indeterminate
-//     ));
-//     assert!(!super::super::is_indeterminate_column_resolution(
-//         &ambiguous
-//     ));
-//
-//     // The structured reason is internal; dlin's existing error text remains
-//     // stable for all name-resolution failures.
-//     for error in [&not_found, &indeterminate, &ambiguous] {
-//         assert_eq!(
-//             format_lineage_error(error),
-//             "Cannot find column 'wanted' in query"
-//         );
-//     }
-// }
-//
-// #[test]
-// fn test_lineage_at_traces_an_unaliased_expression_by_ordinal() {
-//     let expression =
-//         polyglot_sql::parse_one("SELECT fee * 2 FROM t", polyglot_sql::DialectType::Generic)
-//             .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &expression, None, false).unwrap();
-//
-//     assert!(
-//         node.walk().any(|node| node.name == "t.fee"),
-//         "ordinal lineage should reach t.fee: {:?}",
-//         node
-//     );
-// }
-//
-// #[test]
-// fn test_output_columns_preserves_duplicate_named_ordinals() {
-//     let expression = polyglot_sql::parse_one(
-//         "SELECT a.id, b.id FROM a JOIN b ON a.id = b.id",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let output = polyglot_sql::lineage::output_columns(&expression, None).unwrap();
-//
-//     assert_eq!(
-//         output.columns,
-//         vec![
-//             polyglot_sql::OutputColumn::Named {
-//                 name: "id".to_string(),
-//                 ordinal: Some(0),
-//             },
-//             polyglot_sql::OutputColumn::Named {
-//                 name: "id".to_string(),
-//                 ordinal: Some(1),
-//             },
-//         ]
-//     );
-// }
-//
-// #[test]
-// fn test_set_branch_ordinals_survive_an_unresolved_sibling() {
-//     let left_survives = polyglot_sql::parse_one(
-//         "SELECT id, amt FROM a EXCEPT SELECT * FROM unknown",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &left_survives, None, false).unwrap();
-//     assert_eq!(node.downstream.len(), 1);
-//     assert_eq!(
-//         node.downstream[0].set_branch.map(|branch| branch.ordinal),
-//         Some(0)
-//     );
-//
-//     let right_survives = polyglot_sql::parse_one(
-//         "SELECT * FROM unknown EXCEPT SELECT id, amt FROM a",
-//         polyglot_sql::DialectType::Generic,
-//     )
-//     .unwrap();
-//     let node = polyglot_sql::lineage::lineage_at(0, &right_survives, None, false).unwrap();
-//     assert_eq!(node.downstream.len(), 1);
-//     assert_eq!(
-//         node.downstream[0].set_branch.map(|branch| branch.ordinal),
-//         Some(1)
-//     );
-// }

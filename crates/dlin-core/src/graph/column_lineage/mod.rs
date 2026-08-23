@@ -278,10 +278,9 @@ pub(super) fn compute_column_lineage_internal(
                             column,
                             model_path: vec![],
                         },
-                        other => unreachable!(
-                            "the polyglot backend never produces this source variant: {:?}",
-                            other
-                        ),
+                        other => {
+                            unreachable!("backend never produces this source variant: {:?}", other)
+                        }
                     })
                     .collect(),
             }),

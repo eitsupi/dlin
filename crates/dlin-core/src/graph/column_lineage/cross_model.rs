@@ -292,10 +292,9 @@ fn compute_single_column_lineage(
                         column,
                         model_path: vec![],
                     },
-                    other => unreachable!(
-                        "the polyglot backend never produces this source variant: {:?}",
-                        other
-                    ),
+                    other => {
+                        unreachable!("backend never produces this source variant: {:?}", other)
+                    }
                 })
                 .collect(),
             result.transformation,

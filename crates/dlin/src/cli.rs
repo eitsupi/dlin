@@ -590,7 +590,7 @@ Examples:
     /// Low-level debugging tools for SQL parsing and lineage tracing
     #[command(
         long_about = "\
-Low-level debugging tools for polyglot-sql parsing and column lineage.
+Low-level debugging tools for SQL parsing and column lineage.
 
 These subcommands operate on raw SQL strings without requiring a dbt project \
 or manifest.json, making them useful for isolating parsing or lineage issues.
@@ -736,7 +736,7 @@ pub enum DebugCommand {
     #[command(
         name = "parse-sql",
         long_about = "\
-Parse a SQL statement using polyglot-sql and display the result.
+Parse a SQL statement using the production SQL parser and display the result.
 
 By default, shows the Rust Debug representation of the AST. \
 Use --format to choose between AST debug output or JSON AST.
@@ -764,7 +764,7 @@ Examples:
         long_about = "\
 Trace a single column's upstream lineage through a SQL statement.
 
-Uses polyglot-sql's lineage engine to find where a column comes from. \
+Uses the production sqllineage engine to find where a column comes from. \
 Optionally provide table schema information for more accurate resolution \
 (especially needed for SELECT * expansion).
 

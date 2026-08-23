@@ -135,7 +135,7 @@ fn analyze_one_column(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let analysis = backend.analyze(&request).map_err(|e| (e.kind, e.message))?;
     let statement = require_single_lineage_statement(analysis).map_err(|e| (e.kind, e.message))?;
     let (outcomes, diagnostics) = normalize_column_outcomes(&outputs, statement.columns);
@@ -163,7 +163,7 @@ fn analyze_one_column(
                 .map(|s| match s {
                     BackendSource::Concrete { relation, column } => (relation.render(), column),
                     other => panic!(
-                        "the polyglot backend never produces this source variant: {:?}",
+                        "the active backend never produces this source variant: {:?}",
                         other
                     ),
                 })
@@ -184,7 +184,7 @@ fn assert_resolved(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
@@ -223,7 +223,7 @@ fn assert_failed(
 ) {
     let (manifest, node_id) = make_manifest(sql, known_table);
     let node = manifest.nodes.get(&node_id).unwrap();
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), column) {
@@ -295,7 +295,7 @@ fn select_star_with_unknown_schema_cannot_resolve_a_column() {
         DlinDialect::Generic,
         None,
         "id",
-        "Cannot find column",
+        "cannot match output",
     );
 }
 
@@ -310,11 +310,7 @@ fn top_level_union_all_traces_both_operands() {
         None,
         "id",
         &[("t1", "id"), ("t2", "id")],
-        // Unlike a plain SELECT, the top-level lineage node for a set operation
-        // is the Union/Except expression itself, not a Column reference, so
-        // `classify_transformation` falls through to `Unknown` — even though
-        // each individual leaf is a direct column reference.
-        TransformationType::Unknown,
+        TransformationType::Direct,
     );
 }
 
@@ -325,10 +321,14 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     assert_eq!(catalog.table_columns("t").unwrap(), ["b", "a"]);
 
     let sql = "select * from t union all select * from t";
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let duplicate_output_names = BTreeSet::new();
 
-    for (column, expected_sources) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])].into_iter()
+    for (column, expected_sources) in [
+        ("b", vec![("t", "b"), ("t", "b")]),
+        ("a", vec![("t", "a"), ("t", "a")]),
+    ]
+    .into_iter()
     {
         let outputs = [OutputColumnRequest {
             slot: AnalysisSlot(0),
@@ -383,11 +383,7 @@ fn top_level_except_traces_both_operands() {
         None,
         "id",
         &[("t1", "id"), ("t2", "id")],
-        // Unlike a plain SELECT, the top-level lineage node for a set operation
-        // is the Union/Except expression itself, not a Column reference, so
-        // `classify_transformation` falls through to `Unknown` — even though
-        // each individual leaf is a direct column reference.
-        TransformationType::Unknown,
+        TransformationType::Direct,
     );
 }
 
@@ -397,7 +393,7 @@ fn unresolvable_column_fails_with_column_resolution_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(
@@ -409,7 +405,7 @@ fn unresolvable_column_fails_with_column_resolution_kind() {
     ) {
         Ok(PathOutcome::Failed(message)) => {
             assert!(
-                message.contains("Cannot find column"),
+                message.contains("no sqllineage mapping"),
                 "message: {}",
                 message
             );
@@ -426,7 +422,7 @@ fn unparseable_sql_fails_with_parse_kind() {
     let (manifest, node_id) = make_manifest(sql, None);
     let node = manifest.nodes.get(&node_id).unwrap();
     let dialect = DlinDialect::Generic;
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let catalog = schema::build_schema_from_manifest(&manifest, node, dialect, &backend);
 
     match analyze_one_column(&manifest, &node_id, dialect, catalog.as_ref(), "anything") {

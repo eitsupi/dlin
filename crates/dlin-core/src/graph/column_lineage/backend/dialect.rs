@@ -184,45 +184,6 @@ impl DlinDialect {
         }
     }
 
-    pub fn to_polyglot(self) -> polyglot_sql::DialectType {
-        match self {
-            Self::Generic => polyglot_sql::DialectType::Generic,
-            Self::PostgreSQL => polyglot_sql::DialectType::PostgreSQL,
-            Self::MySQL => polyglot_sql::DialectType::MySQL,
-            Self::Hive => polyglot_sql::DialectType::Hive,
-            Self::Databricks => polyglot_sql::DialectType::Databricks,
-            Self::Snowflake => polyglot_sql::DialectType::Snowflake,
-            Self::BigQuery => polyglot_sql::DialectType::BigQuery,
-            Self::DuckDB => polyglot_sql::DialectType::DuckDB,
-            Self::SQLite => polyglot_sql::DialectType::SQLite,
-            Self::Spark => polyglot_sql::DialectType::Spark,
-            Self::Trino => polyglot_sql::DialectType::Trino,
-            Self::Presto => polyglot_sql::DialectType::Presto,
-            Self::Redshift => polyglot_sql::DialectType::Redshift,
-            Self::TSQL => polyglot_sql::DialectType::TSQL,
-            Self::Oracle => polyglot_sql::DialectType::Oracle,
-            Self::ClickHouse => polyglot_sql::DialectType::ClickHouse,
-            Self::Athena => polyglot_sql::DialectType::Athena,
-            Self::Teradata => polyglot_sql::DialectType::Teradata,
-            Self::Doris => polyglot_sql::DialectType::Doris,
-            Self::StarRocks => polyglot_sql::DialectType::StarRocks,
-            Self::Materialize => polyglot_sql::DialectType::Materialize,
-            Self::RisingWave => polyglot_sql::DialectType::RisingWave,
-            Self::SingleStore => polyglot_sql::DialectType::SingleStore,
-            Self::CockroachDB => polyglot_sql::DialectType::CockroachDB,
-            Self::TiDB => polyglot_sql::DialectType::TiDB,
-            Self::Druid => polyglot_sql::DialectType::Druid,
-            Self::Solr => polyglot_sql::DialectType::Solr,
-            Self::Tableau => polyglot_sql::DialectType::Tableau,
-            Self::Dune => polyglot_sql::DialectType::Dune,
-            Self::Fabric => polyglot_sql::DialectType::Fabric,
-            Self::Drill => polyglot_sql::DialectType::Drill,
-            Self::Dremio => polyglot_sql::DialectType::Dremio,
-            Self::Exasol => polyglot_sql::DialectType::Exasol,
-            Self::DataFusion => polyglot_sql::DialectType::DataFusion,
-        }
-    }
-
     #[cfg(feature = "column-lineage")]
     pub(crate) fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
         match self {
@@ -367,7 +328,6 @@ mod tests {
         for dialect in all_variants() {
             let variant = DlinDialect::from_str(dialect.as_str()).expect("known variant parses");
             assert_eq!(variant, dialect);
-            assert_eq!(dialect.to_polyglot(), variant.to_polyglot());
             assert_eq!(dialect.to_string(), variant.to_string());
         }
     }

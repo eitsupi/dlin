@@ -24,6 +24,82 @@ impl SqllineageBackend {
     }
 }
 
+/// Parse-only check used by the CLI debug commands before validating any
+/// optional schema arguments.
+pub fn check_sql_parses(sql: &str, dialect: super::dialect::DlinDialect) -> Result<(), String> {
+    parse_statements(sql, dialect).map(|_| ())
+}
+
+/// Parse SQL and render its sqlparser AST using Rust's debug representation.
+pub fn debug_parse_sql_ast_debug(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+) -> Result<String, String> {
+    parse_statements(sql, dialect).map(|statements| format!("{statements:#?}"))
+}
+
+/// Parse SQL and render its sqlparser AST as JSON.
+pub fn debug_parse_sql_json(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+    pretty: bool,
+) -> Result<String, String> {
+    let statements = parse_statements(sql, dialect)?;
+    if pretty {
+        serde_json::to_string_pretty(&statements)
+    } else {
+        serde_json::to_string(&statements)
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// Analyze SQL and render the requested column's sqllineage mappings as JSON.
+/// The result intentionally exposes the upstream analyzer's public shape,
+/// including statement-wide unresolved-star information.
+pub fn debug_trace_column_json(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+    catalog: Option<&super::CatalogSnapshot>,
+    column: &str,
+    pretty: bool,
+) -> Result<String, String> {
+    let results = analyze_sql(sql, dialect, catalog).map_err(|error| error.message)?;
+    let mappings =
+        results
+            .iter()
+            .flat_map(|result| {
+                result.columns.mappings.iter().filter(|mapping| {
+                    column_identifiers_match(&mapping.target.column, column, dialect)
+                })
+            })
+            .collect::<Vec<_>>();
+    if mappings.is_empty() {
+        return Err(format!("lineage error: no mapping for column '{column}'"));
+    }
+    let value = serde_json::json!({
+        "column": column,
+        "mappings": mappings,
+        "has_unresolved_stars": results.iter().any(|result| result.columns.has_unresolved_stars),
+    });
+    if pretty {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&value)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn parse_statements(
+    sql: &str,
+    dialect: super::dialect::DlinDialect,
+) -> Result<Vec<Statement>, String> {
+    let parser_dialect = dialect
+        .to_sqllineage()
+        .map_err(|error| error.message)?
+        .to_sqlparser_dialect();
+    Parser::parse_sql(&*parser_dialect, sql).map_err(|error| format!("parse error: {error}"))
+}
+
 impl LineageBackend for SqllineageBackend {
     fn id(&self) -> BackendId {
         BackendId::Sqllineage

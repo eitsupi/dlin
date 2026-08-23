@@ -12,11 +12,10 @@ categories = ["development-tools", "visualization"]
 
 [features]
 clap = ["dep:clap"]
-column-lineage = ["dep:polyglot-sql", "dep:sqllineage", "dep:sqlparser"]
+column-lineage = ["dep:sqllineage", "dep:sqlparser"]
 
 [dependencies]
 clap = { workspace = true, optional = true }
-polyglot-sql = { workspace = true, optional = true }
 sqllineage = { workspace = true, optional = true }
 sqlparser = { workspace = true, optional = true }
 petgraph = { workspace = true }

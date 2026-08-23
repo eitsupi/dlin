@@ -104,7 +104,7 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
         ]),
         ..Default::default()
     };
-    let backend = backend_for_tests(BackendId::Polyglot);
+    let backend = backend_for_tests(BackendId::Sqllineage);
     let root = manifest.nodes.get(root_id).unwrap();
     let catalog =
         schema::build_schema_from_manifest(&manifest, root, DlinDialect::Generic, &backend)
