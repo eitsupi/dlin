@@ -1183,6 +1183,63 @@ fn sqllineage_parse_failure_is_parse_error() {
 }
 
 #[test]
+fn sqllineage_empty_projection_is_parse_error() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "value".to_string(),
+    }];
+    let request = LineageRequest {
+        sql: "select from from",
+        dialect: DlinDialect::Generic,
+        catalog: None,
+        outputs: &outputs,
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
+fn sqllineage_empty_projection_in_set_operation_branch_is_parse_error() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "value".to_string(),
+    }];
+    let request = LineageRequest {
+        sql: "select 1 union all select from foo",
+        dialect: DlinDialect::Generic,
+        catalog: None,
+        outputs: &outputs,
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
+fn sqllineage_empty_projection_in_nested_subquery_is_parse_error() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "value".to_string(),
+    }];
+    let request = LineageRequest {
+        sql: "select id from (select from foo) as t",
+        dialect: DlinDialect::Generic,
+        catalog: None,
+        outputs: &outputs,
+        duplicate_output_names: &BTreeSet::new(),
+    };
+    let backend = backend_for_tests(BackendId::Sqllineage);
+
+    let error = backend.analyze(&request).unwrap_err();
+    assert_eq!(error.kind, BackendErrorKind::Parse);
+}
+
+#[test]
 fn sqllineage_unsupported_dialect_is_reported() {
     let request = LineageRequest {
         sql: "SELECT 1",

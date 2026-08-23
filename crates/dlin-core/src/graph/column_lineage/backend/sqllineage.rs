@@ -82,14 +82,23 @@ impl LineageBackend for SqllineageBackend {
     }
 
     fn analyze(&self, request: &LineageRequest<'_>) -> Result<BackendAnalysis, BackendError> {
-        let results = analyze_sql(request.sql, request.dialect, request.catalog)?;
-
-        let shape_check = check_set_operation_shapes(request.sql, request.dialect);
+        let shape_check = check_statement_shapes(request.sql, request.dialect);
         if let Err(error) = &shape_check
             && matches!(&error.kind, BackendErrorKind::UnsupportedDialect)
         {
             return Err(error.clone());
         }
+
+        if let Ok(statements) = &shape_check
+            && statements.iter().any(statement_has_empty_projection)
+        {
+            return Err(BackendError {
+                kind: BackendErrorKind::Parse,
+                message: "dlin found a SELECT with an empty projection".to_owned(),
+            });
+        }
+
+        let results = analyze_sql(request.sql, request.dialect, request.catalog)?;
 
         Ok(BackendAnalysis {
             statements: results
@@ -309,18 +318,20 @@ fn analyze_output(
 
 const DANGEROUS_SET_OPERATION_REASON: &str = "a set operation whose leading branch is SELECT * cannot be aligned with its other branches, so lineage for this statement cannot be trusted";
 
-fn check_set_operation_shapes(
+fn check_statement_shapes(
     sql: &str,
     dialect: super::dialect::DlinDialect,
 ) -> Result<Vec<Statement>, BackendError> {
-    // Obtain the parser dialect through sqllineage so this guard uses exactly the grammar that
-    // produced the lineage result; maintaining a second hand-written dialect mapping could let
-    // the guard inspect a different parse from sqllineage's.
+    // This is the one deliberate second parse for statement-shape checks: keep all such
+    // structural checks here so their statements stay aligned with the lineage results.
+    // Obtain the parser dialect through sqllineage so these statement-shape checks use exactly
+    // the grammar that produced the lineage result; maintaining a second hand-written dialect
+    // mapping could let the guard inspect a different parse from sqllineage's.
     //
     // `sqllineage::analyze` makes this same `Parser::parse_sql` call with this same dialect and
     // emits one result per statement in order, so the statement list here matches the analysis
     // results position for position. Keep it that way: parsing by some other route would let the
-    // two lists drift, and a statement whose shape went unchecked would silently lose its guard.
+    // two lists drift, and a statement whose shape went unchecked would silently lose its guards.
     let parser_dialect = dialect.to_sqllineage()?.to_sqlparser_dialect();
     Parser::parse_sql(&*parser_dialect, sql).map_err(|error| BackendError {
         kind: BackendErrorKind::Parse,
@@ -332,6 +343,42 @@ fn dangerous_set_operation_reason(statement: &Statement) -> Option<&'static str>
     let mut visitor = DangerousSetOperationVisitor::default();
     let _ = statement.visit(&mut visitor);
     visitor.dangerous.then_some(DANGEROUS_SET_OPERATION_REASON)
+}
+
+fn statement_has_empty_projection(statement: &Statement) -> bool {
+    let mut visitor = EmptyProjectionVisitor::default();
+    let _ = statement.visit(&mut visitor);
+    visitor.empty
+}
+
+#[derive(Default)]
+struct EmptyProjectionVisitor {
+    empty: bool,
+}
+
+impl Visitor for EmptyProjectionVisitor {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.empty |= set_expr_contains_empty_projection(&query.body);
+        ControlFlow::Continue(())
+    }
+}
+
+fn set_expr_contains_empty_projection(body: &SetExpr) -> bool {
+    match body {
+        SetExpr::Select(select) => select.projection.is_empty(),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_contains_empty_projection(left) || set_expr_contains_empty_projection(right)
+        }
+        SetExpr::Query(_)
+        | SetExpr::Values(_)
+        | SetExpr::Table(_)
+        | SetExpr::Insert(_)
+        | SetExpr::Update(_)
+        | SetExpr::Delete(_)
+        | SetExpr::Merge(_) => false,
+    }
 }
 
 #[derive(Default)]
