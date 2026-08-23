@@ -105,6 +105,133 @@ fn source_free_union_manifest() -> Manifest {
     }
 }
 
+fn bigquery_nested_star_manifest() -> Manifest {
+    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn model(
+        unique_id: &str,
+        name: &str,
+        dependencies: &[&str],
+        output_columns: &[&str],
+        sql: &str,
+    ) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+
+    fn source(unique_id: &str, name: &str, output_columns: &[&str]) -> ManifestSource {
+        ManifestSource {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            database: None,
+            schema: None,
+            identifier: None,
+        }
+    }
+
+    let raw_table = "source.proj.raw.raw_table";
+    let raw_aux = "source.proj.raw.raw_aux";
+    let stg_source = "model.proj.stg_source";
+    let agg_model = "model.proj.agg_model";
+    let aux_model = "model.proj.aux_model";
+    let downstream_model = "model.proj.downstream_model";
+
+    let mut sources = HashMap::new();
+    sources.insert(
+        raw_table.to_string(),
+        source(
+            raw_table,
+            "raw_table",
+            &["user_id", "updated_at", "col_a", "col_b"],
+        ),
+    );
+    sources.insert(
+        raw_aux.to_string(),
+        source(raw_aux, "raw_aux", &["user_id", "aux_value"]),
+    );
+
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        stg_source.to_string(),
+        model(
+            stg_source,
+            "stg_source",
+            &[raw_table],
+            &["user_id", "updated_at", "col_a", "col_b"],
+            "SELECT user_id, updated_at, col_a, col_b FROM raw_table",
+        ),
+    );
+    nodes.insert(
+        agg_model.to_string(),
+        model(
+            agg_model,
+            "agg_model",
+            &[stg_source],
+            &["user_id", "event"],
+            "SELECT user_id, ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM stg_source AS t GROUP BY user_id",
+        ),
+    );
+    nodes.insert(
+        aux_model.to_string(),
+        model(
+            aux_model,
+            "aux_model",
+            &[raw_aux],
+            &["user_id", "aux_value"],
+            "SELECT user_id, aux_value FROM raw_aux",
+        ),
+    );
+    nodes.insert(
+        downstream_model.to_string(),
+        model(
+            downstream_model,
+            "downstream_model",
+            &[agg_model, aux_model],
+            &["user_id", "updated_at", "col_a", "col_b", "aux_value"],
+            "WITH join_data AS (SELECT base.* EXCEPT (event), base.event.* EXCEPT (user_id), IFNULL(aux.aux_value, 0) AS aux_value FROM agg_model AS base LEFT JOIN aux_model AS aux ON base.user_id = aux.user_id) SELECT * FROM join_data",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        sources,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     let manifest = source_free_union_manifest();
@@ -148,6 +275,50 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     assert_eq!(
         id_sources,
         vec![("external_table_a", "id"), ("external_table_b", "id")]
+    );
+}
+
+#[test]
+fn test_cross_model_bigquery_nested_star_keeps_known_user_id_lineage() {
+    // BigQuery-specific EXCEPT and nested field-star syntax intentionally
+    // leaves some STRUCT expansion unresolved; known scalar lineage must
+    // remain available rather than being discarded with those errors.
+    let manifest = bigquery_nested_star_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "downstream_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let user_id = result
+        .columns
+        .iter()
+        .find(|column| column.column == "user_id")
+        .expect("user_id should remain in the known lineage columns");
+    assert!(
+        user_id
+            .sources
+            .iter()
+            .any(|source| source.table == "raw_table" && source.column == "user_id"),
+        "user_id should trace to raw_table.user_id, got: {:?}; errors: {:?}",
+        user_id.sources,
+        result.errors
+    );
+    assert!(
+        !result
+            .columns
+            .iter()
+            .any(|column| column.column == "updated_at"),
+        "nested field star should remain unresolved"
+    );
+    assert!(
+        result.errors.iter().any(|error| {
+            error.kind == ColumnLineageErrorKind::ColumnNotFound
+                && error.what.starts_with("column 'updated_at':")
+        }),
+        "expected an uncertainty/error for nested field star, got: {:?}",
+        result.errors
     );
 }
 
