@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4-rc.3] - 2026-08-23
+
+### Bug Fixes
+
+- Switch column lineage's (experimental) backend from polyglot-sql to sqllineage. This fixes several accuracy issues, but as a result some previously accepted `--dialect` values (e.g. `presto`, `oracle`, `athena`, `teradata`) are no longer supported and unsupported dialects fall back to generic parsing with a warning. Given the experimental status of column lineage, other behavior may have shifted as well (#134, #136, #137, #138, #139, #141, #143, #144, #145, #149, #151, #152, #153)
+
 ## [0.2.4-rc.1] - 2026-08-03
 
 ### Bug Fixes
