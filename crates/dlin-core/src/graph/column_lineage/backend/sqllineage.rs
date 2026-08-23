@@ -369,8 +369,7 @@ fn set_expr_contains_empty_projection(body: &SetExpr) -> bool {
     match body {
         SetExpr::Select(select) => select.projection.is_empty(),
         SetExpr::SetOperation { left, right, .. } => {
-            set_expr_contains_empty_projection(left)
-                || set_expr_contains_empty_projection(right)
+            set_expr_contains_empty_projection(left) || set_expr_contains_empty_projection(right)
         }
         SetExpr::Query(_)
         | SetExpr::Values(_)
