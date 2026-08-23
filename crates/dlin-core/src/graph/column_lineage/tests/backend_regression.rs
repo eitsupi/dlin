@@ -388,6 +388,22 @@ fn top_level_except_traces_both_operands() {
 }
 
 #[test]
+fn generic_cte_union_with_source_free_branch_resolves() {
+    assert_resolved(
+        r#"WITH branches AS (
+            SELECT customer_id FROM upstream_model
+            UNION ALL
+            SELECT CAST(NULL AS STRING) AS customer_id
+        ) SELECT customer_id FROM branches"#,
+        DlinDialect::Generic,
+        Some(("upstream_model", &["customer_id"])),
+        "customer_id",
+        &[("upstream_model", "customer_id")],
+        TransformationType::Direct,
+    );
+}
+
+#[test]
 fn unresolvable_column_fails_with_column_resolution_kind() {
     let sql = "select id from t1";
     let (manifest, node_id) = make_manifest(sql, None);
@@ -997,7 +1013,7 @@ fn sqllineage_catalog_expands_star_to_concrete_sources() {
 }
 
 #[test]
-fn sqllineage_catalog_set_operation_with_literal_branch_is_indeterminate() {
+fn sqllineage_catalog_set_operation_with_literal_branch_keeps_concrete_sources() {
     let mut catalog = CatalogSnapshot::new();
     catalog.add_table("ext_a", ["col_x".to_string(), "col_y".to_string()]);
     let outputs = [
@@ -1017,19 +1033,26 @@ fn sqllineage_catalog_set_operation_with_literal_branch_is_indeterminate() {
         &BTreeSet::new(),
     );
 
-    for slot in [0, 1] {
+    for (slot, column) in [(0, "col_x"), (1, "col_y")] {
         match sqllineage_outcome(&statement, slot) {
-            BackendColumnOutcome::Failed(failure) => {
-                assert_eq!(failure.resolution, ResolutionState::Indeterminate);
-                assert!(failure.error.message.contains("source-free"));
+            BackendColumnOutcome::Resolved(result) => {
+                assert_eq!(result.resolution, ResolutionState::Resolved);
+                assert_eq!(result.sources.len(), 1);
+                assert_eq!(
+                    result.sources[0],
+                    BackendSource::Concrete {
+                        relation: RelationRef::from_manifest(None, None, "ext_a"),
+                        column: column.to_string(),
+                    }
+                );
             }
-            other => panic!("expected conservative indeterminate outcome, got {other:?}"),
+            other => panic!("expected concrete branch to resolve, got {other:?}"),
         }
     }
 }
 
 #[test]
-fn sqllineage_source_free_branch_is_indeterminate_even_with_catalog() {
+fn sqllineage_source_free_branch_does_not_discard_concrete_branch() {
     let mut catalog = CatalogSnapshot::new();
     catalog.add_table("ext_a", ["col_x".to_string(), "col_y".to_string()]);
     let outputs = [OutputColumnRequest {
@@ -1044,11 +1067,39 @@ fn sqllineage_source_free_branch_is_indeterminate_even_with_catalog() {
     );
 
     match sqllineage_outcome(&statement, 0) {
-        BackendColumnOutcome::Failed(failure) => {
-            assert_eq!(failure.resolution, ResolutionState::Indeterminate);
-            assert!(failure.error.message.contains("source-free"));
+        BackendColumnOutcome::Resolved(result) => {
+            assert_eq!(result.resolution, ResolutionState::Resolved);
+            assert_eq!(
+                result.sources,
+                vec![BackendSource::Concrete {
+                    relation: RelationRef::from_manifest(None, None, "ext_a"),
+                    column: "col_x".to_string(),
+                }]
+            );
         }
-        other => panic!("expected conservative indeterminate outcome, got {other:?}"),
+        other => panic!("expected concrete branch to resolve, got {other:?}"),
+    }
+}
+
+#[test]
+fn sqllineage_source_free_only_branch_resolves_without_sources() {
+    let outputs = [OutputColumnRequest {
+        slot: AnalysisSlot(0),
+        name: "col_a".to_string(),
+    }];
+    let statement = sqllineage_statement(
+        "SELECT CAST(NULL AS STRING) AS col_a",
+        None,
+        &outputs,
+        &BTreeSet::new(),
+    );
+
+    match sqllineage_outcome(&statement, 0) {
+        BackendColumnOutcome::Resolved(result) => {
+            assert_eq!(result.resolution, ResolutionState::Resolved);
+            assert!(result.sources.is_empty(), "unexpected sources: {result:?}");
+        }
+        other => panic!("expected source-free output to resolve without sources, got {other:?}"),
     }
 }
 

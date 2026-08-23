@@ -373,13 +373,13 @@ fn analyze_output(
                     ),
                 );
             }
-            ColumnOrigin::SourceFree { column } => {
-                return failed_output(
-                    target,
-                    ResolutionState::Indeterminate,
-                    format!("column '{}' has a source-free set-operation branch", column),
-                );
-            }
+            // A source-free branch (for example `CAST(NULL AS STRING)` in a set
+            // operation) is known to contribute no upstream column.  It must not
+            // make a concrete origin from another branch indeterminate; simply
+            // omit it from dlin's source list.  If it is the only origin, the
+            // resolved result correctly has no sources, just like a literal
+            // expression outside a set operation.
+            ColumnOrigin::SourceFree { .. } => {}
             ColumnOrigin::Recursive { .. } => {
                 return failed_output(
                     target,
