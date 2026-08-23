@@ -105,6 +105,75 @@ fn source_free_union_manifest() -> Manifest {
     }
 }
 
+fn duplicate_column_error_manifest() -> Manifest {
+    let mut manifest = make_cross_model_manifest();
+    let columns = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let model =
+        |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
+            ManifestNode {
+                unique_id: unique_id.to_string(),
+                name: name.to_string(),
+                alias: None,
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                original_file_path: None,
+                columns: columns(output_columns),
+                compiled_code: Some(sql.to_string()),
+                database: None,
+                schema: None,
+            }
+        };
+
+    manifest.nodes.insert(
+        "model.proj.left_model".to_string(),
+        model(
+            "model.proj.left_model",
+            "left_model",
+            &[],
+            &["dup_col"],
+            "SELECT * FROM unknown_left_table",
+        ),
+    );
+    manifest.nodes.insert(
+        "model.proj.right_model".to_string(),
+        model(
+            "model.proj.right_model",
+            "right_model",
+            &[],
+            &["dup_col"],
+            "SELECT missing_col FROM known_right_table",
+        ),
+    );
+    manifest.nodes.insert(
+        "model.proj.duplicate_target".to_string(),
+        model(
+            "model.proj.duplicate_target",
+            "duplicate_target",
+            &["model.proj.left_model", "model.proj.right_model"],
+            &["dup_col", "other_col"],
+            "SELECT l.dup_col AS dup_col, r.dup_col AS other_col FROM left_model AS l JOIN right_model AS r ON l.dup_col = r.dup_col",
+        ),
+    );
+    manifest
+}
+
 fn bigquery_nested_star_manifest() -> Manifest {
     fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
         names
@@ -275,6 +344,56 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     assert_eq!(
         id_sources,
         vec![("external_table_a", "id"), ("external_table_b", "id")]
+    );
+}
+
+#[test]
+fn test_cross_model_preserves_distinct_same_column_errors() {
+    let manifest = duplicate_column_error_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "duplicate_target",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let duplicate_errors: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|error| error.what.starts_with("column 'dup_col':"))
+        .collect();
+    assert_eq!(duplicate_errors.len(), 2, "errors: {:?}", result.errors);
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_some())
+            .count(),
+        1,
+        "expected one unresolved-star hint: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        duplicate_errors
+            .iter()
+            .filter(|error| error.hint.is_none())
+            .count(),
+        1,
+        "expected one no-mapping diagnostic: {:?}",
+        result.errors
+    );
+    assert!(
+        duplicate_errors
+            .iter()
+            .any(|error| error.what.contains("unexpanded SELECT *")),
+        "expected unresolved-star reason: {:?}",
+        result.errors
+    );
+    assert!(
+        duplicate_errors
+            .iter()
+            .any(|error| error.what.contains("no sqllineage mapping")),
+        "expected no-mapping reason: {:?}",
+        result.errors
     );
 }
 

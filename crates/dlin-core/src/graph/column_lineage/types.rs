@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::relation::RelationRef;
@@ -139,8 +141,56 @@ impl InternalModelColumnLineage {
                         .collect(),
                 })
                 .collect(),
-            errors: self.errors,
+            errors: normalize_column_lineage_errors(self.errors),
         }
+    }
+}
+
+/// Collapse parseable per-column diagnostics at a public output boundary.
+///
+/// A single column can produce the same `ColumnNotFound` finding through more
+/// than one resolver path. Keep the first group's position, selecting the
+/// hinted diagnostic when the other diagnostic identity fields are equal.
+pub(crate) fn normalize_column_lineage_errors(
+    errors: Vec<ColumnLineageError>,
+) -> Vec<ColumnLineageError> {
+    let mut normalized = Vec::with_capacity(errors.len());
+    let mut groups = HashMap::<(String, String, Option<String>), usize>::new();
+
+    for error in errors {
+        let Some(column) = parse_column_not_found_name(&error) else {
+            normalized.push(error);
+            continue;
+        };
+        let key = (column.to_string(), error.what.clone(), error.why.clone());
+
+        if let Some(&index) = groups.get(&key) {
+            if diagnostic_precedes(&error, &normalized[index]) {
+                normalized[index] = error;
+            }
+        } else {
+            groups.insert(key, normalized.len());
+            normalized.push(error);
+        }
+    }
+
+    normalized
+}
+
+fn parse_column_not_found_name(error: &ColumnLineageError) -> Option<&str> {
+    if error.kind != ColumnLineageErrorKind::ColumnNotFound || !error.what.starts_with("column '") {
+        return None;
+    }
+    let rest = &error.what[8..];
+    let end = rest.find("':")?;
+    (!rest[..end].is_empty()).then_some(&rest[..end])
+}
+
+fn diagnostic_precedes(candidate: &ColumnLineageError, current: &ColumnLineageError) -> bool {
+    match (candidate.hint.is_some(), current.hint.is_some()) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate.hint.as_deref().unwrap_or("") < current.hint.as_deref().unwrap_or(""),
     }
 }
 
@@ -170,5 +220,62 @@ impl From<ModelColumnLineage> for InternalModelColumnLineage {
                 .collect(),
             errors: public.errors,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error(what: &str, why: Option<&str>, hint: Option<&str>) -> ColumnLineageError {
+        ColumnLineageError {
+            kind: ColumnLineageErrorKind::ColumnNotFound,
+            what: what.to_string(),
+            why: why.map(str::to_string),
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn normalizes_equivalent_column_errors_and_preserves_distinct_diagnostics() {
+        let errors = normalize_column_lineage_errors(vec![
+            ColumnLineageError {
+                kind: ColumnLineageErrorKind::ParseFailure,
+                what: "parse".to_string(),
+                why: None,
+                hint: None,
+            },
+            error("column 'dup_col': unresolved", Some("reason"), None),
+            error("column 'dup_col': unresolved", Some("reason"), Some("star")),
+            error("column 'dup_col': different", Some("reason"), None),
+            error("column 'dup_col': unresolved", Some("other reason"), None),
+        ]);
+
+        assert_eq!(errors.len(), 4);
+        assert_eq!(errors[0].what, "parse");
+        assert_eq!(errors[1].what, "column 'dup_col': unresolved");
+        assert_eq!(errors[1].hint.as_deref(), Some("star"));
+        assert_eq!(errors[2].what, "column 'dup_col': different");
+        assert_eq!(errors[3].why.as_deref(), Some("other reason"));
+    }
+
+    #[test]
+    fn keeps_malformed_and_other_kinds_ungrouped() {
+        let errors = normalize_column_lineage_errors(vec![
+            error("column 'dup_col': same", None, Some("z")),
+            error("column 'dup_col': same", None, Some("a")),
+            error("column dup_col: malformed", None, None),
+            ColumnLineageError {
+                kind: ColumnLineageErrorKind::ParseFailure,
+                what: "column 'dup_col': same".to_string(),
+                why: None,
+                hint: None,
+            },
+        ]);
+
+        assert_eq!(errors.len(), 3);
+        assert_eq!(errors[0].hint.as_deref(), Some("a"));
+        assert_eq!(errors[1].what, "column dup_col: malformed");
+        assert_eq!(errors[2].kind, ColumnLineageErrorKind::ParseFailure);
     }
 }

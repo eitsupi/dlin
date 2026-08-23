@@ -35,7 +35,10 @@ pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
 };
-use types::{InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage};
+use types::{
+    InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage,
+    normalize_column_lineage_errors,
+};
 
 fn discover_named_output_columns(
     backend: &dyn LineageBackend,
