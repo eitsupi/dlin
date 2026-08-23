@@ -92,7 +92,7 @@ fn compute_cross_model_inner(
     result
 }
 
-fn build_upstream_model_relations(
+pub(super) fn build_upstream_model_relations(
     manifest: &Manifest,
     model_name: &str,
 ) -> Vec<(RelationRef, String)> {

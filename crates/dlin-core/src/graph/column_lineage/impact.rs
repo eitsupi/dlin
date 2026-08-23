@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::parser::manifest::Manifest;
 
 use super::backend::DlinDialect;
-use super::relation::{RelationRef, RelationResolution, resolve_unique};
+use super::relation::{RelationResolution, resolve_unique};
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, InternalModelColumnLineage,
     TransformationType, find_model_by_name,
@@ -132,17 +132,6 @@ pub fn compute_column_impact_with_manifest_path(
         vec![(initial_uid, column_name.to_string(), None, initial_visited)];
 
     while let Some((source_uid, source_column, current_path, visited_nodes)) = queue.pop() {
-        let source_relation = manifest
-            .nodes
-            .get(&source_uid)
-            .map(|node| {
-                RelationRef::from_manifest(
-                    node.database.as_deref(),
-                    node.schema.as_deref(),
-                    node.relation_name(),
-                )
-            })
-            .unwrap_or_else(|| RelationRef::bare(source_uid.clone()));
         let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
@@ -154,6 +143,11 @@ pub fn compute_column_impact_with_manifest_path(
                 None => continue,
             };
             let dep_name = &dep_node.name;
+            let candidates = super::cross_model::build_upstream_model_relations(manifest, dep_uid);
+            let candidate_relations = candidates
+                .iter()
+                .map(|(relation, _)| relation.clone())
+                .collect::<Vec<_>>();
 
             let lineage = lineage_cache.entry(dep_uid.clone()).or_insert_with(|| {
                 super::compute_column_lineage_internal(
@@ -174,8 +168,13 @@ pub fn compute_column_impact_with_manifest_path(
                 }
 
                 let references_source = entry.sources.iter().any(|s| {
-                    relation_matches(&s.relation, &source_relation, dialect)
-                        && s.column == source_column
+                    if s.column != source_column {
+                        return false;
+                    }
+                    match resolve_unique(&s.relation, &candidate_relations, dialect) {
+                        RelationResolution::Unique(index) => candidates[index].1 == source_uid,
+                        RelationResolution::Ambiguous | RelationResolution::NotFound => false,
+                    }
                 });
 
                 if references_source {
@@ -269,11 +268,4 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
     }
 
     map
-}
-
-fn relation_matches(query: &RelationRef, candidate: &RelationRef, dialect: DlinDialect) -> bool {
-    matches!(
-        resolve_unique(query, std::slice::from_ref(candidate), dialect),
-        RelationResolution::Unique(0)
-    )
 }
