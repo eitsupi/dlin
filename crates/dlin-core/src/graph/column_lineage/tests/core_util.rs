@@ -366,14 +366,12 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
     // exposing no physical source columns.
     let mut nodes = HashMap::new();
     let mut columns = HashMap::new();
-    for name in ["week_start"] {
-        columns.insert(
-            name.to_string(),
-            ManifestColumn {
-                name: name.to_string(),
-            },
-        );
-    }
+    columns.insert(
+        "week_start".to_string(),
+        ManifestColumn {
+            name: "week_start".to_string(),
+        },
+    );
     nodes.insert(
         "model.proj.unnest_model".to_string(),
         ManifestNode {

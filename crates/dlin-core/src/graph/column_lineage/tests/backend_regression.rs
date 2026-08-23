@@ -1104,6 +1104,93 @@ fn sqllineage_source_free_only_branch_resolves_without_sources() {
 }
 
 #[test]
+fn sqllineage_bigquery_temporal_date_parts_are_not_columns() {
+    let mut catalog = CatalogSnapshot::new();
+    catalog.add_table(
+        "events",
+        [
+            "event_date".to_string(),
+            "other_date".to_string(),
+            "event_ts".to_string(),
+            "tz_name".to_string(),
+        ],
+    );
+    let outputs = [
+        OutputColumnRequest {
+            slot: AnalysisSlot(0),
+            name: "monday_start".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(1),
+            name: "week_diff".to_string(),
+        },
+        OutputColumnRequest {
+            slot: AnalysisSlot(2),
+            name: "timestamp_year".to_string(),
+        },
+    ];
+    let statement = sqllineage_statement_with_dialect(
+        "SELECT DATE_TRUNC(event_date, WEEK(MONDAY)) AS monday_start, DATE_DIFF(event_date, other_date, ISOWEEK) AS week_diff, TIMESTAMP_TRUNC(event_ts, ISOYEAR, tz_name) AS timestamp_year FROM events",
+        DlinDialect::BigQuery,
+        Some(&catalog),
+        &outputs,
+        &BTreeSet::new(),
+    );
+    let expected = [
+        (
+            "monday_start",
+            vec![BackendSource::Concrete {
+                relation: RelationRef::from_manifest(None, None, "events"),
+                column: "event_date".to_string(),
+            }],
+        ),
+        (
+            "week_diff",
+            vec![
+                BackendSource::Concrete {
+                    relation: RelationRef::from_manifest(None, None, "events"),
+                    column: "event_date".to_string(),
+                },
+                BackendSource::Concrete {
+                    relation: RelationRef::from_manifest(None, None, "events"),
+                    column: "other_date".to_string(),
+                },
+            ],
+        ),
+        (
+            "timestamp_year",
+            vec![
+                BackendSource::Concrete {
+                    relation: RelationRef::from_manifest(None, None, "events"),
+                    column: "event_ts".to_string(),
+                },
+                BackendSource::Concrete {
+                    relation: RelationRef::from_manifest(None, None, "events"),
+                    column: "tz_name".to_string(),
+                },
+            ],
+        ),
+    ];
+
+    for (slot, (name, expected_sources)) in expected.into_iter().enumerate() {
+        match sqllineage_outcome(&statement, slot) {
+            BackendColumnOutcome::Resolved(result) => {
+                assert_eq!(result.target.name, name);
+                assert_eq!(result.resolution, ResolutionState::Resolved);
+                assert_eq!(result.sources, expected_sources);
+                assert!(result.sources.iter().all(|source| match source {
+                    BackendSource::Concrete { column, .. } => {
+                        !matches!(column.as_str(), "MONDAY" | "ISOWEEK" | "ISOYEAR")
+                    }
+                    _ => false,
+                }));
+            }
+            other => panic!("expected resolved BigQuery output {name}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn sqllineage_returns_failed_outcome_for_unmapped_requested_output() {
     let outputs = [
         OutputColumnRequest {
