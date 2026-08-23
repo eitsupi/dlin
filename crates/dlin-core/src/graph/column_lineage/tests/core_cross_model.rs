@@ -196,6 +196,34 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
     }
 }
 
+fn bigquery_unnest_cross_model_manifest() -> Manifest {
+    let mut manifest = bigquery_compound_field_access_manifest();
+    let mut downstream = manifest
+        .nodes
+        .remove("model.proj.array_model")
+        .expect("array model fixture should exist");
+    downstream.unique_id = "model.proj.downstream_model".to_string();
+    downstream.name = "downstream_model".to_string();
+    downstream.columns = ["item"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    downstream.compiled_code = Some(
+        "SELECT item FROM upstream_model AS base, UNNEST(base.items_array) AS item".to_string(),
+    );
+    manifest
+        .nodes
+        .insert("model.proj.downstream_model".to_string(), downstream);
+    manifest
+}
+
 fn duplicate_column_error_manifest() -> Manifest {
     let mut manifest = make_cross_model_manifest();
     let columns = |names: &[&str]| {
@@ -469,6 +497,38 @@ fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column
             .any(|(model, column, _)| model == "upstream_model" && column == "items_array"),
         "expected upstream model path, got: {:?}",
         source.model_path
+    );
+}
+
+#[test]
+fn test_cross_model_bigquery_unnest_reaches_external_array_column() {
+    let manifest = bigquery_unnest_cross_model_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "downstream_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let item = result
+        .columns
+        .iter()
+        .find(|column| column.column == "item")
+        .expect("item should be present");
+    assert_eq!(
+        item.sources
+            .iter()
+            .map(|source| (source.table.as_str(), source.column.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("external_table_a", "items_array")]
+    );
+    assert!(
+        item.sources
+            .iter()
+            .all(|source| !(source.table == "upstream_model" && source.column == "item")),
+        "UNNEST must not fabricate an upstream_model.item source: {:?}",
+        item.sources
     );
 }
 

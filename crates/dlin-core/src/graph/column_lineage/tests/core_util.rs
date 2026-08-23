@@ -361,11 +361,9 @@ fn test_traced_total_columns_in_json() {
 // --- Regression tests for known issues ---
 
 #[test]
-#[allow(clippy::single_element_loop)]
-fn test_bigquery_unnest_virtual_source_excluded() {
-    // BigQuery UNNEST produces a Virtual source node. Before the fix, collect_leaves
-    // would include it as a leaf with an empty/synthetic table name. After the fix,
-    // Virtual leaf nodes are skipped so only real table sources survive.
+fn test_bigquery_source_free_unnest_is_traced_without_sources() {
+    // A source-free BigQuery UNNEST projection remains a valid output while
+    // exposing no physical source columns.
     let mut nodes = HashMap::new();
     let mut columns = HashMap::new();
     for name in ["week_start"] {
@@ -409,17 +407,16 @@ fn test_bigquery_unnest_virtual_source_excluded() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    // week_start derives from UNNEST — a Virtual source with no physical table.
-    // collect_leaves must skip Virtual nodes, so sources should be empty.
-    let week_start = result.columns.iter().find(|c| c.column == "week_start");
-    if let Some(entry) = week_start {
-        for src in &entry.sources {
-            assert!(
-                !src.table.is_empty(),
-                "Virtual UNNEST source should not appear as leaf: got table='{}', column='{}'",
-                src.table,
-                src.column
-            );
-        }
-    }
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    // The output is present and source-free by contract.
+    let week_start = result
+        .columns
+        .iter()
+        .find(|c| c.column == "week_start")
+        .expect("week_start should be present");
+    assert!(
+        week_start.sources.is_empty(),
+        "source-free UNNEST output should have no sources: {:?}",
+        week_start.sources
+    );
 }
