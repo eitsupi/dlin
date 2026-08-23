@@ -1008,13 +1008,13 @@ const LEDGER: &[LedgerEntry] = &[
     },
     LedgerEntry {
         case_id: "unparseable_sql",
-        field: "analysis.shape",
-        polyglot: "error(Parse)",
-        sqllineage: "1 statement(s)",
-        status: LedgerStatus::Open {
-            to_settle: "Polyglot's whole-analysis parse failure is dlin's established contract for this SQL shape (a dedicated regression test elsewhere already pins this for Polyglot). sqllineage's Generic dialect currently accepts this malformed statement and returns a result instead of failing the analysis; the sqllineage backend needs an explicit guard for this shape before dlin can rely on parse-failure semantics being consistent across backends.",
+        field: "analysis.error.message",
+        polyglot: "Parse error at line 1, column 17: Expected table name or subquery, got From",
+        sqllineage: "dlin found a SELECT with an empty projection",
+        status: LedgerStatus::Decided {
+            verdict: "Neither backend has a semantic advantage here. Both correctly classify this SQL as unparseable; the exact diagnostic wording is backend-specific implementation detail, not a shared contract, and dlin is not required to match either backend's message text verbatim.",
         },
-        authority: "dlin backend comparison and parse-error behavior",
+        authority: "dlin backend comparison and production error reporting",
     },
     LedgerEntry {
         case_id: "known_star_contribution_disappears",
