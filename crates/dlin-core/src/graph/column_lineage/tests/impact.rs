@@ -3,6 +3,107 @@ use std::collections::HashMap;
 
 use crate::parser::manifest::{DependsOn, ManifestColumn, ManifestConfig, ManifestNode};
 
+fn duplicate_column_impact_manifest() -> Manifest {
+    let columns = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    let model =
+        |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
+            ManifestNode {
+                unique_id: unique_id.to_string(),
+                name: name.to_string(),
+                alias: None,
+                resource_type: "model".to_string(),
+                depends_on: DependsOn {
+                    nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+                },
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                original_file_path: None,
+                columns: columns(output_columns),
+                compiled_code: Some(sql.to_string()),
+                database: None,
+                schema: None,
+            }
+        };
+
+    let source_id = "model.proj.impact_source";
+    let star_id = "model.proj.star_downstream";
+    let plain_id = "model.proj.plain_downstream";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        source_id.to_string(),
+        model(
+            source_id,
+            "impact_source",
+            &[],
+            &["other_col"],
+            "SELECT other_col FROM raw_source",
+        ),
+    );
+    nodes.insert(
+        star_id.to_string(),
+        model(
+            star_id,
+            "star_downstream",
+            &[source_id],
+            &["other_col", "dup_col"],
+            "WITH known AS (SELECT source.other_col AS other_col FROM impact_source AS source), unknown AS (SELECT * FROM unknown_star) SELECT known.other_col AS other_col, unknown.dup_col AS dup_col FROM known JOIN unknown ON 1 = 1",
+        ),
+    );
+    nodes.insert(
+        plain_id.to_string(),
+        model(
+            plain_id,
+            "plain_downstream",
+            &[source_id],
+            &["other_col", "dup_col"],
+            "SELECT source.other_col AS other_col FROM impact_source AS source",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        sources: HashMap::new(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_column_impact_normalizes_duplicate_column_errors() {
+    let manifest = duplicate_column_impact_manifest();
+    let result = compute_column_impact(
+        &manifest,
+        "impact_source",
+        "other_col",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let duplicate_errors: Vec<_> = result
+        .errors
+        .iter()
+        .filter(|error| error.what.starts_with("column 'dup_col':"))
+        .collect();
+    assert_eq!(duplicate_errors.len(), 1, "errors: {:?}", result.errors);
+    assert!(
+        duplicate_errors[0].hint.is_some(),
+        "expected star hint, errors: {:?}",
+        result.errors
+    );
+}
+
 #[test]
 fn test_column_impact_direct_dependent() {
     // stg_orders.order_id is used by orders.order_id

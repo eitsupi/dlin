@@ -10,7 +10,7 @@ use super::backend::DlinDialect;
 use super::relation::{RelationResolution, resolve_unique};
 use super::{
     ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, InternalModelColumnLineage,
-    TransformationType, find_model_by_name,
+    TransformationType, find_model_by_name, normalize_column_lineage_errors,
 };
 
 #[derive(Debug, Serialize)]
@@ -245,7 +245,7 @@ pub fn compute_column_impact_with_manifest_path(
         model: model_name.to_string(),
         column: column_name.to_string(),
         impacted_columns: impacted,
-        errors,
+        errors: normalize_column_lineage_errors(errors),
     }
 }
 
