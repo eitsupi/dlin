@@ -45,11 +45,12 @@ dlin-core = { version = "0.2.4-rc.2", path = "crates/dlin-core" }
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
-# Temporary: two column lineage correctness fixes not yet in a sqllineage release.
-# Upstream PR: https://github.com/funcpp/sqllineage/pull/12
+# Temporary: column lineage correctness fixes not yet in a sqllineage release.
+# Upstream PRs: https://github.com/funcpp/sqllineage/pull/12
+#               https://github.com/funcpp/sqllineage/pull/13
 # Drop this once they are released.
 [patch.crates-io]
-sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "e8e47908536232b28f1252045394a412eb865b09" }
+sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "38149bf689f0e4a3557e192c68bc94dcabc4eea8" }
 
 [profile.dist]
 inherits = "release"
