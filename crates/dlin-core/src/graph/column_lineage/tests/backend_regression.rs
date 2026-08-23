@@ -1339,9 +1339,17 @@ fn sqllineage_discovery(
     sql: &str,
     catalog: Option<&CatalogSnapshot>,
 ) -> Result<OutputDiscovery, super::super::backend::BackendError> {
+    sqllineage_discovery_with_dialect(sql, DlinDialect::Generic, catalog)
+}
+
+fn sqllineage_discovery_with_dialect(
+    sql: &str,
+    dialect: DlinDialect,
+    catalog: Option<&CatalogSnapshot>,
+) -> Result<OutputDiscovery, super::super::backend::BackendError> {
     let request = OutputDiscoveryRequest {
         sql,
-        dialect: DlinDialect::Generic,
+        dialect,
         catalog,
     };
     backend_for_tests(BackendId::Sqllineage).discover_output_columns(&request)
@@ -1389,9 +1397,61 @@ fn sqllineage_discovery_unexpanded_star_has_no_name() {
 
 #[test]
 fn sqllineage_discovery_preserves_quoted_star_output_name() {
-    let discovery = sqllineage_discovery("SELECT id AS \"*\" FROM orders", None).unwrap();
+    let discovery = sqllineage_discovery(r#"SELECT id AS "*" FROM orders"#, None).unwrap();
 
     assert_eq!(discovered_names(&discovery), ["*"]);
+}
+
+#[test]
+fn sqllineage_discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
+    let discovery = sqllineage_discovery_with_dialect(
+        r#"SELECT id AS "*", base.event.* FROM source AS base"#,
+        DlinDialect::BigQuery,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(discovered_names(&discovery), ["*"]);
+    assert!(!discovery.duplicate_names.contains("*"));
+}
+
+#[test]
+fn sqllineage_discovery_drops_field_path_star_without_forged_output_name() {
+    let analyzed = sqllineage::analyze(
+        "SELECT base.event.* FROM source AS base",
+        sqllineage::AnalyzeOptions {
+            dialect: DlinDialect::BigQuery.to_sqllineage().unwrap(),
+            normalize_case: true,
+            ..sqllineage::AnalyzeOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(analyzed[0].columns.mappings.iter().any(|mapping| {
+        mapping.target.column == "*"
+            && mapping.sources.iter().any(|source| {
+                matches!(
+                    source,
+                    sqllineage::ColumnOrigin::Concrete { column, .. } if column == "event"
+                )
+            })
+            && mapping.sources.iter().any(|source| {
+                matches!(
+                    source,
+                    sqllineage::ColumnOrigin::Ambiguous { column, candidates }
+                        if column == "*" && candidates.is_empty()
+                )
+            })
+    }));
+
+    let discovery = sqllineage_discovery_with_dialect(
+        "SELECT base.event.* FROM source AS base",
+        DlinDialect::BigQuery,
+        None,
+    )
+    .unwrap();
+
+    assert!(discovery.outputs.is_empty());
+    assert!(!discovery.duplicate_names.contains("*"));
 }
 
 #[test]
