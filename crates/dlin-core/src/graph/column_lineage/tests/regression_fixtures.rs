@@ -550,7 +550,10 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &[], &["a", "b", "c"]);
+    // The literal branch is source-free rather than uncertain, so concrete
+    // origins for a and b remain resolved.  The third ordinal is supplied by
+    // the unresolved star and stays conservative.
+    assert_exact_column_outcomes(&result, &["a", "b"], &["c"]);
 }
 
 #[test]
@@ -626,7 +629,10 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_exact_column_outcomes(&result, &["extra_col"], &["a", "b", "c"]);
+    // The source-free literal branches do not erase concrete origins.  The
+    // wildcard ordinal remains indeterminate, while the explicitly named
+    // extra_col output remains discoverable.
+    assert_exact_column_outcomes(&result, &["a", "extra_col"], &["b", "c"]);
 }
 
 #[test]

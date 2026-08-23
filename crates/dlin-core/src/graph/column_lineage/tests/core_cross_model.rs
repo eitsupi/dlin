@@ -1,4 +1,156 @@
+use std::collections::HashMap;
+
 use super::*;
+use crate::parser::manifest::{
+    DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode, ManifestSource,
+};
+
+fn source_free_union_manifest() -> Manifest {
+    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn model(
+        unique_id: &str,
+        name: &str,
+        dependencies: &[&str],
+        output_columns: &[&str],
+        sql: &str,
+    ) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+
+    fn source(unique_id: &str, name: &str, output_columns: &[&str]) -> ManifestSource {
+        ManifestSource {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            source_name: "raw".to_string(),
+            resource_type: "source".to_string(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            database: None,
+            schema: None,
+            identifier: None,
+        }
+    }
+
+    let source_a_id = "source.proj.external_table_a";
+    let source_b_id = "source.proj.external_table_b";
+    let upstream_id = "model.proj.upstream_model";
+    let union_id = "model.proj.union_model";
+    let mut sources = HashMap::new();
+    sources.insert(
+        source_a_id.to_string(),
+        source(source_a_id, "external_table_a", &["real_col", "id"]),
+    );
+    sources.insert(
+        source_b_id.to_string(),
+        source(source_b_id, "external_table_b", &["id"]),
+    );
+
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        upstream_id.to_string(),
+        model(
+            upstream_id,
+            "upstream_model",
+            &[source_a_id, source_b_id],
+            &["real_col", "id"],
+            "SELECT real_col, id FROM external_table_a UNION ALL SELECT CAST(NULL AS STRING) AS real_col, id FROM external_table_b",
+        ),
+    );
+    nodes.insert(
+        union_id.to_string(),
+        model(
+            union_id,
+            "union_model",
+            &[upstream_id],
+            &["real_col", "id"],
+            "WITH branches AS (SELECT real_col, id FROM upstream_model UNION ALL SELECT CAST(NULL AS STRING) AS real_col, CAST(NULL AS INT64) AS id) SELECT real_col, id FROM branches",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        sources,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
+    let manifest = source_free_union_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "union_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.total_columns, 2);
+    assert_eq!(result.traced_columns, 2);
+    assert_eq!(result.columns.len(), 2);
+
+    let real_col = result
+        .columns
+        .iter()
+        .find(|column| column.column == "real_col")
+        .unwrap();
+    assert_eq!(
+        real_col
+            .sources
+            .iter()
+            .map(|source| (source.table.as_str(), source.column.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("external_table_a", "real_col")]
+    );
+
+    let id = result
+        .columns
+        .iter()
+        .find(|column| column.column == "id")
+        .unwrap();
+    let mut id_sources = id
+        .sources
+        .iter()
+        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .collect::<Vec<_>>();
+    id_sources.sort_unstable();
+    assert_eq!(
+        id_sources,
+        vec![("external_table_a", "id"), ("external_table_b", "id")]
+    );
+}
+
 /// Build a manifest with 3 levels: customers → orders → stg_orders → raw.orders
 #[test]
 fn test_cross_model_single_hop() {
