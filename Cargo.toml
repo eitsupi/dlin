@@ -24,7 +24,7 @@ indexmap = "2"
 minijinja = "2"
 rayon = "1"
 globset = "0.4"
-sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "55047352276d719e56b4e8a1ebac07a5663639ca", default-features = false }
+sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "0627171fddf81a9d1d34f95083960399934ed6c4", default-features = false }
 # Must stay in lockstep with the sqlparser version sqllineage depends on; see
 # `sqlparser_version_matches_sqllineage` in dlin-core.
 sqlparser = { version = "0.62", features = ["serde", "visitor"] }
