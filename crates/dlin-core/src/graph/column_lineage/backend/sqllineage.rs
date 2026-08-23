@@ -3,7 +3,9 @@ use sqlparser::ast::{Query, SelectItem, SetExpr, Statement, Visit, Visitor};
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
-use super::catalog_provider::{SqllineageCatalogProvider, column_identifiers_match};
+use super::catalog_provider::{
+    SqllineageCatalogProvider, column_identifiers_match, resolve_table_for_sqllineage,
+};
 use super::{
     AnalysisCompleteness, BackendAnalysis, BackendColumnFailure, BackendColumnOutcome,
     BackendColumnResult, BackendError, BackendErrorKind, BackendId, BackendSource,
@@ -245,12 +247,8 @@ fn analyze_output(
                     &table.table,
                 );
                 let relation = catalog
-                    .and_then(|catalog| match dialect {
-                        super::dialect::DlinDialect::Generic
-                        | super::dialect::DlinDialect::BigQuery => {
-                            catalog.resolve_table_exact_case_insensitive(&raw_relation)
-                        }
-                        _ => catalog.resolve_table_exact(&raw_relation, dialect),
+                    .and_then(|catalog| {
+                        resolve_table_for_sqllineage(catalog, &raw_relation, dialect)
                     })
                     .map(|catalog_table| catalog_table.relation.clone())
                     .unwrap_or(raw_relation);
