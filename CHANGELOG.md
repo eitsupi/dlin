@@ -1,16 +1,11 @@
 # Changelog
 
-## [0.2.4-rc.3] - 2026-08-23
+## [0.2.4] - 2026-08-24
 
-### Bug Fixes
+### Changes
 
-- Switch column lineage's (experimental) backend from polyglot-sql to sqllineage. This fixes several accuracy issues, but as a result some previously accepted `--dialect` values (e.g. `presto`, `oracle`, `athena`, `teradata`) are no longer supported and unsupported dialects fall back to generic parsing with a warning. Given the experimental status of column lineage, other behavior may have shifted as well (#134, #136, #137, #138, #139, #141, #143, #144, #145, #149, #151, #152, #153)
-
-## [0.2.4-rc.1] - 2026-08-03
-
-### Bug Fixes
-
-- Fix column lineage tracing across `UNION`/`INTERSECT`/`EXCEPT` set operations involving `SELECT *`: explicit columns are now traced correctly and unresolvable stars no longer produce fabricated sources (#110, #120, #121)
+- Column lineage (experimental) now runs on a new SQL analysis backend, `sqllineage`, replacing `polyglot-sql`. This is the headline change of this release. Lineage is resolved more accurately for `SELECT *` and qualified or aliased stars, `UNION`/`INTERSECT`/`EXCEPT` set operations, CTEs and derived tables, `UNNEST` value tables, array and nested-field access, and aggregate expressions such as `COUNT(*)`. Where lineage genuinely cannot be proven, it is now reported as unresolved instead of being attributed to a fabricated source (#134, #135, #136, #137, #138, #139, #141, #143, #144, #145, #147, #149, #151, #152, #153, #155, #157, #158, #159, #160, #161, #162)
+- Some `--dialect` values that the previous backend accepted (e.g. `presto`, `oracle`, `athena`, `teradata`) are no longer supported. They now fall back to generic parsing with a warning. Given the experimental status of column lineage, other behavior may have shifted as well (#153)
 
 ## [0.2.3] - 2026-06-11
 
