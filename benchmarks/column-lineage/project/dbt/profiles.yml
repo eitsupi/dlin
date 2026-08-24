@@ -1,0 +1,6 @@
+column_lineage_correctness:
+  target: benchmark
+  outputs:
+    benchmark:
+      type: duckdb
+      path: "{{ env_var('COLUMN_LINEAGE_FIXTURE_DUCKDB_PATH') }}"

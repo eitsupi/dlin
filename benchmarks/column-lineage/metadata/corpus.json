@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "dlin-column-lineage-correctness-fixtures",
+  "license": "MIT",
+  "synthetic": true,
+  "contains_pii": false,
+  "project": "project/dbt",
+  "source_tables": [
+    "raw_orders",
+    "raw_payments",
+    "raw_events",
+    "raw_left",
+    "raw_right"
+  ],
+  "atomic_cases": 12,
+  "integration_cases": 5,
+  "model_nodes_in_manifest": 28,
+  "model_nodes_in_catalog": 27,
+  "catalog_exclusion": "The deliberately ambiguous A12 model is ephemeral and therefore has no catalog relation.",
+  "oracle": "oracle/cases.json"
+}

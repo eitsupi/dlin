@@ -1,0 +1,25 @@
+name: column_lineage_correctness
+version: 1.0.0
+config-version: 2
+profile: column_lineage_correctness
+
+flags:
+  send_anonymous_usage_stats: false
+
+model-paths: [models]
+seed-paths: [seeds]
+snapshot-paths: [snapshots]
+test-paths: [tests]
+analysis-paths: [analyses]
+macro-paths: [macros]
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  column_lineage_correctness:
+    atomic:
+      +materialized: view
+    integration:
+      +materialized: view

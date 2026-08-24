@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "fixture_runtime": {
+    "dbt_core": "1.12.2",
+    "dbt_duckdb": "1.11.0",
+    "duckdb": "1.5.5"
+  },
+  "comparison_targets": [
+    {
+      "name": "dlin",
+      "version": "0.2.4",
+      "binary": "dlin"
+    },
+    {
+      "name": "parrant",
+      "version": "0.17.2",
+      "binary": "parrant"
+    },
+    {
+      "name": "dbt-meta",
+      "version": "0.3.8",
+      "binary": "meta"
+    }
+  ],
+  "note": "Tool results are not used to construct oracle/cases.json. Unsupported or indeterminate cases are reported by the caller."
+}

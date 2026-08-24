@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "A01",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a01_direct_copy", "column": "order_id"},
+      "semantic_class": "direct_copy",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.order_id"],
+      "expected_model_path": ["model.column_lineage_correctness.a01_direct_copy.order_id"],
+      "notes": "Same-name projection from one source relation."
+    },
+    {
+      "case_id": "A02",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a02_rename_cast_expression", "column": "amount_double"},
+      "semantic_class": "rename_cast_expression",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount"],
+      "expected_model_path": ["model.column_lineage_correctness.a02_rename_cast_expression.amount_double"],
+      "notes": "Arithmetic expression over a source column."
+    },
+    {
+      "case_id": "A03",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a03_source_free", "column": "row_count"},
+      "semantic_class": "source_free",
+      "expected_terminal_sources": [],
+      "expected_model_path": ["model.column_lineage_correctness.a03_source_free.row_count"],
+      "notes": "The relation is a VALUES literal; no external source is expected."
+    },
+    {
+      "case_id": "A04",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a04_union_two_sources", "column": "amount"},
+      "semantic_class": "union_two_sources",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount", "source.synthetic.raw_payments.amount"],
+      "expected_model_path": ["model.column_lineage_correctness.a04_union_two_sources.amount"],
+      "notes": "Both UNION ALL branches contribute the output column."
+    },
+    {
+      "case_id": "A05",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a05_union_typed_null", "column": "amount"},
+      "semantic_class": "union_typed_null",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount"],
+      "expected_model_path": ["model.column_lineage_correctness.a05_union_typed_null.amount"],
+      "notes": "The typed NULL branch is source-free and must not become a fake source."
+    },
+    {
+      "case_id": "A06",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a06_star_unqualified", "column": "order_id"},
+      "semantic_class": "star_unqualified",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.order_id"],
+      "expected_model_path": ["model.column_lineage_correctness.a06_star_unqualified.order_id"],
+      "notes": "The input relation has a known schema and is the only relation."
+    },
+    {
+      "case_id": "A07",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a07_star_qualified", "column": "shared_value"},
+      "semantic_class": "star_qualified",
+      "expected_terminal_sources": ["source.synthetic.raw_left.shared_value"],
+      "expected_model_path": ["model.column_lineage_correctness.a07_star_qualified.shared_value"],
+      "notes": "The qualified star selects the left relation only."
+    },
+    {
+      "case_id": "A08",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a08_unnest_value_table", "column": "event_value"},
+      "semantic_class": "unnest_value_table",
+      "expected_terminal_sources": ["source.synthetic.raw_events.numeric_value"],
+      "expected_model_path": ["model.column_lineage_correctness.a08_unnest_value_table.event_value"],
+      "notes": "UNNEST expands a list built from one source column."
+    },
+    {
+      "case_id": "A09",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a09_struct_nested_field", "column": "event_amount"},
+      "semantic_class": "struct_nested_field",
+      "expected_terminal_sources": ["source.synthetic.raw_events.numeric_value"],
+      "expected_model_path": ["model.column_lineage_correctness.a09_struct_nested_field.event_amount"],
+      "notes": "A nested struct field is selected in a downstream model."
+    },
+    {
+      "case_id": "A10",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a10_date_token", "column": "report_date"},
+      "semantic_class": "date_token",
+      "expected_terminal_sources": [],
+      "expected_model_path": ["model.column_lineage_correctness.a10_date_token.report_date"],
+      "notes": "A DATE literal is not a source relation or source column."
+    },
+    {
+      "case_id": "A11",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a11_row_value_alias", "column": "event_value"},
+      "semantic_class": "row_value_alias",
+      "expected_terminal_sources": ["source.synthetic.raw_events.numeric_value"],
+      "expected_model_path": ["model.column_lineage_correctness.a11_row_value_alias.event_value"],
+      "notes": "A row/struct alias is not itself a relation or fabricated column."
+    },
+    {
+      "case_id": "A12",
+      "layer": "atomic",
+      "direction": "upstream",
+      "query": {"model": "a12_ambiguous_bare_column", "column": "shared_value"},
+      "semantic_class": "ambiguous_bare_column",
+      "expected_terminal_sources": null,
+      "expected_model_path": [],
+      "notes": "Indeterminate: an unqualified duplicate column must not be forced to one source."
+    },
+    {
+      "case_id": "I01",
+      "layer": "integration",
+      "direction": "upstream",
+      "query": {"model": "i01_deep_08", "column": "amount_double"},
+      "semantic_class": "deep_projection",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount"],
+      "expected_model_path": [
+        "model.column_lineage_correctness.i01_deep_08.amount_double",
+        "model.column_lineage_correctness.i01_deep_07.amount_double",
+        "model.column_lineage_correctness.i01_deep_06.amount_double",
+        "model.column_lineage_correctness.i01_deep_05.amount_double",
+        "model.column_lineage_correctness.i01_deep_04.amount_double",
+        "model.column_lineage_correctness.i01_deep_03.amount_double",
+        "model.column_lineage_correctness.i01_deep_02.amount_double",
+        "model.column_lineage_correctness.i01_deep_01.amount_double",
+        "model.column_lineage_correctness.a02_rename_cast_expression.amount_double",
+        "source.synthetic.raw_orders.amount"
+      ],
+      "notes": "Eight explicit projection hops preserve the source column."
+    },
+    {
+      "case_id": "I02",
+      "layer": "integration",
+      "direction": "upstream",
+      "query": {"model": "i02_multi_source_union", "column": "amount"},
+      "semantic_class": "multi_source_union",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount", "source.synthetic.raw_payments.amount"],
+      "expected_model_path": ["model.column_lineage_correctness.i02_multi_source_union.amount"],
+      "notes": "Combines a two-source UNION with a typed-NULL UNION."
+    },
+    {
+      "case_id": "I03",
+      "layer": "integration",
+      "direction": "upstream",
+      "query": {"model": "i03_wide_127", "column": "column_127"},
+      "semantic_class": "wide_projection",
+      "expected_terminal_sources": ["source.synthetic.raw_orders.amount"],
+      "expected_model_path": ["model.column_lineage_correctness.i03_wide_127.column_127"],
+      "notes": "The model has 127 output columns; this is a small correctness fixture, not a scale generator."
+    },
+    {
+      "case_id": "I04",
+      "layer": "integration",
+      "direction": "upstream",
+      "query": {"model": "i04_nested_pipeline", "column": "combined_value"},
+      "semantic_class": "nested_pipeline",
+      "expected_terminal_sources": ["source.synthetic.raw_events.numeric_value"],
+      "expected_model_path": ["model.column_lineage_correctness.i04_nested_pipeline.combined_value"],
+      "notes": "Combines nested-field, UNNEST, and row-value pipeline stages."
+    },
+    {
+      "case_id": "I05",
+      "layer": "integration",
+      "direction": "downstream",
+      "query": {"model": "i05_fanout_base", "column": "amount"},
+      "semantic_class": "downstream_fanout",
+      "expected_downstream_targets": [
+        "model.column_lineage_correctness.i05_direct_consumer.amount",
+        "model.column_lineage_correctness.i05_expression_consumer.scaled_amount",
+        "model.column_lineage_correctness.i05_rename_consumer.renamed_amount"
+      ],
+      "expected_model_path": [],
+      "notes": "One source column fans out to direct, renamed, and expression consumers."
+    }
+  ]
+}
