@@ -277,6 +277,21 @@ fn cte_traces_through_to_the_base_table() {
 }
 
 #[test]
+fn qualified_and_bare_struct_access_share_top_level_relation_contract() {
+    let sql = "SELECT agg.event.qualified_field AS qualified_field, event.bare_field AS bare_field FROM upstream_model AS agg";
+    for column in ["qualified_field", "bare_field"] {
+        assert_resolved(
+            sql,
+            DlinDialect::BigQuery,
+            None,
+            column,
+            &[("upstream_model", "event")],
+            TransformationType::Direct,
+        );
+    }
+}
+
+#[test]
 fn select_star_with_known_schema_resolves_the_named_column() {
     assert_resolved(
         "select * from known_table",
