@@ -28,10 +28,45 @@ def main() -> None:
     source_ids = set(manifest["sources"])
     assert len(model_ids) == 28
     assert len(catalog_model_ids) == 27
+    assert model_ids - catalog_model_ids == {
+        "model.column_lineage_correctness.a12_ambiguous_bare_column"
+    }
+
+    def assert_catalog_column(identifier: str) -> None:
+        relation_id, column_name = identifier.rsplit(".", 1)
+        if identifier.startswith("model."):
+            assert relation_id in catalog_model_ids, identifier
+            assert column_name in catalog["nodes"][relation_id]["columns"], identifier
+            return
+
+        if identifier.startswith("source."):
+            parts = identifier.split(".")
+            source_name = ".".join(parts[1:3])
+            matching_source_ids = [
+                source_id
+                for source_id in catalog["sources"]
+                if source_id.endswith("." + source_name)
+            ]
+            assert len(matching_source_ids) == 1, identifier
+            source_id = matching_source_ids[0]
+            assert column_name in catalog["sources"][source_id]["columns"], identifier
+            return
+
+        raise AssertionError(identifier)
 
     for case in oracle["cases"]:
         model_id = f"model.column_lineage_correctness.{case['query']['model']}"
         assert model_id in model_ids, (case["case_id"], model_id)
+        if model_id in catalog_model_ids:
+            assert case["query"]["column"] in catalog["nodes"][model_id]["columns"], (
+                case["case_id"],
+                model_id,
+                case["query"]["column"],
+            )
+        else:
+            # A12 is intentionally ephemeral, so dbt does not expose its columns
+            # in catalog.json and there is no catalog-backed column check to run.
+            assert model_id == "model.column_lineage_correctness.a12_ambiguous_bare_column"
         identifiers = []
         if case["direction"] == "upstream":
             identifiers.extend(case["expected_terminal_sources"] or [])
@@ -47,6 +82,7 @@ def main() -> None:
                 assert any(source_id.endswith("." + source_table) for source_id in source_ids), identifier
             else:
                 raise AssertionError(identifier)
+            assert_catalog_column(identifier)
 
     print(
         "artifacts valid: "
