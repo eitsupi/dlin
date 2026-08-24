@@ -196,6 +196,83 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
     }
 }
 
+fn bigquery_struct_field_cross_model_manifest() -> Manifest {
+    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn model(
+        unique_id: &str,
+        name: &str,
+        dependencies: &[&str],
+        output_columns: &[&str],
+        sql: &str,
+    ) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            compiled_code: Some(sql.to_string()),
+            database: Some("p".to_string()),
+            schema: Some("d".to_string()),
+        }
+    }
+
+    let upstream_id = "model.proj.upstream_model";
+    let downstream_id = "model.proj.quoting_model";
+
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        upstream_id.to_string(),
+        model(
+            upstream_id,
+            "upstream_model",
+            &[],
+            &["user_id", "event"],
+            "SELECT user_id, ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t GROUP BY user_id",
+        ),
+    );
+    nodes.insert(
+        downstream_id.to_string(),
+        model(
+            downstream_id,
+            "quoting_model",
+            &[upstream_id],
+            &[
+                "user_id",
+                "qualified_field",
+                "bare_field",
+                "plain_column",
+            ],
+            "SELECT agg.user_id, agg.event.qualified_field AS qualified_field, event.bare_field AS bare_field, agg.user_id AS plain_column FROM `p`.`d`.`upstream_model` AS agg",
+        ),
+    );
+
+    Manifest {
+        nodes,
+        ..Default::default()
+    }
+}
+
 fn bigquery_unnest_cross_model_manifest() -> Manifest {
     let mut manifest = bigquery_compound_field_access_manifest();
     let mut downstream = manifest
@@ -498,6 +575,79 @@ fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column
         "expected upstream model path, got: {:?}",
         source.model_path
     );
+}
+
+#[test]
+fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
+    let manifest = bigquery_struct_field_cross_model_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "quoting_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let user_id = result
+        .columns
+        .iter()
+        .find(|column| column.column == "user_id")
+        .expect("user_id should be present");
+    let plain_column = result
+        .columns
+        .iter()
+        .find(|column| column.column == "plain_column")
+        .expect("plain_column should be present");
+    for entry in [user_id, plain_column] {
+        assert_eq!(
+            entry.sources,
+            vec![ColumnSource {
+                table: "p.d.external_table_a".to_string(),
+                column: "user_id".to_string(),
+                model_path: vec![(
+                    "upstream_model".to_string(),
+                    "user_id".to_string(),
+                    TransformationType::Direct,
+                )],
+            }]
+        );
+    }
+
+    let qualified = result
+        .columns
+        .iter()
+        .find(|column| column.column == "qualified_field");
+    let bare = result
+        .columns
+        .iter()
+        .find(|column| column.column == "bare_field");
+    let qualified = qualified.expect("qualified_field should be present");
+    let bare = bare.expect("bare_field should be present");
+    assert_eq!(qualified.sources, bare.sources);
+    for entry in [qualified, bare] {
+        assert_eq!(
+            entry.sources,
+            vec![ColumnSource {
+                table: "p.d.upstream_model".to_string(),
+                column: "event".to_string(),
+                model_path: Vec::new(),
+            }]
+        );
+    }
+    assert!(
+        result.errors.iter().any(|error| {
+            error.what.contains("event") && error.what.contains("no visible binding")
+        }),
+        "row-value child should remain indeterminate: {:?}",
+        result.errors
+    );
+
+    let public = serde_json::to_string(&result).expect("public result should serialize");
+    for forbidden in ["\\\"agg.event\\\"", "\\\"event\\\"", "external_table_a.t"] {
+        assert!(
+            !public.contains(forbidden),
+            "public result must not expose {forbidden}: {public}"
+        );
+    }
 }
 
 #[test]
