@@ -403,7 +403,7 @@ flowchart LR
 
 Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
 
-| Workload | dlin 0.2.4 | Parrant 0.17.2 | dbt-meta 0.3.8 |
+| Workload | dlin 0.2.4 | [Parrant 0.17.2](https://pypi.org/project/parrant/0.17.2/) | [dbt-meta 0.3.8](https://pypi.org/project/dbt-meta/0.3.8/) |
 | --- | ---: | ---: | ---: |
 | Volume, 100,150 columns, single upstream | 79.8 ms | 29.3 s | build >120 s timeout; query not run |
 | Deep 64, single upstream | 78.1 ms | 1.34 s | build 3.13 s; query 427 ms |
