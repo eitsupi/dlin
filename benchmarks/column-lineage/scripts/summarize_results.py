@@ -94,9 +94,7 @@ def scenario_summary(scenario: dict, runs: int) -> dict:
         "stdout": scenario["raw_stdout"],
         "stderr": scenario["raw_stderr"],
     }
-    for raw_path in raw_paths.values():
-        if not (ROOT / raw_path).is_file():
-            raise RuntimeError(f"missing raw output: {raw_path}")
+    missing_raw = [raw_path for raw_path in raw_paths.values() if not (ROOT / raw_path).is_file()]
     result = {
         "name": scenario["name"],
         "kind": scenario["kind"],
@@ -107,9 +105,15 @@ def scenario_summary(scenario: dict, runs: int) -> dict:
         "raw_stderr": raw_paths["stderr"],
         "hyperfine_json": scenario["hyperfine_json"],
     }
+    if missing_raw:
+        result["missing_raw"] = missing_raw
     if scenario["exit_code"] != 0:
         result["status"] = "invalid"
+        if missing_raw:
+            result["reason"] = f"{result['reason']}; missing raw output: {', '.join(missing_raw)}"
         return result
+    for raw_path in missing_raw:
+        raise RuntimeError(f"missing raw output: {raw_path}")
 
     hyperfine_path = ROOT / scenario["hyperfine_json"]
     if not hyperfine_path.is_file():
@@ -203,7 +207,7 @@ def main() -> int:
     markdown = [
         "# Benchmark summary",
         "",
-        "This is a three-run quick measurement. It reports measurements only and declares no ranking or winner.",
+        f"This is a {runs}-run quick measurement. It reports measurements only and declares no ranking or winner.",
         "",
         *table("Preparation and cold", preparation),
         *table("Query", queries),
