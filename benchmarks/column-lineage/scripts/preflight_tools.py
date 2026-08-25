@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,7 @@ def run_command(
             StopIteration,
             TypeError,
             ValueError,
+            AttributeError,
             json.JSONDecodeError,
         ) as error:
             valid = False
@@ -114,6 +116,13 @@ def skipped_status(tool: str, command: str, reason: str) -> dict[str, object]:
     return invalid_status(tool, command, 126, reason)
 
 
+def reported_version(stdout: str) -> str | None:
+    matches = re.findall(
+        r"(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+)(?![0-9A-Za-z.+-])", stdout
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
 def executable(
     binary: str, expected_version: str, label: str | None = None
 ) -> tuple[str | None, dict[str, object]]:
@@ -127,7 +136,10 @@ def executable(
         return None, invalid_status(tool, "version", 126, f"development build path rejected: {path_text}")
 
     def check_version(stdout: str) -> str:
-        assert expected_version in stdout, f"expected version {expected_version!r}, got {stdout.strip()!r}"
+        actual_version = reported_version(stdout)
+        assert actual_version == expected_version, (
+            f"expected version {expected_version!r}, got {stdout.strip()!r}"
+        )
         return f"version {expected_version}"
 
     status = run_command(tool, "version", [path, "--version"], check_version)
