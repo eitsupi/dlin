@@ -72,9 +72,9 @@ git diff --name-only main | dlin graph -o json
 
 dlin supports two source modes for model-level commands.
 
-**SQL parse mode (default)** is for developers working with a live dbt project. dlin reads `ref()` and `source()` calls directly from SQL files without running `dbt compile`. It works immediately as you edit models, with no compilation step needed.
+**SQL parse mode (default)** is for developers editing a live dbt project. It reads `ref()` and `source()` directly from SQL without waiting for `dbt compile`, so model-level lineage quickly identifies the related models. Read the relevant SQL for exact transformation behavior.
 
-**Manifest mode** (`--source manifest`) is for analysts or agents who have access only to a compiled `manifest.json`. A developer runs `dbt compile` once and distributes the result; anyone with that file can then explore the full project structure with dlin without needing SQL files or a Python environment.
+**Manifest mode** (`--source manifest`) is for analysts or agents analyzing compiled state rather than editing live SQL. A developer compiles once and shares `manifest.json`; users explore the resolved graph without SQL or Python. Use column-level lineage when a field-level trace is needed; it requires the compiled manifest.
 
 ```sh
 # SQL parse mode: reads SQL files directly (default)
