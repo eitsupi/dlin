@@ -14,6 +14,8 @@ uv tool install --reinstall dbt-meta==0.3.8
 cargo install hyperfine --version 1.19.0 --locked
 ```
 
+The comparison CLIs are intentionally installed as isolated `uv tool` environments rather than project dependencies: Parrant 0.17.2 requires `sqlglot>=26.8,<27`, while dbt-meta 0.3.8 requires `sqlglot>=30` and the pinned dbt environment resolves SQLGlot 30.x.
+
 Run the small benchmark with these four commands:
 
 ```sh
