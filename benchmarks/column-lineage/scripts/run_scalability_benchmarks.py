@@ -111,7 +111,12 @@ def dlin_downstream_valid(stdout: Path, workload: dict) -> str:
     payload = json_text(stdout)
     assert isinstance(payload, list) and payload, "dlin downstream JSON is empty"
     query = workload["selected_queries"]["downstream"]
-    entry = next(item for item in payload if item.get("model") == model_name(query["model"]))
+    entry = next(
+        item
+        for item in payload
+        if item.get("model") == model_name(query["model"])
+        and item.get("column") == query["column"]
+    )
     actual = {
         (item.get("unique_id"), item.get("column"))
         for item in entry.get("impacted_columns", [])
