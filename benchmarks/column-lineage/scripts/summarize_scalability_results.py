@@ -70,17 +70,6 @@ def cpu_model() -> str | None:
     return platform.processor() or None
 
 
-def total_memory() -> int | None:
-    meminfo = Path("/proc/meminfo")
-    if meminfo.is_file():
-        for line in meminfo.read_text(errors="replace").splitlines():
-            if line.startswith("MemTotal:"):
-                parts = line.split()
-                if len(parts) > 1 and parts[1].isdigit():
-                    return int(parts[1]) * 1024
-    return None
-
-
 def file_metadata(path: Path, expected: dict | None = None) -> dict:
     if not path.is_file():
         raise RuntimeError(f"missing artifact: {relative(path)}")
@@ -253,7 +242,7 @@ def markdown(result: dict) -> str:
         "",
         "## Run context",
         "",
-        f"Tools: {tool_versions}. Runs/warmup/timeout: {result['runs']}/{result['warmup']}/{result['timeout_seconds']} seconds. Environment: {environment['os']}, {environment['arch']}, {environment['cpu_model']}, {environment['total_memory_bytes']} bytes memory.",
+        f"Tools: {tool_versions}. Runs/warmup/timeout: {result['runs']}/{result['warmup']}/{result['timeout_seconds']} seconds. Environment: {environment['os']}, {environment['arch']}, {environment['cpu_model']}.",
         "",
         "## Reproduce",
         "",
@@ -302,7 +291,7 @@ def main() -> int:
     profiles = [profile_result(profile) for profile in profiles_config]
     result = {
         "schema_version": 1,
-        "environment": {"os": platform.platform(), "arch": platform.machine() or None, "cpu_model": cpu_model(), "total_memory_bytes": total_memory()},
+        "environment": {"os": platform.platform(), "arch": platform.machine() or None, "cpu_model": cpu_model()},
         "git_head": git_head(),
         "tool_versions": [{key: target[key] for key in ("name", "version", "binary", "install")} for target in load(TOOLS)["comparison_targets"]],
         "runs": 3,
