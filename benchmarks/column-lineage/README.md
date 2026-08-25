@@ -43,6 +43,8 @@ Manual profiles require `--allow-manual`. Outputs are written under ignored `res
 
 After preflight, run a bounded scale measurement with `uv run --locked python scripts/run_scalability_benchmarks.py --profile wide-25 --runs 1 --warmup 1`; each tool's cache/preparation boundary is recorded in `run_metadata.json`.
 
+Publish the formal local scale results with `uv run --locked python scripts/summarize_scalability_results.py`.
+
 ## Provenance and license
 
 The fixture structure was informed by [GnosisChain dbt-cerebro](https://github.com/gnosischain/dbt-cerebro), MIT License, Copyright 2024 hdser. This project does not copy its SQL, model names, or data. The fixture material is released under the MIT License; see [LICENSE](LICENSE) and [NOTICE](NOTICE).

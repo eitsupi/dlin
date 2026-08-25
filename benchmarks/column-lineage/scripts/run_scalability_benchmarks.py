@@ -217,7 +217,7 @@ def probe_and_record(name: str, tool: str, kind: str, argv: list[str], validator
         "command": command_string(argv),
         "status": "invalid",
         "exit_code": exit_code,
-        "reason": "command failed" if exit_code else "semantic validation failed",
+        "reason": f"timeout after {timeout} seconds" if exit_code == 124 else ("command failed" if exit_code else "semantic validation failed"),
         "probe_stdout": rel(probe_stdout),
         "probe_stderr": rel(probe_stderr),
         "raw_stdout": None,
@@ -366,7 +366,7 @@ def main() -> int:
             "warmup": args.warmup,
             "timeout_seconds": args.timeout,
             "boundaries": {
-                "dlin_cache": {"size_bytes": None, "reason": "v1 uses --no-cache because dlin-fot2.7 is unverified"},
+                "dlin_cache": {"size_bytes": None, "reason": "v1 uses --no-cache because cache behavior is not yet verified"},
                 "parrant_cache": {"size_bytes": None, "reason": "no persistent cache; project parsing is included"},
                 "peak_rss": {"size_bytes": None, "reason": "N/A; no low-overhead process-tree measurement"},
             },
