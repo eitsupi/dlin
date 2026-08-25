@@ -35,6 +35,16 @@ uv run --locked python scripts/preflight_tools.py
 
 The preflight uses the same manifest and catalog for dlin, Parrant, and dbt-meta. It runs representative I01 upstream and I05 downstream queries, stores raw outputs under `results/local/preflight/`, and writes a tool-specific validity summary to `status.json`.
 
+For a quick first measurement, run the three steps below. The benchmark uses hyperfine with three runs and one warmup by default. Set `BENCHMARK_RUNS` or `BENCHMARK_WARMUP` to increase them.
+
+```sh
+./scripts/regenerate_artifacts.sh
+uv run --locked python scripts/preflight_tools.py
+uv run --locked python scripts/run_benchmarks.py
+```
+
+Results are written under `results/local/benchmark/`. dlin reports cold and warm cache scenarios. Parrant includes project parsing in each query measurement because it has no persistent cache. dbt-meta measures lineage build separately from queries against its generated artifact.
+
 ## Run-local artifacts
 
 `artifacts/manifest.json` and `artifacts/catalog.json` are raw, ignored outputs of one setup run. The benchmark runner must pass those exact two files to every tool in that run and record their hashes in its run metadata. Runtime metadata in dbt artifacts is therefore part of the observed run input; this fixture does not commit golden artifacts. For branched cases, `expected_terminal_sources` is the required set; `expected_model_path` is an advisory representative path unless the case is a single-chain case such as I01. Consumers must not require one common path for every branch.
