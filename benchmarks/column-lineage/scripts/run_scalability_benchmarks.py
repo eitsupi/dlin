@@ -83,7 +83,11 @@ def dlin_upstream_valid(stdout: Path, workload: dict) -> str:
     entry = next(item for item in payload if item.get("model") == expected_model)
     column = next(item for item in entry["columns"] if item["column"] == query["column"])
     expected_source = source_name(query["expected_terminal_source_ids"][0])
-    assert any(expected_source in str(item.get("table", "")) for item in column["sources"]), "dlin source mismatch"
+    actual = {
+        (str(item.get("table", "")).split(".")[-1], item.get("column"))
+        for item in column["sources"]
+    }
+    assert actual == {(expected_source, query["column"])}, "dlin source mismatch"
     return "dlin upstream terminal source found"
 
 
@@ -125,6 +129,7 @@ def parrant_upstream_valid(stdout: Path, workload: dict) -> str:
     entry = json_text(stdout)
     query = workload["selected_queries"]["upstream"]
     parrant_coverage(entry, workload)
+    assert entry["model"] == model_name(query["model"]) and entry["column"] == query["column"], "Parrant target mismatch"
     expected_source = source_name(query["expected_terminal_source_ids"][0])
     source_columns = [
         source
@@ -132,7 +137,10 @@ def parrant_upstream_valid(stdout: Path, workload: dict) -> str:
         for column in model.values()
         for source in column.get("source_columns", [])
     ]
-    assert any(expected_source in source for source in source_columns), "Parrant source mismatch"
+    actual = {tuple(source.split(".", 1)) for source in source_columns if "." in source}
+    assert actual and all(column == query["column"] for _, column in actual), "Parrant upstream column mismatch"
+    terminal = {identity for identity in actual if identity[0] == expected_source}
+    assert terminal == {(expected_source, query["column"])}, "Parrant source mismatch"
     return "Parrant upstream terminal source found"
 
 
@@ -161,7 +169,11 @@ def meta_upstream_valid(stdout: Path, workload: dict) -> str:
     entry = json_text(stdout)
     query = workload["selected_queries"]["upstream"]
     expected_source = source_name(query["expected_terminal_source_ids"][0])
-    assert any(expected_source in item.get("id", "") for item in entry["all"]), "dbt-meta source mismatch"
+    expected_target = f"{model_name(query['model'])}.{query['column']}"
+    assert entry["target"]["id"] == expected_target, "dbt-meta target mismatch"
+    identities = {(item.get("model"), item.get("column")) for item in entry["all"]}
+    assert identities and all(column == query["column"] for _, column in identities), "dbt-meta upstream column mismatch"
+    assert (f"source.main.{expected_source}", query["column"]) in identities, "dbt-meta source mismatch"
     return "dbt-meta upstream terminal source found"
 
 
@@ -202,7 +214,7 @@ def probe_and_record(name: str, tool: str, kind: str, argv: list[str], validator
             record["reason"] = validator(probe_stdout, workload)
             record["validation_reason"] = record["reason"]
             record["status"] = "valid"
-        except (AssertionError, KeyError, IndexError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        except (AssertionError, IndexError, KeyError, OSError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as error:
             record["reason"] = str(error) or error.__class__.__name__
     records.append(record)
     return record["status"] == "valid"
