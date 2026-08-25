@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {"name": "volume-1k", "family": "volume", "manual": false, "parameters": {"width": 50, "background_models": 20}},
+    {"name": "volume-10k", "family": "volume", "manual": false, "parameters": {"width": 50, "background_models": 200}},
+    {"name": "volume-100k", "family": "volume", "manual": false, "parameters": {"width": 50, "background_models": 2000}},
+    {"name": "volume-1m", "family": "volume", "manual": true, "parameters": {"width": 50, "background_models": 20000}},
+    {"name": "wide-25", "family": "wide", "manual": false, "parameters": {"width": 25, "depth": 8}},
+    {"name": "wide-50", "family": "wide", "manual": false, "parameters": {"width": 50, "depth": 8}},
+    {"name": "wide-100", "family": "wide", "manual": false, "parameters": {"width": 100, "depth": 8}},
+    {"name": "wide-200", "family": "wide", "manual": false, "parameters": {"width": 200, "depth": 8}},
+    {"name": "deep-8", "family": "deep", "manual": false, "parameters": {"width": 25, "depth": 8}},
+    {"name": "deep-16", "family": "deep", "manual": false, "parameters": {"width": 25, "depth": 16}},
+    {"name": "deep-32", "family": "deep", "manual": false, "parameters": {"width": 25, "depth": 32}},
+    {"name": "deep-64", "family": "deep", "manual": false, "parameters": {"width": 25, "depth": 64}},
+    {"name": "deep-128", "family": "deep", "manual": true, "parameters": {"width": 25, "depth": 128}},
+    {"name": "fanout-8", "family": "fanout", "manual": false, "parameters": {"width": 25, "branches": 8}},
+    {"name": "fanout-32", "family": "fanout", "manual": false, "parameters": {"width": 25, "branches": 32}},
+    {"name": "fanout-128", "family": "fanout", "manual": false, "parameters": {"width": 25, "branches": 128}},
+    {"name": "fanout-512", "family": "fanout", "manual": true, "parameters": {"width": 25, "branches": 512}}
+  ]
+}

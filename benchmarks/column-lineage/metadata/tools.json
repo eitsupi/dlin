@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "fixture_runtime": {
+    "dbt_core": "1.12.2",
+    "dbt_duckdb": "1.11.0",
+    "duckdb": "1.5.5"
+  },
+  "comparison_targets": [
+    {
+      "name": "dlin",
+      "version": "0.2.4",
+      "binary": "dlin",
+      "version_command": "dlin --version",
+      "install": "uv tool install --reinstall dlin-cli==0.2.4",
+      "commands": {
+        "upstream": "dlin column upstream i01_deep_08 --column amount_double --manifest-path artifacts/manifest.json --no-cache -o json",
+        "downstream": "dlin column downstream i05_fanout_base --column amount --manifest-path artifacts/manifest.json --no-cache -o json"
+      },
+      "capabilities": {
+        "upstream": true,
+        "downstream": true,
+        "whole_model": true,
+        "full_project": true,
+        "preparation": "compiled manifest.json",
+        "cache": "supported and disabled with --no-cache"
+      },
+      "limitations": [
+        "The preflight checks representative columns only and does not score the full oracle."
+      ]
+    },
+    {
+      "name": "parrant",
+      "version": "0.17.2",
+      "binary": "parrant",
+      "version_command": "parrant --version",
+      "install": "uv tool install --reinstall --with jinja2 parrant==0.17.2",
+      "commands": {
+        "upstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select +i01_deep_08.amount_double --format json",
+        "downstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select i05_fanout_base.amount+ --format json"
+      },
+      "capabilities": {
+        "upstream": true,
+        "downstream": true,
+        "whole_model": true,
+        "full_project": true,
+        "preparation": "manifest.json and catalog.json",
+        "cache": "no preflight cache flag"
+      },
+      "limitations": [
+        "The released package may require the Jinja2 supplement included by the install command.",
+        "The preflight requires parsed_ok models and rejects an output where every model failed to parse."
+      ]
+    },
+    {
+      "name": "dbt-meta",
+      "version": "0.3.8",
+      "binary": "meta",
+      "version_command": "meta --version",
+      "install": "uv tool install --reinstall dbt-meta==0.3.8",
+      "commands": {
+        "build": "meta lineage build --manifest artifacts/manifest.json --catalog artifacts/catalog.json --output results/local/preflight/dbt-meta-lineage.json --json --no-compile",
+        "upstream": "meta lineage column --artifact results/local/preflight/dbt-meta-lineage.json --json i01_deep_08.amount_double",
+        "downstream": "meta lineage downstream --artifact results/local/preflight/dbt-meta-lineage.json --json i05_fanout_base.amount"
+      },
+      "capabilities": {
+        "upstream": true,
+        "downstream": true,
+        "whole_model": false,
+        "full_project": true,
+        "preparation": "lineage build from manifest.json and catalog.json",
+        "cache": "lineage artifact is an explicit preflight output"
+      },
+      "limitations": [
+        "The build may report parse warnings for unsupported SQL; the preflight requires a non-empty node and edge graph."
+      ]
+    }
+  ],
+  "excluded_targets": [
+    {
+      "name": "Canva",
+      "version": "0.1.7b2",
+      "reason": "The public CLI is known not to produce valid lineage for this artifact, resulting in empty or parse-failure output.",
+      "reevaluate_when": "Reevaluate when a released CLI produces non-empty, parseable lineage for this fixture."
+    }
+  ],
+  "note": "Tool results are not used to construct oracle/cases.json. Unsupported cases are reported by the caller."
+}

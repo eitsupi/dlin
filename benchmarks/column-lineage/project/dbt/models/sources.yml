@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: synthetic
+    schema: main
+    tables:
+      - name: raw_orders
+      - name: raw_payments
+      - name: raw_events
+      - name: raw_left
+      - name: raw_right

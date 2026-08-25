@@ -1,0 +1,16 @@
+This benchmark fixture is original synthetic material and contains no PII.
+
+Runtime dependencies:
+
+* dbt-core 1.12.2, Apache License 2.0,
+  https://github.com/dbt-labs/dbt-core
+* dbt-duckdb 1.11.0, Apache License 2.0,
+  https://github.com/duckdb/dbt-duckdb
+* DuckDB, MIT License,
+  https://github.com/duckdb/duckdb
+
+Structural inspiration:
+
+* GnosisChain dbt-cerebro, MIT License, Copyright 2024 hdser,
+  https://github.com/gnosischain/dbt-cerebro
+  The fixture does not copy SQL, model names, or data from this project.

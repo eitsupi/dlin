@@ -1,0 +1,8 @@
+.venv/
+project/dbt/logs/
+project/dbt/target/
+project/column_lineage_correctness.duckdb
+scripts/__pycache__/
+
+artifacts/*
+results/local/

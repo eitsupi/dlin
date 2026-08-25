@@ -1,0 +1,3 @@
+payment_id,order_id,amount,status
+10,1,12.50,settled
+11,2,20.00,pending
