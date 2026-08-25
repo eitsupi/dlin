@@ -112,9 +112,12 @@ def dlin_downstream_valid(stdout: Path, workload: dict) -> str:
     assert isinstance(payload, list) and payload, "dlin downstream JSON is empty"
     query = workload["selected_queries"]["downstream"]
     entry = next(item for item in payload if item.get("model") == model_name(query["model"]))
-    actual = {item.get("unique_id") for item in entry.get("impacted_columns", [])}
-    expected = set(query["expected_target_ids"])
-    actual.discard(query["model"])
+    actual = {
+        (item.get("unique_id"), item.get("column"))
+        for item in entry.get("impacted_columns", [])
+    }
+    expected = {(target, query["column"]) for target in query["expected_target_ids"]}
+    actual.discard((query["model"], query["column"]))
     assert actual == expected, "dlin downstream targets mismatch"
     return "dlin downstream targets found"
 
@@ -148,9 +151,14 @@ def parrant_downstream_valid(stdout: Path, workload: dict) -> str:
     entry = json_text(stdout)
     query = workload["selected_queries"]["downstream"]
     parrant_coverage(entry, workload)
-    actual = {model_id for model_id in entry["downstream"]["models"]}
-    expected = {model_name(uid) for uid in query["expected_target_ids"]}
-    actual.discard(model_name(query["model"]))
+    assert entry["model"] == model_name(query["model"]) and entry["column"] == query["column"], "Parrant target mismatch"
+    actual = {
+        (model_id, column)
+        for model_id, columns in entry["downstream"]["models"].items()
+        for column in columns
+    }
+    expected = {(model_name(uid), query["column"]) for uid in query["expected_target_ids"]}
+    actual.discard((model_name(query["model"]), query["column"]))
     assert actual == expected, "Parrant downstream targets mismatch"
     return "Parrant downstream targets found"
 
@@ -180,6 +188,8 @@ def meta_upstream_valid(stdout: Path, workload: dict) -> str:
 def meta_downstream_valid(stdout: Path, workload: dict) -> str:
     entry = json_text(stdout)
     query = workload["selected_queries"]["downstream"]
+    expected_target = f"{model_name(query['model'])}.{query['column']}"
+    assert entry["target"]["id"] == expected_target, "dbt-meta target mismatch"
     actual = {item["id"] for item in entry["all"]}
     expected = {f"{model_name(uid)}.{query['column']}" for uid in query["expected_target_ids"]}
     actual.discard(f"{model_name(query['model'])}.{query['column']}")
