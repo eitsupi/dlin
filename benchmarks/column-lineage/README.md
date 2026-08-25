@@ -41,6 +41,7 @@ For a quick first measurement, run the three steps below. The benchmark uses hyp
 ./scripts/regenerate_artifacts.sh
 uv run --locked python scripts/preflight_tools.py
 uv run --locked python scripts/run_benchmarks.py
+uv run --locked python scripts/summarize_results.py
 ```
 
 Results are written under `results/local/benchmark/`. dlin reports cold and warm cache scenarios. Parrant includes project parsing in each query measurement because it has no persistent cache. dbt-meta measures lineage build separately from queries against its generated artifact.
