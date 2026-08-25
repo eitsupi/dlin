@@ -118,7 +118,7 @@ def skipped_status(tool: str, command: str, reason: str) -> dict[str, object]:
 
 def reported_version(stdout: str) -> str | None:
     matches = re.findall(
-        r"(?<![0-9A-Za-z])v?(\d+\.\d+\.\d+)(?![0-9A-Za-z.+-])", stdout
+        r"(?<![0-9A-Za-z.])v?(\d+\.\d+\.\d+)(?![0-9A-Za-z.+-])", stdout
     )
     return matches[0] if len(matches) == 1 else None
 
