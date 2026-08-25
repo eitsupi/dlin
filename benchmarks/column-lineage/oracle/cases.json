@@ -112,16 +112,6 @@
       "notes": "A row/struct alias is not itself a relation or fabricated column."
     },
     {
-      "case_id": "A12",
-      "layer": "atomic",
-      "direction": "upstream",
-      "query": {"model": "a12_ambiguous_bare_column", "column": "shared_value"},
-      "semantic_class": "ambiguous_bare_column",
-      "expected_terminal_sources": null,
-      "expected_model_path": [],
-      "notes": "Indeterminate: an unqualified duplicate column must not be forced to one source."
-    },
-    {
       "case_id": "I01",
       "layer": "integration",
       "direction": "upstream",

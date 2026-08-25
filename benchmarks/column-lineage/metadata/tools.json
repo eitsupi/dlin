@@ -22,5 +22,5 @@
       "binary": "meta"
     }
   ],
-  "note": "Tool results are not used to construct oracle/cases.json. Unsupported or indeterminate cases are reported by the caller."
+  "note": "Tool results are not used to construct oracle/cases.json. Unsupported cases are reported by the caller."
 }

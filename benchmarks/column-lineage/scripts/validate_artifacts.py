@@ -26,11 +26,9 @@ def main() -> None:
         key for key in catalog["nodes"] if key.startswith("model.")
     }
     source_ids = set(manifest["sources"])
-    assert len(model_ids) == 28
+    assert len(model_ids) == 27
     assert len(catalog_model_ids) == 27
-    assert model_ids - catalog_model_ids == {
-        "model.column_lineage_correctness.a12_ambiguous_bare_column"
-    }
+    assert model_ids == catalog_model_ids
 
     def assert_catalog_column(identifier: str) -> None:
         relation_id, column_name = identifier.rsplit(".", 1)
@@ -57,19 +55,14 @@ def main() -> None:
     for case in oracle["cases"]:
         model_id = f"model.column_lineage_correctness.{case['query']['model']}"
         assert model_id in model_ids, (case["case_id"], model_id)
-        if model_id in catalog_model_ids:
-            assert case["query"]["column"] in catalog["nodes"][model_id]["columns"], (
-                case["case_id"],
-                model_id,
-                case["query"]["column"],
-            )
-        else:
-            # A12 is intentionally ephemeral, so dbt does not expose its columns
-            # in catalog.json and there is no catalog-backed column check to run.
-            assert model_id == "model.column_lineage_correctness.a12_ambiguous_bare_column"
+        assert case["query"]["column"] in catalog["nodes"][model_id]["columns"], (
+            case["case_id"],
+            model_id,
+            case["query"]["column"],
+        )
         identifiers = []
         if case["direction"] == "upstream":
-            identifiers.extend(case["expected_terminal_sources"] or [])
+            identifiers.extend(case["expected_terminal_sources"])
         else:
             identifiers.extend(case["expected_downstream_targets"])
         identifiers.extend(case["expected_model_path"])

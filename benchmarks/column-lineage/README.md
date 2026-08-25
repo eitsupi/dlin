@@ -4,9 +4,9 @@ This directory is a small, reproducible correctness corpus for dbt column-lineag
 
 ## Scope
 
-The atomic fixtures cover direct projection, rename/cast/expression, source-free expressions, two-source unions, typed-NULL unions, unqualified and qualified stars, DuckDB list/struct `UNNEST`, nested struct fields, date tokens, row-value aliases, and deliberately ambiguous bare columns. Integration fixtures cover an eight-hop projection chain, a combined multi-source union, 50- and 127-column projections, a nested pipeline, and downstream fanout.
+The atomic fixtures cover direct projection, rename/cast/expression, source-free expressions, two-source unions, typed-NULL unions, unqualified and qualified stars, DuckDB list/struct `UNNEST`, nested struct fields, date tokens, and row-value aliases. Integration fixtures cover an eight-hop projection chain, a combined multi-source union, 50- and 127-column projections, a nested pipeline, and downstream fanout.
 
-The oracle is independent from tool output: [oracle/cases.json](oracle/cases.json) records canonical source/target expectations and indeterminate cases. Transform labels are intentionally outside the v1 score. A tool that cannot represent a case should be recorded as unsupported by the caller; this corpus does not embed tool-specific rules.
+The oracle is independent from tool output: [oracle/cases.json](oracle/cases.json) records canonical source/target expectations. Transform labels are intentionally outside the v1 score. A tool that cannot represent a case should be recorded as unsupported by the caller; this corpus does not embed tool-specific rules.
 
 ## Reproduce
 

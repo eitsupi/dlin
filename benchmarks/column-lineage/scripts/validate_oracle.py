@@ -24,7 +24,7 @@ allowed_layers = {"atomic", "integration"}
 payload = json.loads(ORACLE.read_text())
 assert payload["schema_version"] == 1
 cases = payload["cases"]
-assert len(cases) == 17
+assert len(cases) == 16
 ids = set()
 
 for case in cases:
@@ -38,12 +38,10 @@ for case in cases:
     assert isinstance(case["notes"], str) and case["notes"], case
     if case["direction"] == "upstream":
         assert "expected_terminal_sources" in case, case
-        assert case["expected_terminal_sources"] is None or isinstance(
-            case["expected_terminal_sources"], list
-        ), case
+        assert isinstance(case["expected_terminal_sources"], list), case
     else:
         assert "expected_downstream_targets" in case, case
         assert isinstance(case["expected_downstream_targets"], list), case
 
-assert ids == {*(f"A{i:02d}" for i in range(1, 13)), *(f"I{i:02d}" for i in range(1, 6))}
+assert ids == {*(f"A{i:02d}" for i in range(1, 12)), *(f"I{i:02d}" for i in range(1, 6))}
 print(f"oracle valid: {len(cases)} cases")

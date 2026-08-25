@@ -12,10 +12,9 @@
     "raw_left",
     "raw_right"
   ],
-  "atomic_cases": 12,
+  "atomic_cases": 11,
   "integration_cases": 5,
-  "model_nodes_in_manifest": 28,
+  "model_nodes_in_manifest": 27,
   "model_nodes_in_catalog": 27,
-  "catalog_exclusion": "The deliberately ambiguous A12 model is ephemeral and therefore has no catalog relation.",
   "oracle": "oracle/cases.json"
 }
