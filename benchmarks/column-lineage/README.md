@@ -28,6 +28,10 @@ The fixture uses dbt-core 1.12.2 and dbt-duckdb 1.11.0, pinned in `pyproject.tom
 
 `artifacts/manifest.json` and `artifacts/catalog.json` are raw, ignored outputs of one setup run. The benchmark runner must pass those exact two files to every tool in that run and record their hashes in its run metadata. Runtime metadata in dbt artifacts is therefore part of the observed run input; this fixture does not commit golden artifacts. For branched cases, `expected_terminal_sources` is the required set; `expected_model_path` is an advisory representative path unless the case is a single-chain case such as I01. Consumers must not require one common path for every branch.
 
+## Structural inspiration
+
+The fixture structure was informed by [GnosisChain dbt-cerebro](https://github.com/gnosischain/dbt-cerebro), MIT License, Copyright 2024 hdser. It does not copy SQL, model names, or data.
+
 ## License
 
 The fixture material is released under the MIT License. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
