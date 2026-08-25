@@ -8,7 +8,7 @@ dbt model lineage CLI. Parses SQL files directly or reads a compiled `manifest.j
 
 Works for developers navigating live SQL files, analysts exploring a shared manifest, AI agents via CLI prompt or MCP server, and CI pipelines.
 
-Column-level lineage (`dlin column upstream` / `dlin column downstream`) is also available. It requires `manifest.json`.
+Column-level lineage (`dlin column upstream` / `dlin column downstream`) requires a compiled `manifest.json` and is usable in practice while remaining Experimental for coverage reasons.
 
 ## Motivation
 
@@ -18,7 +18,7 @@ dlin is designed to fill that gap: a CLI tool that lets AI agents understand a d
 
 To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates common Jinja patterns without Python, parallelizes file I/O, and caches aggressively.
 
-The key idea behind dlin is that finding the right models fast is what matters most. The hard part for agents is knowing which models to look at in the first place. dlin focuses on making model-level lineage as fast as possible, and also offers experimental column-level lineage for deeper analysis.
+The key idea behind dlin is that finding the right models fast is what matters most. The hard part for agents is knowing which models to look at in the first place. dlin focuses on making model-level lineage fast and provides column-level lineage for deeper analysis.
 
 ## Install
 
@@ -146,7 +146,7 @@ Pass `--dialect` to match your project's SQL dialect for accurate column lineage
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
-- **Column-level lineage** (experimental): traces columns across models with transformation classification; requires `manifest.json`
+- **Column-level lineage** (experimental): traces columns across models with transformation classification through the Rust lineage backend; requires `manifest.json`
 
 ## Mermaid diagrams
 
@@ -283,7 +283,9 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 ## Column-level lineage (Experimental)
 
 > [!WARNING]
-> Column-level lineage uses [sqllineage](https://github.com/funcpp/sqllineage) for SQL parsing and lineage extraction. The production backend directly supports Generic, PostgreSQL, MySQL, Hive, Databricks, Snowflake, BigQuery, DuckDB, SQLite, Spark, Trino, Redshift, T-SQL, and ClickHouse. The `dlin` CLI and MCP resolve other recognized dialects to Generic with a warning; direct `dlin-core` API callers receive an unsupported-dialect error instead. Coverage still varies by SQL complexity and dialect, and patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may remain unresolved.
+> The earlier polyglot-sql implementation was completely replaced by a Rust backend built on sqllineage/sqlparser. It is covered by regression fixtures and validated against real dbt projects. Experimental describes remaining coverage work, not an unusable prototype.
+>
+> The Rust lineage stack has less production usage and SQL coverage history than established SQLGlot-based Python tools. Cross-dialect and complex SQL completeness therefore still has unverified areas. The production backend directly supports Generic, PostgreSQL, MySQL, Hive, Databricks, Snowflake, BigQuery, DuckDB, SQLite, Spark, Trino, Redshift, T-SQL, and ClickHouse. The `dlin` CLI and MCP resolve other recognized dialects to Generic with a warning; direct `dlin-core` API callers receive an unsupported-dialect error instead. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may remain unresolved.
 
 `dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json`. Run `dbt compile` first.
 
@@ -401,6 +403,18 @@ flowchart LR
 ```
 
 `stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`. `orders.order_id` is then aggregated into `customers.order_count`. Each edge shows its per-hop transformation type.
+
+### Performance benchmark
+
+Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
+
+| Workload | dlin 0.2.4 | Parrant 0.17.2 | dbt-meta 0.3.8 |
+| --- | ---: | ---: | ---: |
+| Volume, 100,150 columns, single upstream | 79.8 ms | 29.3 s | build >120 s timeout; query not run |
+| Deep 64, single upstream | 78.1 ms | 1.34 s | build 3.13 s; query 427 ms |
+| Fan-out 128, downstream | 238 ms | 1.90 s | build 6.24 s; query 418 ms |
+
+These measurements use synthetic artifacts derived from the real dbt fixture. Native Rust avoids Python runtime startup and overhead; on these workloads, dlin showed substantially lower latency. This does not establish a general winner or fastest tool. dlin uses `--no-cache`, Parrant timings include parsing, and dbt-meta query timing excludes build. See the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 
 ### Known limitations
 
