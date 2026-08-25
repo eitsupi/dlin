@@ -282,9 +282,7 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
 ## Column-level lineage (Experimental)
 
-The earlier polyglot-sql backend was fully replaced by a Rust sqllineage/sqlparser backend. Regression fixtures and real dbt project validation show that it is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
-
-`dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json`. Run `dbt compile` first.
+`dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. Regression fixtures and real dbt project validation show that column-level lineage is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
 
 ```sh
 # Where does each output column of orders come from?
