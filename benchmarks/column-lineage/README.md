@@ -1,35 +1,12 @@
-# Column-lineage correctness fixtures
+# Column-lineage benchmark
 
-This directory is a small, reproducible correctness corpus for dbt column-lineage tools. It is original synthetic material, contains no PII, and does not copy SQL or data from a public sample project. The SQL fixtures do not mention any lineage tool or encode tool-specific expected differences.
+This directory contains a small real dbt-generated DuckDB correctness and quick benchmark layer, plus a separate synthetic scalability layer. The oracle is independent of tool output.
 
-## Scope
+## Setup and small benchmark
 
-The atomic fixtures cover direct projection, rename/cast/expression, source-free expressions, two-source unions, typed-NULL unions, unqualified and qualified stars, DuckDB list/struct `UNNEST`, nested struct fields, date tokens, and row-value aliases. Integration fixtures cover an eight-hop projection chain, a combined multi-source union, 50- and 127-column projections, a nested pipeline, and downstream fanout.
-
-The oracle is independent from tool output: [oracle/cases.json](oracle/cases.json) records canonical source/target expectations. Transform labels are intentionally outside the v1 score. A tool that cannot represent a case should be recorded as unsupported by the caller; this corpus does not embed tool-specific rules.
-
-## Reproduce
-
-All Python and dbt commands go through the pinned uv project. `uvx` and unmanaged system Python are prohibited; use only the declared `pyproject.toml`/`uv.lock` environment and `uv run --locked`.
+From `benchmarks/column-lineage`:
 
 ```sh
-cd benchmarks/column-lineage
-uv sync --locked
-uv run --locked dbt --version --project-dir project/dbt
-./scripts/regenerate_artifacts.sh
-./scripts/validate_artifacts.sh
-```
-
-`regenerate_artifacts.sh` sets the required `COLUMN_LINEAGE_FIXTURE_DUCKDB_PATH` environment variable to a fixture-local absolute DuckDB path, removes that exact database before execution, and runs `dbt clean`, `dbt build`, and `dbt docs generate` from a clean dbt target. It copies the raw `manifest.json` and `catalog.json` into the ignored `artifacts/` directory. An exit trap removes the temporary database, target, logs, and script bytecode on both success and failure; it does not remove `.venv`. Each source-backed model has a SQL `depends_on` comment for its seed, while its executable `FROM` remains a source reference; this makes clean `dbt build` order the seeds before the models without changing the lineage SQL. There are no dbt packages, so no mutable `dbt deps` step is needed. The working DuckDB, target, logs, and run-local artifacts are ignored.
-
-The fixture uses dbt-core 1.12.2 and dbt-duckdb 1.11.0, pinned in `pyproject.toml` and `uv.lock`. Dependencies are not vendored; their attribution and source URLs are in [NOTICE](NOTICE).
-
-## Clean checkout setup
-
-From a clean Linux checkout, install the pinned tools before running the benchmark:
-
-```sh
-cd benchmarks/column-lineage
 uv sync --locked
 uv tool install --reinstall dlin-cli==0.2.4
 uv tool install --reinstall --with jinja2 parrant==0.17.2
@@ -37,20 +14,7 @@ uv tool install --reinstall dbt-meta==0.3.8
 cargo install hyperfine --version 1.19.0 --locked
 ```
 
-The default local benchmark uses three runs and one warmup.
-
-## Tool preflight
-
-Run the clean artifact generator, then the thin three-tool preflight:
-
-```sh
-./scripts/regenerate_artifacts.sh
-uv run --locked python scripts/preflight_tools.py
-```
-
-The preflight uses the same manifest and catalog for dlin, Parrant, and dbt-meta. It runs representative I01 upstream and I05 downstream queries, stores raw outputs under `results/local/preflight/`, and writes a tool-specific validity summary to `status.json`.
-
-For a quick first measurement, run these four commands in order. The benchmark uses hyperfine with three runs and one warmup by default. Set `BENCHMARK_RUNS` or `BENCHMARK_WARMUP` to increase them.
+Run the small benchmark with these four commands:
 
 ```sh
 ./scripts/regenerate_artifacts.sh
@@ -59,23 +23,22 @@ uv run --locked python scripts/run_benchmarks.py
 uv run --locked python scripts/summarize_results.py
 ```
 
-Results are written under `results/local/benchmark/`. dlin reports cold and warm cache scenarios. Parrant includes project parsing in each query measurement because it has no persistent cache. dbt-meta measures lineage build separately from queries against its generated artifact.
+The default measurement uses three runs and one warmup. Set `BENCHMARK_RUNS` or `BENCHMARK_WARMUP` to override them. Results are written under `results/local/preflight/` and `results/local/benchmark/`.
 
-Known limitations:
+The runner passes the same manifest and catalog bytes to every tool. Preflight checks 10 representative commands; it is not a full 16-case correctness score. dlin cold and warm describe only its tool cache and do not drop the OS cache. Parrant timings include project parsing. dbt-meta build is measured separately from queries. Canva 0.1.7b2 is excluded because its public CLI produces invalid or empty lineage for this fixture.
 
-- Preflight checks 10 representative commands. It is not a full 16-case correctness score.
-- Parrant query timings include project parsing. dbt-meta query timings exclude lineage build.
-- Canva 0.1.7b2 is excluded from numeric results because its public CLI produces invalid or empty lineage for this fixture.
-- dlin cold and warm only describe the dlin tool cache. They do not drop the operating system cache.
+## Synthetic scalability layer
 
-## Run-local artifacts
+This layer uses the real artifacts as templates for deterministic workload shapes. It is not representative of real projects. Regenerate the real artifacts, then list or generate a profile:
 
-`artifacts/manifest.json` and `artifacts/catalog.json` are raw, ignored outputs of one setup run. The benchmark runner must pass those exact two files to every tool in that run and record their hashes in its run metadata. Runtime metadata in dbt artifacts is therefore part of the observed run input; this fixture does not commit golden artifacts. For branched cases, `expected_terminal_sources` is the required set; `expected_model_path` is an advisory representative path unless the case is a single-chain case such as I01. Consumers must not require one common path for every branch.
+```sh
+./scripts/regenerate_artifacts.sh
+uv run --locked python scripts/generate_scalability_artifacts.py --list-profiles
+uv run --locked python scripts/generate_scalability_artifacts.py --profile wide-25
+```
 
-## Structural inspiration
+Manual profiles require `--allow-manual`. Outputs are written under ignored `results/local/scalability/`.
 
-The fixture structure was informed by [GnosisChain dbt-cerebro](https://github.com/gnosischain/dbt-cerebro), MIT License, Copyright 2024 hdser. It does not copy SQL, model names, or data.
+## Provenance and license
 
-## License
-
-The fixture material is released under the MIT License. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+The fixture structure was informed by [GnosisChain dbt-cerebro](https://github.com/gnosischain/dbt-cerebro), MIT License, Copyright 2024 hdser. This project does not copy its SQL, model names, or data. The fixture material is released under the MIT License; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
