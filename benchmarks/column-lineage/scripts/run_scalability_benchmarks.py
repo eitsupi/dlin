@@ -75,6 +75,14 @@ def source_name(unique_id: str) -> str:
     return unique_id.rsplit(".", 1)[-1]
 
 
+def upstream_labels(unique_ids: list[str]) -> dict[str, str]:
+    labels = {}
+    for unique_id in unique_ids:
+        label = source_name(unique_id) if unique_id.startswith("source.") else model_name(unique_id)
+        labels[label] = unique_id
+    return labels
+
+
 def dlin_upstream_valid(stdout: Path, workload: dict) -> str:
     payload = json_text(stdout)
     assert isinstance(payload, list) and payload, "dlin upstream JSON is empty"
@@ -138,17 +146,34 @@ def parrant_upstream_valid(stdout: Path, workload: dict) -> str:
     query = workload["selected_queries"]["upstream"]
     parrant_coverage(entry, workload)
     assert entry["model"] == model_name(query["model"]) and entry["column"] == query["column"], "Parrant target mismatch"
-    expected_source = source_name(query["expected_terminal_source_ids"][0])
-    source_columns = [
-        source
-        for model in entry["upstream"]["models"].values()
-        for column in model.values()
-        for source in column.get("source_columns", [])
-    ]
-    actual = {tuple(source.split(".", 1)) for source in source_columns if "." in source}
-    assert actual and all(column == query["column"] for _, column in actual), "Parrant upstream column mismatch"
-    terminal = {identity for identity in actual if identity[0] == expected_source}
-    assert terminal == {(expected_source, query["column"])}, "Parrant source mismatch"
+    expected_ids = query["expected_upstream_node_ids"]
+    labels = upstream_labels(expected_ids)
+    models = entry["upstream"]["models"]
+    actual_ids = set()
+    for label, columns in models.items():
+        assert label in labels, f"Parrant unexpected upstream node: {label}"
+        actual_ids.add(labels[label])
+        assert set(columns) == {query["column"]}, "Parrant upstream column mismatch"
+    assert actual_ids == set(expected_ids), "Parrant upstream node set mismatch"
+    expected_edges = {
+        edge["child_id"]: edge["parent_id"]
+        for edge in query["expected_upstream_edges"]
+        if edge["child_id"] in expected_ids
+    }
+    for label, columns in models.items():
+        unique_id = labels[label]
+        column_entry = columns[query["column"]]
+        actual_refs = set()
+        for source in column_entry.get("source_columns", []):
+            name, column = source.split(".", 1)
+            actual_refs.add((name, column))
+        if unique_id.startswith("source."):
+            expected_refs = {(label, query["column"])}
+        else:
+            parent_id = expected_edges[unique_id]
+            parent_label = next(label for label, uid in labels.items() if uid == parent_id)
+            expected_refs = {(parent_label, query["column"])}
+        assert actual_refs == expected_refs, "Parrant upstream edge mismatch"
     return "Parrant upstream terminal source found"
 
 
@@ -185,7 +210,14 @@ def meta_upstream_valid(stdout: Path, workload: dict) -> str:
     expected_target = f"{model_name(query['model'])}.{query['column']}"
     assert entry["target"]["id"] == expected_target, "dbt-meta target mismatch"
     identities = {(item.get("model"), item.get("column")) for item in entry["all"]}
-    assert identities and all(column == query["column"] for _, column in identities), "dbt-meta upstream column mismatch"
+    expected = {
+        (
+            f"source.main.{source_name(unique_id)}" if unique_id.startswith("source.") else model_name(unique_id),
+            query["column"],
+        )
+        for unique_id in query["expected_upstream_node_ids"]
+    }
+    assert identities == expected, "dbt-meta upstream node/column set mismatch"
     assert (f"source.main.{expected_source}", query["column"]) in identities, "dbt-meta source mismatch"
     return "dbt-meta upstream terminal source found"
 

@@ -1,6 +1,6 @@
 # Column-lineage benchmark
 
-This directory contains a small real dbt-generated DuckDB correctness and quick benchmark layer, plus a separate synthetic scalability layer. The oracle is independent of tool output.
+This directory contains a small real dbt-generated DuckDB correctness and quick benchmark layer, plus a separate synthetic scalability layer. The oracle is a manually specified independent oracle, separate from tool output.
 
 ## Setup and small benchmark
 

@@ -280,6 +280,14 @@ def profile_graph(profile: dict, manifest_template: dict, catalog_template: dict
         manifest["child_map"].setdefault(uid, [])
     selected_uid = model_id(selected_model)
     selected_source_uid = source_id(selected_source)
+    expected_upstream_node_ids = []
+    expected_upstream_edges = []
+    current_uid = selected_uid
+    while current_uid in manifest["nodes"]:
+        parent_uid = manifest["parent_map"][current_uid][0]
+        expected_upstream_node_ids.append(parent_uid)
+        expected_upstream_edges.append({"child_id": current_uid, "parent_id": parent_uid, "column": names[0]})
+        current_uid = parent_uid
     expected_targets = [model_id(item) for item in downstream_names]
     if family == "volume":
         downstream_query = {
@@ -314,7 +322,14 @@ def profile_graph(profile: dict, manifest_template: dict, catalog_template: dict
         },
         "workload": {"background_relation_edges": background_edges, "selected_relation_edges": selected_edges, "selected_query_work_separate": family == "volume"},
         "selected_queries": {
-            "upstream": {"model": selected_uid, "column": names[0], "expected_terminal_source_ids": [selected_source_uid], "path_edges": path_edges},
+            "upstream": {
+                "model": selected_uid,
+                "column": names[0],
+                "expected_terminal_source_ids": [selected_source_uid],
+                "path_edges": path_edges,
+                "expected_upstream_node_ids": expected_upstream_node_ids,
+                "expected_upstream_edges": expected_upstream_edges,
+            },
             "downstream": downstream_query,
             "whole_model": {
                 "applicable": True,
@@ -398,13 +413,23 @@ def validate(manifest: dict, catalog: dict, workload: dict) -> None:
     upstream = queries["upstream"]
     current = upstream["model"]
     path_edges = 0
+    traversed_nodes = []
+    traversed_edges = []
     while current in model_ids:
         parents = manifest["parent_map"][current]
         if len(parents) != 1:
             raise ValueError("selected upstream path is not a single chain")
         current = parents[0]
         path_edges += 1
-    if current not in source_ids or [current] != upstream["expected_terminal_source_ids"] or path_edges != upstream["path_edges"]:
+        traversed_nodes.append(current)
+        traversed_edges.append({"child_id": upstream["model"] if path_edges == 1 else traversed_nodes[-2], "parent_id": current, "column": upstream["column"]})
+    if (
+        current not in source_ids
+        or [current] != upstream["expected_terminal_source_ids"]
+        or path_edges != upstream["path_edges"]
+        or traversed_nodes != upstream["expected_upstream_node_ids"]
+        or traversed_edges != upstream["expected_upstream_edges"]
+    ):
         raise ValueError("selected upstream endpoint mismatch")
     downstream = queries["downstream"]
     if not downstream.get("applicable", True):
