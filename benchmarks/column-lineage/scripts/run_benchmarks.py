@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shlex
 import shutil
@@ -112,6 +113,7 @@ def benchmark(
         name,
         command,
     ]
+    outer_timeout = (runs + warmup) * 60 + 30
     try:
         completed = subprocess.run(
             invocation,
@@ -119,7 +121,7 @@ def benchmark(
             capture_output=True,
             text=True,
             check=False,
-            timeout=240,
+            timeout=outer_timeout,
         )
         exit_code = completed.returncode
         stdout = completed.stdout
@@ -138,10 +140,50 @@ def benchmark(
             "hyperfine": " ".join(shlex.quote(arg) for arg in invocation),
             "hyperfine_json": relative(hyperfine_json),
             "exit_code": exit_code,
+            "reason": "hyperfine completed" if exit_code == 0 else "hyperfine failed",
+            "timeout_seconds": outer_timeout,
             "raw_stdout": relative(RESULTS / f"{name}.stdout"),
             "raw_stderr": relative(RESULTS / f"{name}.stderr"),
         }
     )
+
+
+def skipped(
+    name: str,
+    kind: str,
+    command: str,
+    reason: str,
+    records: list[dict[str, object]],
+) -> None:
+    stdout_path = RESULTS / f"{name}.stdout"
+    stderr_path = RESULTS / f"{name}.stderr"
+    hyperfine_json = RESULTS / f"{name}.hyperfine.json"
+    hyperfine_json.unlink(missing_ok=True)
+    write(stdout_path, "")
+    write(stderr_path, reason)
+    records.append(
+        {
+            "name": name,
+            "kind": kind,
+            "command": command,
+            "hyperfine": None,
+            "hyperfine_json": relative(hyperfine_json),
+            "exit_code": 126,
+            "reason": reason,
+            "raw_stdout": relative(stdout_path),
+            "raw_stderr": relative(stderr_path),
+        }
+    )
+
+
+def artifact_metadata(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return {
+        "path": relative(path),
+        "size_bytes": path.stat().st_size,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
 
 
 def dlin_command(direction: str, model: str, column: str, cache: str) -> str:
@@ -167,6 +209,10 @@ def dlin_command(direction: str, model: str, column: str, cache: str) -> str:
 
 
 def main() -> int:
+    manifest_path = ROOT / MANIFEST
+    catalog_path = ROOT / CATALOG
+    manifest_metadata = artifact_metadata(manifest_path)
+    catalog_metadata = artifact_metadata(catalog_path)
     ensure_preflight()
     runs = setting("BENCHMARK_RUNS", 3)
     warmup = setting("BENCHMARK_WARMUP", 1)
@@ -195,7 +241,7 @@ def main() -> int:
             warmup,
             records,
         )
-        prepare(
+        warm_ready = prepare(
             f"dlin_{direction}_warm_prepare",
             [
                 "dlin",
@@ -215,14 +261,12 @@ def main() -> int:
         )
         stdout_path = RESULTS / f"dlin_{direction}_warm.stdout"
         stderr_path = RESULTS / f"dlin_{direction}_warm.stderr"
-        benchmark(
-            f"dlin_{direction}_warm",
-            "warm",
-            redirected(base, stdout_path, stderr_path),
-            runs,
-            warmup,
-            records,
-        )
+        warm_name = f"dlin_{direction}_warm"
+        warm_command = redirected(base, stdout_path, stderr_path)
+        if warm_ready:
+            benchmark(warm_name, "warm", warm_command, runs, warmup, records)
+        else:
+            skipped(warm_name, "warm", warm_command, "warm cache preparation failed; measurement skipped", records)
 
     for name, select in (
         ("upstream", "+i01_deep_08.amount_double"),
@@ -262,7 +306,7 @@ def main() -> int:
         warmup,
         records,
     )
-    prepare(
+    meta_query_ready = prepare(
         "dbt_meta_query_prepare",
         [
             "meta",
@@ -288,25 +332,23 @@ def main() -> int:
             f"timeout 60s meta lineage downstream --artifact {shlex.quote(relative(META_ARTIFACT))} --json i05_fanout_base.amount",
         ),
     ):
-        benchmark(
-            f"dbt_meta_{name}",
-            "query",
-            redirected(
-                command,
-                RESULTS / f"dbt_meta_{name}.stdout",
-                RESULTS / f"dbt_meta_{name}.stderr",
-            ),
-            runs,
-            warmup,
-            records,
+        query_name = f"dbt_meta_{name}"
+        query_command = redirected(
+            command,
+            RESULTS / f"{query_name}.stdout",
+            RESULTS / f"{query_name}.stderr",
         )
+        if meta_query_ready:
+            benchmark(query_name, "query", query_command, runs, warmup, records)
+        else:
+            skipped(query_name, "query", query_command, "lineage artifact preparation failed; measurement skipped", records)
 
     metadata = {
         "schema_version": 1,
         "runs": runs,
         "warmup": warmup,
-        "manifest": MANIFEST,
-        "catalog": CATALOG,
+        "manifest": manifest_metadata,
+        "catalog": catalog_metadata,
         "scenarios": records,
     }
     metadata_path = RESULTS / "run_metadata.json"
