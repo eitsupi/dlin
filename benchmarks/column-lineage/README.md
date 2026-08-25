@@ -24,6 +24,21 @@ uv run --locked dbt --version --project-dir project/dbt
 
 The fixture uses dbt-core 1.12.2 and dbt-duckdb 1.11.0, pinned in `pyproject.toml` and `uv.lock`. Dependencies are not vendored; their attribution and source URLs are in [NOTICE](NOTICE).
 
+## Clean checkout setup
+
+From a clean Linux checkout, install the pinned tools before running the benchmark:
+
+```sh
+cd benchmarks/column-lineage
+uv sync --locked
+uv tool install --reinstall dlin-cli==0.2.4
+uv tool install --reinstall --with jinja2 parrant==0.17.2
+uv tool install --reinstall dbt-meta==0.3.8
+cargo install hyperfine --version 1.19.0 --locked
+```
+
+The default local benchmark uses three runs and one warmup.
+
 ## Tool preflight
 
 Run the clean artifact generator, then the thin three-tool preflight:
@@ -35,7 +50,7 @@ uv run --locked python scripts/preflight_tools.py
 
 The preflight uses the same manifest and catalog for dlin, Parrant, and dbt-meta. It runs representative I01 upstream and I05 downstream queries, stores raw outputs under `results/local/preflight/`, and writes a tool-specific validity summary to `status.json`.
 
-For a quick first measurement, run the three steps below. The benchmark uses hyperfine with three runs and one warmup by default. Set `BENCHMARK_RUNS` or `BENCHMARK_WARMUP` to increase them.
+For a quick first measurement, run these four commands in order. The benchmark uses hyperfine with three runs and one warmup by default. Set `BENCHMARK_RUNS` or `BENCHMARK_WARMUP` to increase them.
 
 ```sh
 ./scripts/regenerate_artifacts.sh
@@ -45,6 +60,13 @@ uv run --locked python scripts/summarize_results.py
 ```
 
 Results are written under `results/local/benchmark/`. dlin reports cold and warm cache scenarios. Parrant includes project parsing in each query measurement because it has no persistent cache. dbt-meta measures lineage build separately from queries against its generated artifact.
+
+Known limitations:
+
+- Preflight checks 10 representative commands. It is not a full 16-case correctness score.
+- Parrant query timings include project parsing. dbt-meta query timings exclude lineage build.
+- Canva 0.1.7b2 is excluded from numeric results because its public CLI produces invalid or empty lineage for this fixture.
+- dlin cold and warm only describe the dlin tool cache. They do not drop the operating system cache.
 
 ## Run-local artifacts
 
