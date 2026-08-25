@@ -282,10 +282,7 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
 ## Column-level lineage (Experimental)
 
-> [!WARNING]
-> The earlier polyglot-sql implementation was completely replaced by a Rust backend built on sqllineage/sqlparser. It is covered by regression fixtures and validated against real dbt projects. Experimental describes remaining coverage work, not an unusable prototype.
->
-> The Rust lineage stack has less production usage and SQL coverage history than established SQLGlot-based Python tools. Cross-dialect and complex SQL completeness therefore still has unverified areas. The production backend directly supports Generic, PostgreSQL, MySQL, Hive, Databricks, Snowflake, BigQuery, DuckDB, SQLite, Spark, Trino, Redshift, T-SQL, and ClickHouse. The `dlin` CLI and MCP resolve other recognized dialects to Generic with a warning; direct `dlin-core` API callers receive an unsupported-dialect error instead. Patterns such as `SELECT *` chains, STRUCT expansion, and some database-specific syntax may remain unresolved.
+The earlier polyglot-sql backend was fully replaced by a Rust sqllineage/sqlparser backend. Regression fixtures and real dbt project validation show that it is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
 
 `dlin column upstream` and `dlin column downstream` trace columns across models. Unlike model-level commands, they always require a compiled `manifest.json`. Run `dbt compile` first.
 
@@ -414,7 +411,7 @@ Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
 | Deep 64, single upstream | 78.1 ms | 1.34 s | build 3.13 s; query 427 ms |
 | Fan-out 128, downstream | 238 ms | 1.90 s | build 6.24 s; query 418 ms |
 
-These measurements use synthetic artifacts derived from the real dbt fixture. Native Rust avoids Python runtime startup and overhead; on these workloads, dlin showed substantially lower latency. This does not establish a general winner or fastest tool. dlin uses `--no-cache`, Parrant timings include parsing, and dbt-meta query timing excludes build. See the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
+These synthetic results use artifacts derived from the real dbt fixture. Native Rust avoids Python startup and dlin showed lower latency here; dlin uses `--no-cache`, Parrant includes parsing, and dbt-meta query excludes build. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 
 ### Known limitations
 
