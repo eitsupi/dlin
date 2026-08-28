@@ -367,8 +367,8 @@ pub fn load_manifest_from_bytes(content: &[u8], manifest_path: &Path) -> Result<
 }
 
 impl Manifest {
-    /// Collect `compiled_code` from manifest nodes as a mapping from simplified
-    /// unique_id to SQL string.  Nodes without `compiled_code` are omitted.
+    /// Collect `compiled_code` from manifest nodes as a mapping from graph
+    /// identity to SQL string. Nodes without `compiled_code` are omitted.
     ///
     /// This is the manifest-mode counterpart of the file-based
     /// `collect_sql_contents` used in SQL-parse mode.  Users must run
