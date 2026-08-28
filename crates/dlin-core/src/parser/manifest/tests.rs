@@ -180,6 +180,78 @@ fn test_build_graph_from_minimal_manifest() {
 }
 
 #[test]
+fn test_build_graph_qualifies_colliding_simplified_model_ids() {
+    let mut nodes = HashMap::new();
+    for package in ["package_a", "package_b"] {
+        let orig_id = format!("model.{package}.orders");
+        nodes.insert(
+            orig_id.clone(),
+            ManifestNode {
+                unique_id: orig_id,
+                name: "orders".to_string(),
+                alias: None,
+                resource_type: "model".to_string(),
+                depends_on: DependsOn::default(),
+                config: ManifestConfig::default(),
+                description: None,
+                path: None,
+                original_file_path: None,
+                columns: HashMap::new(),
+                compiled_code: None,
+                database: None,
+                schema: None,
+            },
+        );
+    }
+    nodes.insert(
+        "model.consumer.reporting".to_string(),
+        ManifestNode {
+            unique_id: "model.consumer.reporting".to_string(),
+            name: "reporting".to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: vec![
+                    "model.package_a.orders".to_string(),
+                    "model.package_b.orders".to_string(),
+                ],
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: HashMap::new(),
+            compiled_code: None,
+            database: None,
+            schema: None,
+        },
+    );
+
+    let graph = build_graph_from_parsed_manifest(&Manifest {
+        nodes,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let package_a = graph
+        .node_indices()
+        .find(|&index| graph[index].unique_id == "model.package_a.orders")
+        .expect("package_a model should retain its full unique_id");
+    let package_b = graph
+        .node_indices()
+        .find(|&index| graph[index].unique_id == "model.package_b.orders")
+        .expect("package_b model should retain its full unique_id");
+    let reporting = graph
+        .node_indices()
+        .find(|&index| graph[index].unique_id == "model.reporting")
+        .expect("non-colliding model should retain its simplified unique_id");
+
+    assert_ne!(package_a, package_b);
+    assert!(graph.find_edge(package_a, reporting).is_some());
+    assert!(graph.find_edge(package_b, reporting).is_some());
+}
+
+#[test]
 fn test_build_graph_with_exposures() {
     let manifest = Manifest {
         nodes: HashMap::from([(

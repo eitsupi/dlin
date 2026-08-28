@@ -13,14 +13,24 @@ pub struct ManifestMetadata {
     /// dbt adapter type (e.g. "postgres", "bigquery", "snowflake") — present in dbt >=1.x manifests.
     pub adapter_type: Option<String>,
     /// The exact schema URI emitted by dbt (for example, `.../manifest/v12/manifest.json`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub dbt_schema_version: Option<String>,
     /// The exact dbt version string emitted by dbt.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub dbt_version: Option<String>,
     /// Numeric schema version extracted from [`dbt_schema_version`], when possible.
     #[serde(skip)]
     pub dbt_schema_version_number: Option<u32>,
+}
+
+fn deserialize_optional_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.as_str().map(ToOwned::to_owned)))
 }
 
 /// Top-level manifest.json structure
@@ -55,20 +65,20 @@ pub struct Manifest {
     #[serde(default)]
     pub groups: HashMap<String, serde_json::Value>,
     #[serde(default)]
-    pub group_map: HashMap<String, Vec<String>>,
+    pub group_map: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub selectors: HashMap<String, serde_json::Value>,
     #[serde(default)]
-    pub parent_map: HashMap<String, Vec<String>>,
+    pub parent_map: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
-    pub child_map: HashMap<String, Vec<String>>,
+    pub child_map: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub unit_tests: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub functions: HashMap<String, serde_json::Value>,
     /// Disabled nodes are grouped by resource type in dbt manifests.
     #[serde(default)]
-    pub disabled: HashMap<String, Vec<serde_json::Value>>,
+    pub disabled: Option<HashMap<String, Vec<serde_json::Value>>>,
     /// Unknown top-level fields, flattened so forward-compatible data is not lost.
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -281,16 +291,14 @@ pub fn load_manifest(manifest_path: &Path) -> Result<Manifest> {
 }
 
 pub fn load_manifest_from_bytes(content: &[u8], manifest_path: &Path) -> Result<Manifest> {
-    let mut manifest: Manifest = serde_json::from_slice(content).map_err(|e| {
-        crate::error::DbtLineageError::ArtifactParseError {
-            path: manifest_path.to_path_buf(),
-            source: e,
-        }
-    })?;
-
-    report::enrich_manifest_observations(&mut manifest, content);
-
-    Ok(manifest)
+    Ok(
+        report::load_manifest_compat_from_bytes(content).map_err(|e| {
+            crate::error::DbtLineageError::ArtifactParseError {
+                path: manifest_path.to_path_buf(),
+                source: e,
+            }
+        })?,
+    )
 }
 
 impl Manifest {

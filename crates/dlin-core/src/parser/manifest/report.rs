@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::Manifest;
 
 /// Whether a known top-level resource map was absent, empty, or populated.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
 pub enum ResourceMapPresence {
     #[default]
@@ -16,6 +17,7 @@ pub enum ResourceMapPresence {
 }
 
 /// Observations about the shape and capabilities of a manifest artifact.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManifestCapabilities {
     /// Presence is tracked separately from the typed map, since dbt v12 may
@@ -28,6 +30,7 @@ pub struct ManifestCapabilities {
 }
 
 /// A stable, machine-readable diagnostic produced while loading a manifest.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestDiagnosticKind {
     ParseError,
@@ -40,6 +43,7 @@ pub enum ManifestDiagnosticKind {
 }
 
 /// Severity of a manifest load diagnostic.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManifestDiagnosticSeverity {
     Error,
@@ -47,6 +51,7 @@ pub enum ManifestDiagnosticSeverity {
 }
 
 /// Diagnostic details retained by [`ManifestLoadReport`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestDiagnostic {
     pub kind: ManifestDiagnosticKind,
@@ -60,6 +65,7 @@ pub struct ManifestDiagnostic {
 }
 
 /// Result of loading a manifest while retaining non-fatal observations.
+#[non_exhaustive]
 #[derive(Debug, Default)]
 pub struct ManifestLoadReport {
     pub manifest: Option<Manifest>,
@@ -119,20 +125,56 @@ const KNOWN_RESOURCE_MAP_KEYS: &[&str] = &[
     "disabled",
 ];
 
-/// Populate compatibility observations for the already decoded manifest.
-pub(super) fn enrich_manifest_observations(manifest: &mut Manifest, content: &[u8]) {
-    let value = serde_json::from_slice::<Value>(content).ok();
-    let top_level_object = value.as_ref().and_then(Value::as_object);
-    let unknown_keys = top_level_object
-        .map(|object| {
-            object
-                .keys()
-                .filter(|key| !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    enrich_manifest_observations_inner(manifest, unknown_keys, top_level_object);
+#[derive(Debug, Default)]
+struct ManifestObservations {
+    unknown_top_level_keys: BTreeSet<String>,
+    resource_maps: BTreeMap<String, ResourceMapPresence>,
+}
+
+fn observe_value(value: &Value) -> ManifestObservations {
+    let Some(object) = value.as_object() else {
+        return ManifestObservations::default();
+    };
+
+    ManifestObservations {
+        unknown_top_level_keys: object
+            .keys()
+            .filter(|key| !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()))
+            .cloned()
+            .collect(),
+        resource_maps: KNOWN_RESOURCE_MAP_KEYS
+            .iter()
+            .map(|key| {
+                let presence = resource_map_presence(object, key);
+                ((*key).to_string(), presence)
+            })
+            .collect(),
+    }
+}
+
+fn resource_map_presence(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> ResourceMapPresence {
+    match object.get(key) {
+        None => ResourceMapPresence::Absent,
+        Some(Value::Null) => ResourceMapPresence::Empty,
+        Some(Value::Object(map)) if map.is_empty() => ResourceMapPresence::Empty,
+        Some(Value::Object(_)) => ResourceMapPresence::NonEmpty,
+        Some(_) => ResourceMapPresence::Empty,
+    }
+}
+
+/// Decode the compatibility API's manifest with one JSON parse and one owned
+/// value. The caller maps the serde error to its legacy domain error.
+pub(super) fn load_manifest_compat_from_bytes(
+    content: &[u8],
+) -> std::result::Result<Manifest, serde_json::Error> {
+    let value: Value = serde_json::from_slice(content)?;
+    let observations = observe_value(&value);
+    let mut manifest = serde_json::from_value(value)?;
+    enrich_manifest_observations_inner(&mut manifest, observations);
+    Ok(manifest)
 }
 
 /// Load a manifest and retain non-fatal compatibility diagnostics.
@@ -185,6 +227,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         };
     };
 
+    let observations = observe_value(&value);
     let mut diagnostics = Vec::new();
     let metadata = object.get("metadata").and_then(Value::as_object);
     let schema_value = metadata.and_then(|metadata| metadata.get("dbt_schema_version"));
@@ -264,25 +307,11 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some("metadata.dbt_version".to_string()),
             schema: raw_schema.clone(),
         }),
-        (Some(_), Some(version)) if !is_valid_dbt_version(version) => {
-            diagnostics.push(ManifestDiagnostic {
-                kind: ManifestDiagnosticKind::InvalidDbtVersion,
-                severity: ManifestDiagnosticSeverity::Warning,
-                message: format!("invalid dbt_version string: {version}"),
-                hint: Some("Expected a version such as 1.8.0 or 1.8.0rc1".to_string()),
-                raw_resource: Some("metadata.dbt_version".to_string()),
-                schema: raw_schema.clone(),
-            })
-        }
         (Some(_), Some(_)) => {}
         (None, Some(_)) => {}
     }
 
-    let unknown_keys = object
-        .keys()
-        .filter(|key| !KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()))
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let unknown_keys = observations.unknown_top_level_keys.clone();
     for key in &unknown_keys {
         diagnostics.push(ManifestDiagnostic {
             kind: ManifestDiagnosticKind::UnknownTopLevelKey,
@@ -296,7 +325,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         });
     }
 
-    let mut manifest: Manifest = match serde_json::from_value(value.clone()) {
+    let mut manifest: Manifest = match serde_json::from_value(value) {
         Ok(manifest) => manifest,
         Err(error) => {
             diagnostics.push(ManifestDiagnostic {
@@ -316,7 +345,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         }
     };
     manifest.metadata.dbt_schema_version_number = schema_number;
-    enrich_manifest_observations_inner(&mut manifest, unknown_keys, Some(object));
+    enrich_manifest_observations_inner(&mut manifest, observations);
 
     ManifestLoadReport {
         manifest: Some(manifest),
@@ -348,115 +377,22 @@ fn parse_schema_number(schema: &str) -> Option<u32> {
         .and_then(|number| number.parse().ok())
 }
 
-fn is_valid_dbt_version(version: &str) -> bool {
-    let (core, build) = version
-        .split_once('+')
-        .map_or((version, None), |(core, build)| (core, Some(build)));
-    if build.is_some_and(|build| build.is_empty()) {
-        return false;
-    }
-    let (base, hyphen_suffix) = core
-        .split_once('-')
-        .map_or((core, None), |(base, suffix)| (base, Some(suffix)));
-    if hyphen_suffix.is_some_and(|suffix| !is_valid_version_suffix(suffix)) {
-        return false;
-    }
-    let mut components = base.split('.');
-    let major = components.next();
-    let minor = components.next();
-    let patch = components.next();
-    if components.next().is_some()
-        || !major.is_some_and(is_numeric_component)
-        || !minor.is_some_and(is_numeric_component)
-    {
-        return false;
-    }
-    let Some(patch) = patch else { return false };
-    let digits = patch
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    let suffix = &patch[digits.len()..];
-    !digits.is_empty() && is_valid_version_suffix(suffix)
-}
-
-fn is_numeric_component(component: &str) -> bool {
-    !component.is_empty()
-        && component
-            .chars()
-            .all(|character| character.is_ascii_digit())
-}
-
-fn is_valid_version_suffix(suffix: &str) -> bool {
-    if suffix.is_empty() {
-        return true;
-    }
-    let prefix = ["dev", "rc", "a", "b"]
-        .into_iter()
-        .find(|prefix| suffix.starts_with(prefix));
-    let Some(prefix) = prefix else { return false };
-    let number = &suffix[prefix.len()..];
-    number.is_empty() || is_numeric_component(number)
-}
-
-fn enrich_manifest_observations_inner(
-    manifest: &mut Manifest,
-    unknown_top_level_keys: BTreeSet<String>,
-    top_level_object: Option<&serde_json::Map<String, Value>>,
-) {
+fn enrich_manifest_observations_inner(manifest: &mut Manifest, observations: ManifestObservations) {
     manifest.metadata.dbt_schema_version_number = manifest
         .metadata
         .dbt_schema_version
         .as_deref()
         .and_then(parse_schema_number);
-    let mut capabilities = ManifestCapabilities {
-        unknown_top_level_keys,
+    let capabilities = ManifestCapabilities {
+        unknown_top_level_keys: observations.unknown_top_level_keys,
+        resource_maps: observations.resource_maps,
         future_schema: manifest
             .metadata
             .dbt_schema_version_number
             .is_some_and(|number| number > 12),
         ..ManifestCapabilities::default()
     };
-    for key in KNOWN_RESOURCE_MAP_KEYS {
-        let presence = match *key {
-            "nodes" => map_presence(&manifest.nodes, top_level_object, key),
-            "sources" => map_presence(&manifest.sources, top_level_object, key),
-            "exposures" => map_presence(&manifest.exposures, top_level_object, key),
-            "semantic_models" => map_presence(&manifest.semantic_models, top_level_object, key),
-            "metrics" => map_presence(&manifest.metrics, top_level_object, key),
-            "saved_queries" => map_presence(&manifest.saved_queries, top_level_object, key),
-            "macros" => map_presence(&manifest.macros, top_level_object, key),
-            "docs" => map_presence(&manifest.docs, top_level_object, key),
-            "groups" => map_presence(&manifest.groups, top_level_object, key),
-            "group_map" => map_presence(&manifest.group_map, top_level_object, key),
-            "selectors" => map_presence(&manifest.selectors, top_level_object, key),
-            "parent_map" => map_presence(&manifest.parent_map, top_level_object, key),
-            "child_map" => map_presence(&manifest.child_map, top_level_object, key),
-            "unit_tests" => map_presence(&manifest.unit_tests, top_level_object, key),
-            "functions" => map_presence(&manifest.functions, top_level_object, key),
-            "disabled" => map_presence(&manifest.disabled, top_level_object, key),
-            _ => ResourceMapPresence::Absent,
-        };
-        capabilities
-            .resource_maps
-            .insert((*key).to_string(), presence);
-    }
     manifest.capabilities = capabilities;
-}
-
-fn map_presence<T>(
-    map: &HashMap<String, T>,
-    top_level_object: Option<&serde_json::Map<String, Value>>,
-    key: &str,
-) -> ResourceMapPresence {
-    if top_level_object.is_some_and(|object| !object.contains_key(key)) {
-        return ResourceMapPresence::Absent;
-    }
-    if map.is_empty() {
-        ResourceMapPresence::Empty
-    } else {
-        ResourceMapPresence::NonEmpty
-    }
 }
 
 #[cfg(test)]
@@ -534,6 +470,93 @@ mod tests {
     }
 
     #[test]
+    fn test_manifest_load_report_accepts_explicit_null_maps() {
+        let content = br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "2.0.0-alpha.4"
+            },
+            "nodes": {},
+            "disabled": null,
+            "parent_map": null,
+            "child_map": null,
+            "group_map": null
+        }"#;
+
+        let report = load_manifest_report_from_bytes(content, Path::new("manifest.json"));
+        assert!(!report.has_errors());
+        assert_eq!(report.warnings().count(), 0);
+        let manifest = report.manifest.expect("valid manifest");
+        assert!(manifest.disabled.is_none());
+        assert!(manifest.parent_map.is_none());
+        assert!(manifest.child_map.is_none());
+        assert!(manifest.group_map.is_none());
+        for key in ["disabled", "parent_map", "child_map", "group_map"] {
+            assert_eq!(
+                manifest.capabilities.resource_maps[key],
+                ResourceMapPresence::Empty
+            );
+        }
+
+        let compatibility_manifest =
+            load_manifest_from_bytes(content, Path::new("manifest.json")).unwrap();
+        assert!(compatibility_manifest.disabled.is_none());
+        assert!(compatibility_manifest.parent_map.is_none());
+        assert!(compatibility_manifest.child_map.is_none());
+        assert!(compatibility_manifest.group_map.is_none());
+    }
+
+    #[test]
+    fn test_manifest_load_report_distinguishes_missing_empty_and_nonempty_maps() {
+        let content = br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "2.0.0-alpha.4"
+            },
+            "nodes": {},
+            "sources": {"source.proj.raw.orders": {
+                "unique_id": "source.proj.raw.orders",
+                "name": "orders",
+                "source_name": "raw",
+                "resource_type": "source",
+                "description": null,
+                "path": null,
+                "original_file_path": null,
+                "columns": {},
+                "database": null,
+                "schema": null,
+                "identifier": null
+            }},
+            "group_map": {},
+            "disabled": null
+        }"#;
+
+        let report = load_manifest_report_from_bytes(content, Path::new("manifest.json"));
+        assert!(!report.has_errors());
+        let manifest = report.manifest.expect("valid manifest");
+        assert_eq!(
+            manifest.capabilities.resource_maps["nodes"],
+            ResourceMapPresence::Empty
+        );
+        assert_eq!(
+            manifest.capabilities.resource_maps["sources"],
+            ResourceMapPresence::NonEmpty
+        );
+        assert_eq!(
+            manifest.capabilities.resource_maps["macros"],
+            ResourceMapPresence::Absent
+        );
+        assert_eq!(
+            manifest.capabilities.resource_maps["group_map"],
+            ResourceMapPresence::Empty
+        );
+        assert_eq!(
+            manifest.capabilities.resource_maps["disabled"],
+            ResourceMapPresence::Empty
+        );
+    }
+
+    #[test]
     fn test_manifest_load_report_distinguishes_future_schema_and_parse_error() {
         let content = br#"{
             "metadata": {
@@ -589,7 +612,7 @@ mod tests {
             br#"{
                 "metadata": {
                     "dbt_schema_version": "not-a-schema",
-                    "dbt_version": "1.8.garbage"
+                    "dbt_version": 1.8
                 },
                 "nodes": {}
             }"#,
@@ -608,9 +631,18 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::InvalidDbtVersion)
         );
-        assert!(!is_valid_dbt_version("1.8"));
-        assert!(!is_valid_dbt_version("1.8.garbage"));
-        assert!(is_valid_dbt_version("1.8.7rc1"));
-        assert!(is_valid_dbt_version("1.8.7+build.1"));
+
+        let prerelease = load_manifest_report_from_bytes(
+            br#"{
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                    "dbt_version": "2.0.0-alpha.4"
+                },
+                "nodes": {}
+            }"#,
+            Path::new("manifest.json"),
+        );
+        assert!(!prerelease.has_errors());
+        assert_eq!(prerelease.warnings().count(), 0);
     }
 }
