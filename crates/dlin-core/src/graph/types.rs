@@ -78,7 +78,9 @@ pub struct ExposureInfo {
 /// Data associated with each node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeData {
-    /// Unique identifier (e.g., "model.stg_orders" or "source.raw.orders")
+    /// Source-native canonical identifier. Manifest mode uses the fully
+    /// qualified dbt ID; SQL mode retains its generated ID (e.g.
+    /// "model.stg_orders").
     pub unique_id: String,
     /// Display label (e.g., "stg_orders")
     pub label: String,
@@ -96,8 +98,9 @@ pub struct NodeData {
     pub columns: Vec<String>,
     /// Exposure-specific metadata (only set for exposure nodes)
     pub exposure: Option<ExposureInfo>,
-    /// Alternate IDs this node is reachable under (e.g. unversioned "model.my_model"
-    /// for the latest-version node). Populated by build_graph; used for name lookup.
+    /// Alternate source IDs this node is reachable under, such as the
+    /// project-stripped manifest ID. Populated by manifest graph construction
+    /// and used for compatibility name lookup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
 }

@@ -165,7 +165,8 @@ fn test_build_graph_from_minimal_manifest() {
         .find(|&i| graph[i].node_type == NodeType::Model)
         .expect("Should have a model node");
     assert_eq!(graph[model].label, "stg_orders");
-    assert_eq!(graph[model].unique_id, "model.stg_orders");
+    assert_eq!(graph[model].unique_id, "model.proj.stg_orders");
+    assert_eq!(graph[model].aliases, vec!["model.stg_orders"]);
     assert_eq!(graph[model].materialization.as_deref(), Some("view"));
     assert_eq!(graph[model].tags, vec!["staging"]);
     assert_eq!(graph[model].description.as_deref(), Some("Staged orders"));
@@ -176,11 +177,12 @@ fn test_build_graph_from_minimal_manifest() {
         .find(|&i| graph[i].node_type == NodeType::Source)
         .expect("Should have a source node");
     assert_eq!(graph[source].label, "raw.orders");
-    assert_eq!(graph[source].unique_id, "source.raw.orders");
+    assert_eq!(graph[source].unique_id, "source.proj.raw.orders");
+    assert_eq!(graph[source].aliases, vec!["source.raw.orders"]);
 }
 
 #[test]
-fn test_build_graph_qualifies_colliding_simplified_model_ids() {
+fn test_build_graph_preserves_canonical_manifest_ids_and_ambiguous_aliases() {
     let mut nodes = HashMap::new();
     for package in ["package_a", "package_b"] {
         let orig_id = format!("model.{package}.orders");
@@ -258,10 +260,13 @@ fn test_build_graph_qualifies_colliding_simplified_model_ids() {
         .expect("package_b model should retain its full unique_id");
     let reporting = graph
         .node_indices()
-        .find(|&index| graph[index].unique_id == "model.reporting")
-        .expect("non-colliding model should retain its simplified unique_id");
+        .find(|&index| graph[index].unique_id == "model.consumer.reporting")
+        .expect("non-colliding model should retain its canonical unique_id");
 
     assert_ne!(package_a, package_b);
+    assert_eq!(graph[package_a].aliases, vec!["model.orders"]);
+    assert_eq!(graph[package_b].aliases, vec!["model.orders"]);
+    assert_eq!(graph[reporting].aliases, vec!["model.reporting"]);
     assert!(graph.find_edge(package_a, reporting).is_some());
     assert!(graph.find_edge(package_b, reporting).is_some());
 }
@@ -1101,13 +1106,15 @@ fn test_collect_sql_contents_from_manifest() {
 
     // compiled_code present → included
     assert_eq!(
-        sql_contents.get("model.stg_orders").map(|s| s.as_str()),
+        sql_contents
+            .get("model.proj.stg_orders")
+            .map(|s| s.as_str()),
         Some("select * from raw.orders")
     );
-    // test unique_id is simplified (test.proj.name.hash → test.name)
+    // Compiled SQL keys use the canonical manifest unique_id.
     assert_eq!(
         sql_contents
-            .get("test.not_null_orders_id")
+            .get("test.proj.not_null_orders_id.abc123")
             .map(|s| s.as_str()),
         Some("select count(*) from orders where id is null")
     );
@@ -1125,16 +1132,16 @@ fn test_collect_sql_contents_from_fixture() {
 
     // The fixture has compiled_code for stg_orders and the test node
     assert!(
-        sql_contents.contains_key("model.stg_orders"),
+        sql_contents.contains_key("model.simple_project.stg_orders"),
         "stg_orders should have compiled_code"
     );
     assert!(
-        sql_contents.contains_key("test.assert_orders_positive_amount"),
+        sql_contents.contains_key("test.simple_project.assert_orders_positive_amount"),
         "test node should have compiled_code"
     );
     // Nodes without compiled_code should not appear
     assert!(
-        !sql_contents.contains_key("model.customers"),
+        !sql_contents.contains_key("model.simple_project.customers"),
         "customers has no compiled_code in fixture"
     );
 }
@@ -1217,7 +1224,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
         .node_indices()
         .find(|&i| graph[i].node_type == NodeType::SemanticModel)
         .expect("Should have a semantic_model node");
-    assert_eq!(graph[sem].unique_id, "semantic_model.orders");
+    assert_eq!(graph[sem].unique_id, "semantic_model.proj.orders");
     assert_eq!(graph[sem].label, "orders");
     assert_eq!(
         graph[sem].description.as_deref(),
@@ -1228,13 +1235,13 @@ fn test_build_graph_with_semantic_layer_nodes() {
         .node_indices()
         .find(|&i| graph[i].node_type == NodeType::Metric)
         .expect("Should have a metric node");
-    assert_eq!(graph[metric].unique_id, "metric.order_count");
+    assert_eq!(graph[metric].unique_id, "metric.proj.order_count");
 
     let sq = graph
         .node_indices()
         .find(|&i| graph[i].node_type == NodeType::SavedQuery)
         .expect("Should have a saved_query node");
-    assert_eq!(graph[sq].unique_id, "saved_query.order_metrics");
+    assert_eq!(graph[sq].unique_id, "saved_query.proj.order_metrics");
 }
 
 #[test]
