@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -7,9 +7,9 @@ use petgraph::stable_graph::NodeIndex;
 use crate::graph::types::*;
 
 use super::{
-    Manifest, ManifestExposure, ManifestMetric, ManifestNode, ManifestSavedQuery,
-    ManifestSemanticModel, ManifestSource, load_manifest, resource_type_to_node_type,
-    simplify_unique_id,
+    Manifest, ManifestExposure, ManifestGraphIdentity, ManifestGraphResolver, ManifestMetric,
+    ManifestNode, ManifestSavedQuery, ManifestSemanticModel, ManifestSource, load_manifest,
+    resource_type_to_node_type,
 };
 
 /// Build a LineageGraph from a parsed manifest.json file.
@@ -24,35 +24,30 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     let mut graph = LineageGraph::new();
     // Map from original manifest unique_id to graph NodeIndex
     let mut node_map: HashMap<String, NodeIndex> = HashMap::new();
-    let ambiguous_ids = ambiguous_simplified_ids(manifest);
+    let resolver = ManifestGraphResolver::new(manifest);
 
     // 1. Add source nodes
-    add_source_nodes(&mut graph, &mut node_map, &manifest.sources, &ambiguous_ids);
+    add_source_nodes(&mut graph, &mut node_map, &manifest.sources, &resolver);
 
     // 2. Add regular nodes (models, seeds, snapshots, tests, analyses)
-    add_regular_nodes(&mut graph, &mut node_map, &manifest.nodes, &ambiguous_ids);
+    add_regular_nodes(&mut graph, &mut node_map, &manifest.nodes, &resolver);
 
     // 3. Add exposure nodes
-    add_exposure_nodes(
-        &mut graph,
-        &mut node_map,
-        &manifest.exposures,
-        &ambiguous_ids,
-    );
+    add_exposure_nodes(&mut graph, &mut node_map, &manifest.exposures, &resolver);
 
     // 4. Add semantic layer nodes
     add_semantic_layer_nodes(
         &mut graph,
         &mut node_map,
         &manifest.semantic_models,
-        &ambiguous_ids,
+        &resolver,
     );
-    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.metrics, &ambiguous_ids);
+    add_semantic_layer_nodes(&mut graph, &mut node_map, &manifest.metrics, &resolver);
     add_semantic_layer_nodes(
         &mut graph,
         &mut node_map,
         &manifest.saved_queries,
-        &ambiguous_ids,
+        &resolver,
     );
 
     // 5. Add edges from depends_on for regular nodes
@@ -69,62 +64,15 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     Ok(graph)
 }
 
-fn ambiguous_simplified_ids(manifest: &Manifest) -> HashSet<String> {
-    let mut counts = HashMap::<String, usize>::new();
-    for orig_id in manifest.sources.keys() {
-        *counts
-            .entry(simplify_unique_id(orig_id, "source"))
-            .or_default() += 1;
-    }
-    for (orig_id, node) in &manifest.nodes {
-        *counts
-            .entry(simplify_unique_id(orig_id, &node.resource_type))
-            .or_default() += 1;
-    }
-    for orig_id in manifest.exposures.keys() {
-        *counts
-            .entry(simplify_unique_id(orig_id, "exposure"))
-            .or_default() += 1;
-    }
-    for orig_id in manifest.semantic_models.keys() {
-        *counts
-            .entry(simplify_unique_id(orig_id, "semantic_model"))
-            .or_default() += 1;
-    }
-    for orig_id in manifest.metrics.keys() {
-        *counts
-            .entry(simplify_unique_id(orig_id, "metric"))
-            .or_default() += 1;
-    }
-    for orig_id in manifest.saved_queries.keys() {
-        *counts
-            .entry(simplify_unique_id(orig_id, "saved_query"))
-            .or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .filter_map(|(simple_id, count)| (count > 1).then_some(simple_id))
-        .collect()
-}
-
-fn node_identity(orig_id: &str, simple_id: &str, ambiguous_ids: &HashSet<String>) -> String {
-    if ambiguous_ids.contains(simple_id) {
-        orig_id.to_string()
-    } else {
-        simple_id.to_string()
-    }
-}
-
 fn index_node(
     node_map: &mut HashMap<String, NodeIndex>,
     orig_id: &str,
-    simple_id: &str,
+    identity: &ManifestGraphIdentity,
     idx: NodeIndex,
-    ambiguous_ids: &HashSet<String>,
 ) {
     node_map.insert(orig_id.to_string(), idx);
-    if !ambiguous_ids.contains(simple_id) {
-        node_map.insert(simple_id.to_string(), idx);
+    if let Some(simple_alias) = &identity.simple_alias {
+        node_map.insert(simple_alias.clone(), idx);
     }
 }
 
@@ -132,14 +80,14 @@ fn add_source_nodes(
     graph: &mut LineageGraph,
     node_map: &mut HashMap<String, NodeIndex>,
     sources: &HashMap<String, ManifestSource>,
-    ambiguous_ids: &HashSet<String>,
+    resolver: &ManifestGraphResolver,
 ) {
     for (orig_id, source) in sources {
-        let simple_id = simplify_unique_id(orig_id, "source");
+        let identity = resolver.resolve(orig_id, "source");
         let label = format!("{}.{}", source.source_name, source.name);
 
         let idx = graph.add_node(NodeData {
-            unique_id: node_identity(orig_id, &simple_id, ambiguous_ids),
+            unique_id: identity.graph_id.clone(),
             label,
             node_type: NodeType::Source,
             file_path: source
@@ -159,7 +107,7 @@ fn add_source_nodes(
             aliases: vec![],
         });
         // Also index by simplified id for unambiguous edge resolution.
-        index_node(node_map, orig_id, &simple_id, idx, ambiguous_ids);
+        index_node(node_map, orig_id, &identity, idx);
     }
 }
 
@@ -167,14 +115,14 @@ fn add_regular_nodes(
     graph: &mut LineageGraph,
     node_map: &mut HashMap<String, NodeIndex>,
     nodes: &HashMap<String, ManifestNode>,
-    ambiguous_ids: &HashSet<String>,
+    resolver: &ManifestGraphResolver,
 ) {
     for (orig_id, node) in nodes {
         let node_type = resource_type_to_node_type(&node.resource_type);
-        let simple_id = simplify_unique_id(orig_id, &node.resource_type);
+        let identity = resolver.resolve(orig_id, &node.resource_type);
 
         let idx = graph.add_node(NodeData {
-            unique_id: node_identity(orig_id, &simple_id, ambiguous_ids),
+            unique_id: identity.graph_id.clone(),
             label: node.name.clone(),
             node_type,
             file_path: node
@@ -193,7 +141,7 @@ fn add_regular_nodes(
             exposure: None,
             aliases: vec![],
         });
-        index_node(node_map, orig_id, &simple_id, idx, ambiguous_ids);
+        index_node(node_map, orig_id, &identity, idx);
     }
 }
 
@@ -201,13 +149,13 @@ fn add_exposure_nodes(
     graph: &mut LineageGraph,
     node_map: &mut HashMap<String, NodeIndex>,
     exposures: &HashMap<String, ManifestExposure>,
-    ambiguous_ids: &HashSet<String>,
+    resolver: &ManifestGraphResolver,
 ) {
     for (orig_id, exposure) in exposures {
-        let simple_id = simplify_unique_id(orig_id, "exposure");
+        let identity = resolver.resolve(orig_id, "exposure");
 
         let idx = graph.add_node(NodeData {
-            unique_id: node_identity(orig_id, &simple_id, ambiguous_ids),
+            unique_id: identity.graph_id.clone(),
             label: exposure.name.clone(),
             node_type: NodeType::Exposure,
             file_path: None,
@@ -227,7 +175,7 @@ fn add_exposure_nodes(
             }),
             aliases: vec![],
         });
-        index_node(node_map, orig_id, &simple_id, idx, ambiguous_ids);
+        index_node(node_map, orig_id, &identity, idx);
     }
 }
 
@@ -364,13 +312,13 @@ fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
     graph: &mut LineageGraph,
     node_map: &mut HashMap<String, NodeIndex>,
     items: &HashMap<String, T>,
-    ambiguous_ids: &HashSet<String>,
+    resolver: &ManifestGraphResolver,
 ) {
     for (orig_id, item) in items {
         let resource_type = item.node_type().label();
-        let simple_id = simplify_unique_id(orig_id, resource_type);
+        let identity = resolver.resolve(orig_id, resource_type);
         let idx = graph.add_node(NodeData {
-            unique_id: node_identity(orig_id, &simple_id, ambiguous_ids),
+            unique_id: identity.graph_id.clone(),
             label: item.label().unwrap_or_else(|| item.name()).to_string(),
             node_type: item.node_type(),
             file_path: item
@@ -387,7 +335,7 @@ fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
             exposure: None,
             aliases: vec![],
         });
-        index_node(node_map, orig_id, &simple_id, idx, ambiguous_ids);
+        index_node(node_map, orig_id, &identity, idx);
     }
 }
 

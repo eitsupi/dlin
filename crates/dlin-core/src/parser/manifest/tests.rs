@@ -197,7 +197,7 @@ fn test_build_graph_qualifies_colliding_simplified_model_ids() {
                 path: None,
                 original_file_path: None,
                 columns: HashMap::new(),
-                compiled_code: None,
+                compiled_code: Some(format!("select '{package}'")),
                 database: None,
                 schema: None,
             },
@@ -227,11 +227,26 @@ fn test_build_graph_qualifies_colliding_simplified_model_ids() {
         },
     );
 
-    let graph = build_graph_from_parsed_manifest(&Manifest {
+    let manifest = Manifest {
         nodes,
         ..Default::default()
-    })
-    .unwrap();
+    };
+    let sql_contents = manifest.collect_sql_contents();
+    assert_eq!(
+        sql_contents
+            .get("model.package_a.orders")
+            .map(String::as_str),
+        Some("select 'package_a'")
+    );
+    assert_eq!(
+        sql_contents
+            .get("model.package_b.orders")
+            .map(String::as_str),
+        Some("select 'package_b'")
+    );
+    assert!(!sql_contents.contains_key("model.orders"));
+
+    let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
 
     let package_a = graph
         .node_indices()

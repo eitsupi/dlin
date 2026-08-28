@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -272,6 +272,69 @@ fn simplify_unique_id(unique_id: &str, resource_type: &str) -> String {
     }
 }
 
+#[derive(Debug)]
+struct ManifestGraphIdentity {
+    graph_id: String,
+    simple_alias: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ManifestGraphResolver {
+    ambiguous_simplified_ids: HashSet<String>,
+}
+
+impl ManifestGraphResolver {
+    fn new(manifest: &Manifest) -> Self {
+        let mut counts = HashMap::<String, usize>::new();
+        let mut count = |orig_id: &str, resource_type: &str| {
+            *counts
+                .entry(simplify_unique_id(orig_id, resource_type))
+                .or_default() += 1;
+        };
+
+        for orig_id in manifest.sources.keys() {
+            count(orig_id, "source");
+        }
+        for (orig_id, node) in &manifest.nodes {
+            count(orig_id, &node.resource_type);
+        }
+        for orig_id in manifest.exposures.keys() {
+            count(orig_id, "exposure");
+        }
+        for orig_id in manifest.semantic_models.keys() {
+            count(orig_id, "semantic_model");
+        }
+        for orig_id in manifest.metrics.keys() {
+            count(orig_id, "metric");
+        }
+        for orig_id in manifest.saved_queries.keys() {
+            count(orig_id, "saved_query");
+        }
+
+        Self {
+            ambiguous_simplified_ids: counts
+                .into_iter()
+                .filter_map(|(simple_id, count)| (count > 1).then_some(simple_id))
+                .collect(),
+        }
+    }
+
+    fn resolve(&self, orig_id: &str, resource_type: &str) -> ManifestGraphIdentity {
+        let simple_id = simplify_unique_id(orig_id, resource_type);
+        if self.ambiguous_simplified_ids.contains(&simple_id) {
+            ManifestGraphIdentity {
+                graph_id: orig_id.to_string(),
+                simple_alias: None,
+            }
+        } else {
+            ManifestGraphIdentity {
+                graph_id: simple_id.clone(),
+                simple_alias: Some(simple_id),
+            }
+        }
+    }
+}
+
 mod report;
 pub use report::*;
 mod graph;
@@ -311,10 +374,11 @@ impl Manifest {
     /// contains compiled SQL.
     pub fn collect_sql_contents(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
+        let resolver = ManifestGraphResolver::new(self);
         for (orig_id, node) in &self.nodes {
             if let Some(ref code) = node.compiled_code {
-                let simple_id = simplify_unique_id(orig_id, &node.resource_type);
-                map.insert(simple_id, code.clone());
+                let identity = resolver.resolve(orig_id, &node.resource_type);
+                map.insert(identity.graph_id, code.clone());
             }
         }
         map
