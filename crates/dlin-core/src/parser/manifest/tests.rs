@@ -561,39 +561,8 @@ fn test_build_graph_from_manifest_invalid_json() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest_path = tmp.path().join("manifest.json");
     fs::write(&manifest_path, "not valid json").unwrap();
-    // dbt >= 1.x sets path to the models-dir-relative path (e.g. "staging/stg_orders.sql")
-    // and original_file_path to the project-root-relative path ("models/staging/stg_orders.sql").
-    // resolve_sql_to_label strips the project root and compares against file_path, so
-    // original_file_path must win when both are present.
-    let manifest = Manifest {
-        nodes: HashMap::from([(
-            "model.proj.stg_orders".to_string(),
-            ManifestNode {
-                unique_id: "model.proj.stg_orders".to_string(),
-                name: "stg_orders".to_string(),
-                alias: None,
-                resource_type: "model".to_string(),
-                depends_on: DependsOn::default(),
-                config: ManifestConfig::default(),
-                description: None,
-                path: Some("staging/stg_orders.sql".to_string()),
-                original_file_path: Some("models/staging/stg_orders.sql".to_string()),
-                columns: HashMap::new(),
-                compiled_code: None,
-                database: None,
-                schema: None,
-            },
-        )]),
-        sources: HashMap::new(),
-        ..Default::default()
-    };
-
-    let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
-    let node = &graph[graph.node_indices().next().unwrap()];
-    assert_eq!(
-        node.file_path.as_ref().map(|p| p.to_str().unwrap()),
-        Some("models/staging/stg_orders.sql")
-    );
+    let result = build_graph_from_manifest(&manifest_path);
+    assert!(result.is_err());
 }
 
 #[test]
