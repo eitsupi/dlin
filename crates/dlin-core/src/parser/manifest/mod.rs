@@ -278,6 +278,8 @@ struct ManifestGraphIdentity {
     simple_alias: Option<String>,
 }
 
+// TODO: Revisit this compatibility hybrid by separating canonical IDs,
+// display IDs, aliases, and ambiguous lookup into an explicit contract.
 #[derive(Debug, Default)]
 struct ManifestGraphResolver {
     ambiguous_simplified_ids: HashSet<String>,
