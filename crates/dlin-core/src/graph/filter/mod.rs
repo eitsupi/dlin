@@ -9,47 +9,76 @@ use crate::error::DbtLineageError;
 use super::types::*;
 
 /// Result of a node name lookup.
+#[derive(Debug)]
 enum NodeLookupResult {
     /// No matching node found.
     NotFound,
-    /// Exactly one node matched (exact or suffix).
+    /// Exactly one node matched at the highest-priority lookup stage.
     Found(NodeIndex),
-    /// Multiple nodes matched the suffix fallback. The first is used,
-    /// and all matching unique_ids are returned for caller-side warnings.
+    /// Multiple nodes matched at the highest-priority lookup stage. The first
+    /// is selected deterministically, and all matching canonical unique_ids
+    /// are returned for caller-side warnings.
     Ambiguous(NodeIndex, Vec<String>),
 }
 
-/// Find a node by name, using a two-pass approach:
-/// 1. Exact match on label, unique_id, or recorded aliases (set by build_graph)
-/// 2. Suffix match on unique_id (`.{name}`) — excludes Phantom nodes so that a
-///    phantom created for a missing versioned ref does not shadow real nodes
+/// Find a node by name using the compatibility lookup precedence:
+/// canonical ID, alias (including the bare model-name shorthand), display
+/// label, then canonical ID suffix. Each stage is evaluated independently and
+/// a lower-priority stage is not consulted once a higher stage has matches.
 fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
-    // Pass 1: exact label, unique_id, or alias.
-    // Aliases hold fully-qualified IDs like "model.my_model" set by build_graph.
-    // Also match the bare name: "my_model" is treated as equivalent to "model.my_model".
-    let name_prefixed = format!("model.{}", name);
-    let exact = graph.node_indices().find(|&idx| {
-        let node = &graph[idx];
-        node.label == name
-            || node.unique_id == name
-            || node
-                .aliases
-                .iter()
-                .any(|a| a == name || a == &name_prefixed)
-    });
-    if let Some(idx) = exact {
-        return NodeLookupResult::Found(idx);
+    let canonical = collect_matches(graph, |node| node.unique_id == name);
+    if !canonical.is_empty() {
+        return lookup_result(graph, canonical);
     }
 
-    // Pass 2: suffix match — skip Phantom nodes
-    let suffix = format!(".{}", name);
-    let matches: Vec<NodeIndex> = graph
-        .node_indices()
-        .filter(|&idx| {
-            graph[idx].node_type != NodeType::Phantom && graph[idx].unique_id.ends_with(&suffix)
-        })
-        .collect();
+    let aliases = collect_matches(graph, |node| {
+        node.aliases
+            .iter()
+            .flat_map(|alias| alias_spellings(alias))
+            .any(|spelling| spelling == name)
+    });
+    if !aliases.is_empty() {
+        return lookup_result(graph, aliases);
+    }
 
+    let labels = collect_matches(graph, |node| node.label == name);
+    if !labels.is_empty() {
+        return lookup_result(graph, labels);
+    }
+
+    let suffix = format!(".{name}");
+    let suffix_matches = collect_matches(graph, |node| {
+        node.node_type != NodeType::Phantom && node.unique_id.ends_with(&suffix)
+    });
+    lookup_result(graph, suffix_matches)
+}
+
+fn alias_spellings(alias: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(alias).chain(
+        alias
+            .strip_prefix("model.")
+            .filter(|bare| !bare.contains('.')),
+    )
+}
+
+fn collect_matches(
+    graph: &LineageGraph,
+    mut predicate: impl FnMut(&NodeData) -> bool,
+) -> Vec<NodeIndex> {
+    let mut matches: Vec<NodeIndex> = graph
+        .node_indices()
+        .filter(|&idx| predicate(&graph[idx]))
+        .collect();
+    matches.sort_by(|left, right| {
+        graph[*left]
+            .unique_id
+            .cmp(&graph[*right].unique_id)
+            .then_with(|| left.index().cmp(&right.index()))
+    });
+    matches
+}
+
+fn lookup_result(graph: &LineageGraph, matches: Vec<NodeIndex>) -> NodeLookupResult {
     match matches.len() {
         0 => NodeLookupResult::NotFound,
         1 => NodeLookupResult::Found(matches[0]),
@@ -64,7 +93,7 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
 }
 
 /// Resolve a node by name, returning the node index or an error.
-/// Warns to stderr when the suffix fallback matches multiple nodes.
+/// Warns to stderr when the highest-priority lookup stage matches multiple nodes.
 pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeIndex> {
     match find_node_by_name(graph, name) {
         NodeLookupResult::Found(idx) => Ok(idx),
@@ -216,11 +245,11 @@ fn node_matches_any_selector(node: &NodeData, selectors: &[Selector]) -> bool {
         Selector::ModelName(pat) => {
             pat.matches(&node.label)
                 || pat.matches(&node.unique_id)
-                || node.aliases.iter().any(|a| {
-                    pat.matches(a)
-                        || a.strip_prefix("model.")
-                            .is_some_and(|bare| pat.matches(bare))
-                })
+                || node
+                    .aliases
+                    .iter()
+                    .flat_map(|alias| alias_spellings(alias))
+                    .any(|spelling| pat.matches(spelling))
         }
     })
 }

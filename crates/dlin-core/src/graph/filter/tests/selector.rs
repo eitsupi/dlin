@@ -321,3 +321,47 @@ fn test_node_matches_any_selector_model_name() {
     assert!(node_matches_any_selector(&node, &sel("orders")));
     assert!(!node_matches_any_selector(&node, &sel("customers")));
 }
+
+#[test]
+fn test_selector_alias_spellings_follow_focus_lookup_policy() {
+    let mut simple_model = make_node(
+        "model.project.orders",
+        "display",
+        NodeType::Model,
+        None,
+        vec![],
+    );
+    simple_model.aliases.push("model.orders".to_string());
+    assert!(node_matches_any_selector(&simple_model, &sel("orders")));
+    assert!(node_matches_any_selector(&simple_model, &sel("ord*")));
+
+    let mut qualified_model = make_node(
+        "model.project.metric_model",
+        "model",
+        NodeType::Model,
+        None,
+        vec![],
+    );
+    qualified_model
+        .aliases
+        .push("model.metric.revenue".to_string());
+    let mut metric = make_node(
+        "metric.project.revenue",
+        "revenue",
+        NodeType::Metric,
+        None,
+        vec![],
+    );
+    metric.aliases.push("metric.revenue".to_string());
+
+    assert!(node_matches_any_selector(&metric, &sel("metric.revenue")));
+    assert!(!node_matches_any_selector(
+        &qualified_model,
+        &sel("metric.revenue")
+    ));
+    assert!(node_matches_any_selector(&metric, &sel("metric.*")));
+    assert!(!node_matches_any_selector(
+        &qualified_model,
+        &sel("metric.*")
+    ));
+}

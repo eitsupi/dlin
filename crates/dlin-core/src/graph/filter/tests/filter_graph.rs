@@ -85,6 +85,126 @@ fn test_try_resolve_node_not_found() {
 }
 
 #[test]
+fn test_lookup_prefers_exact_canonical_id_over_lower_priority_label() {
+    let mut g = LineageGraph::new();
+    let canonical = g.add_node(make_node(
+        "model.package.orders",
+        "orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g.add_node(make_node(
+        "model.package.other",
+        "model.package.orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+
+    let found = resolve_node_by_name(&g, "model.package.orders").unwrap();
+    assert_eq!(found, canonical);
+}
+
+#[test]
+fn test_lookup_ambiguity_uses_sorted_canonical_id() {
+    let mut g = LineageGraph::new();
+    let package_b = g.add_node(make_node(
+        "model.package_b.orders",
+        "orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    let package_a = g.add_node(make_node(
+        "model.package_a.orders",
+        "orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g[package_a].aliases.push("model.orders".to_string());
+    g[package_b].aliases.push("model.orders".to_string());
+
+    match find_node_by_name(&g, "orders") {
+        NodeLookupResult::Ambiguous(index, ids) => {
+            assert_eq!(index, package_a);
+            assert_eq!(
+                ids,
+                vec![
+                    "model.package_a.orders".to_string(),
+                    "model.package_b.orders".to_string()
+                ]
+            );
+        }
+        other => panic!("expected an ambiguous lookup, got {other:?}"),
+    }
+
+    let found = try_resolve_node_quiet(&g, "orders").unwrap();
+    assert_eq!(found, package_a);
+}
+
+#[test]
+fn test_lookup_qualified_alias_does_not_use_model_shorthand() {
+    let mut g = LineageGraph::new();
+    let model = g.add_node(make_node(
+        "model.project.metric_model",
+        "metric.revenue",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g[model].aliases.push("model.metric.revenue".to_string());
+    let metric = g.add_node(make_node(
+        "metric.project.revenue",
+        "revenue",
+        NodeType::Metric,
+        None,
+        vec![],
+    ));
+    g[metric].aliases.push("metric.revenue".to_string());
+
+    match find_node_by_name(&g, "metric.revenue") {
+        NodeLookupResult::Found(index) => assert_eq!(index, metric),
+        other => panic!("expected the metric alias to be found uniquely, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_lookup_bare_model_name_uses_model_shorthand() {
+    let mut g = LineageGraph::new();
+    let model = g.add_node(make_node(
+        "model.project.orders",
+        "orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g[model].aliases.push("model.orders".to_string());
+
+    match find_node_by_name(&g, "orders") {
+        NodeLookupResult::Found(index) => assert_eq!(index, model),
+        other => panic!("expected the bare model alias to be found, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_alias_spellings_only_strip_simple_model_aliases() {
+    assert_eq!(
+        alias_spellings("model.orders").collect::<Vec<_>>(),
+        vec!["model.orders", "orders"]
+    );
+    assert_eq!(
+        alias_spellings("model.metric.revenue").collect::<Vec<_>>(),
+        vec!["model.metric.revenue"]
+    );
+    assert_eq!(
+        alias_spellings("metric.revenue").collect::<Vec<_>>(),
+        vec!["metric.revenue"]
+    );
+}
+
+#[test]
 fn test_filter_multiple_focus_models() {
     let g = make_test_graph();
     // Focus on both "raw.orders" and "dashboard" with 0 upstream/downstream

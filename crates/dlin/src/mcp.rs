@@ -753,41 +753,9 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
 }
 
 fn resolve_node_unique_id(state: &McpState, name: &str) -> Option<String> {
-    if let Some(idx) = graph::filter::try_resolve_node_quiet(&state.dag, name) {
-        return Some(state.dag[idx].unique_id.clone());
-    }
-    let normalized = normalize_manifest_unique_id(name)?;
-    graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
+    graph::filter::resolve_node_by_name(&state.dag, name)
+        .ok()
         .map(|idx| state.dag[idx].unique_id.clone())
-}
-
-fn normalize_manifest_unique_id(name: &str) -> Option<String> {
-    let mut parts = name.split('.').collect::<Vec<_>>();
-    if parts.len() < 3 {
-        return None;
-    }
-    let resource_type = parts[0];
-    match resource_type {
-        "source" if parts.len() >= 4 => {
-            parts.remove(1);
-            Some(parts.join("."))
-        }
-        "test" => {
-            // dbt test unique IDs may include a trailing hash:
-            // test.<project>.<test_name>.<hash> -> test.<test_name>
-            if parts.len() >= 3 {
-                Some(format!("test.{}", parts[2]))
-            } else {
-                None
-            }
-        }
-        "model" | "seed" | "snapshot" | "exposure" | "semantic_model" | "metric"
-        | "saved_query" => {
-            parts.remove(1);
-            Some(parts.join("."))
-        }
-        _ => None,
-    }
 }
 
 fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -1337,38 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_manifest_unique_id_strips_test_hash_suffix() {
-        let normalized =
-            normalize_manifest_unique_id("test.simple_project.not_null_orders_order_id.cf6c17daed");
-        assert_eq!(
-            normalized,
-            Some("test.not_null_orders_order_id".to_string())
-        );
-    }
-
-    #[test]
-    fn normalize_manifest_unique_id_supports_unhashed_test_id() {
-        let normalized = normalize_manifest_unique_id("test.simple_project.my_test_name");
-        assert_eq!(normalized, Some("test.my_test_name".to_string()));
-    }
-
-    #[test]
-    fn normalize_manifest_unique_id_supports_semantic_layer_types() {
-        assert_eq!(
-            normalize_manifest_unique_id("semantic_model.my_project.orders"),
-            Some("semantic_model.orders".to_string())
-        );
-        assert_eq!(
-            normalize_manifest_unique_id("metric.my_project.revenue"),
-            Some("metric.revenue".to_string())
-        );
-        assert_eq!(
-            normalize_manifest_unique_id("saved_query.my_project.revenue_metrics"),
-            Some("saved_query.revenue_metrics".to_string())
-        );
-    }
-
-    #[test]
     fn find_nodes_resolves_semantic_layer_full_unique_ids() {
         let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -1420,15 +1356,15 @@ mod tests {
             .map(|n| n["unique_id"].as_str().unwrap())
             .collect();
         assert!(
-            unique_ids.contains(&"semantic_model.supplies"),
+            unique_ids.contains(&"semantic_model.jaffle_shop.supplies"),
             "semantic_model node should resolve to correct type"
         );
         assert!(
-            unique_ids.contains(&"metric.revenue"),
+            unique_ids.contains(&"metric.jaffle_shop.revenue"),
             "metric node should resolve to correct type"
         );
         assert!(
-            unique_ids.contains(&"saved_query.revenue_metrics"),
+            unique_ids.contains(&"saved_query.jaffle_shop.revenue_metrics"),
             "saved_query node should resolve to correct type"
         );
     }
