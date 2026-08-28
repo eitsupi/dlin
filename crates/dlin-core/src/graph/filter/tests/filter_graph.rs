@@ -145,6 +145,50 @@ fn test_lookup_ambiguity_uses_sorted_canonical_id() {
 }
 
 #[test]
+fn test_lookup_qualified_alias_does_not_use_model_shorthand() {
+    let mut g = LineageGraph::new();
+    let model = g.add_node(make_node(
+        "model.project.metric_model",
+        "metric.revenue",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g[model].aliases.push("model.metric.revenue".to_string());
+    let metric = g.add_node(make_node(
+        "metric.project.revenue",
+        "revenue",
+        NodeType::Metric,
+        None,
+        vec![],
+    ));
+    g[metric].aliases.push("metric.revenue".to_string());
+
+    match find_node_by_name(&g, "metric.revenue") {
+        NodeLookupResult::Found(index) => assert_eq!(index, metric),
+        other => panic!("expected the metric alias to be found uniquely, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_lookup_bare_model_name_uses_model_shorthand() {
+    let mut g = LineageGraph::new();
+    let model = g.add_node(make_node(
+        "model.project.orders",
+        "orders",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g[model].aliases.push("model.orders".to_string());
+
+    match find_node_by_name(&g, "orders") {
+        NodeLookupResult::Found(index) => assert_eq!(index, model),
+        other => panic!("expected the bare model alias to be found, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_filter_multiple_focus_models() {
     let g = make_test_graph();
     // Focus on both "raw.orders" and "dashboard" with 0 upstream/downstream

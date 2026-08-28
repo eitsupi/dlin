@@ -35,7 +35,7 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
     let aliases = collect_matches(graph, |node| {
         node.aliases
             .iter()
-            .any(|alias| alias == name || (!name.starts_with("model.") && alias == &name_prefixed))
+            .any(|alias| alias == name || (!name.contains('.') && alias == &name_prefixed))
     });
     if !aliases.is_empty() {
         return lookup_result(graph, aliases);
