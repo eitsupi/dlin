@@ -189,6 +189,22 @@ fn test_lookup_bare_model_name_uses_model_shorthand() {
 }
 
 #[test]
+fn test_alias_spellings_only_strip_simple_model_aliases() {
+    assert_eq!(
+        alias_spellings("model.orders").collect::<Vec<_>>(),
+        vec!["model.orders", "orders"]
+    );
+    assert_eq!(
+        alias_spellings("model.metric.revenue").collect::<Vec<_>>(),
+        vec!["model.metric.revenue"]
+    );
+    assert_eq!(
+        alias_spellings("metric.revenue").collect::<Vec<_>>(),
+        vec!["metric.revenue"]
+    );
+}
+
+#[test]
 fn test_filter_multiple_focus_models() {
     let g = make_test_graph();
     // Focus on both "raw.orders" and "dashboard" with 0 upstream/downstream

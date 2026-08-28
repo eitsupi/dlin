@@ -31,11 +31,11 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
         return lookup_result(graph, canonical);
     }
 
-    let name_prefixed = format!("model.{name}");
     let aliases = collect_matches(graph, |node| {
         node.aliases
             .iter()
-            .any(|alias| alias == name || (!name.contains('.') && alias == &name_prefixed))
+            .flat_map(|alias| alias_spellings(alias))
+            .any(|spelling| spelling == name)
     });
     if !aliases.is_empty() {
         return lookup_result(graph, aliases);
@@ -51,6 +51,14 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
         node.node_type != NodeType::Phantom && node.unique_id.ends_with(&suffix)
     });
     lookup_result(graph, suffix_matches)
+}
+
+fn alias_spellings(alias: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(alias).chain(
+        alias
+            .strip_prefix("model.")
+            .filter(|bare| !bare.contains('.')),
+    )
 }
 
 fn collect_matches(
@@ -237,11 +245,11 @@ fn node_matches_any_selector(node: &NodeData, selectors: &[Selector]) -> bool {
         Selector::ModelName(pat) => {
             pat.matches(&node.label)
                 || pat.matches(&node.unique_id)
-                || node.aliases.iter().any(|a| {
-                    pat.matches(a)
-                        || a.strip_prefix("model.")
-                            .is_some_and(|bare| pat.matches(bare))
-                })
+                || node
+                    .aliases
+                    .iter()
+                    .flat_map(|alias| alias_spellings(alias))
+                    .any(|spelling| pat.matches(spelling))
         }
     })
 }
