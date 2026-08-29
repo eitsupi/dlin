@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use super::project::ResolvedPaths;
+use super::project::{ResolvedPaths, is_sql_file};
 
 /// All discovered files in the dbt project, categorized by type
 #[derive(Debug, Default)]
@@ -21,14 +21,14 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
 
     // Models
     for dir in &paths.model_paths {
-        let (sql, yaml) = walk_directory(dir);
+        let (sql, yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         discovered.model_sql_files.extend(sql);
         discovered.yaml_files.extend(yaml);
     }
 
     // Seeds
     for dir in &paths.seed_paths {
-        let (_, yaml) = walk_directory(dir);
+        let (_, yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         // Seeds are CSV files typically, but we collect their YAML schema files
         discovered.yaml_files.extend(yaml);
         // Also look for .csv files
@@ -37,28 +37,28 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
 
     // Snapshots
     for dir in &paths.snapshot_paths {
-        let (sql, yaml) = walk_directory(dir);
+        let (sql, yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         discovered.snapshot_sql_files.extend(sql);
         discovered.yaml_files.extend(yaml);
     }
 
     // Tests
     for dir in &paths.test_paths {
-        let (sql, yaml) = walk_directory(dir);
+        let (sql, yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         discovered.test_sql_files.extend(sql);
         discovered.yaml_files.extend(yaml);
     }
 
     // Analyses (treated as models, consistent with manifest mode)
     for dir in &paths.analysis_paths {
-        let (sql, yaml) = walk_directory(dir);
+        let (sql, yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         discovered.model_sql_files.extend(sql);
         discovered.yaml_files.extend(yaml);
     }
 
     // Macros
     for dir in &paths.macro_paths {
-        let (sql, _yaml) = walk_directory(dir);
+        let (sql, _yaml) = walk_directory(dir, paths.allow_jinja_file_extensions);
         discovered.macro_sql_files.extend(sql);
     }
 
@@ -66,7 +66,7 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
 }
 
 /// Walk a directory and return (sql_files, yaml_files)
-fn walk_directory(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn walk_directory(dir: &Path, allow_jinja_file_extensions: bool) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut sql_files = Vec::new();
     let mut yaml_files = Vec::new();
 
@@ -80,10 +80,10 @@ fn walk_directory(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         .filter(|e| e.file_type().is_file())
     {
         let path = entry.path();
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("sql") => sql_files.push(path.to_path_buf()),
-            Some("yml" | "yaml") => yaml_files.push(path.to_path_buf()),
-            _ => {}
+        if is_sql_file(path, allow_jinja_file_extensions) {
+            sql_files.push(path.to_path_buf());
+        } else if let Some("yml" | "yaml") = path.extension().and_then(|e| e.to_str()) {
+            yaml_files.push(path.to_path_buf());
         }
     }
 
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_walk_nonexistent_directory() {
-        let (sql, yaml) = walk_directory(Path::new("/nonexistent/path"));
+        let (sql, yaml) = walk_directory(Path::new("/nonexistent/path"), false);
         assert!(sql.is_empty());
         assert!(yaml.is_empty());
     }
@@ -127,7 +127,7 @@ mod tests {
         fs::write(models_dir.join("schema.yml"), "version: 2").unwrap();
         fs::write(models_dir.join("readme.md"), "# Readme").unwrap();
 
-        let (sql, yaml) = walk_directory(&models_dir);
+        let (sql, yaml) = walk_directory(&models_dir, false);
         assert_eq!(sql.len(), 1);
         assert_eq!(yaml.len(), 1);
     }
@@ -162,7 +162,7 @@ mod tests {
         fs::write(staging_dir.join("stg_b.sql"), "SELECT 2").unwrap();
         fs::write(models_dir.join("schema.yaml"), "version: 2").unwrap();
 
-        let (sql, yaml) = walk_directory(&models_dir);
+        let (sql, yaml) = walk_directory(&models_dir, false);
         assert_eq!(sql.len(), 2);
         assert_eq!(yaml.len(), 1);
     }
@@ -200,6 +200,7 @@ mod tests {
             test_paths: vec![test_dir],
             macro_paths: vec![],
             analysis_paths: vec![],
+            allow_jinja_file_extensions: false,
         };
 
         let discovered = discover_files(&paths).unwrap();
@@ -233,6 +234,7 @@ mod tests {
             test_paths: vec![],
             macro_paths: vec![],
             analysis_paths: vec![analyses_dir],
+            allow_jinja_file_extensions: false,
         };
 
         let discovered = discover_files(&paths).unwrap();
@@ -268,6 +270,59 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_files_accepts_jinja_sql_suffix_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::write(models_dir.join("orders.sql.jinja"), "select 1").unwrap();
+        for filename in [
+            "ignored.j2",
+            "ignored.md.jinja",
+            "ignored.sql.other",
+            "ignored.sql.jinja.j2",
+        ] {
+            std::fs::write(models_dir.join(filename), "select 1").unwrap();
+        }
+        let paths = ResolvedPaths {
+            model_paths: vec![models_dir],
+            seed_paths: vec![],
+            snapshot_paths: vec![],
+            test_paths: vec![],
+            macro_paths: vec![],
+            analysis_paths: vec![],
+            allow_jinja_file_extensions: true,
+        };
+
+        let discovered = discover_files(&paths).unwrap();
+        assert_eq!(discovered.model_sql_files.len(), 1);
+    }
+
+    #[test]
+    fn test_discover_files_accepts_suffix_for_all_sql_resource_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = ["models", "snapshots", "tests", "analyses", "macros"];
+        for dir in dirs {
+            let path = tmp.path().join(dir);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(format!("{dir}.sql.j2")), "select 1").unwrap();
+        }
+        let paths = ResolvedPaths {
+            model_paths: vec![tmp.path().join("models")],
+            seed_paths: vec![],
+            snapshot_paths: vec![tmp.path().join("snapshots")],
+            test_paths: vec![tmp.path().join("tests")],
+            macro_paths: vec![tmp.path().join("macros")],
+            analysis_paths: vec![tmp.path().join("analyses")],
+            allow_jinja_file_extensions: true,
+        };
+        let discovered = discover_files(&paths).unwrap();
+        assert_eq!(discovered.model_sql_files.len(), 2);
+        assert_eq!(discovered.snapshot_sql_files.len(), 1);
+        assert_eq!(discovered.test_sql_files.len(), 1);
+        assert_eq!(discovered.macro_sql_files.len(), 1);
+    }
+
+    #[test]
     fn test_discover_files_missing_dirs() {
         let paths = ResolvedPaths {
             model_paths: vec![PathBuf::from("/nonexistent/models")],
@@ -276,6 +331,7 @@ mod tests {
             test_paths: vec![PathBuf::from("/nonexistent/tests")],
             macro_paths: vec![],
             analysis_paths: vec![],
+            allow_jinja_file_extensions: false,
         };
 
         let discovered = discover_files(&paths).unwrap();

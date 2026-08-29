@@ -11,6 +11,7 @@ use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
+use crate::parser::project::sql_file_stem;
 use crate::parser::sql::{
     RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
 };
@@ -181,10 +182,7 @@ fn read_file(path: &Path) -> Result<String> {
 
 /// Extract the file stem as a string, defaulting to "unknown"
 fn file_stem_str(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+    sql_file_stem(path)
 }
 
 /// Create source nodes from a single schema file's source definitions

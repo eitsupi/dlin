@@ -45,6 +45,15 @@ pub struct DbtProject {
 
     #[serde(default)]
     pub vars: HashMap<String, serde_json::Value>,
+
+    #[serde(default)]
+    pub flags: ProjectFlags,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ProjectFlags {
+    #[serde(default)]
+    pub allow_jinja_file_extensions: bool,
 }
 
 fn default_model_paths() -> Vec<String> {
@@ -74,6 +83,39 @@ fn default_analysis_paths() -> Vec<String> {
 // dbt recognizes the project-root vars.yml filename exactly; vars.yaml is not
 // an alias, so dlin intentionally follows that behavior.
 const DBT_VARS_FILE_NAME: &str = "vars.yml";
+
+/// Return whether a path is a dbt SQL resource filename.
+///
+/// dbt's `allow_jinja_file_extensions` flag enables only the documented
+/// `.sql.j2`, `.sql.jinja2`, and `.sql.jinja` suffixes in addition to `.sql`.
+/// Matching is intentionally case-sensitive and exact.
+pub fn is_sql_file(path: &Path, allow_jinja_file_extensions: bool) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.ends_with(".sql")
+        || (allow_jinja_file_extensions
+            && [".sql.j2", ".sql.jinja2", ".sql.jinja"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix)))
+}
+
+/// Return the logical dbt resource name for a recognized SQL filename.
+pub fn sql_file_stem(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    [".sql.j2", ".sql.jinja2", ".sql.jinja", ".sql"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        })
+        .to_string()
+}
 
 impl DbtProject {
     pub fn load(project_dir: &Path) -> Result<Self> {
@@ -152,6 +194,7 @@ impl DbtProject {
             test_paths: resolve(&self.test_paths),
             macro_paths: resolve(&self.macro_paths),
             analysis_paths: resolve(&self.analysis_paths),
+            allow_jinja_file_extensions: self.flags.allow_jinja_file_extensions,
         }
     }
 }
@@ -201,6 +244,25 @@ fn render_project_fields(
                 project_file,
             )?);
         }
+    }
+
+    // This flag is consumed by dlin's file discovery, so render it before the
+    // typed project parse as well. Unlike path fields, it must retain its
+    // native boolean type after evaluating a vars.yml expression.
+    if let Some(flags) = project_map
+        .get_mut("flags")
+        .and_then(|value| value.as_object_mut())
+        && let Some(value) = flags
+            .get("allow_jinja_file_extensions")
+            .and_then(|value| value.as_str())
+    {
+        let rendered = render_project_native_value(
+            &environment,
+            value,
+            "flags.allow_jinja_file_extensions",
+            project_file,
+        )?;
+        flags.insert("allow_jinja_file_extensions".to_owned(), rendered);
     }
     Ok(())
 }
@@ -252,6 +314,48 @@ fn render_project_value(
         })?)
 }
 
+/// Render a project value while preserving native Jinja expression results.
+///
+/// Project path fields are intentionally rendered as strings, but boolean
+/// project flags must remain booleans for typed deserialization. For a value
+/// consisting of one `{{ expression }}`, evaluate the expression directly;
+/// mixed text continues to use the string renderer.
+fn render_project_native_value(
+    environment: &Environment,
+    template: &str,
+    field: &str,
+    project_file: &Path,
+) -> Result<serde_json::Value> {
+    let trimmed = template.trim();
+    if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
+        let expression = trimmed[2..trimmed.len() - 2].trim();
+        if !expression.is_empty() {
+            let value = environment
+                .compile_expression(expression)
+                .and_then(|expression| expression.eval(()))
+                .map_err(|error| DbtLineageError::ProjectFieldRenderError {
+                    path: project_file.to_path_buf(),
+                    field: field.to_string(),
+                    message: error.to_string(),
+                })?;
+            return serde_json::to_value(value).map_err(|error| {
+                DbtLineageError::ProjectFieldRenderError {
+                    path: project_file.to_path_buf(),
+                    field: field.to_string(),
+                    message: error.to_string(),
+                }
+                .into()
+            });
+        }
+    }
+    Ok(serde_json::Value::String(render_project_value(
+        environment,
+        template,
+        field,
+        project_file,
+    )?))
+}
+
 #[derive(Debug)]
 pub struct ResolvedPaths {
     pub model_paths: Vec<PathBuf>,
@@ -260,6 +364,8 @@ pub struct ResolvedPaths {
     pub test_paths: Vec<PathBuf>,
     pub macro_paths: Vec<PathBuf>,
     pub analysis_paths: Vec<PathBuf>,
+    /// Whether dbt-style Jinja-suffixed SQL filenames are enabled.
+    pub allow_jinja_file_extensions: bool,
 }
 
 impl ResolvedPaths {
@@ -276,6 +382,7 @@ impl ResolvedPaths {
             test_paths: resolve(&["tests"]),
             macro_paths: resolve(&["macros"]),
             analysis_paths: resolve(&["analyses"]),
+            allow_jinja_file_extensions: false,
         }
     }
 }
@@ -296,6 +403,83 @@ mod tests {
         assert_eq!(project.test_paths, vec!["tests"]);
         assert_eq!(project.macro_paths, vec!["macros"]);
         assert_eq!(project.analysis_paths, vec!["analyses"]);
+        assert!(!project.flags.allow_jinja_file_extensions);
+    }
+
+    #[test]
+    fn test_allow_jinja_file_extensions_flag() {
+        let yaml = "name: my_project\nflags:\n  allow_jinja_file_extensions: true\n";
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
+        assert!(project.flags.allow_jinja_file_extensions);
+        assert!(
+            project
+                .resolve_paths(Path::new("/project"))
+                .allow_jinja_file_extensions
+        );
+    }
+
+    #[test]
+    fn test_load_renders_allow_jinja_file_extensions_from_vars_yml() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: test_project\nflags:\n  allow_jinja_file_extensions: \"{{ var('use_jinja_ext') }}\"\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("vars.yml"),
+            "vars:\n  use_jinja_ext: true\n",
+        )
+        .unwrap();
+
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert!(project.flags.allow_jinja_file_extensions);
+        assert!(
+            project
+                .resolve_paths(tmp.path())
+                .allow_jinja_file_extensions
+        );
+    }
+
+    #[test]
+    fn test_load_missing_flag_var_has_field_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: test_project\nflags:\n  allow_jinja_file_extensions: \"{{ var('missing_flag') }}\"\n",
+        )
+        .unwrap();
+
+        let error = DbtProject::load(tmp.path()).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::ProjectFieldRenderError { field, .. })
+                if field == "flags.allow_jinja_file_extensions"
+        ));
+    }
+
+    #[test]
+    fn test_sql_filename_allowlist_and_logical_stem() {
+        let accepted = [
+            "orders.sql",
+            "orders.sql.j2",
+            "orders.sql.jinja2",
+            "orders.sql.jinja",
+        ];
+        for filename in accepted {
+            let path = Path::new(filename);
+            assert!(is_sql_file(path, true), "{filename}");
+            assert_eq!(sql_file_stem(path), "orders");
+        }
+        for filename in [
+            "orders.j2",
+            "orders.md.jinja",
+            "orders.sql.other",
+            "orders.sql.jinja.j2",
+        ] {
+            assert!(!is_sql_file(Path::new(filename), true), "{filename}");
+        }
+        assert!(!is_sql_file(Path::new("orders.sql.jinja"), false));
     }
 
     #[test]

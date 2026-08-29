@@ -61,7 +61,7 @@ fn test_build_graph_versioned_ref_without_version_kwarg_resolves_to_latest() {
     let models_dir = project_dir.join("models");
     fs::create_dir_all(&models_dir).unwrap();
 
-    fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
+    fs::write(models_dir.join("my_model_v1.sql.jinja2"), "SELECT 1").unwrap();
     fs::write(models_dir.join("my_model_v2.sql"), "SELECT 2").unwrap();
     // downstream refs 'my_model' without version → should go to v2 (latest)
     fs::write(
@@ -86,7 +86,7 @@ models:
 
     let files = DiscoveredFiles {
         model_sql_files: vec![
-            project_dir.join("models/my_model_v1.sql"),
+            project_dir.join("models/my_model_v1.sql.jinja2"),
             project_dir.join("models/my_model_v2.sql"),
             project_dir.join("models/downstream.sql"),
         ],
@@ -324,7 +324,7 @@ fn test_build_graph_versioned_model_custom_defined_in() {
 
     // v1 uses default stem, v2 uses custom stem via defined_in
     fs::write(models_dir.join("my_model_v1.sql"), "SELECT 1").unwrap();
-    fs::write(models_dir.join("custom_v2_file.sql"), "SELECT 2").unwrap();
+    fs::write(models_dir.join("custom_v2_file.sql.jinja"), "SELECT 2").unwrap();
 
     fs::write(
         models_dir.join("schema.yml"),
@@ -344,7 +344,7 @@ models:
     let files = DiscoveredFiles {
         model_sql_files: vec![
             project_dir.join("models/my_model_v1.sql"),
-            project_dir.join("models/custom_v2_file.sql"),
+            project_dir.join("models/custom_v2_file.sql.jinja"),
         ],
         yaml_files: vec![project_dir.join("models/schema.yml")],
         ..Default::default()
