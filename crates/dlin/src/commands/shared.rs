@@ -10,6 +10,7 @@ use dlin_core::parser;
 #[cfg(not(tarpaulin_include))]
 pub(crate) struct ManifestDagContext {
     pub(crate) manifest: Option<parser::manifest::Manifest>,
+    pub(crate) manifest_bytes: Option<Vec<u8>>,
     pub(crate) project_name: Option<String>,
     pub(crate) referenced_file_paths: Vec<String>,
 }
@@ -51,6 +52,7 @@ pub(crate) fn build_dag(
                     analysis.into_parts();
                 let context = ManifestDagContext {
                     manifest: None,
+                    manifest_bytes: Some(manifest_bytes),
                     project_name,
                     referenced_file_paths,
                 };
@@ -88,6 +90,7 @@ pub(crate) fn build_dag(
                     project_name,
                     referenced_file_paths,
                     manifest: Some(manifest),
+                    manifest_bytes: None,
                 }),
             ))
         }

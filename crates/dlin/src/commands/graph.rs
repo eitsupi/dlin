@@ -131,6 +131,9 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             manifest_context
                 .as_ref()
                 .and_then(|context| context.manifest.as_ref()),
+            manifest_context
+                .as_ref()
+                .and_then(|context| context.manifest_bytes.as_deref()),
             args.manifest_path.as_ref(),
             &filtered,
         ))
@@ -285,6 +288,9 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
             manifest_context
                 .as_ref()
                 .and_then(|context| context.manifest.as_ref()),
+            manifest_context
+                .as_ref()
+                .and_then(|context| context.manifest_bytes.as_deref()),
             args.manifest_path.as_ref(),
             &filtered,
         ))
@@ -330,12 +336,25 @@ fn collect_sql_contents_for_source(
     source: &SourceType,
     project_dir: &Path,
     manifest: Option<&parser::manifest::Manifest>,
+    manifest_bytes: Option<&[u8]>,
     manifest_path: Option<&PathBuf>,
     graph: &graph::types::LineageGraph,
 ) -> HashMap<String, String> {
     match source {
         SourceType::Manifest => {
             if let Some(manifest) = manifest {
+                manifest.collect_sql_contents()
+            } else if let Some(bytes) = manifest_bytes {
+                // Use the already-read bytes even when the path has changed
+                // or disappeared since DAG construction. The path is only
+                // needed for diagnostics from the byte parser.
+                let resolved = manifest_path
+                    .cloned()
+                    .unwrap_or_else(|| project_dir.join("target").join("manifest.json"));
+                let Ok(manifest) = parser::manifest::load_manifest_from_bytes(bytes, &resolved)
+                else {
+                    return HashMap::new();
+                };
                 manifest.collect_sql_contents()
             } else {
                 let Ok(resolved) = resolve_manifest_path_or_default(manifest_path, project_dir)
@@ -451,4 +470,60 @@ pub(crate) fn run_impact_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_sql_content_uses_initial_bytes_when_path_content_differs() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("deleted-manifest.json");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "metadata": {},
+            "nodes": {
+                "model.project.orders": {
+                    "unique_id": "model.project.orders",
+                    "name": "orders",
+                    "resource_type": "model",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": "select 1",
+                    "database": null,
+                    "schema": null
+                }
+            }
+        }))
+        .unwrap();
+        let conflicting_bytes = String::from_utf8(bytes.clone())
+            .unwrap()
+            .replace("select 1", "select 2");
+        std::fs::write(&manifest_path, conflicting_bytes).unwrap();
+        let contents = collect_sql_contents_for_source(
+            &SourceType::Manifest,
+            temp.path(),
+            None,
+            Some(&bytes),
+            Some(&manifest_path),
+            &graph::types::LineageGraph::new(),
+        );
+
+        assert_eq!(
+            parser::manifest::load_manifest_from_bytes(&bytes, &manifest_path)
+                .unwrap()
+                .collect_sql_contents()
+                .get("model.project.orders")
+                .map(String::as_str),
+            Some("select 1")
+        );
+        assert_eq!(
+            contents.get("model.project.orders").map(String::as_str),
+            Some("select 1")
+        );
+    }
 }
