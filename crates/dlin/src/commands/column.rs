@@ -10,6 +10,7 @@ use dlin_core::input;
 use dlin_core::parser;
 use dlin_core::render;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_column_lineage_command(
     cli_models: Vec<String>,
     columns: &[String],
