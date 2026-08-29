@@ -101,7 +101,7 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
 
 /// Strict counterpart to [`build_graph_from_parsed_manifest`].
 pub fn build_graph_from_parsed_manifest_strict(manifest: &Manifest) -> Result<LineageGraph> {
-    if super::manifest_has_future_schema(manifest) {
+    if super::manifest_has_future_schema(manifest) || manifest.capabilities.future_schema {
         anyhow::bail!("manifest uses a future dbt schema version");
     }
     if let Some((unique_id, raw_type)) = find_unsupported_resource(manifest) {

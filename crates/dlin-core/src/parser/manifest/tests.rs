@@ -274,6 +274,19 @@ fn strict_graph_rejects_future_schema_from_direct_deserialize() {
 }
 
 #[test]
+fn strict_graph_rejects_future_schema_capability_without_raw_schema() {
+    let manifest = Manifest {
+        capabilities: ManifestCapabilities {
+            future_schema: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    insta::assert_snapshot!(error.to_string(), @r###"manifest uses a future dbt schema version"###);
+}
+
+#[test]
 fn strict_graph_selects_first_unsupported_resource_by_unique_id() {
     let node = |unique_id: &str, name: &str, resource_type: &str| {
         serde_json::json!({
