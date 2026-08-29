@@ -153,8 +153,12 @@ pub(super) fn compute_column_lineage_internal(
 
     let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
     let backend = Backend::Sqllineage(SqllineageBackend::new());
-    if let Some(cached) = cache.get_internal(
-        model_name,
+    // Cache entries are keyed by the manifest's canonical identity. Callers
+    // may address the same model by its short name or its unique_id, but both
+    // spellings must share one persistent entry.
+    let cache_key = node.unique_id.as_str();
+    if let Some(cached) = cache.get(
+        cache_key,
         compiled_code,
         dialect,
         backend.id(),
@@ -324,8 +328,8 @@ pub(super) fn compute_column_lineage_internal(
         errors,
     };
 
-    cache.insert_internal(
-        model_name,
+    cache.insert(
+        cache_key,
         compiled_code,
         dialect,
         backend.id(),

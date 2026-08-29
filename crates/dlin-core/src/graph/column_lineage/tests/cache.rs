@@ -27,7 +27,7 @@ fn test_column_cache_hit() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -48,7 +48,7 @@ fn test_column_cache_hit() {
 }
 
 #[test]
-fn test_column_cache_persists_structural_relation_and_public_view() {
+fn test_column_cache_persists_structural_relation_and_public_output() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
     let manifest = make_test_manifest();
@@ -67,7 +67,7 @@ fn test_column_cache_persists_structural_relation_and_public_view() {
         .join(COLUMN_LINEAGE_CACHE_FILENAME);
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cache_path).unwrap()).unwrap();
-    let sources = json["entries"]["stg_orders"]["lineage"]["columns"]
+    let sources = json["entries"]["model.proj.stg_orders"]["lineage"]["columns"]
         .as_array()
         .unwrap()
         .iter()
@@ -80,7 +80,7 @@ fn test_column_cache_persists_structural_relation_and_public_view() {
     let reloaded = ColumnLineageCache::load(project_dir, None);
     let hit = reloaded
         .get(
-            "stg_orders",
+            "model.proj.stg_orders",
             &compiled_code,
             DlinDialect::Generic,
             BackendId::Sqllineage,
@@ -92,9 +92,62 @@ fn test_column_cache_persists_structural_relation_and_public_view() {
         )
         .unwrap();
     assert_eq!(
-        serde_json::to_value(hit).unwrap(),
+        serde_json::to_value(hit.clone().into_public()).unwrap(),
         serde_json::to_value(public).unwrap()
     );
+}
+
+#[test]
+fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let manifest = make_test_manifest();
+    let node = super::super::find_model_by_name(&manifest, "stg_orders").unwrap();
+    let unique_id = node.unique_id.clone();
+    let compiled_code = node.compiled_code.clone().unwrap();
+    let manifest_columns_hash =
+        super::super::schema::compute_manifest_columns_hash(&manifest, node);
+    let sentinel = ModelColumnLineage {
+        model: "canonical-cache-sentinel".to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+
+    // Seed the persistent cache using the canonical key, then resolve the
+    // same model through both supported caller spellings. The sentinel makes
+    // this assert a cache hit rather than merely equal recomputation output.
+    let mut seeded = ColumnLineageCache::load(project_dir, None);
+    seeded.insert(
+        &unique_id,
+        &compiled_code,
+        DlinDialect::Generic,
+        BackendId::Sqllineage,
+        manifest_columns_hash,
+        None,
+        sentinel.clone().into(),
+    );
+    seeded.save();
+
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    let short_result =
+        compute_column_lineage(&manifest, "stg_orders", DlinDialect::Generic, &mut cache);
+    let unique_result =
+        compute_column_lineage(&manifest, &unique_id, DlinDialect::Generic, &mut cache);
+
+    assert_eq!(short_result.model, sentinel.model);
+    assert_eq!(unique_result.model, sentinel.model);
+
+    let cache_path = project_dir
+        .join(CACHE_DIR)
+        .join(COLUMN_LINEAGE_CACHE_FILENAME);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cache_path).unwrap()).unwrap();
+    let entries = json["entries"].as_object().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries.contains_key(&unique_id));
+    assert!(!entries.contains_key("stg_orders"));
 }
 
 #[test]
@@ -117,7 +170,7 @@ fn test_column_cache_miss_on_code_change() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -156,7 +209,7 @@ fn test_column_cache_miss_on_dialect_change() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -195,7 +248,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         BackendId::Sqllineage,
         42,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -248,7 +301,7 @@ fn test_column_cache_version_invalidation() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -258,6 +311,7 @@ fn test_column_cache_version_invalidation() {
         .join(COLUMN_LINEAGE_CACHE_FILENAME);
     let content = std::fs::read_to_string(&cache_path).unwrap();
     let mut cf: ColumnLineageCacheFile = serde_json::from_str(&content).unwrap();
+    assert_eq!(cf.version, env!("CARGO_PKG_VERSION"));
     cf.version = "0.0.0-fake".to_string();
     std::fs::write(&cache_path, serde_json::to_string(&cf).unwrap()).unwrap();
 
@@ -293,7 +347,7 @@ fn test_column_cache_disabled() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     // Disabled cache still works in-memory (only disk persistence is disabled)
     assert!(
@@ -333,7 +387,7 @@ fn test_column_cache_fresh() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -368,7 +422,7 @@ fn test_column_cache_fresh() {
         BackendId::Sqllineage,
         0,
         None,
-        lineage2,
+        lineage2.into(),
     );
     fresh.save();
 
@@ -409,7 +463,7 @@ fn test_column_cache_miss_on_manifest_stat_change() {
         BackendId::Sqllineage,
         42,
         Some(&manifest_path),
-        lineage,
+        lineage.into(),
     );
     cache.save();
 
@@ -475,7 +529,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
         BackendId::Sqllineage,
         manifest_columns_hash,
         Some(&manifest_path),
-        sentinel,
+        sentinel.into(),
     );
     seeded.save();
 
@@ -519,7 +573,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         BackendId::Sqllineage,
         initial_hash,
         None,
-        sentinel,
+        sentinel.into(),
     );
 
     let mut changed_manifest = manifest;

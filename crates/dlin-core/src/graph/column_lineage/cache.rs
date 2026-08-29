@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::parser::cache::hash_str;
 
+use super::InternalModelColumnLineage;
 use super::backend::{BackendId, DlinDialect};
-use super::{InternalModelColumnLineage, ModelColumnLineage};
 
 // --- Column lineage disk cache ---
 
@@ -25,13 +25,10 @@ fn analysis_key(backend: BackendId, dialect: DlinDialect) -> String {
     )
 }
 
-/// The cache file format version. Bumped independently of `analysis_key` so
-/// that changing what a cache entry's key looks like (as opposed to what it
-/// contains) also invalidates old entries: their key was computed from a
-/// different, incompatible scheme (the debug-formatted spelling of an
-/// external dialect enum, with no backend identity at all).
-fn cache_format_version() -> String {
-    format!("{}:column-lineage-cache-v3", env!("CARGO_PKG_VERSION"))
+/// The package version is the sole persistent cache compatibility boundary.
+/// Cache formats are intentionally not versioned independently.
+fn package_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// A single cached column lineage entry for one model
@@ -64,7 +61,7 @@ pub(super) struct ColumnLineageCacheFile {
     /// dlin version that created this cache
     #[serde(default)]
     pub(super) version: String,
-    /// Per-model cached entries keyed by model name
+    /// Per-model cached entries keyed by canonical manifest unique_id
     entries: HashMap<String, ColumnLineageCacheEntry>,
 }
 
@@ -72,9 +69,6 @@ pub(super) struct ColumnLineageCacheFile {
 pub struct ColumnLineageCache {
     version: String,
     entries: HashMap<String, ColumnLineageCacheEntry>,
-    /// In-memory public views preserve the existing `get` API without putting
-    /// rendered strings back into the internal/on-disk representation.
-    legacy_views: HashMap<String, ModelColumnLineage>,
     /// `None` when the cache is disabled (no-op mode).
     cache_path: Option<PathBuf>,
     dirty: bool,
@@ -86,7 +80,6 @@ impl ColumnLineageCache {
         Self {
             version: String::new(),
             entries: HashMap::new(),
-            legacy_views: HashMap::new(),
             cache_path: None,
             dirty: false,
         }
@@ -101,7 +94,7 @@ impl ColumnLineageCache {
                 .join(CACHE_DIR)
                 .join(COLUMN_LINEAGE_CACHE_FILENAME),
         };
-        let version = cache_format_version();
+        let version = package_version();
 
         let entries = std::fs::read_to_string(&cache_path)
             .ok()
@@ -109,15 +102,9 @@ impl ColumnLineageCache {
             .filter(|cf| cf.version == version)
             .map(|cf| cf.entries)
             .unwrap_or_default();
-        let legacy_views = entries
-            .iter()
-            .map(|(model, entry)| (model.clone(), entry.lineage.clone().into_public()))
-            .collect();
-
         Self {
             version,
             entries,
-            legacy_views,
             cache_path: Some(cache_path),
             dirty: false,
         }
@@ -133,46 +120,25 @@ impl ColumnLineageCache {
                 .join(COLUMN_LINEAGE_CACHE_FILENAME),
         };
         Self {
-            version: cache_format_version(),
+            version: package_version(),
             entries: HashMap::new(),
-            legacy_views: HashMap::new(),
             cache_path: Some(cache_path),
             dirty: false,
         }
     }
 
-    /// Look up a cached lineage result for the given model.
+    /// Look up a cached lineage result for a canonical manifest unique_id.
     /// Returns `None` if not cached or if compiled_code/dialect/manifest_columns_hash have changed.
-    pub fn get(
+    pub(crate) fn get(
         &self,
-        model_name: &str,
-        compiled_code: &str,
-        dialect: DlinDialect,
-        backend: BackendId,
-        manifest_path: Option<&Path>,
-        manifest_columns_hash: Option<u64>,
-    ) -> Option<&ModelColumnLineage> {
-        self.get_internal(
-            model_name,
-            compiled_code,
-            dialect,
-            backend,
-            manifest_path,
-            manifest_columns_hash,
-        )?;
-        self.legacy_views.get(model_name)
-    }
-
-    pub(crate) fn get_internal(
-        &self,
-        model_name: &str,
+        model_unique_id: &str,
         compiled_code: &str,
         dialect: DlinDialect,
         backend: BackendId,
         manifest_path: Option<&Path>,
         manifest_columns_hash: Option<u64>,
     ) -> Option<&InternalModelColumnLineage> {
-        let entry = self.entries.get(model_name)?;
+        let entry = self.entries.get(model_unique_id)?;
         let code_hash = hash_str(compiled_code);
         let key = analysis_key(backend, dialect);
         if entry.compiled_code_hash != code_hash || entry.analysis_key != key {
@@ -195,33 +161,11 @@ impl ColumnLineageCache {
         None
     }
 
-    /// Insert a lineage result into the cache.
+    /// Insert a lineage result using a canonical manifest unique_id.
     #[allow(clippy::too_many_arguments)]
-    pub fn insert(
+    pub(crate) fn insert(
         &mut self,
-        model_name: &str,
-        compiled_code: &str,
-        dialect: DlinDialect,
-        backend: BackendId,
-        manifest_columns_hash: u64,
-        manifest_path: Option<&Path>,
-        lineage: ModelColumnLineage,
-    ) {
-        self.insert_internal(
-            model_name,
-            compiled_code,
-            dialect,
-            backend,
-            manifest_columns_hash,
-            manifest_path,
-            lineage.into(),
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn insert_internal(
-        &mut self,
-        model_name: &str,
+        model_unique_id: &str,
         compiled_code: &str,
         dialect: DlinDialect,
         backend: BackendId,
@@ -229,10 +173,9 @@ impl ColumnLineageCache {
         manifest_path: Option<&Path>,
         lineage: InternalModelColumnLineage,
     ) {
-        let public_view = lineage.clone().into_public();
         let stat = manifest_path.and_then(manifest_stat);
         self.entries.insert(
-            model_name.to_string(),
+            model_unique_id.to_string(),
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
                 analysis_key: analysis_key(backend, dialect),
@@ -243,8 +186,6 @@ impl ColumnLineageCache {
                 lineage,
             },
         );
-        self.legacy_views
-            .insert(model_name.to_string(), public_view);
         self.dirty = true;
     }
 
