@@ -488,9 +488,11 @@ fn test_semantic_digest_memoizes_shared_upstream_and_terminates_cycles() {
     let stg_orders = manifest.nodes.get("model.proj.stg_orders").unwrap();
     let mut digests = super::super::schema::SemanticDigestCache::default();
 
-    digests.digest_for_node(&manifest, orders);
+    let orders_digest = digests.digest_for_node(&manifest, orders);
+    assert!(orders_digest.persistent_cache_safe);
     let computed_after_orders = digests.computed_nodes();
-    digests.digest_for_node(&manifest, stg_orders);
+    let stg_orders_digest = digests.digest_for_node(&manifest, stg_orders);
+    assert!(stg_orders_digest.persistent_cache_safe);
     assert_eq!(computed_after_orders, digests.computed_nodes());
 
     let mut cyclic_manifest = make_test_manifest();
@@ -510,7 +512,107 @@ fn test_semantic_digest_memoizes_shared_upstream_and_terminates_cycles() {
     let stg_first_stg = stg_first.digest_for_node(&cyclic_manifest, cyclic_stg);
     let stg_first_orders = stg_first.digest_for_node(&cyclic_manifest, cyclic_orders);
 
-    assert_ne!(orders_first_orders, 0);
+    assert_ne!(orders_first_orders.value, 0);
+    assert!(!orders_first_orders.persistent_cache_safe);
+    assert!(!orders_first_stg.persistent_cache_safe);
     assert_eq!(orders_first_orders, stg_first_orders);
     assert_eq!(orders_first_stg, stg_first_stg);
+}
+
+#[test]
+fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cyclic_manifest = make_test_manifest();
+    cyclic_manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .depends_on
+        .nodes
+        .push("model.proj.orders".to_string());
+
+    let orders = super::super::find_model_by_name(&cyclic_manifest, "orders").unwrap();
+    let orders_id = orders.unique_id.clone();
+    let digest = super::super::schema::SemanticDigestCache::default()
+        .digest_for_node(&cyclic_manifest, orders);
+    assert!(!digest.persistent_cache_safe);
+
+    let sentinel = ModelColumnLineage {
+        model: "cycle-cache-sentinel".to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+    let mut seeded = ColumnLineageCache::load(tmp.path(), None);
+    seeded.insert(
+        &orders_id,
+        DlinDialect::Generic,
+        digest.value,
+        sentinel.clone().into(),
+    );
+    seeded.save();
+
+    // The old digest remains the same even though one cycle participant
+    // changes, so this specifically exercises the persistent-cache safety
+    // flag rather than merely relying on digest invalidation.
+    let mut changed_manifest = cyclic_manifest;
+    changed_manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("select changed_order_id from raw.orders".to_string());
+    let changed_orders = super::super::find_model_by_name(&changed_manifest, "orders").unwrap();
+    let changed_digest = super::super::schema::SemanticDigestCache::default()
+        .digest_for_node(&changed_manifest, changed_orders);
+    assert_eq!(digest.value, changed_digest.value);
+    assert!(!changed_digest.persistent_cache_safe);
+
+    let mut cache = ColumnLineageCache::load(tmp.path(), None);
+    let result = compute_column_lineage(
+        &changed_manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut cache,
+    );
+    assert_ne!(result.model, sentinel.model);
+
+    // Unsafe cycle results are also not written back to persistent storage.
+    cache.save();
+    let persisted = ColumnLineageCache::load(tmp.path(), None);
+    assert_eq!(
+        persisted
+            .get(&orders_id, DlinDialect::Generic, digest.value)
+            .unwrap()
+            .model,
+        sentinel.model
+    );
+
+    // A node outside the cycle is unsafe as well because its transitive
+    // dependency digest is unsafe.
+    let mut external_manifest = changed_manifest;
+    let external = crate::parser::manifest::ManifestNode {
+        unique_id: "model.proj.report".to_string(),
+        name: "report".to_string(),
+        alias: None,
+        resource_type: "model".to_string(),
+        depends_on: crate::parser::manifest::DependsOn {
+            nodes: vec![orders_id],
+        },
+        config: crate::parser::manifest::ManifestConfig::default(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: HashMap::new(),
+        compiled_code: Some("select * from orders".to_string()),
+        database: None,
+        schema: None,
+    };
+    external_manifest
+        .nodes
+        .insert(external.unique_id.clone(), external);
+    let external = external_manifest.nodes.get("model.proj.report").unwrap();
+    let external_digest = super::super::schema::SemanticDigestCache::default()
+        .digest_for_node(&external_manifest, external);
+    assert!(!external_digest.persistent_cache_safe);
 }

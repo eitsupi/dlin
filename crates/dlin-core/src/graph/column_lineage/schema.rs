@@ -182,12 +182,25 @@ pub(super) struct SemanticDigestCache {
     computed_nodes: usize,
 }
 
+/// The semantic digest of a node and whether it is safe to use as a
+/// persistent cache validation key.
+///
+/// Digests for malformed dependency cycles are still useful for terminating
+/// the traversal deterministically, but they must not be persisted. A cycle
+/// marker deliberately omits some dependency state, so using such a digest
+/// for persistent reuse could turn a changed dependency into a stale hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SemanticDigest {
+    pub(super) value: u64,
+    pub(super) persistent_cache_safe: bool,
+}
+
 impl SemanticDigestCache {
     pub(super) fn digest_for_node(
         &mut self,
         manifest: &Manifest,
         node: &crate::parser::manifest::ManifestNode,
-    ) -> u64 {
+    ) -> SemanticDigest {
         self.digest_for_id(
             manifest,
             &node.unique_id,
@@ -195,7 +208,6 @@ impl SemanticDigestCache {
             &mut Vec::new(),
             &mut HashSet::new(),
         )
-        .0
     }
 
     fn digest_for_id(
@@ -205,9 +217,12 @@ impl SemanticDigestCache {
         visiting: &mut HashSet<String>,
         path: &mut Vec<String>,
         cycle_nodes: &mut HashSet<String>,
-    ) -> (u64, bool) {
+    ) -> SemanticDigest {
         if let Some(digest) = self.digests.get(id) {
-            return (*digest, false);
+            return SemanticDigest {
+                value: *digest,
+                persistent_cache_safe: true,
+            };
         }
         if visiting.contains(id) {
             // dbt DAGs should be acyclic, but malformed manifests must not
@@ -217,12 +232,16 @@ impl SemanticDigestCache {
             if let Some(start) = path.iter().position(|active| active == id) {
                 cycle_nodes.extend(path[start..].iter().cloned());
             }
-            return (hash_str("column-lineage:cycle"), true);
+            return SemanticDigest {
+                value: hash_str("column-lineage:cycle"),
+                persistent_cache_safe: false,
+            };
         }
         visiting.insert(id.to_string());
         path.push(id.to_string());
 
         let mut parts = Vec::new();
+        let mut persistent_cache_safe = true;
         if let Some(node) = manifest.nodes.get(id) {
             parts.push(format!("node:{id}"));
             append_node_local_parts(&mut parts, node);
@@ -234,12 +253,13 @@ impl SemanticDigestCache {
                 if manifest.nodes.contains_key(dependency_id)
                     || manifest.sources.contains_key(dependency_id)
                 {
-                    let (dependency_digest, _) =
+                    let dependency_digest =
                         self.digest_for_id(manifest, dependency_id, visiting, path, cycle_nodes);
+                    persistent_cache_safe &= dependency_digest.persistent_cache_safe;
                     if cycle_nodes.contains(id) && cycle_nodes.contains(dependency_id.as_str()) {
                         parts.push(format!("cycle-dependency:{dependency_id}"));
                     } else {
-                        parts.push(format!("digest:{dependency_digest}"));
+                        parts.push(format!("digest:{}", dependency_digest.value));
                     }
                 } else {
                     parts.push("missing-dependency".to_string());
@@ -256,11 +276,15 @@ impl SemanticDigestCache {
         visiting.remove(id);
         let digest = hash_str(&parts.join("\0"));
         let is_cycle_participant = cycle_nodes.contains(id);
-        if !is_cycle_participant {
+        persistent_cache_safe &= !is_cycle_participant;
+        if persistent_cache_safe {
             self.digests.insert(id.to_string(), digest);
         }
         self.computed_nodes += 1;
-        (digest, is_cycle_participant)
+        SemanticDigest {
+            value: digest,
+            persistent_cache_safe,
+        }
     }
 
     #[cfg(test)]
@@ -277,7 +301,9 @@ pub(super) fn compute_semantic_digest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
 ) -> u64 {
-    SemanticDigestCache::default().digest_for_node(manifest, node)
+    SemanticDigestCache::default()
+        .digest_for_node(manifest, node)
+        .value
 }
 
 fn append_node_local_parts(parts: &mut Vec<String>, node: &crate::parser::manifest::ManifestNode) {

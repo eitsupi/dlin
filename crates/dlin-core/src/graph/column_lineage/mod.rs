@@ -213,7 +213,11 @@ pub(super) fn compute_column_lineage_internal(
     // Cache entries are keyed by the manifest's canonical identity. Callers
     // may address the same model by its short name or its unique_id, but both
     // spellings must share one persistent entry.
-    if let Some(cached) = analysis.cache.get(cache_key, dialect, semantic_digest) {
+    if semantic_digest.persistent_cache_safe
+        && let Some(cached) = analysis
+            .cache
+            .get(cache_key, dialect, semantic_digest.value)
+    {
         let cached = cached.clone();
         analysis
             .lineage_results
@@ -381,9 +385,11 @@ pub(super) fn compute_column_lineage_internal(
         errors,
     };
 
-    analysis
-        .cache
-        .insert(cache_key, dialect, semantic_digest, result.clone());
+    if semantic_digest.persistent_cache_safe {
+        analysis
+            .cache
+            .insert(cache_key, dialect, semantic_digest.value, result.clone());
+    }
     analysis
         .lineage_results
         .insert(cache_key.to_string(), result.clone());
