@@ -35,6 +35,11 @@ pub struct ManifestGraphCache {
     dirty: bool,
 }
 
+// `CARGO_PKG_VERSION`, used by `load` and `fresh`, is the compatibility and
+// invalidation boundary for both cache format and graph semantics. We avoid a
+// second cache schema/semantics version: a release/version bump automatically
+// discards older caches. Compatibility between development builds sharing a
+// package version is not guaranteed; use `--refresh-cache` when needed.
 impl ManifestGraphCache {
     pub fn disabled() -> Self {
         Self {
