@@ -56,6 +56,10 @@ def write_workload(root: Path, count: int) -> None:
     (sql_root / "dbt_project.yml").write_text(dbt_project, encoding="utf-8")
     (sql_root / "macros").mkdir(exist_ok=True)
     (sql_root / "macros" / "benchmark.sql").write_text(macro, encoding="utf-8")
+    parent_name = "orders" if count == 1 else f"orders_{count - 2:04d}"
+    (sql_root / "vars.yml").write_text(
+        f"vars:\n  benchmark_parent: {parent_name}\n", encoding="utf-8"
+    )
 
     source_id = f"source.{project}.raw.orders"
     source = {
@@ -81,8 +85,13 @@ def write_workload(root: Path, count: int) -> None:
             if index == 0
             else f'"main"."{("orders" if index == 1 else f"orders_{index - 1:04d}")}"'
         )
-        if index == 0:
-            sql = "select {{ benchmark_label('id') }}, amount from {{ source('raw', 'orders') }}"
+        if index == count - 1 and index > 0:
+            sql = (
+                f"select {{{{ benchmark_label('id') }}}}, amount + {index} as amount "
+                "from {{ ref(var('benchmark_parent')) }}"
+            )
+        elif index == 0:
+            sql = "select id, amount from {{ source('raw', 'orders') }}"
         else:
             previous_name = "orders" if index == 1 else f"orders_{index - 1:04d}"
             sql = (

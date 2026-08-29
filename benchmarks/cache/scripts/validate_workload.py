@@ -51,6 +51,12 @@ def main() -> int:
     if manifest_files != ["target/manifest.json"]:
         parser.error(f"manifest_project contains files outside target/manifest.json: {manifest_files}")
     models = sorted((root / "sql_project/models").glob("*.sql"))
+    vars_path = root / "sql_project/vars.yml"
+    if not vars_path.is_file() or "benchmark_parent:" not in vars_path.read_text(encoding="utf-8"):
+        parser.error("SQL workload is missing vars.yml benchmark_parent")
+    final_model = models[-1]
+    if "ref(var('benchmark_parent'))" not in final_model.read_text(encoding="utf-8"):
+        parser.error("final SQL model does not exercise ref(var('benchmark_parent'))")
     if not models or not any(
         "{{ ref(" in path.read_text(encoding="utf-8") for path in models
     ):

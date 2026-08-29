@@ -52,6 +52,11 @@ python3 benchmarks/cache/scripts/run_benchmarks.py \
   --binary target/release/dlin --runs 3 --warmup 1
 ```
 
+Pass `--summary-file <PATH>` to write the concise semantic-validation report
+as Markdown (the runner also prints the same report to its log). CI passes
+`$GITHUB_STEP_SUMMARY` so the probe results are visible in the job summary;
+timing values are intentionally not included there.
+
 Use `--skip-timing` for a fast probe-only check, or pass a debug binary
 explicitly for functional development checks. Results are written under the
 ignored `benchmarks/cache/results/` directory:
@@ -60,6 +65,8 @@ ignored `benchmarks/cache/results/` directory:
   input sizes, commands, cache metadata, probe status, and timing paths.
 * `hyperfine/*.json` contains raw timing output.
 * `cache/<scenario>/` contains the observed persistent cache files.
+* `invalidation/` contains isolated SQL-project copies and functional
+  invalidation metadata.
 
 Each scenario uses its own cache directory and observes
 `extraction_cache.json`, `manifest_graph_cache.json`, and
@@ -75,6 +82,18 @@ nanoseconds and asserts that observed cache files are unchanged by the warm
 probe and timed warm runs. This is combined benchmark evidence, not direct
 proof of an internal cache hit; direct hit guarantees belong in production
 unit/integration tests. Timing is informational and has no pass/fail threshold.
+
+For SQL and manifest scenarios, timing uses the small-output `summary -o json`
+command while semantic probes use `graph -o json`. This keeps graph rendering
+out of cache timings while comparing the observable DAG. The column scenario
+uses the same compiled-SQL column query for both.
+
+The runner also performs three SQL invalidation baselines on isolated copies:
+a size-changing single-file ref edit, a macro body edit that adds a rendered
+dependency, and a `vars.yml` edit that changes the final model ref. Each must
+produce an equivalent cached/no-cache result and a changed graph/cache state;
+these are functional checks, not timing thresholds. The generated SQL project
+uses `vars.yml` without duplicating `vars` in `dbt_project.yml`.
 
 The SQL and manifest scenarios use the small-output `summary` command to
 measure model-level DAG construction without timing a large graph renderer.
