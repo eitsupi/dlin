@@ -1,10 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-
-use serde::{Deserialize, Serialize};
-
-use crate::parser::cache::hash_str;
 
 use super::InternalModelColumnLineage;
 use super::backend::DlinDialect;
@@ -23,24 +19,11 @@ fn package_version() -> String {
 /// A single cached column lineage entry for one model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ColumnLineageCacheEntry {
-    /// FNV-1a hash of the model's compiled SQL
-    compiled_code_hash: u64,
+    /// Digest of the model and its transitive semantic dependencies.
+    semantic_digest: u64,
     /// Dialect that produced this entry. The backend is fixed by this package
     /// and covered by the package-version compatibility boundary.
     dialect: String,
-    /// FNV-1a hash covering the model's YAML columns, compiled SQL, and the same
-    /// for all transitive upstream dependencies. Captures any schema or SQL change
-    /// that could alter the lineage result, not just manifest column definitions.
-    /// Defaults to 0 for cache entries created before this field was added,
-    /// which effectively invalidates them since the computed hash will differ.
-    #[serde(default)]
-    manifest_columns_hash: u64,
-    #[serde(default)]
-    manifest_mtime_secs: u64,
-    #[serde(default)]
-    manifest_mtime_nanos: u32,
-    #[serde(default)]
-    manifest_size_bytes: u64,
     /// Cached lineage result
     lineage: InternalModelColumnLineage,
 }
@@ -118,58 +101,33 @@ impl ColumnLineageCache {
     }
 
     /// Look up a cached lineage result for a canonical manifest unique_id.
-    /// Returns `None` if not cached or if compiled_code/dialect/manifest_columns_hash have changed.
-    pub(crate) fn get(
+    /// Returns `None` if the semantic digest or effective dialect changed.
+    pub(super) fn get(
         &self,
         model_unique_id: &str,
-        compiled_code: &str,
         dialect: DlinDialect,
-        manifest_path: Option<&Path>,
-        manifest_columns_hash: Option<u64>,
+        semantic_digest: u64,
     ) -> Option<&InternalModelColumnLineage> {
         let entry = self.entries.get(model_unique_id)?;
-        let code_hash = hash_str(compiled_code);
-        if entry.compiled_code_hash != code_hash || entry.dialect != dialect.as_str() {
+        if entry.dialect != dialect.as_str() || entry.semantic_digest != semantic_digest {
             return None;
         }
-        // Fast negative check: if manifest stat differs, this cache entry is stale.
-        if let Some(path) = manifest_path
-            && let Some(stat) = manifest_stat(path)
-            && (entry.manifest_mtime_secs != stat.mtime_secs
-                || entry.manifest_mtime_nanos != stat.mtime_nanos
-                || entry.manifest_size_bytes != stat.size_bytes)
-        {
-            return None;
-        }
-        if let Some(hash) = manifest_columns_hash
-            && entry.manifest_columns_hash == hash
-        {
-            return Some(&entry.lineage);
-        }
-        None
+        Some(&entry.lineage)
     }
 
     /// Insert a lineage result using a canonical manifest unique_id.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn insert(
+    pub(super) fn insert(
         &mut self,
         model_unique_id: &str,
-        compiled_code: &str,
         dialect: DlinDialect,
-        manifest_columns_hash: u64,
-        manifest_path: Option<&Path>,
+        semantic_digest: u64,
         lineage: InternalModelColumnLineage,
     ) {
-        let stat = manifest_path.and_then(manifest_stat);
         self.entries.insert(
             model_unique_id.to_string(),
             ColumnLineageCacheEntry {
-                compiled_code_hash: hash_str(compiled_code),
                 dialect: dialect.as_str().to_string(),
-                manifest_columns_hash,
-                manifest_mtime_secs: stat.as_ref().map_or(0, |s| s.mtime_secs),
-                manifest_mtime_nanos: stat.as_ref().map_or(0, |s| s.mtime_nanos),
-                manifest_size_bytes: stat.as_ref().map_or(0, |s| s.size_bytes),
+                semantic_digest,
                 lineage,
             },
         );
@@ -210,24 +168,4 @@ impl ColumnLineageCache {
             }
         }
     }
-}
-
-struct ManifestStat {
-    mtime_secs: u64,
-    mtime_nanos: u32,
-    size_bytes: u64,
-}
-
-fn manifest_stat(path: &Path) -> Option<ManifestStat> {
-    let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta
-        .modified()
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    Some(ManifestStat {
-        mtime_secs: mtime.as_secs(),
-        mtime_nanos: mtime.subsec_nanos(),
-        size_bytes: meta.len(),
-    })
 }

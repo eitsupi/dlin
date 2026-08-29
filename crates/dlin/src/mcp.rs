@@ -622,17 +622,15 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let column = required_string(args, "column")?;
     let direction = required_string(args, "direction")?;
     let mut cache = state.column_lineage_cache.borrow_mut();
+    let mut analysis = graph::column_lineage::ColumnLineageAnalysis::new(
+        &state.manifest,
+        state.dialect,
+        &mut cache,
+    );
 
     match direction {
         "upstream" => {
-            let mut report =
-                graph::column_lineage::compute_cross_model_column_lineage_with_manifest_path(
-                    &state.manifest,
-                    model,
-                    state.dialect,
-                    Some(&state.manifest_path),
-                    &mut cache,
-                );
+            let mut report = analysis.compute_cross_model_column_lineage(model);
             report.columns.retain(|entry| entry.column == column);
             if report.total_columns > 0 {
                 // Collect the short names of models on the target column's lineage path.
@@ -693,14 +691,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 }
 
                 for (lineage_model, cols) in &lineage_model_columns {
-                    let model_report =
-                        graph::column_lineage::compute_column_lineage_with_manifest_path(
-                            &state.manifest,
-                            lineage_model,
-                            state.dialect,
-                            Some(&state.manifest_path),
-                            &mut cache,
-                        );
+                    let model_report = analysis.compute_column_lineage(lineage_model);
                     for err in model_report.errors {
                         if matches!(
                             err.kind,
@@ -718,14 +709,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
                 // Query single-model lineage for global errors specific to the target model
                 // itself (e.g. the target model's own ParseFailure or NoCompiledCode). The
                 // cache populated during cross-model computation makes this a cheap hit.
-                let target_lineage =
-                    graph::column_lineage::compute_column_lineage_with_manifest_path(
-                        &state.manifest,
-                        model,
-                        state.dialect,
-                        Some(&state.manifest_path),
-                        &mut cache,
-                    );
+                let target_lineage = analysis.compute_column_lineage(model);
                 let target_global_errors: Vec<_> = target_lineage
                     .errors
                     .into_iter()
@@ -761,14 +745,7 @@ fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
             Ok(serde_json::to_value(&report)?)
         }
         "downstream" => {
-            let report = graph::column_lineage::compute_column_impact_with_manifest_path(
-                &state.manifest,
-                model,
-                column,
-                state.dialect,
-                Some(&state.manifest_path),
-                &mut cache,
-            );
+            let report = analysis.compute_column_impact(model, column);
             Ok(serde_json::to_value(&report)?)
         }
         _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),

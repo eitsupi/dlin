@@ -1,7 +1,5 @@
-use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
-
 use crate::parser::manifest::Manifest;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 mod backend;
 mod cache;
@@ -23,14 +21,8 @@ pub use backend::{
     check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
-pub use cross_model::{
-    compute_cross_model_column_lineage, compute_cross_model_column_lineage_with_manifest_path,
-};
-pub use impact::{
-    ColumnImpactReport, ImpactedColumn, compute_column_impact,
-    compute_column_impact_with_manifest_path,
-};
-use schema::{build_yaml_schema_for_node, compute_manifest_columns_hash};
+pub use impact::{ColumnImpactReport, ImpactedColumn};
+use schema::{SemanticDigestCache, build_yaml_schema_for_node};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
@@ -77,37 +69,98 @@ fn discover_named_output_columns(
     }
 }
 
-/// Compute column-level lineage for a model.
+/// A per-manifest column-lineage analysis session.
 ///
-/// Takes the manifest and a model name (short label like "orders"),
-/// and returns the column lineage for that model.
-pub fn compute_column_lineage(
-    manifest: &Manifest,
-    model_name: &str,
-    dialect: DlinDialect,
-    cache: &mut ColumnLineageCache,
-) -> ModelColumnLineage {
-    compute_column_lineage_internal(manifest, model_name, dialect, None, cache).into_public()
+/// The session owns all in-process memoization. Persistent cache storage is
+/// deliberately kept separate, so a disabled cache can still avoid repeated
+/// semantic digest work and repeated model analysis within one invocation.
+pub struct ColumnLineageAnalysis<'a> {
+    pub(super) manifest: &'a Manifest,
+    pub(super) dialect: DlinDialect,
+    pub(super) cache: &'a mut ColumnLineageCache,
+    semantic_digests: SemanticDigestCache,
+    lineage_results: HashMap<String, InternalModelColumnLineage>,
 }
 
-pub fn compute_column_lineage_with_manifest_path(
+impl<'a> ColumnLineageAnalysis<'a> {
+    pub fn new(
+        manifest: &'a Manifest,
+        dialect: DlinDialect,
+        cache: &'a mut ColumnLineageCache,
+    ) -> Self {
+        Self {
+            manifest,
+            dialect,
+            cache,
+            semantic_digests: SemanticDigestCache::default(),
+            lineage_results: HashMap::new(),
+        }
+    }
+
+    pub fn compute_column_lineage(&mut self, model_name: &str) -> ModelColumnLineage {
+        self.compute_column_lineage_internal(model_name)
+            .into_public()
+    }
+
+    pub fn compute_cross_model_column_lineage(&mut self, model_name: &str) -> ModelColumnLineage {
+        cross_model::compute_cross_model_column_lineage(self, model_name).into_public()
+    }
+
+    pub fn compute_column_impact(
+        &mut self,
+        model_name: &str,
+        column_name: &str,
+    ) -> ColumnImpactReport {
+        impact::compute_column_impact(self, model_name, column_name)
+    }
+
+    pub(super) fn compute_column_lineage_internal(
+        &mut self,
+        model_name: &str,
+    ) -> InternalModelColumnLineage {
+        compute_column_lineage_internal(self, model_name)
+    }
+}
+
+#[cfg(test)]
+fn compute_column_lineage(
     manifest: &Manifest,
     model_name: &str,
     dialect: DlinDialect,
-    manifest_path: Option<&Path>,
     cache: &mut ColumnLineageCache,
 ) -> ModelColumnLineage {
-    compute_column_lineage_internal(manifest, model_name, dialect, manifest_path, cache)
-        .into_public()
+    ColumnLineageAnalysis::new(manifest, dialect, cache).compute_column_lineage(model_name)
+}
+
+#[cfg(test)]
+fn compute_cross_model_column_lineage(
+    manifest: &Manifest,
+    model_name: &str,
+    dialect: DlinDialect,
+    cache: &mut ColumnLineageCache,
+) -> ModelColumnLineage {
+    ColumnLineageAnalysis::new(manifest, dialect, cache)
+        .compute_cross_model_column_lineage(model_name)
+}
+
+#[cfg(test)]
+fn compute_column_impact(
+    manifest: &Manifest,
+    model_name: &str,
+    column_name: &str,
+    dialect: DlinDialect,
+    cache: &mut ColumnLineageCache,
+) -> ColumnImpactReport {
+    ColumnLineageAnalysis::new(manifest, dialect, cache)
+        .compute_column_impact(model_name, column_name)
 }
 
 pub(super) fn compute_column_lineage_internal(
-    manifest: &Manifest,
+    analysis: &mut ColumnLineageAnalysis<'_>,
     model_name: &str,
-    dialect: DlinDialect,
-    manifest_path: Option<&Path>,
-    cache: &mut ColumnLineageCache,
 ) -> InternalModelColumnLineage {
+    let manifest = analysis.manifest;
+    let dialect = analysis.dialect;
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name));
 
@@ -130,6 +183,10 @@ pub(super) fn compute_column_lineage_internal(
     };
 
     let display_name = node.name.as_str();
+    let cache_key = node.unique_id.as_str();
+    if let Some(cached) = analysis.lineage_results.get(cache_key) {
+        return cached.clone();
+    }
 
     let compiled_code = match &node.compiled_code {
         Some(code) => code,
@@ -151,20 +208,21 @@ pub(super) fn compute_column_lineage_internal(
         }
     };
 
-    let manifest_columns_hash = compute_manifest_columns_hash(manifest, node);
+    let semantic_digest = analysis.semantic_digests.digest_for_node(manifest, node);
     let backend = Backend::Sqllineage(SqllineageBackend::new());
     // Cache entries are keyed by the manifest's canonical identity. Callers
     // may address the same model by its short name or its unique_id, but both
     // spellings must share one persistent entry.
-    let cache_key = node.unique_id.as_str();
-    if let Some(cached) = cache.get(
-        cache_key,
-        compiled_code,
-        dialect,
-        manifest_path,
-        Some(manifest_columns_hash),
-    ) {
-        return cached.clone();
+    if semantic_digest.persistent_cache_safe
+        && let Some(cached) = analysis
+            .cache
+            .get(cache_key, dialect, semantic_digest.value)
+    {
+        let cached = cached.clone();
+        analysis
+            .lineage_results
+            .insert(cache_key.to_string(), cached.clone());
+        return cached;
     }
 
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
@@ -224,7 +282,7 @@ pub(super) fn compute_column_lineage_internal(
         duplicate_output_names: &duplicate_output_names,
     };
 
-    let analysis = match backend.analyze(&request) {
+    let backend_analysis = match backend.analyze(&request) {
         Ok(analysis) => analysis,
         Err(e) => {
             return InternalModelColumnLineage {
@@ -244,7 +302,7 @@ pub(super) fn compute_column_lineage_internal(
         }
     };
 
-    let statement = match require_single_lineage_statement(analysis) {
+    let statement = match require_single_lineage_statement(backend_analysis) {
         Ok(statement) => statement,
         Err(e) => {
             return InternalModelColumnLineage {
@@ -327,15 +385,14 @@ pub(super) fn compute_column_lineage_internal(
         errors,
     };
 
-    cache.insert(
-        cache_key,
-        compiled_code,
-        dialect,
-        manifest_columns_hash,
-        manifest_path,
-        result.clone(),
-    );
-
+    if semantic_digest.persistent_cache_safe {
+        analysis
+            .cache
+            .insert(cache_key, dialect, semantic_digest.value, result.clone());
+    }
+    analysis
+        .lineage_results
+        .insert(cache_key.to_string(), result.clone());
     result
 }
 

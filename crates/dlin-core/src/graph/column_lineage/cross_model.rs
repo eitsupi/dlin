@@ -1,7 +1,5 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
-
 use crate::parser::manifest::Manifest;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::backend::{
     AnalysisSlot, Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend,
@@ -11,60 +9,35 @@ use super::backend::{
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::schema;
 use super::{
-    ColumnLineageCache, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
-    ModelColumnLineage, TransformationType, find_model_by_name, find_model_by_unique_id,
+    ColumnLineageAnalysis, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
+    TransformationType, find_model_by_name, find_model_by_unique_id,
 };
 
-pub fn compute_cross_model_column_lineage(
-    manifest: &Manifest,
+pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
+    analysis: &'a mut ColumnLineageAnalysis<'m>,
     model_name: &str,
-    dialect: DlinDialect,
-    cache: &mut ColumnLineageCache,
-) -> ModelColumnLineage {
-    compute_cross_model_column_lineage_with_manifest_path(
-        manifest, model_name, dialect, None, cache,
-    )
-}
-
-pub fn compute_cross_model_column_lineage_with_manifest_path(
-    manifest: &Manifest,
-    model_name: &str,
-    dialect: DlinDialect,
-    manifest_path: Option<&Path>,
-    cache: &mut ColumnLineageCache,
-) -> ModelColumnLineage {
+) -> InternalModelColumnLineage {
     let mut ctx = CrossModelContext {
-        manifest,
-        dialect,
-        manifest_path,
+        analysis,
         in_memory_cache: HashMap::new(),
         computing: HashSet::new(),
     };
     ctx.computing.insert(model_name.to_string());
-    compute_cross_model_inner(model_name, &mut ctx, cache).into_public()
+    compute_cross_model_inner(model_name, &mut ctx)
 }
 
-struct CrossModelContext<'a> {
-    manifest: &'a Manifest,
-    dialect: DlinDialect,
-    manifest_path: Option<&'a Path>,
+struct CrossModelContext<'a, 'm> {
+    analysis: &'a mut ColumnLineageAnalysis<'m>,
     in_memory_cache: HashMap<String, InternalModelColumnLineage>,
     computing: HashSet<String>,
 }
 
 fn compute_cross_model_inner(
     model_name: &str,
-    ctx: &mut CrossModelContext<'_>,
-    disk_cache: &mut ColumnLineageCache,
+    ctx: &mut CrossModelContext<'_, '_>,
 ) -> InternalModelColumnLineage {
-    let mut result = super::compute_column_lineage_internal(
-        ctx.manifest,
-        model_name,
-        ctx.dialect,
-        ctx.manifest_path,
-        disk_cache,
-    );
-    let upstream_models = build_upstream_model_relations(ctx.manifest, model_name);
+    let mut result = super::compute_column_lineage_internal(ctx.analysis, model_name);
+    let upstream_models = build_upstream_model_relations(ctx.analysis.manifest, model_name);
 
     for entry in &mut result.columns {
         let mut resolved_sources = Vec::new();
@@ -79,7 +52,6 @@ fn compute_cross_model_inner(
                 &mut resolved_sources,
                 &mut result.errors,
                 ctx,
-                disk_cache,
                 &[],
             );
         }
@@ -129,15 +101,15 @@ fn resolve_source_recursive(
     visited: &mut HashSet<(String, String)>,
     resolved: &mut Vec<InternalColumnSource>,
     errors: &mut Vec<ColumnLineageError>,
-    ctx: &mut CrossModelContext<'_>,
-    disk_cache: &mut ColumnLineageCache,
+    ctx: &mut CrossModelContext<'_, '_>,
     current_path: &[(String, String, TransformationType)],
 ) {
     let candidates = upstream_models
         .iter()
         .map(|(relation, _)| relation.clone())
         .collect::<Vec<_>>();
-    let model_unique_id = match resolve_unique(&source.relation, &candidates, ctx.dialect) {
+    let model_unique_id = match resolve_unique(&source.relation, &candidates, ctx.analysis.dialect)
+    {
         RelationResolution::Unique(index) => Some(upstream_models[index].1.clone()),
         RelationResolution::Ambiguous | RelationResolution::NotFound => None,
     };
@@ -170,7 +142,7 @@ fn resolve_source_recursive(
             return;
         }
         ctx.computing.insert(model_unique_id.clone());
-        let upstream_result = compute_cross_model_inner(&model_unique_id, ctx, disk_cache);
+        let upstream_result = compute_cross_model_inner(&model_unique_id, ctx);
         ctx.in_memory_cache
             .insert(model_unique_id.clone(), upstream_result);
     }
@@ -212,15 +184,16 @@ fn resolve_source_recursive(
         }
     } else {
         let on_demand = compute_single_column_lineage(
-            ctx.manifest,
+            ctx.analysis.manifest,
             &model_unique_id,
             &source.column,
-            ctx.dialect,
+            ctx.analysis.dialect,
         );
         let transformation = on_demand
             .as_ref()
             .map_or(TransformationType::Unknown, |(_, t)| t.clone());
         let model_display_name = ctx
+            .analysis
             .manifest
             .nodes
             .get(&model_unique_id)
@@ -235,7 +208,8 @@ fn resolve_source_recursive(
             leaf.model_path = current_path.to_vec();
             resolved.push(leaf);
         } else {
-            let further_upstream = build_upstream_model_relations(ctx.manifest, &model_unique_id);
+            let further_upstream =
+                build_upstream_model_relations(ctx.analysis.manifest, &model_unique_id);
             for s in &on_demand_sources {
                 resolve_source_recursive(
                     s,
@@ -244,7 +218,6 @@ fn resolve_source_recursive(
                     resolved,
                     errors,
                     ctx,
-                    disk_cache,
                     &extended_path,
                 );
             }

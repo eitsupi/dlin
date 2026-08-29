@@ -1,15 +1,13 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::rc::Rc;
 
 use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
 
-use super::backend::DlinDialect;
 use super::relation::{RelationResolution, resolve_unique};
 use super::{
-    ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, InternalModelColumnLineage,
+    ColumnLineageAnalysis, ColumnLineageError, ColumnLineageErrorKind, InternalModelColumnLineage,
     TransformationType, find_model_by_name, normalize_column_lineage_errors,
 };
 
@@ -72,32 +70,16 @@ fn materialize_path(mut cursor: Option<&Rc<PathNode>>) -> ImpactPath {
     path
 }
 
-pub fn compute_column_impact(
-    manifest: &Manifest,
+pub(super) fn compute_column_impact(
+    analysis: &mut ColumnLineageAnalysis<'_>,
     model_name: &str,
     column_name: &str,
-    dialect: DlinDialect,
-    cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
-    compute_column_impact_with_manifest_path(
-        manifest,
-        model_name,
-        column_name,
-        dialect,
-        None,
-        cache,
-    )
-}
-
-pub fn compute_column_impact_with_manifest_path(
-    manifest: &Manifest,
-    model_name: &str,
-    column_name: &str,
-    dialect: DlinDialect,
-    manifest_path: Option<&Path>,
-    cache: &mut ColumnLineageCache,
-) -> ColumnImpactReport {
-    let initial_node = match find_model_by_name(manifest, model_name) {
+    let manifest = analysis.manifest;
+    let dialect = analysis.dialect;
+    let initial_node = match super::find_model_by_unique_id(manifest, model_name)
+        .or_else(|| find_model_by_name(manifest, model_name))
+    {
         Some(n) => n,
         None => {
             return ColumnImpactReport {
@@ -149,15 +131,9 @@ pub fn compute_column_impact_with_manifest_path(
                 .map(|(relation, _)| relation.clone())
                 .collect::<Vec<_>>();
 
-            let lineage = lineage_cache.entry(dep_uid.clone()).or_insert_with(|| {
-                super::compute_column_lineage_internal(
-                    manifest,
-                    dep_uid,
-                    dialect,
-                    manifest_path,
-                    cache,
-                )
-            });
+            let lineage = lineage_cache
+                .entry(dep_uid.clone())
+                .or_insert_with(|| super::compute_column_lineage_internal(analysis, dep_uid));
 
             let mut found_on_path = false;
 
