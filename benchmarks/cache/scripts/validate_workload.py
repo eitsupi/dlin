@@ -51,6 +51,11 @@ def main() -> int:
     if manifest_files != ["target/manifest.json"]:
         parser.error(f"manifest_project contains files outside target/manifest.json: {manifest_files}")
     models = sorted((root / "sql_project/models").glob("*.sql"))
+    if len(models) < 3 or not (root / "sql_project/models/orders_0002.sql").is_file():
+        parser.error(
+            "SQL workload must contain at least 3 models including "
+            "models/orders_0002.sql for invalidation baselines"
+        )
     vars_path = root / "sql_project/vars.yml"
     if not vars_path.is_file() or "benchmark_parent:" not in vars_path.read_text(encoding="utf-8"):
         parser.error("SQL workload is missing vars.yml benchmark_parent")

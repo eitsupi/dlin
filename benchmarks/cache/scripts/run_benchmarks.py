@@ -217,6 +217,12 @@ def sql_invalidation_baselines(
     workload: Path, binary: Path, results: Path
 ) -> dict[str, object]:
     source_project = workload / "sql_project"
+    model_files = sorted((source_project / "models").glob("*.sql"))
+    if len(model_files) < 3 or not (source_project / "models/orders_0002.sql").is_file():
+        raise RuntimeError(
+            "SQL workload must contain at least 3 models including "
+            "models/orders_0002.sql for invalidation baselines"
+        )
     mutations = {
         "single_sql_file": lambda project: mutate_single_sql_file(project),
         "macro": lambda project: mutate_macro(project),
