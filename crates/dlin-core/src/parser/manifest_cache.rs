@@ -246,7 +246,7 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
-    fn fingerprint_lookup_does_not_require_manifest_reread() {
+    fn fingerprint_lookup_uses_caller_fingerprint_without_reread() {
         let temp = tempfile::tempdir().unwrap();
         let manifest_path = temp.path().join("manifest.json");
         let bytes = br#"{}"#;
@@ -267,13 +267,18 @@ mod tests {
         let mut cache = ManifestGraphCache::fresh(temp.path(), None);
         let graph = LineageGraph::new();
         assert!(cache.insert_if_fingerprint_matches(&manifest_path, &graph, fingerprint));
-        std::fs::remove_file(&manifest_path).unwrap();
+        // Keep the path identity stable while changing the on-disk content.
+        std::fs::write(&manifest_path, br#"{"changed":true}"#).unwrap();
 
+        // The caller-computed old fingerprint is trusted and does not reread
+        // the changed manifest.
         assert!(
             cache
                 .get_with_fingerprint(&manifest_path, fingerprint)
                 .is_some()
         );
+        // The compatibility API reads and hashes the current content, so it
+        // correctly misses the stale entry.
         assert!(cache.get(&manifest_path).is_none());
     }
 }
