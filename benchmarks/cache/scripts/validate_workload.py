@@ -27,6 +27,16 @@ def main() -> int:
         or metadata["model_count"] < 1
     ):
         parser.error("workload_metadata.json has an invalid model_count")
+    if (
+        not isinstance(metadata.get("macro_count"), int)
+        or metadata["macro_count"] < 1
+    ):
+        parser.error("workload_metadata.json has an invalid macro_count")
+    if (
+        not isinstance(metadata.get("macro_file_count"), int)
+        or metadata["macro_file_count"] < 1
+    ):
+        parser.error("workload_metadata.json has an invalid macro_file_count")
     expected = metadata.get("files", {})
     actual = {}
     for path in sorted(root.rglob("*")):
@@ -43,6 +53,23 @@ def main() -> int:
         parser.error(f"manifest is missing nodes or sources: {manifest_path}")
     if (root / "sql_project/target/manifest.json").exists():
         parser.error("SQL workload must not contain a target/manifest.json")
+    macro_files = sorted((root / "sql_project/macros").glob("*.sql"))
+    if (
+        len(macro_files) != metadata["macro_file_count"]
+        or macro_files[0].name != "benchmark.sql"
+    ):
+        parser.error("SQL workload macro files differ from workload_metadata.json")
+    macro_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in macro_files
+    )
+    macro_definitions = macro_source.count("{% macro ")
+    if macro_definitions != metadata["macro_count"]:
+        parser.error(
+            "macro definition count differs from workload_metadata.json: "
+            f"{macro_definitions} != {metadata['macro_count']}"
+        )
+    if "{% macro benchmark_label(" not in macro_source:
+        parser.error("SQL workload is missing the invoked benchmark_label macro")
     manifest_files = sorted(
         path.relative_to(root / "manifest_project").as_posix()
         for path in (root / "manifest_project").rglob("*")
@@ -66,7 +93,12 @@ def main() -> int:
         "{{ ref(" in path.read_text(encoding="utf-8") for path in models
     ):
         parser.error("SQL workload does not exercise ref() extraction")
-    print(f"validated {metadata['profile']} workload ({metadata['model_count']} models)")
+    print(
+        f"validated {metadata['profile']} workload "
+        f"({metadata['model_count']} models, "
+        f"macro_files={metadata['macro_file_count']}, "
+        f"macros={metadata['macro_count']})"
+    )
     return 0
 
 

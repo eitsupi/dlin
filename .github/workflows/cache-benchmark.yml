@@ -31,21 +31,30 @@ defaults:
 jobs:
   cache-benchmark-validation:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [small, macro-heavy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Cache Rust
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Generate workload
-        run: python3 benchmarks/cache/scripts/generate_workload.py --self-check
-      - name: Validate workload
-        run: python3 benchmarks/cache/scripts/validate_workload.py benchmarks/cache/workloads/default
+      - name: Generate ${{ matrix.profile }} workload
+        run: >
+          python3 benchmarks/cache/scripts/generate_workload.py
+          --output benchmarks/cache/workloads/${{ matrix.profile }}
+          --profile ${{ matrix.profile }}
+          --self-check
+      - name: Validate ${{ matrix.profile }} workload
+        run: >
+          python3 benchmarks/cache/scripts/validate_workload.py
+          benchmarks/cache/workloads/${{ matrix.profile }}
       - name: Build dlin
         run: cargo build -p dlin --locked
-      - name: Validate cache behavior
+      - name: Validate ${{ matrix.profile }} cache behavior
         run: >
           python3 benchmarks/cache/scripts/run_benchmarks.py
-          --workload benchmarks/cache/workloads/default
+          --workload benchmarks/cache/workloads/${{ matrix.profile }}
           --binary target/debug/dlin
-          --results-dir benchmarks/cache/results/ci
+          --results-dir benchmarks/cache/results/ci/${{ matrix.profile }}
           --summary-file "$GITHUB_STEP_SUMMARY"
           --skip-timing

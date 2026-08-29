@@ -12,7 +12,14 @@ from pathlib import Path
 
 
 SUITE_ROOT = Path(__file__).resolve().parents[1]
-PROFILES = {"small": 64, "medium": 512}
+PROFILES = {
+    "small": {"model_count": 64, "macro_file_count": 1, "macro_count": 1},
+    "medium": {"model_count": 512, "macro_file_count": 1, "macro_count": 1},
+    # Keep the model count comparable to the default workload while making the
+    # effective macro prefix large enough to expose both per-model prefix
+    # parsing and build_macro_prefix's cumulative source validation.
+    "macro-heavy": {"model_count": 64, "macro_file_count": 16, "macro_count": 128},
+}
 
 
 def manifest_node(
@@ -38,7 +45,11 @@ def manifest_node(
     }
 
 
-def write_workload(root: Path, count: int) -> None:
+def write_workload(root: Path, profile: str) -> None:
+    profile_config = PROFILES[profile]
+    count = profile_config["model_count"]
+    macro_file_count = profile_config["macro_file_count"]
+    macro_count = profile_config["macro_count"]
     project = "cache_benchmark"
     sql_root = root / "sql_project"
     manifest_root = root / "manifest_project"
@@ -52,10 +63,22 @@ def write_workload(root: Path, count: int) -> None:
         "model-paths: [models]\n"
         "macro-paths: [macros]\n"
     )
-    macro = """{% macro benchmark_label(value) %}{{ value }}{% endmacro %}\n"""
+    macro_definitions = [
+        "{% macro benchmark_label(value) %}{{ value }}{% endmacro %}"
+    ]
+    macro_definitions.extend(
+        f"{{% macro benchmark_helper_{index:03d}(value) %}}"
+        "{{ value }}{% endmacro %}"
+        for index in range(1, macro_count)
+    )
     (sql_root / "dbt_project.yml").write_text(dbt_project, encoding="utf-8")
     (sql_root / "macros").mkdir(exist_ok=True)
-    (sql_root / "macros" / "benchmark.sql").write_text(macro, encoding="utf-8")
+    for file_index in range(macro_file_count):
+        start = macro_count * file_index // macro_file_count
+        end = macro_count * (file_index + 1) // macro_file_count
+        macro = "\n".join(macro_definitions[start:end]) + "\n"
+        filename = "benchmark.sql" if file_index == 0 else f"benchmark_{file_index:03d}.sql"
+        (sql_root / "macros" / filename).write_text(macro, encoding="utf-8")
     parent_name = "orders" if count == 1 else f"orders_{count - 2:04d}"
     (sql_root / "vars.yml").write_text(
         f"vars:\n  benchmark_parent: {parent_name}\n", encoding="utf-8"
@@ -125,10 +148,10 @@ def write_workload(root: Path, count: int) -> None:
     (manifest_root / "target" / "manifest.json").write_text(payload, encoding="utf-8")
 
     metadata = {
-        "profile": next(
-            (name for name, size in PROFILES.items() if size == count), "custom"
-        ),
+        "profile": profile,
         "model_count": count,
+        "macro_file_count": macro_file_count,
+        "macro_count": macro_count,
     }
     metadata["files"] = {}
     for file in sorted(root.rglob("*")):
@@ -168,8 +191,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_check:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            write_workload(Path(first), PROFILES[args.profile])
-            write_workload(Path(second), PROFILES[args.profile])
+            write_workload(Path(first), args.profile)
+            write_workload(Path(second), args.profile)
             if tree_digest(Path(first)) != tree_digest(Path(second)):
                 parser.error("workload generation is not deterministic")
     args.output = args.output.resolve()
@@ -181,8 +204,15 @@ def main() -> int:
                 parser.error("output must be empty; use --force only for a previously generated workload")
             shutil.rmtree(args.output)
     args.output.mkdir(parents=True, exist_ok=True)
-    write_workload(args.output, PROFILES[args.profile])
-    print(f"generated {args.profile} workload ({PROFILES[args.profile]} models) at {args.output}")
+    write_workload(args.output, args.profile)
+    config = PROFILES[args.profile]
+    print(
+        f"generated {args.profile} workload "
+        f"({config['model_count']} models, "
+        f"macro_files={config['macro_file_count']}, "
+        f"macros={config['macro_count']}) "
+        f"at {args.output}"
+    )
     return 0
 
 

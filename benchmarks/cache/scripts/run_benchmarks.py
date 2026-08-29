@@ -308,7 +308,10 @@ def validation_summary(metadata: dict[str, object]) -> str:
     lines = [
         "## dlin cache semantic validation",
         "",
-        f"- Fixture: `{workload_metadata['profile']}` ({workload_metadata['model_count']} models)",
+        f"- Fixture: `{workload_metadata['profile']}` "
+        f"({workload_metadata['model_count']} models, "
+        f"macro_files={workload_metadata['macro_file_count']}, "
+        f"macros={workload_metadata['macro_count']})",
         f"- dlin: `{metadata['binary_version']}`",
         f"- Timing values: omitted (timing run: {'yes' if metadata['timing'] else 'no'})",
         "",
