@@ -20,27 +20,12 @@ fn test_column_cache_hit() {
         }],
         errors: vec![],
     };
-    cache.insert(
-        "test_model",
-        "SELECT id FROM raw",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("test_model", DlinDialect::Generic, 0, lineage.into());
     cache.save();
 
     // Reload from disk
     let cache2 = ColumnLineageCache::load(project_dir, None);
-    let hit = cache2
-        .get(
-            "test_model",
-            "SELECT id FROM raw",
-            DlinDialect::Generic,
-            None,
-            Some(0),
-        )
-        .unwrap();
+    let hit = cache2.get("test_model", DlinDialect::Generic, 0).unwrap();
     assert_eq!(hit.columns.len(), 1);
     assert_eq!(hit.columns[0].column, "id");
 }
@@ -50,12 +35,6 @@ fn test_column_cache_persists_structural_relation_and_public_output() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
     let manifest = make_test_manifest();
-    let compiled_code = super::super::find_model_by_name(&manifest, "stg_orders")
-        .unwrap()
-        .compiled_code
-        .clone()
-        .unwrap();
-
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let public = compute_column_lineage(&manifest, "stg_orders", DlinDialect::Generic, &mut cache);
     cache.save();
@@ -79,13 +58,11 @@ fn test_column_cache_persists_structural_relation_and_public_output() {
     let hit = reloaded
         .get(
             "model.proj.stg_orders",
-            &compiled_code,
             DlinDialect::Generic,
-            None,
-            Some(super::super::schema::compute_manifest_columns_hash(
+            super::super::schema::compute_semantic_digest(
                 &manifest,
                 super::super::find_model_by_name(&manifest, "stg_orders").unwrap(),
-            )),
+            ),
         )
         .unwrap();
     assert_eq!(
@@ -101,9 +78,7 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
     let manifest = make_test_manifest();
     let node = super::super::find_model_by_name(&manifest, "stg_orders").unwrap();
     let unique_id = node.unique_id.clone();
-    let compiled_code = node.compiled_code.clone().unwrap();
-    let manifest_columns_hash =
-        super::super::schema::compute_manifest_columns_hash(&manifest, node);
+    let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
     let sentinel = ModelColumnLineage {
         model: "canonical-cache-sentinel".to_string(),
         traced_columns: 0,
@@ -118,10 +93,8 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
     let mut seeded = ColumnLineageCache::load(project_dir, None);
     seeded.insert(
         &unique_id,
-        &compiled_code,
         DlinDialect::Generic,
-        manifest_columns_hash,
-        None,
+        semantic_digest,
         sentinel.clone().into(),
     );
     seeded.save();
@@ -147,7 +120,7 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
 }
 
 #[test]
-fn test_column_cache_miss_on_code_change() {
+fn test_column_cache_miss_on_semantic_digest_change() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
 
@@ -159,22 +132,11 @@ fn test_column_cache_miss_on_code_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache2
-            .get("m", "SELECT 2", DlinDialect::Generic, None, Some(0))
-            .is_none()
-    );
+    assert!(cache2.get("m", DlinDialect::Generic, 1).is_none());
 }
 
 #[test]
@@ -190,22 +152,11 @@ fn test_column_cache_miss_on_dialect_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::BigQuery,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::BigQuery, 0, lineage.into());
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache2
-            .get("m", "SELECT 1", DlinDialect::Snowflake, None, Some(0))
-            .is_none()
-    );
+    assert!(cache2.get("m", DlinDialect::Snowflake, 0).is_none());
 }
 
 #[test]
@@ -221,29 +172,14 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        42,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 42, lineage.into());
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
     // Same hash → hit
-    assert!(
-        cache2
-            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(42))
-            .is_some()
-    );
+    assert!(cache2.get("m", DlinDialect::Generic, 42).is_some());
     // Different hash → miss (YAML columns changed in manifest)
-    assert!(
-        cache2
-            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(99))
-            .is_none()
-    );
+    assert!(cache2.get("m", DlinDialect::Generic, 99).is_none());
 }
 
 #[test]
@@ -259,14 +195,7 @@ fn test_column_cache_version_invalidation() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
     cache.save();
 
     // Tamper with version in saved file
@@ -280,11 +209,7 @@ fn test_column_cache_version_invalidation() {
     std::fs::write(&cache_path, serde_json::to_string(&cf).unwrap()).unwrap();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache2
-            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
-            .is_none()
-    );
+    assert!(cache2.get("m", DlinDialect::Generic, 0).is_none());
 }
 
 #[test]
@@ -297,20 +222,9 @@ fn test_column_cache_disabled() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
     // Disabled cache still works in-memory (only disk persistence is disabled)
-    assert!(
-        cache
-            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
-            .is_some()
-    );
+    assert!(cache.get("m", DlinDialect::Generic, 0).is_some());
     // But save is a no-op (no cache_path)
     cache.save();
 }
@@ -329,23 +243,12 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
     cache.save();
 
     // Fresh cache ignores existing entries
     let fresh = ColumnLineageCache::fresh(project_dir, None);
-    assert!(
-        fresh
-            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
-            .is_none()
-    );
+    assert!(fresh.get("m", DlinDialect::Generic, 0).is_none());
 
     // But can save new entries
     let mut fresh = ColumnLineageCache::fresh(project_dir, None);
@@ -356,26 +259,15 @@ fn test_column_cache_fresh() {
         columns: vec![],
         errors: vec![],
     };
-    fresh.insert(
-        "m2",
-        "SELECT 2",
-        DlinDialect::Generic,
-        0,
-        None,
-        lineage2.into(),
-    );
+    fresh.insert("m2", DlinDialect::Generic, 0, lineage2.into());
     fresh.save();
 
     let reloaded = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        reloaded
-            .get("m2", "SELECT 2", DlinDialect::Generic, None, Some(0))
-            .is_some()
-    );
+    assert!(reloaded.get("m2", DlinDialect::Generic, 0).is_some());
 }
 
 #[test]
-fn test_column_cache_miss_on_manifest_stat_change() {
+fn test_column_cache_ignores_manifest_stat_change_when_semantics_match() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
     let manifest_path = project_dir.join("manifest.json");
@@ -389,48 +281,20 @@ fn test_column_cache_miss_on_manifest_stat_change() {
         columns: vec![],
         errors: vec![],
     };
-    cache.insert(
-        "m",
-        "SELECT 1",
-        DlinDialect::Generic,
-        42,
-        Some(&manifest_path),
-        lineage.into(),
-    );
+    cache.insert("m", DlinDialect::Generic, 42, lineage.into());
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                Some(&manifest_path),
-                Some(42)
-            )
-            .is_some()
-    );
+    assert!(cache2.get("m", DlinDialect::Generic, 42).is_some());
 
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&manifest_path, r#"{"nodes":{"x":1}}"#).unwrap();
 
     let cache3 = ColumnLineageCache::load(project_dir, None);
-    assert!(
-        cache3
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                Some(&manifest_path),
-                Some(42)
-            )
-            .is_none()
-    );
+    assert!(cache3.get("m", DlinDialect::Generic, 42).is_some());
 }
 
 #[test]
-fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
+fn test_compute_column_lineage_reuses_result_when_manifest_stat_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path();
     let manifest_path = project_dir.join("manifest.json");
@@ -440,9 +304,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     let model_name = "stg_orders";
     let node = super::super::find_model_by_name(&manifest, model_name).unwrap();
     let unique_id = node.unique_id.clone();
-    let compiled_code = node.compiled_code.as_deref().unwrap();
-    let manifest_columns_hash =
-        super::super::schema::compute_manifest_columns_hash(&manifest, node);
+    let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
 
     let sentinel = ModelColumnLineage {
         model: "manifest-stat-cache-sentinel".to_string(),
@@ -455,40 +317,27 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     let mut seeded = ColumnLineageCache::load(project_dir, None);
     seeded.insert(
         &unique_id,
-        compiled_code,
         DlinDialect::Generic,
-        manifest_columns_hash,
-        Some(&manifest_path),
+        semantic_digest,
         sentinel.into(),
     );
     seeded.save();
 
     let mut before_change = ColumnLineageCache::load(project_dir, None);
-    let cached = compute_column_lineage_with_manifest_path(
+    let cached = compute_column_lineage(
         &manifest,
         model_name,
         DlinDialect::Generic,
-        Some(&manifest_path),
         &mut before_change,
     );
     assert_eq!(cached.model, "manifest-stat-cache-sentinel");
 
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&manifest_path, r#"{"nodes":{"changed":1}}"#).unwrap();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let result = compute_column_lineage_with_manifest_path(
-        &manifest,
-        model_name,
-        DlinDialect::Generic,
-        Some(&manifest_path),
-        &mut cache,
-    );
+    let result = compute_column_lineage(&manifest, model_name, DlinDialect::Generic, &mut cache);
 
-    assert!(
-        result.total_columns > 0,
-        "should recompute, not return sentinel"
-    );
+    assert_eq!(result.model, "manifest-stat-cache-sentinel");
 }
 
 #[test]
@@ -496,8 +345,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     let manifest = make_test_manifest();
     let downstream = super::super::find_model_by_name(&manifest, "orders").unwrap();
     let unique_id = downstream.unique_id.clone();
-    let initial_hash = super::super::schema::compute_manifest_columns_hash(&manifest, downstream);
-    let compiled_code = downstream.compiled_code.as_deref().unwrap();
+    let initial_hash = super::super::schema::compute_semantic_digest(&manifest, downstream);
 
     let sentinel = ModelColumnLineage {
         model: "upstream-alias-cache-sentinel".to_string(),
@@ -509,10 +357,8 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     let mut cache = ColumnLineageCache::disabled();
     cache.insert(
         &unique_id,
-        compiled_code,
         DlinDialect::Generic,
         initial_hash,
-        None,
         sentinel.into(),
     );
 
@@ -527,7 +373,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         .alias = Some("stg_orders_alias".to_string());
     let changed_downstream = super::super::find_model_by_name(&changed_manifest, "orders").unwrap();
     let changed_hash =
-        super::super::schema::compute_manifest_columns_hash(&changed_manifest, changed_downstream);
+        super::super::schema::compute_semantic_digest(&changed_manifest, changed_downstream);
 
     assert_ne!(initial_hash, changed_hash);
     let result = compute_column_lineage(
@@ -540,4 +386,131 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         result.total_columns > 0,
         "alias change should invalidate the cache"
     );
+}
+
+#[test]
+fn test_semantic_digest_changes_when_upstream_sql_changes() {
+    let manifest = make_test_manifest();
+    let downstream = super::super::find_model_by_name(&manifest, "orders").unwrap();
+    let initial_digest = super::super::schema::compute_semantic_digest(&manifest, downstream);
+
+    let mut changed = manifest;
+    changed
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("select changed_order_id from raw.orders".to_string());
+    let changed_downstream = super::super::find_model_by_name(&changed, "orders").unwrap();
+    let changed_digest =
+        super::super::schema::compute_semantic_digest(&changed, changed_downstream);
+
+    assert_ne!(initial_digest, changed_digest);
+}
+
+#[test]
+fn test_semantic_digest_ignores_unrelated_manifest_changes() {
+    let manifest = make_test_manifest();
+    let downstream = super::super::find_model_by_name(&manifest, "orders").unwrap();
+    let initial_digest = super::super::schema::compute_semantic_digest(&manifest, downstream);
+
+    let mut changed = manifest;
+    changed.exposures.insert(
+        "exposure.proj.unrelated".to_string(),
+        crate::parser::manifest::ManifestExposure {
+            unique_id: "exposure.proj.unrelated".to_string(),
+            name: "unrelated".to_string(),
+            depends_on: Default::default(),
+            description: None,
+            label: None,
+            exposure_type: None,
+            url: None,
+            maturity: None,
+            owner: None,
+        },
+    );
+    let changed_downstream = super::super::find_model_by_name(&changed, "orders").unwrap();
+    let changed_digest =
+        super::super::schema::compute_semantic_digest(&changed, changed_downstream);
+
+    assert_eq!(initial_digest, changed_digest);
+}
+
+#[test]
+fn test_unrelated_manifest_change_reuses_cached_lineage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest = make_test_manifest();
+    let node = super::super::find_model_by_name(&manifest, "orders").unwrap();
+    let unique_id = node.unique_id.clone();
+    let digest = super::super::schema::compute_semantic_digest(&manifest, node);
+    let sentinel = ModelColumnLineage {
+        model: "unrelated-change-sentinel".to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![],
+    };
+
+    let mut seeded = ColumnLineageCache::load(tmp.path(), None);
+    seeded.insert(
+        &unique_id,
+        DlinDialect::Generic,
+        digest,
+        sentinel.clone().into(),
+    );
+    seeded.save();
+
+    let mut changed = manifest;
+    changed.exposures.insert(
+        "exposure.proj.unrelated".to_string(),
+        crate::parser::manifest::ManifestExposure {
+            unique_id: "exposure.proj.unrelated".to_string(),
+            name: "unrelated".to_string(),
+            depends_on: Default::default(),
+            description: None,
+            label: None,
+            exposure_type: None,
+            url: None,
+            maturity: None,
+            owner: None,
+        },
+    );
+    let mut cache = ColumnLineageCache::load(tmp.path(), None);
+    let actual = ColumnLineageAnalysis::new(&changed, DlinDialect::Generic, &mut cache)
+        .compute_column_lineage("orders");
+
+    assert_eq!(actual.model, sentinel.model);
+}
+
+#[test]
+fn test_semantic_digest_memoizes_shared_upstream_and_terminates_cycles() {
+    let manifest = make_test_manifest();
+    let orders = manifest.nodes.get("model.proj.orders").unwrap();
+    let stg_orders = manifest.nodes.get("model.proj.stg_orders").unwrap();
+    let mut digests = super::super::schema::SemanticDigestCache::default();
+
+    digests.digest_for_node(&manifest, orders);
+    let computed_after_orders = digests.computed_nodes();
+    digests.digest_for_node(&manifest, stg_orders);
+    assert_eq!(computed_after_orders, digests.computed_nodes());
+
+    let mut cyclic_manifest = make_test_manifest();
+    cyclic_manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .depends_on
+        .nodes
+        .push("model.proj.orders".to_string());
+    let cyclic_orders = cyclic_manifest.nodes.get("model.proj.orders").unwrap();
+    let cyclic_stg = cyclic_manifest.nodes.get("model.proj.stg_orders").unwrap();
+    let mut orders_first = super::super::schema::SemanticDigestCache::default();
+    let orders_first_orders = orders_first.digest_for_node(&cyclic_manifest, cyclic_orders);
+    let orders_first_stg = orders_first.digest_for_node(&cyclic_manifest, cyclic_stg);
+    let mut stg_first = super::super::schema::SemanticDigestCache::default();
+    let stg_first_stg = stg_first.digest_for_node(&cyclic_manifest, cyclic_stg);
+    let stg_first_orders = stg_first.digest_for_node(&cyclic_manifest, cyclic_orders);
+
+    assert_ne!(orders_first_orders, 0);
+    assert_eq!(orders_first_orders, stg_first_orders);
+    assert_eq!(orders_first_stg, stg_first_stg);
 }

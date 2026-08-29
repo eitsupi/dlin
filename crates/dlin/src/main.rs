@@ -1059,17 +1059,13 @@ fn run_column_lineage_command(
     };
 
     let column_filter: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
+    let mut analysis =
+        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache);
 
     let reports: Vec<_> = models
         .iter()
         .map(|model| {
-            let mut report = graph::column_lineage::compute_cross_model_column_lineage_with_manifest_path(
-                &manifest,
-                model,
-                dialect,
-                Some(&resolved_manifest_path),
-                &mut cache,
-            );
+            let mut report = analysis.compute_cross_model_column_lineage(model);
             if !column_filter.is_empty() {
                 report
                     .columns
@@ -1219,18 +1215,12 @@ fn run_column_impact_command(
         graph::column_lineage::ColumnLineageCache::load(&project_dir, cache_dir)
     };
 
+    let mut analysis =
+        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache);
+
     let reports: Vec<_> = columns
         .iter()
-        .map(|col| {
-            graph::column_lineage::compute_column_impact_with_manifest_path(
-                &manifest,
-                model,
-                col,
-                dialect,
-                Some(&resolved),
-                &mut cache,
-            )
-        })
+        .map(|col| analysis.compute_column_impact(model, col))
         .collect();
 
     // Print warnings for errors
