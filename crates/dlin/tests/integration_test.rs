@@ -2148,9 +2148,9 @@ Warning: [future_schema_version] manifest uses a future dbt schema version: http
   Hint: Some resource types may not be understood by this version of dlin
 Warning: [unknown_top_level_key] unknown top-level manifest key: future_resources
   Hint: The key is retained in Manifest::extra for forward compatibility
-Warning: [unknown_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unknown resource type 'operation'
+Warning: [unsupported_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'
   Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
-Warning: [unknown_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unknown resource type 'future_resource'
+Warning: [unsupported_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'
   Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
 "###);
 
@@ -2186,30 +2186,30 @@ Warning: [unknown_resource_type] manifest resource 'future.test_project.item' in
     "why": null
   },
   {
-    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
-    "kind": "unknown_resource_type",
-    "level": "warning",
-    "raw_resource": "future.test_project.item",
-    "raw_type": "future_resource",
-    "what": "manifest resource 'future.test_project.item' in 'future_resources' uses unknown resource type 'future_resource'",
-    "why": null
-  },
-  {
-    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
-    "kind": "unknown_resource_type",
-    "level": "warning",
-    "raw_resource": "operation.test_project.refresh",
-    "raw_type": "operation",
-    "what": "manifest resource 'operation.test_project.refresh' in 'nodes' uses unknown resource type 'operation'",
-    "why": null
-  },
-  {
     "hint": "The key is retained in Manifest::extra for forward compatibility",
     "kind": "unknown_top_level_key",
     "level": "warning",
     "raw_resource": "future_resources",
     "raw_type": null,
     "what": "unknown top-level manifest key: future_resources",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unsupported_resource_type",
+    "level": "warning",
+    "raw_resource": "future.test_project.item",
+    "raw_type": "future_resource",
+    "what": "manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unsupported_resource_type",
+    "level": "warning",
+    "raw_resource": "operation.test_project.refresh",
+    "raw_type": "operation",
+    "what": "manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'",
     "why": null
   }
 ]

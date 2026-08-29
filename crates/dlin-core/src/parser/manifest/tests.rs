@@ -41,7 +41,7 @@ fn test_resource_classifier_does_not_fallback_unknown_types_to_model() {
     );
     assert_eq!(
         classify_resource_type("analysis"),
-        ManifestResourceType::Unknown("analysis".to_string())
+        ManifestResourceType::Known(NodeType::Model)
     );
     assert_eq!(
         classify_resource_type("operation"),
@@ -61,10 +61,10 @@ fn test_unknown_manifest_resource_is_reported_and_omitted_from_graph() {
             "dbt_version": "1.8.0"
         },
         "nodes": {
-            "analysis.proj.report": {
-                "unique_id": "analysis.proj.report",
+            "operation.proj.report": {
+                "unique_id": "operation.proj.report",
                 "name": "report",
-                "resource_type": "analysis",
+                "resource_type": "operation",
                 "depends_on": {"nodes": []},
                 "config": {},
                 "description": null,
@@ -79,7 +79,7 @@ fn test_unknown_manifest_resource_is_reported_and_omitted_from_graph() {
                 "unique_id": "model.proj.orders",
                 "name": "orders",
                 "resource_type": "model",
-                "depends_on": {"nodes": ["analysis.proj.report"]},
+                "depends_on": {"nodes": ["operation.proj.report"]},
                 "config": {},
                 "description": null,
                 "path": null,
@@ -95,13 +95,13 @@ fn test_unknown_manifest_resource_is_reported_and_omitted_from_graph() {
     let diagnostic = report
         .diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType)
-        .expect("unknown resource should have a typed diagnostic");
+        .find(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType)
+        .expect("unsupported resource should have a typed diagnostic");
     assert_eq!(
         diagnostic.raw_resource.as_deref(),
-        Some("analysis.proj.report")
+        Some("operation.proj.report")
     );
-    assert_eq!(diagnostic.raw_type.as_deref(), Some("analysis"));
+    assert_eq!(diagnostic.raw_type.as_deref(), Some("operation"));
     assert!(diagnostic.hint.is_some());
     let manifest = report.manifest.as_ref().expect("permissive load succeeds");
     let graph = build_graph_from_parsed_manifest(manifest).unwrap();
@@ -119,6 +119,67 @@ fn test_unknown_manifest_resource_is_reported_and_omitted_from_graph() {
         "a manifest resource omitted for unsupported type is not an unresolved dependency"
     );
     assert!(build_graph_from_parsed_manifest_strict(manifest).is_err());
+}
+
+#[test]
+fn analysis_is_a_model_with_ordinary_dependency_edges() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {
+                "model.proj.upstream": {
+                    "unique_id": "model.proj.upstream",
+                    "name": "upstream",
+                    "resource_type": "model",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                },
+                "analysis.proj.report": {
+                    "unique_id": "analysis.proj.report",
+                    "name": "report",
+                    "resource_type": "analysis",
+                    "depends_on": {"nodes": ["model.proj.upstream"]},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                }
+            }
+        }"#,
+        std::path::Path::new("manifest.json"),
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType)
+    );
+    let manifest = report.manifest.expect("permissive load succeeds");
+    let graph = build_graph_from_parsed_manifest_strict(&manifest).unwrap();
+    let upstream = graph
+        .node_indices()
+        .find(|&index| graph[index].label == "upstream")
+        .unwrap();
+    let analysis = graph
+        .node_indices()
+        .find(|&index| graph[index].label == "report")
+        .unwrap();
+    assert_eq!(graph[analysis].node_type, NodeType::Model);
+    assert!(graph.find_edge(upstream, analysis).is_some());
 }
 
 #[test]
@@ -141,7 +202,7 @@ fn strict_graph_rejects_functions_and_unknown_resource_maps() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'function.proj.helper' uses unknown resource type 'function'"###);
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'function.proj.helper' uses unsupported resource type 'function'"###);
 
     let report = load_manifest_report_from_bytes(
         br#"{
@@ -158,7 +219,7 @@ fn strict_graph_rejects_functions_and_unknown_resource_maps() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'future.proj.item' uses unknown resource type 'future_resource'"###);
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'future.proj.item' uses unsupported resource type 'future_resource'"###);
 }
 
 #[test]
@@ -196,7 +257,61 @@ fn strict_graph_rejects_unit_tests() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'unit_test.proj.check' uses unknown resource type 'unit_test'"###);
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'unit_test.proj.check' uses unsupported resource type 'unit_test'"###);
+}
+
+#[test]
+fn strict_graph_rejects_future_schema_from_direct_deserialize() {
+    let manifest: Manifest = serde_json::from_value(serde_json::json!({
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v99/manifest.json"
+        },
+        "nodes": {}
+    }))
+    .unwrap();
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    insta::assert_snapshot!(error.to_string(), @r###"manifest uses a future dbt schema version"###);
+}
+
+#[test]
+fn strict_graph_selects_first_unsupported_resource_by_unique_id() {
+    let node = |unique_id: &str, name: &str, resource_type: &str| {
+        serde_json::json!({
+            "unique_id": unique_id,
+            "name": name,
+            "resource_type": resource_type,
+            "depends_on": {"nodes": []},
+            "config": {},
+            "description": null,
+            "path": null,
+            "original_file_path": null,
+            "columns": {},
+            "compiled_code": null,
+            "database": null,
+            "schema": null
+        })
+    };
+    let manifest: Manifest = serde_json::from_value(serde_json::json!({
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json"
+        },
+        "nodes": {
+            "operation.proj.z": node("operation.proj.z", "z", "operation"),
+            "operation.proj.a": node("operation.proj.a", "a", "operation")
+        },
+        "functions": {
+            "function.proj.b": {"name": "b"}
+        },
+        "unit_tests": {
+            "unit_test.proj.c": {"name": "c"}
+        },
+        "future_resources": {
+            "future.proj.d": {"resource_type": "future_resource"}
+        }
+    }))
+    .unwrap();
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'function.proj.b' uses unsupported resource type 'function'"###);
 }
 
 #[test]
@@ -233,7 +348,7 @@ fn test_manifest_graph_report_propagates_load_diagnostics() {
         report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType)
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType)
     );
     assert!(report.manifest.nodes.contains_key("operation.proj.refresh"));
 }
@@ -923,12 +1038,12 @@ fn test_original_file_path_preferred_over_path() {
 fn test_build_graph_unknown_resource_is_not_a_model() {
     let manifest = Manifest {
         nodes: HashMap::from([(
-            "analysis.proj.my_analysis".to_string(),
+            "operation.proj.my_operation".to_string(),
             ManifestNode {
-                unique_id: "analysis.proj.my_analysis".to_string(),
-                name: "my_analysis".to_string(),
+                unique_id: "operation.proj.my_operation".to_string(),
+                name: "my_operation".to_string(),
                 alias: None,
-                resource_type: "analysis".to_string(),
+                resource_type: "operation".to_string(),
                 depends_on: DependsOn::default(),
                 config: ManifestConfig::default(),
                 description: None,

@@ -490,6 +490,7 @@ fn build_dag(
                 graph,
                 diagnostics,
                 manifest,
+                ..
             } = graph_report;
             if let Some(parsed_fingerprint) = parsed_fingerprint {
                 let expected = (
@@ -1004,7 +1005,7 @@ fn run_column_lineage_command(
             input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
         // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
         // file-path expansion — column lineage only supports resource_type == "model".
-        // Unknown resource kinds are omitted from the DAG, so check the
+        // Unsupported resource kinds are omitted from the DAG, so check the
         // manifest directly when applying the model-only filter.
         let manifest_model_names: std::collections::HashSet<&str> = manifest
             .nodes

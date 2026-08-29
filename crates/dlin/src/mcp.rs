@@ -123,6 +123,7 @@ impl McpState {
             graph: dag,
             diagnostics,
             manifest,
+            ..
         } = graph_report;
         let resolved_dialect = resolve_dialect(args.dialect.as_ref(), &manifest)?;
 
@@ -992,7 +993,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             result["structuredContent"]["warnings"][0]["kind"],
-            "unknown_resource_type"
+            "unsupported_resource_type"
         );
         assert_eq!(
             result["structuredContent"]["warnings"][0]["raw_type"],

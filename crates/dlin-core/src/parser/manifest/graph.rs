@@ -15,6 +15,7 @@ use super::{
 /// A manifest graph together with diagnostics observed while loading the
 /// artifact. Keeping these values together prevents callers from reparsing a
 /// manifest merely to display forward-compatibility warnings.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct ManifestGraphReport {
     pub graph: LineageGraph,
@@ -55,7 +56,7 @@ pub fn build_graph_from_load_report(
     })
 }
 
-/// Strict graph-building wrapper. Unknown resource kinds are rejected instead
+/// Strict graph-building wrapper. Unsupported resource kinds are rejected instead
 /// of being omitted, while [`build_graph_from_manifest`] keeps its historical
 /// permissive behavior.
 pub fn build_graph_from_manifest_strict(manifest_path: &Path) -> Result<LineageGraph> {
@@ -100,11 +101,13 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
 
 /// Strict counterpart to [`build_graph_from_parsed_manifest`].
 pub fn build_graph_from_parsed_manifest_strict(manifest: &Manifest) -> Result<LineageGraph> {
-    if manifest.capabilities.future_schema {
+    if super::manifest_has_future_schema(manifest) {
         anyhow::bail!("manifest uses a future dbt schema version");
     }
-    if let Some((unique_id, raw_type)) = find_unknown_resource(manifest) {
-        anyhow::bail!("manifest resource '{unique_id}' uses unknown resource type '{raw_type}'");
+    if let Some((unique_id, raw_type)) = find_unsupported_resource(manifest) {
+        anyhow::bail!(
+            "manifest resource '{unique_id}' uses unsupported resource type '{raw_type}'"
+        );
     }
     build_graph_from_parsed_manifest(manifest)
 }
@@ -112,56 +115,62 @@ pub fn build_graph_from_parsed_manifest_strict(manifest: &Manifest) -> Result<Li
 /// Find resources that the graph builder cannot represent. This mirrors the
 /// report loader's policy for the typed resource containers, while allowing a
 /// parsed manifest to be checked directly without reparsing its JSON.
-fn find_unknown_resource(manifest: &Manifest) -> Option<(String, String)> {
-    let node = manifest.nodes.iter().find_map(|(unique_id, node)| {
-        match classify_resource_type(&node.resource_type) {
-            ManifestResourceType::Known(_) => None,
-            ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
-        }
-    });
-    if node.is_some() {
-        return node;
-    }
-
-    let function = find_unknown_raw_resource(&manifest.functions, "function");
-    if function.is_some() {
-        return function;
-    }
-
-    let unit_test = find_unknown_raw_resource(&manifest.unit_tests, "unit_test");
-    if unit_test.is_some() {
-        return unit_test;
-    }
+fn find_unsupported_resource(manifest: &Manifest) -> Option<(String, String)> {
+    let mut candidates = manifest
+        .nodes
+        .iter()
+        .filter_map(
+            |(unique_id, node)| match classify_resource_type(&node.resource_type) {
+                ManifestResourceType::Known(_) => None,
+                ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+            },
+        )
+        .collect::<Vec<_>>();
+    candidates.extend(find_unsupported_raw_resources(
+        &manifest.functions,
+        "function",
+    ));
+    candidates.extend(find_unsupported_raw_resources(
+        &manifest.unit_tests,
+        "unit_test",
+    ));
 
     // `extra` is the parsed representation of the same unknown top-level
     // keys tracked by `ManifestCapabilities`; reading it also keeps direct
     // callers that construct a Manifest without observations safe.
-    manifest.extra.iter().find_map(|(_map_name, value)| {
-        let entries = value.as_object()?;
-        entries.iter().find_map(|(unique_id, value)| {
+    for value in manifest.extra.values() {
+        let Some(entries) = value.as_object() else {
+            continue;
+        };
+        candidates.extend(entries.iter().filter_map(|(unique_id, value)| {
             let raw_type = value.get("resource_type")?.as_str()?;
             match classify_resource_type(raw_type) {
                 ManifestResourceType::Known(_) => None,
                 ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
             }
-        })
-    })
+        }));
+    }
+    candidates.sort_unstable();
+    candidates.into_iter().next()
 }
 
-fn find_unknown_raw_resource(
+fn find_unsupported_raw_resources(
     resources: &HashMap<String, serde_json::Value>,
     default_resource_type: &str,
-) -> Option<(String, String)> {
-    resources.iter().find_map(|(unique_id, resource)| {
-        let raw_type = resource
-            .get("resource_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(default_resource_type);
-        match classify_resource_type(raw_type) {
-            ManifestResourceType::Known(_) => None,
-            ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
-        }
-    })
+) -> Vec<(String, String)> {
+    resources
+        .iter()
+        .filter_map(|(unique_id, resource)| {
+            let raw_type = resource
+                .get("resource_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(default_resource_type);
+            match classify_resource_type(raw_type) {
+                ManifestResourceType::Known(_) => None,
+                ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+            }
+        })
+        .collect()
 }
 
 fn index_node(node_map: &mut HashMap<String, NodeIndex>, orig_id: &str, idx: NodeIndex) {
