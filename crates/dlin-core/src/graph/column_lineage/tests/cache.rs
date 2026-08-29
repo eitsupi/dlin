@@ -24,7 +24,6 @@ fn test_column_cache_hit() {
         "test_model",
         "SELECT id FROM raw",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -38,7 +37,6 @@ fn test_column_cache_hit() {
             "test_model",
             "SELECT id FROM raw",
             DlinDialect::Generic,
-            BackendId::Sqllineage,
             None,
             Some(0),
         )
@@ -83,7 +81,6 @@ fn test_column_cache_persists_structural_relation_and_public_output() {
             "model.proj.stg_orders",
             &compiled_code,
             DlinDialect::Generic,
-            BackendId::Sqllineage,
             None,
             Some(super::super::schema::compute_manifest_columns_hash(
                 &manifest,
@@ -123,7 +120,6 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
         &unique_id,
         &compiled_code,
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         manifest_columns_hash,
         None,
         sentinel.clone().into(),
@@ -167,7 +163,6 @@ fn test_column_cache_miss_on_code_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -177,14 +172,7 @@ fn test_column_cache_miss_on_code_change() {
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get(
-                "m",
-                "SELECT 2",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m", "SELECT 2", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -206,7 +194,6 @@ fn test_column_cache_miss_on_dialect_change() {
         "m",
         "SELECT 1",
         DlinDialect::BigQuery,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -216,14 +203,7 @@ fn test_column_cache_miss_on_dialect_change() {
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Snowflake,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m", "SELECT 1", DlinDialect::Snowflake, None, Some(0))
             .is_none()
     );
 }
@@ -245,7 +225,6 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         42,
         None,
         lineage.into(),
@@ -256,27 +235,13 @@ fn test_column_cache_miss_on_manifest_columns_change() {
     // Same hash → hit
     assert!(
         cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(42)
-            )
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(42))
             .is_some()
     );
     // Different hash → miss (YAML columns changed in manifest)
     assert!(
         cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(99)
-            )
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(99))
             .is_none()
     );
 }
@@ -298,7 +263,6 @@ fn test_column_cache_version_invalidation() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -318,14 +282,7 @@ fn test_column_cache_version_invalidation() {
     let cache2 = ColumnLineageCache::load(project_dir, None);
     assert!(
         cache2
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 }
@@ -344,7 +301,6 @@ fn test_column_cache_disabled() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -352,14 +308,7 @@ fn test_column_cache_disabled() {
     // Disabled cache still works in-memory (only disk persistence is disabled)
     assert!(
         cache
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_some()
     );
     // But save is a no-op (no cache_path)
@@ -384,7 +333,6 @@ fn test_column_cache_fresh() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage.into(),
@@ -395,14 +343,7 @@ fn test_column_cache_fresh() {
     let fresh = ColumnLineageCache::fresh(project_dir, None);
     assert!(
         fresh
-            .get(
-                "m",
-                "SELECT 1",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m", "SELECT 1", DlinDialect::Generic, None, Some(0))
             .is_none()
     );
 
@@ -419,7 +360,6 @@ fn test_column_cache_fresh() {
         "m2",
         "SELECT 2",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         0,
         None,
         lineage2.into(),
@@ -429,14 +369,7 @@ fn test_column_cache_fresh() {
     let reloaded = ColumnLineageCache::load(project_dir, None);
     assert!(
         reloaded
-            .get(
-                "m2",
-                "SELECT 2",
-                DlinDialect::Generic,
-                BackendId::Sqllineage,
-                None,
-                Some(0)
-            )
+            .get("m2", "SELECT 2", DlinDialect::Generic, None, Some(0))
             .is_some()
     );
 }
@@ -460,7 +393,6 @@ fn test_column_cache_miss_on_manifest_stat_change() {
         "m",
         "SELECT 1",
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         42,
         Some(&manifest_path),
         lineage.into(),
@@ -474,7 +406,6 @@ fn test_column_cache_miss_on_manifest_stat_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Sqllineage,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -491,7 +422,6 @@ fn test_column_cache_miss_on_manifest_stat_change() {
                 "m",
                 "SELECT 1",
                 DlinDialect::Generic,
-                BackendId::Sqllineage,
                 Some(&manifest_path),
                 Some(42)
             )
@@ -527,7 +457,6 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
         &unique_id,
         compiled_code,
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         manifest_columns_hash,
         Some(&manifest_path),
         sentinel.into(),
@@ -582,7 +511,6 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         &unique_id,
         compiled_code,
         DlinDialect::Generic,
-        BackendId::Sqllineage,
         initial_hash,
         None,
         sentinel.into(),

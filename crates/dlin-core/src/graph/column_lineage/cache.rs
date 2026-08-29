@@ -7,23 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::parser::cache::hash_str;
 
 use super::InternalModelColumnLineage;
-use super::backend::{BackendId, DlinDialect};
+use super::backend::DlinDialect;
 
 // --- Column lineage disk cache ---
 
 pub(super) const COLUMN_LINEAGE_CACHE_FILENAME: &str = "column_lineage_cache.json";
 pub(super) const CACHE_DIR: &str = ".dlin_cache";
-
-/// Cache key identifying which backend and dialect produced a cached analysis.
-/// Distinct from the source-code hash: two analyses of the same SQL under a
-/// different backend or dialect are not interchangeable.
-fn analysis_key(backend: BackendId, dialect: DlinDialect) -> String {
-    format!(
-        "column-lineage/v3;backend={};dialect={}",
-        backend.as_str(),
-        dialect.as_str()
-    )
-}
 
 /// The package version is the sole persistent cache compatibility boundary.
 /// Cache formats are intentionally not versioned independently.
@@ -36,8 +25,9 @@ fn package_version() -> String {
 struct ColumnLineageCacheEntry {
     /// FNV-1a hash of the model's compiled SQL
     compiled_code_hash: u64,
-    /// Backend and dialect that produced this entry (see [`analysis_key`])
-    analysis_key: String,
+    /// Dialect that produced this entry. The backend is fixed by this package
+    /// and covered by the package-version compatibility boundary.
+    dialect: String,
     /// FNV-1a hash covering the model's YAML columns, compiled SQL, and the same
     /// for all transitive upstream dependencies. Captures any schema or SQL change
     /// that could alter the lineage result, not just manifest column definitions.
@@ -134,14 +124,12 @@ impl ColumnLineageCache {
         model_unique_id: &str,
         compiled_code: &str,
         dialect: DlinDialect,
-        backend: BackendId,
         manifest_path: Option<&Path>,
         manifest_columns_hash: Option<u64>,
     ) -> Option<&InternalModelColumnLineage> {
         let entry = self.entries.get(model_unique_id)?;
         let code_hash = hash_str(compiled_code);
-        let key = analysis_key(backend, dialect);
-        if entry.compiled_code_hash != code_hash || entry.analysis_key != key {
+        if entry.compiled_code_hash != code_hash || entry.dialect != dialect.as_str() {
             return None;
         }
         // Fast negative check: if manifest stat differs, this cache entry is stale.
@@ -168,7 +156,6 @@ impl ColumnLineageCache {
         model_unique_id: &str,
         compiled_code: &str,
         dialect: DlinDialect,
-        backend: BackendId,
         manifest_columns_hash: u64,
         manifest_path: Option<&Path>,
         lineage: InternalModelColumnLineage,
@@ -178,7 +165,7 @@ impl ColumnLineageCache {
             model_unique_id.to_string(),
             ColumnLineageCacheEntry {
                 compiled_code_hash: hash_str(compiled_code),
-                analysis_key: analysis_key(backend, dialect),
+                dialect: dialect.as_str().to_string(),
                 manifest_columns_hash,
                 manifest_mtime_secs: stat.as_ref().map_or(0, |s| s.mtime_secs),
                 manifest_mtime_nanos: stat.as_ref().map_or(0, |s| s.mtime_nanos),

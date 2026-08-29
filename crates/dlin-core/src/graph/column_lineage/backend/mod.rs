@@ -28,14 +28,6 @@ pub enum BackendId {
     Sqllineage,
 }
 
-impl BackendId {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Sqllineage => "sqllineage",
-        }
-    }
-}
-
 /// Uniform interface for lineages backends.
 pub trait LineageBackend: Send + Sync {
     fn id(&self) -> BackendId;

@@ -161,7 +161,6 @@ pub(super) fn compute_column_lineage_internal(
         cache_key,
         compiled_code,
         dialect,
-        backend.id(),
         manifest_path,
         Some(manifest_columns_hash),
     ) {
@@ -332,7 +331,6 @@ pub(super) fn compute_column_lineage_internal(
         cache_key,
         compiled_code,
         dialect,
-        backend.id(),
         manifest_columns_hash,
         manifest_path,
         result.clone(),
