@@ -236,6 +236,7 @@ dependencies = [
  "clap",
  "dlin-core",
  "filetime",
+ "insta",
  "libc",
  "path-slash",
  "regex",

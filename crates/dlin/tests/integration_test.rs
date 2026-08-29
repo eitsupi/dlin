@@ -2071,6 +2071,176 @@ mod manifest_only_mode {
         tmp
     }
 
+    fn forward_compat_manifest_dir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("target")).unwrap();
+        let manifest = serde_json::json!({
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+                "dbt_version": "1.9.0"
+            },
+            "nodes": {
+                "model.test_project.orders": {
+                    "unique_id": "model.test_project.orders",
+                    "name": "orders",
+                    "resource_type": "model",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                },
+                "operation.test_project.refresh": {
+                    "unique_id": "operation.test_project.refresh",
+                    "name": "refresh",
+                    "resource_type": "operation",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                }
+            },
+            "future_resources": {
+                "future.test_project.item": {"resource_type": "future_resource"}
+            }
+        });
+        fs::write(
+            tmp.path().join("target/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_manifest_forward_compatibility_warnings_cli_contract() {
+        let tmp = forward_compat_manifest_dir();
+        let manifest_path = tmp.path().join("target/manifest.json");
+        let common_args = [
+            "graph",
+            "--source",
+            "manifest",
+            "--manifest-path",
+            manifest_path.to_str().unwrap(),
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+            "-o",
+            "plain",
+        ];
+
+        let output = Command::new(binary_path())
+            .args(common_args)
+            .output()
+            .expect("failed to run forward-compatible manifest command");
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        insta::assert_snapshot!(stderr.as_ref(), @r###"
+Warning: [future_schema_version] manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json
+  Hint: Some resource types may not be understood by this version of dlin
+Warning: [unknown_top_level_key] unknown top-level manifest key: future_resources
+  Hint: The key is retained in Manifest::extra for forward compatibility
+Warning: [unsupported_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'
+  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+Warning: [unsupported_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'
+  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+"###);
+
+        let mut json_args = vec!["--error-format", "json"];
+        json_args.extend(common_args);
+        let output = Command::new(binary_path())
+            .args(json_args)
+            .output()
+            .expect("failed to run JSON warning command");
+        assert!(output.status.success());
+        let mut warnings: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("warning should be JSON"))
+            .collect();
+        warnings.sort_by_key(|warning| {
+            (
+                warning["kind"].as_str().unwrap_or_default().to_string(),
+                warning["raw_resource"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        insta::assert_snapshot!(serde_json::to_string_pretty(&warnings).unwrap(), @r###"
+[
+  {
+    "hint": "Some resource types may not be understood by this version of dlin",
+    "kind": "future_schema_version",
+    "level": "warning",
+    "raw_resource": "metadata.dbt_schema_version",
+    "raw_type": null,
+    "what": "manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+    "why": null
+  },
+  {
+    "hint": "The key is retained in Manifest::extra for forward compatibility",
+    "kind": "unknown_top_level_key",
+    "level": "warning",
+    "raw_resource": "future_resources",
+    "raw_type": null,
+    "what": "unknown top-level manifest key: future_resources",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unsupported_resource_type",
+    "level": "warning",
+    "raw_resource": "future.test_project.item",
+    "raw_type": "future_resource",
+    "what": "manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unsupported_resource_type",
+    "level": "warning",
+    "raw_resource": "operation.test_project.refresh",
+    "raw_type": "operation",
+    "what": "manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'",
+    "why": null
+  }
+]
+"###);
+
+        let output = Command::new(binary_path())
+            .args(common_args.iter().copied().chain(["-q"]))
+            .output()
+            .expect("failed to run quiet command");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+
+        let old = copy_fixture_to_temp();
+        let old_output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                old.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                old.path().to_str().unwrap(),
+                "-o",
+                "plain",
+            ])
+            .output()
+            .expect("failed to run old manifest command");
+        assert!(old_output.status.success());
+        insta::assert_snapshot!(String::from_utf8_lossy(&old_output.stderr).as_ref(), @r###""###);
+    }
+
     #[test]
     fn test_summary_manifest_mode_without_project_yml() {
         let tmp = minimal_manifest_dir(None);

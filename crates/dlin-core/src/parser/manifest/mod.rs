@@ -87,6 +87,44 @@ pub struct Manifest {
     pub capabilities: report::ManifestCapabilities,
 }
 
+/// Highest manifest schema version whose graph semantics are understood by
+/// this parser.
+pub(crate) const CURRENT_SUPPORTED_MANIFEST_SCHEMA_VERSION: u32 = 12;
+
+/// Extract the numeric manifest schema version from dbt's schema URI.
+pub(crate) fn parse_schema_number(schema: &str) -> Option<u32> {
+    let segments = schema.split('/').collect::<Vec<_>>();
+    let (resource, version) = match segments.as_slice() {
+        [.., resource, version, filename]
+            if *resource == "manifest" && *filename == "manifest.json" =>
+        {
+            (*resource, *version)
+        }
+        [.., resource, version_json] if *resource == "manifest" => {
+            (*resource, version_json.strip_suffix(".json")?)
+        }
+        _ => return None,
+    };
+    if resource != "manifest" {
+        return None;
+    }
+    version
+        .strip_prefix('v')
+        .filter(|number| {
+            !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+        })
+        .and_then(|number| number.parse().ok())
+}
+
+pub(crate) fn manifest_has_future_schema(manifest: &Manifest) -> bool {
+    manifest
+        .metadata
+        .dbt_schema_version
+        .as_deref()
+        .and_then(parse_schema_number)
+        .is_some_and(|number| number > CURRENT_SUPPORTED_MANIFEST_SCHEMA_VERSION)
+}
+
 /// A node entry in the manifest (model, seed, snapshot, test, analysis)
 #[derive(Debug, Deserialize)]
 pub struct ManifestNode {
@@ -232,16 +270,35 @@ impl ManifestNode {
     }
 }
 
-fn resource_type_to_node_type(resource_type: &str) -> NodeType {
+/// The classification used while translating dbt resources into graph nodes.
+///
+/// `NodeType::Model` is not a general fallback here. Analyses historically
+/// participate in model-level lineage as Model nodes; other unsupported kinds
+/// such as operations remain Unknown rather than being presented as models.
+/// Unsupported resources are retained by the manifest loader and diagnosed by the
+/// report loader, but omitted from the graph. Dependencies whose target is not
+/// represented in the graph are skipped, preserving the historical behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManifestResourceType {
+    Known(NodeType),
+    Unknown(String),
+}
+
+pub(crate) fn classify_resource_type(resource_type: &str) -> ManifestResourceType {
     match resource_type {
-        "model" => NodeType::Model,
-        "source" => NodeType::Source,
-        "seed" => NodeType::Seed,
-        "snapshot" => NodeType::Snapshot,
-        "test" => NodeType::Test,
-        "analysis" => NodeType::Model,
-        "exposure" => NodeType::Exposure,
-        _ => NodeType::Model,
+        "model" => ManifestResourceType::Known(NodeType::Model),
+        // Analyses historically participate in model-level lineage as Model
+        // nodes; column lineage separately checks raw resource_type == "model".
+        "analysis" => ManifestResourceType::Known(NodeType::Model),
+        "source" => ManifestResourceType::Known(NodeType::Source),
+        "seed" => ManifestResourceType::Known(NodeType::Seed),
+        "snapshot" => ManifestResourceType::Known(NodeType::Snapshot),
+        "test" => ManifestResourceType::Known(NodeType::Test),
+        "exposure" => ManifestResourceType::Known(NodeType::Exposure),
+        "semantic_model" => ManifestResourceType::Known(NodeType::SemanticModel),
+        "metric" => ManifestResourceType::Known(NodeType::Metric),
+        "saved_query" => ManifestResourceType::Known(NodeType::SavedQuery),
+        other => ManifestResourceType::Unknown(other.to_string()),
     }
 }
 
@@ -291,7 +348,11 @@ impl ManifestGraphIdentity {
 mod report;
 pub use report::*;
 mod graph;
-pub use graph::{build_graph_from_manifest, build_graph_from_parsed_manifest};
+pub use graph::{
+    ManifestGraphReport, build_graph_from_load_report, build_graph_from_manifest,
+    build_graph_from_manifest_report, build_graph_from_manifest_strict,
+    build_graph_from_parsed_manifest, build_graph_from_parsed_manifest_strict,
+};
 #[cfg(test)]
 pub(crate) use graph::{infer_edge_type, non_empty_string};
 
@@ -315,6 +376,21 @@ pub fn load_manifest_from_bytes(content: &[u8], manifest_path: &Path) -> Result<
             }
         })?,
     )
+}
+
+/// Load a manifest and reject unsupported resource kinds.
+///
+/// [`load_manifest`] remains the compatibility/permissive API.  Consumers
+/// that need to guarantee a complete graph can opt into this strict wrapper;
+/// malformed artifacts and unsupported resource kinds are returned as errors.
+pub fn load_manifest_strict(manifest_path: &Path) -> Result<Manifest> {
+    let report = load_manifest_report(manifest_path)?;
+    report.into_manifest_strict()
+}
+
+/// Parse manifest bytes using strict resource validation.
+pub fn load_manifest_strict_from_bytes(content: &[u8], manifest_path: &Path) -> Result<Manifest> {
+    load_manifest_report_from_bytes(content, manifest_path).into_manifest_strict()
 }
 
 impl Manifest {

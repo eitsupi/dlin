@@ -8,14 +8,61 @@ use crate::graph::types::*;
 
 use super::{
     Manifest, ManifestExposure, ManifestGraphIdentity, ManifestMetric, ManifestNode,
-    ManifestSavedQuery, ManifestSemanticModel, ManifestSource, load_manifest,
-    resource_type_to_node_type,
+    ManifestResourceType, ManifestSavedQuery, ManifestSemanticModel, ManifestSource,
+    classify_resource_type, load_manifest,
 };
+
+/// A manifest graph together with diagnostics observed while loading the
+/// artifact. Keeping these values together prevents callers from reparsing a
+/// manifest merely to display forward-compatibility warnings.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct ManifestGraphReport {
+    pub graph: LineageGraph,
+    pub diagnostics: Vec<super::ManifestDiagnostic>,
+    pub manifest: Manifest,
+}
 
 /// Build a LineageGraph from a parsed manifest.json file.
 pub fn build_graph_from_manifest(manifest_path: &Path) -> Result<LineageGraph> {
     let manifest = load_manifest(manifest_path)?;
     build_graph_from_parsed_manifest(&manifest)
+}
+
+/// Load a manifest once and build its graph while retaining load diagnostics.
+pub fn build_graph_from_manifest_report(manifest_path: &Path) -> Result<ManifestGraphReport> {
+    let report = super::load_manifest_report(manifest_path)?;
+    build_graph_from_load_report(report)
+}
+
+/// Build a graph from an already loaded report without reparsing it.
+pub fn build_graph_from_load_report(
+    report: super::ManifestLoadReport,
+) -> Result<ManifestGraphReport> {
+    let diagnostics = report.diagnostics;
+    let manifest = report.manifest.ok_or_else(|| {
+        let message = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.severity == super::ManifestDiagnosticSeverity::Error)
+            .map(|diagnostic| diagnostic.message.clone())
+            .unwrap_or_else(|| "manifest could not be loaded".to_string());
+        anyhow::anyhow!(message)
+    })?;
+    let graph = build_graph_from_parsed_manifest(&manifest)?;
+    Ok(ManifestGraphReport {
+        graph,
+        diagnostics,
+        manifest,
+    })
+}
+
+/// Strict graph-building wrapper. Unsupported resource kinds are rejected instead
+/// of being omitted, while [`build_graph_from_manifest`] keeps its historical
+/// permissive behavior.
+pub fn build_graph_from_manifest_strict(manifest_path: &Path) -> Result<LineageGraph> {
+    let report = super::load_manifest_report(manifest_path)?;
+    let manifest = report.into_manifest_strict()?;
+    build_graph_from_parsed_manifest_strict(&manifest)
 }
 
 /// Build a LineageGraph from an already-parsed Manifest struct.
@@ -50,6 +97,80 @@ pub fn build_graph_from_parsed_manifest(manifest: &Manifest) -> Result<LineageGr
     add_depends_on_edges(&mut graph, &node_map, &manifest.saved_queries);
 
     Ok(graph)
+}
+
+/// Strict counterpart to [`build_graph_from_parsed_manifest`].
+pub fn build_graph_from_parsed_manifest_strict(manifest: &Manifest) -> Result<LineageGraph> {
+    if super::manifest_has_future_schema(manifest) || manifest.capabilities.future_schema {
+        anyhow::bail!("manifest uses a future dbt schema version");
+    }
+    if let Some((unique_id, raw_type)) = find_unsupported_resource(manifest) {
+        anyhow::bail!(
+            "manifest resource '{unique_id}' uses unsupported resource type '{raw_type}'"
+        );
+    }
+    build_graph_from_parsed_manifest(manifest)
+}
+
+/// Find resources that the graph builder cannot represent. This mirrors the
+/// report loader's policy for the typed resource containers, while allowing a
+/// parsed manifest to be checked directly without reparsing its JSON.
+fn find_unsupported_resource(manifest: &Manifest) -> Option<(String, String)> {
+    let mut candidates = manifest
+        .nodes
+        .iter()
+        .filter_map(
+            |(unique_id, node)| match classify_resource_type(&node.resource_type) {
+                ManifestResourceType::Known(_) => None,
+                ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+            },
+        )
+        .collect::<Vec<_>>();
+    candidates.extend(find_unsupported_raw_resources(
+        &manifest.functions,
+        "function",
+    ));
+    candidates.extend(find_unsupported_raw_resources(
+        &manifest.unit_tests,
+        "unit_test",
+    ));
+
+    // `extra` is the parsed representation of the same unknown top-level
+    // keys tracked by `ManifestCapabilities`; reading it also keeps direct
+    // callers that construct a Manifest without observations safe.
+    for value in manifest.extra.values() {
+        let Some(entries) = value.as_object() else {
+            continue;
+        };
+        candidates.extend(entries.iter().filter_map(|(unique_id, value)| {
+            let raw_type = value.get("resource_type")?.as_str()?;
+            match classify_resource_type(raw_type) {
+                ManifestResourceType::Known(_) => None,
+                ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+            }
+        }));
+    }
+    candidates.sort_unstable();
+    candidates.into_iter().next()
+}
+
+fn find_unsupported_raw_resources(
+    resources: &HashMap<String, serde_json::Value>,
+    default_resource_type: &str,
+) -> Vec<(String, String)> {
+    resources
+        .iter()
+        .filter_map(|(unique_id, resource)| {
+            let raw_type = resource
+                .get("resource_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(default_resource_type);
+            match classify_resource_type(raw_type) {
+                ManifestResourceType::Known(_) => None,
+                ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+            }
+        })
+        .collect()
 }
 
 fn index_node(node_map: &mut HashMap<String, NodeIndex>, orig_id: &str, idx: NodeIndex) {
@@ -96,7 +217,13 @@ fn add_regular_nodes(
     nodes: &HashMap<String, ManifestNode>,
 ) {
     for (orig_id, node) in nodes {
-        let node_type = resource_type_to_node_type(&node.resource_type);
+        let ManifestResourceType::Known(node_type) = classify_resource_type(&node.resource_type)
+        else {
+            // Unsupported resource kinds are retained by Manifest and
+            // diagnosed by the report loader, but must not masquerade as
+            // models in a graph.
+            continue;
+        };
         let identity = ManifestGraphIdentity::from_resource(orig_id, &node.resource_type);
 
         let idx = graph.add_node(NodeData {
