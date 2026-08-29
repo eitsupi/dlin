@@ -913,11 +913,10 @@ mod tests {
         assert_eq!(json["raw_type"], "operation");
         assert!(json["why"].is_null());
         assert_eq!(json["hint"], diagnostic.hint.as_deref().unwrap());
-        assert!(
-            diagnostic
-                .to_warning_text()
-                .contains("resource type 'operation'")
-        );
+        insta::assert_snapshot!(diagnostic.to_warning_text(), @r###"
+Warning: [unknown_resource_type] manifest resource 'operation.proj.refresh' in 'nodes' uses unknown resource type 'operation'
+  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+"###);
         assert!(report.into_manifest_strict().is_err());
     }
 

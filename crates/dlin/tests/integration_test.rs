@@ -2143,10 +2143,16 @@ mod manifest_only_mode {
             .expect("failed to run forward-compatible manifest command");
         assert!(output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("future_schema_version"));
-        assert!(stderr.contains("operation.test_project.refresh"));
-        assert!(stderr.contains("resource type 'operation'"));
-        assert!(stderr.contains("Hint:"));
+        insta::assert_snapshot!(stderr.as_ref(), @r###"
+Warning: [future_schema_version] manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json
+  Hint: Some resource types may not be understood by this version of dlin
+Warning: [unknown_top_level_key] unknown top-level manifest key: future_resources
+  Hint: The key is retained in Manifest::extra for forward compatibility
+Warning: [unknown_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unknown resource type 'operation'
+  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+Warning: [unknown_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unknown resource type 'future_resource'
+  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+"###);
 
         let mut json_args = vec!["--error-format", "json"];
         json_args.extend(common_args);
@@ -2155,35 +2161,59 @@ mod manifest_only_mode {
             .output()
             .expect("failed to run JSON warning command");
         assert!(output.status.success());
-        let warnings: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+        let mut warnings: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
             .lines()
             .map(|line| serde_json::from_str(line).expect("warning should be JSON"))
             .collect();
-        let unknown = warnings
-            .iter()
-            .find(|warning| warning["kind"] == "unknown_resource_type")
-            .expect("unknown resource warning");
-        assert_eq!(unknown["raw_resource"], "operation.test_project.refresh");
-        assert_eq!(unknown["raw_type"], "operation");
-        assert!(
-            unknown["what"]
-                .as_str()
-                .is_some_and(|what| !what.is_empty())
-        );
-        assert!(unknown["why"].is_null());
-        assert!(
-            unknown["hint"]
-                .as_str()
-                .is_some_and(|hint| !hint.is_empty())
-        );
-        let future = warnings
-            .iter()
-            .find(|warning| warning["kind"] == "future_schema_version")
-            .expect("future schema warning");
-        assert_eq!(future["level"], "warning");
-        assert!(future["what"].as_str().is_some_and(|what| !what.is_empty()));
-        assert!(future["why"].is_null());
-        assert!(future["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        warnings.sort_by_key(|warning| {
+            (
+                warning["kind"].as_str().unwrap_or_default().to_string(),
+                warning["raw_resource"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        insta::assert_snapshot!(serde_json::to_string_pretty(&warnings).unwrap(), @r###"
+[
+  {
+    "hint": "Some resource types may not be understood by this version of dlin",
+    "kind": "future_schema_version",
+    "level": "warning",
+    "raw_resource": "metadata.dbt_schema_version",
+    "raw_type": null,
+    "what": "manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unknown_resource_type",
+    "level": "warning",
+    "raw_resource": "future.test_project.item",
+    "raw_type": "future_resource",
+    "what": "manifest resource 'future.test_project.item' in 'future_resources' uses unknown resource type 'future_resource'",
+    "why": null
+  },
+  {
+    "hint": "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results",
+    "kind": "unknown_resource_type",
+    "level": "warning",
+    "raw_resource": "operation.test_project.refresh",
+    "raw_type": "operation",
+    "what": "manifest resource 'operation.test_project.refresh' in 'nodes' uses unknown resource type 'operation'",
+    "why": null
+  },
+  {
+    "hint": "The key is retained in Manifest::extra for forward compatibility",
+    "kind": "unknown_top_level_key",
+    "level": "warning",
+    "raw_resource": "future_resources",
+    "raw_type": null,
+    "what": "unknown top-level manifest key: future_resources",
+    "why": null
+  }
+]
+"###);
 
         let output = Command::new(binary_path())
             .args(common_args.iter().copied().chain(["-q"]))
@@ -2208,7 +2238,7 @@ mod manifest_only_mode {
             .output()
             .expect("failed to run old manifest command");
         assert!(old_output.status.success());
-        assert!(!String::from_utf8_lossy(&old_output.stderr).contains("Warning:"));
+        insta::assert_snapshot!(String::from_utf8_lossy(&old_output.stderr).as_ref(), @r###""###);
     }
 
     #[test]

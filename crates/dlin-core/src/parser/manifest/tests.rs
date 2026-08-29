@@ -141,7 +141,7 @@ fn strict_graph_rejects_functions_and_unknown_resource_maps() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    assert!(error.to_string().contains("function.proj.helper"));
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'function.proj.helper' uses unknown resource type 'function'"###);
 
     let report = load_manifest_report_from_bytes(
         br#"{
@@ -158,7 +158,7 @@ fn strict_graph_rejects_functions_and_unknown_resource_maps() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    assert!(error.to_string().contains("future.proj.item"));
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'future.proj.item' uses unknown resource type 'future_resource'"###);
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn strict_graph_rejects_future_schema_capability() {
     let manifest = report.manifest.expect("permissive load succeeds");
     assert!(manifest.capabilities.future_schema);
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    assert!(error.to_string().contains("future dbt schema"));
+    insta::assert_snapshot!(error.to_string(), @r###"manifest uses a future dbt schema version"###);
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn strict_graph_rejects_unit_tests() {
     );
     let manifest = report.manifest.expect("permissive load succeeds");
     let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    assert!(error.to_string().contains("unit_test.proj.check"));
+    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'unit_test.proj.check' uses unknown resource type 'unit_test'"###);
 }
 
 #[test]

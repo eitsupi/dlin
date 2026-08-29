@@ -33,6 +33,7 @@ tempfile = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 serde-saphyr = { workspace = true }
+insta = { workspace = true }
 
 [lints]
 workspace = true
