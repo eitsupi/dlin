@@ -7,8 +7,15 @@ pub enum DbtLineageError {
     #[error("dbt project not found: no dbt_project.yml in {0}")]
     ProjectNotFound(PathBuf),
 
-    #[error("Variables cannot be defined in both dbt_project.yml and vars.yml")]
+    #[error("Variables cannot be defined in both vars.yml and dbt_project.yml.")]
     ProjectVarsConflict,
+
+    #[error("failed to render {field} in {path}: {message}")]
+    ProjectFieldRenderError {
+        path: PathBuf,
+        field: String,
+        message: String,
+    },
 
     #[error("failed to read file {path}: {source}")]
     FileReadError {
@@ -70,7 +77,7 @@ mod tests {
 
         let err = DbtLineageError::ProjectVarsConflict;
         insta::assert_snapshot!(err.to_string(), @r###"
-Variables cannot be defined in both dbt_project.yml and vars.yml
+Variables cannot be defined in both vars.yml and dbt_project.yml.
 "###);
 
         let err = DbtLineageError::DuplicateModel {

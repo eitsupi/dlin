@@ -108,6 +108,7 @@ fn walk_csv_files(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::project::DbtProject;
     use std::fs;
 
     #[test]
@@ -239,6 +240,33 @@ mod tests {
         assert_eq!(discovered.model_sql_files.len(), 2);
         // Analysis YAML files are collected
         assert_eq!(discovered.yaml_files.len(), 1);
+    }
+
+    #[test]
+    fn test_discover_files_uses_vars_yml_for_project_model_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let models_dir = project_dir.join("custom_models");
+        fs::create_dir_all(&models_dir).unwrap();
+        fs::write(models_dir.join("orders.sql"), "select 1").unwrap();
+        fs::write(
+            project_dir.join("dbt_project.yml"),
+            "name: test_project\nmodel-paths: [\"{{ var('model_dir') }}\"]\n",
+        )
+        .unwrap();
+        fs::write(
+            project_dir.join("vars.yml"),
+            "vars:\n  model_dir: custom_models\n",
+        )
+        .unwrap();
+
+        let project = DbtProject::load(project_dir).unwrap();
+        let discovered = discover_files(&project.resolve_paths(project_dir)).unwrap();
+
+        assert_eq!(
+            discovered.model_sql_files,
+            vec![models_dir.join("orders.sql")]
+        );
     }
 
     #[test]
