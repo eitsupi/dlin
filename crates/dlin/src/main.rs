@@ -1370,6 +1370,40 @@ fn find_deleted_manifest_files(
     deleted
 }
 
+/// Collect files whose mtimes can make a manifest stale.
+///
+/// The project file and the optional project-level vars file affect dbt's
+/// interpretation of the discovered resources, so they are freshness inputs
+/// even though they do not live under one of the configured resource paths.
+fn collect_manifest_freshness_inputs(
+    project_dir: &Path,
+    project: &parser::project::DbtProject,
+) -> Result<Vec<PathBuf>> {
+    let paths = project.resolve_paths(project_dir);
+    let files = parser::discovery::discover_files(&paths)?;
+    let mut inputs = files
+        .model_sql_files
+        .into_iter()
+        .chain(files.macro_sql_files)
+        .chain(files.seed_files)
+        .chain(files.snapshot_sql_files)
+        .chain(files.test_sql_files)
+        .chain(files.yaml_files)
+        .collect::<Vec<_>>();
+
+    for name in ["dbt_project.yml", "vars.yml"] {
+        let path = project_dir.join(name);
+        if path.is_file() {
+            inputs.push(path);
+        }
+    }
+
+    inputs.sort();
+    inputs.dedup();
+
+    Ok(inputs)
+}
+
 /// Check manifest.json freshness, returning None if manifest is irrelevant.
 #[cfg(not(tarpaulin_include))]
 fn check_manifest_freshness(
@@ -1397,23 +1431,13 @@ fn check_manifest_freshness(
         Err(_) => return Some(not_found),
     };
 
-    let paths = project.resolve_paths(project_dir);
-    let files = match parser::discovery::discover_files(&paths) {
+    let files = match collect_manifest_freshness_inputs(project_dir, project) {
         Ok(f) => f,
         Err(_) => return None,
     };
 
     let mut stale_files: Vec<String> = Vec::new();
-    let all_files = files
-        .model_sql_files
-        .iter()
-        .chain(files.macro_sql_files.iter())
-        .chain(files.seed_files.iter())
-        .chain(files.snapshot_sql_files.iter())
-        .chain(files.test_sql_files.iter())
-        .chain(files.yaml_files.iter());
-
-    for file in all_files {
+    for file in &files {
         if let Ok(meta) = std::fs::metadata(file)
             && let Ok(mtime) = meta.modified()
             && mtime > manifest_mtime
@@ -1472,21 +1496,11 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
 
     // Discover project files
     let project = parser::project::DbtProject::load(&project_dir)?;
-    let paths = project.resolve_paths(&project_dir);
-    let files = parser::discovery::discover_files(&paths)?;
+    let files = collect_manifest_freshness_inputs(&project_dir, &project)?;
 
     // Collect all SQL/YAML files and compare mtimes
     let mut stale_files: Vec<PathBuf> = Vec::new();
-    let all_files = files
-        .model_sql_files
-        .iter()
-        .chain(files.macro_sql_files.iter())
-        .chain(files.seed_files.iter())
-        .chain(files.snapshot_sql_files.iter())
-        .chain(files.test_sql_files.iter())
-        .chain(files.yaml_files.iter());
-
-    for file in all_files {
+    for file in &files {
         match std::fs::metadata(file) {
             Ok(meta) => {
                 if let Ok(mtime) = meta.modified()
