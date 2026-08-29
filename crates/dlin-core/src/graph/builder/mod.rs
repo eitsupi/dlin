@@ -389,9 +389,9 @@ struct ModelExtraction {
     model_name: String,
     extraction: Option<JinjaExtraction>,
     columns: Vec<String>,
-    /// SQL bytes retained only for a newly extracted entry so the cache hash
-    /// uses the same read that supplied the MiniJinja input.
-    sql_bytes: Option<Vec<u8>>,
+    /// Semantic identity computed from the bytes used for this extraction.
+    /// Keeping only this token avoids retaining the full SQL corpus.
+    input_hash: Option<cache::ExtractionInputHash>,
     /// Whether this extraction came from the disk cache (no need to re-save)
     from_cache: bool,
 }
@@ -425,13 +425,15 @@ fn process_model_files(
             let model_name = file_stem_str(sql_path);
 
             let sql_bytes = std::fs::read(sql_path).ok();
+            let input_hash = sql_bytes
+                .as_deref()
+                .map(|bytes| cache_ref.input_hash(bytes));
 
             // Check disk cache first. The bytes are read once and shared with
             // the miss path so cache validation cannot observe a different
             // file from the one that is rendered.
-            if let Some(cached) = sql_bytes
-                .as_deref()
-                .and_then(|bytes| cache_ref.get(sql_path, project_dir, bytes))
+            if let Some(cached) =
+                input_hash.and_then(|hash| cache_ref.get(sql_path, project_dir, hash))
             {
                 let sql_content = sql_bytes
                     .as_deref()
@@ -442,7 +444,7 @@ fn process_model_files(
                     model_name,
                     extraction: Some(cached.clone()),
                     columns,
-                    sql_bytes: None,
+                    input_hash: None,
                     from_cache: true,
                 };
             }
@@ -461,7 +463,7 @@ fn process_model_files(
                 model_name,
                 extraction,
                 columns,
-                sql_bytes,
+                input_hash,
                 from_cache: false,
             }
         })
@@ -486,8 +488,8 @@ fn process_model_files(
         let (sql_config, cached_refs_sources) = match me.extraction {
             Some(ext) => {
                 // Save newly extracted results to disk cache
-                if !from_cache && let Some(sql_bytes) = me.sql_bytes.as_deref() {
-                    disk_cache.insert(&me.sql_path, project_dir, sql_bytes, &ext);
+                if !from_cache && let Some(input_hash) = me.input_hash {
+                    disk_cache.insert(&me.sql_path, project_dir, input_hash, &ext);
                 }
                 (ext.config, Some((ext.refs, ext.sources)))
             }

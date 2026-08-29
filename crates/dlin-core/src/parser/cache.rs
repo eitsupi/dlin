@@ -18,6 +18,10 @@ struct CacheEntry {
     extraction: JinjaExtraction,
 }
 
+/// Opaque semantic input identity for one SQL extraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExtractionInputHash(u64);
+
 /// On-disk cache for minijinja extraction results
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheFile {
@@ -113,15 +117,19 @@ impl ExtractionCache {
 
     /// Look up a cached extraction for the given file path.
     /// Returns `None` if not cached or if the SQL bytes have changed.
-    pub fn get(
+    pub(crate) fn input_hash(&self, sql_bytes: &[u8]) -> ExtractionInputHash {
+        ExtractionInputHash(hash_sql_input(sql_bytes, self.environment_hash))
+    }
+
+    pub(crate) fn get(
         &self,
         path: &Path,
         project_dir: &Path,
-        sql_bytes: &[u8],
+        input_hash: ExtractionInputHash,
     ) -> Option<&JinjaExtraction> {
         let key = relative_key(path, project_dir);
         let entry = self.entries.get(&key)?;
-        if entry.input_hash == hash_sql_input(sql_bytes, self.environment_hash) {
+        if entry.input_hash == input_hash.0 {
             Some(&entry.extraction)
         } else {
             None
@@ -129,18 +137,18 @@ impl ExtractionCache {
     }
 
     /// Insert an extraction result into the cache.
-    pub fn insert(
+    pub(crate) fn insert(
         &mut self,
         path: &Path,
         project_dir: &Path,
-        sql_bytes: &[u8],
+        input_hash: ExtractionInputHash,
         extraction: &JinjaExtraction,
     ) {
         let key = relative_key(path, project_dir);
         self.entries.insert(
             key,
             CacheEntry {
-                input_hash: hash_sql_input(sql_bytes, self.environment_hash),
+                input_hash: input_hash.0,
                 extraction: extraction.clone(),
             },
         );
@@ -305,7 +313,11 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        assert!(cache.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache
+                .get(&sql_file, project_dir, cache.input_hash(sql))
+                .is_none()
+        );
 
         let extraction = JinjaExtraction {
             refs: vec![RefCall {
@@ -316,12 +328,15 @@ mod tests {
             sources: vec![],
             config: SqlConfig::default(),
         };
-        cache.insert(&sql_file, project_dir, sql, &extraction);
+        let input_hash = cache.input_hash(sql);
+        cache.insert(&sql_file, project_dir, input_hash, &extraction);
         cache.save();
 
         // Reload from disk
         let cache2 = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        let hit = cache2.get(&sql_file, project_dir, sql).unwrap();
+        let hit = cache2
+            .get(&sql_file, project_dir, cache2.input_hash(sql))
+            .unwrap();
         assert_eq!(hit.refs.len(), 1);
         assert_eq!(hit.refs[0].name, "orders");
     }
@@ -336,7 +351,13 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         let cache_path = project_dir.join(CACHE_DIR).join(CACHE_FILENAME);
@@ -345,7 +366,11 @@ mod tests {
         assert!(cache_file.entries.contains_key("models/orders.sql.j2"));
 
         let reloaded = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        assert!(reloaded.get(&sql_file, project_dir, sql).is_some());
+        assert!(
+            reloaded
+                .get(&sql_file, project_dir, reloaded.input_hash(sql))
+                .is_some()
+        );
     }
 
     #[test]
@@ -357,12 +382,22 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix_v1", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Different macro prefix → cache miss
         let cache2 = ExtractionCache::load(project_dir, "prefix_v2", &HashMap::new(), None);
-        assert!(cache2.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -376,7 +411,13 @@ mod tests {
             FileTime::from_last_modification_time(&fs::metadata(&sql_file).unwrap());
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Modify file without changing its size or waiting for its mtime.
@@ -389,7 +430,11 @@ mod tests {
         assert_eq!(original_mtime.unix_seconds(), changed_mtime.unix_seconds());
 
         let cache2 = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        assert!(cache2.get(&sql_file, project_dir, changed_sql).is_none());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(changed_sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -401,7 +446,13 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
 
         // Tamper with the entry to simulate an invalid input hash.
         let key = relative_key(&sql_file, project_dir);
@@ -409,7 +460,11 @@ mod tests {
             entry.input_hash = entry.input_hash.wrapping_add(1);
         }
 
-        assert!(cache.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache
+                .get(&sql_file, project_dir, cache.input_hash(sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -431,18 +486,28 @@ mod tests {
 
         let mut cache_a =
             ExtractionCache::load(&project_a, "prefix", &HashMap::new(), Some(&cache_dir));
-        cache_a.insert(&file_a, &project_a, sql_a, &JinjaExtraction::default());
+        let input_hash = cache_a.input_hash(sql_a);
+        cache_a.insert(&file_a, &project_a, input_hash, &JinjaExtraction::default());
         cache_a.save();
 
         let mut cache_b =
             ExtractionCache::load(&project_b, "prefix", &HashMap::new(), Some(&cache_dir));
-        assert!(cache_b.get(&file_b, &project_b, sql_b).is_none());
-        cache_b.insert(&file_b, &project_b, sql_b, &JinjaExtraction::default());
+        assert!(
+            cache_b
+                .get(&file_b, &project_b, cache_b.input_hash(sql_b))
+                .is_none()
+        );
+        let input_hash = cache_b.input_hash(sql_b);
+        cache_b.insert(&file_b, &project_b, input_hash, &JinjaExtraction::default());
         cache_b.save();
 
         let cache_a_again =
             ExtractionCache::load(&project_a, "prefix", &HashMap::new(), Some(&cache_dir));
-        assert!(cache_a_again.get(&file_a, &project_a, sql_a).is_none());
+        assert!(
+            cache_a_again
+                .get(&file_a, &project_a, cache_a_again.input_hash(sql_a))
+                .is_none()
+        );
     }
 
     #[test]
@@ -454,7 +519,13 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         let gitignore = project_dir.join(".dlin_cache/.gitignore");
@@ -477,7 +548,13 @@ mod tests {
         fs::write(dlin_dir.join(".gitignore"), "custom\n").unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         let content = fs::read_to_string(dlin_dir.join(".gitignore")).unwrap();
@@ -495,7 +572,13 @@ mod tests {
 
         let mut cache =
             ExtractionCache::load(project_dir, "prefix", &HashMap::new(), Some(&cache_dir));
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Cache file should be directly in cache_dir, not nested under .dlin_cache/
@@ -512,7 +595,13 @@ mod tests {
         fs::write(&sql_file, sql).unwrap();
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Tamper with version in the saved file
@@ -524,7 +613,11 @@ mod tests {
 
         // Reload → entries should be discarded
         let cache2 = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        assert!(cache2.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -539,7 +632,11 @@ mod tests {
         fs::write(&cache_path, "not valid json").unwrap();
 
         let cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        assert!(cache.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache
+                .get(&sql_file, project_dir, cache.input_hash(sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -554,14 +651,24 @@ mod tests {
         vars.insert("schema".to_string(), serde_json::json!("staging"));
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &vars, None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Different vars → cache miss
         let mut vars2 = HashMap::new();
         vars2.insert("schema".to_string(), serde_json::json!("production"));
         let cache2 = ExtractionCache::load(project_dir, "prefix", &vars2, None);
-        assert!(cache2.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(sql))
+                .is_none()
+        );
     }
 
     #[test]
@@ -576,12 +683,22 @@ mod tests {
         vars.insert("schema".to_string(), serde_json::json!("staging"));
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &vars, None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Same vars → cache hit
         let cache2 = ExtractionCache::load(project_dir, "prefix", &vars, None);
-        assert!(cache2.get(&sql_file, project_dir, sql).is_some());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(sql))
+                .is_some()
+        );
     }
 
     #[test]
@@ -599,7 +716,13 @@ mod tests {
         vars_a.insert("config".to_string(), serde_json::Value::Object(nested_a));
 
         let mut cache = ExtractionCache::load(project_dir, "prefix", &vars_a, None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         let mut nested_b = serde_json::Map::new();
@@ -608,7 +731,11 @@ mod tests {
         let mut vars_b = HashMap::new();
         vars_b.insert("config".to_string(), serde_json::Value::Object(nested_b));
         let cache2 = ExtractionCache::load(project_dir, "prefix", &vars_b, None);
-        assert!(cache2.get(&sql_file, project_dir, sql).is_some());
+        assert!(
+            cache2
+                .get(&sql_file, project_dir, cache2.input_hash(sql))
+                .is_some()
+        );
     }
 
     #[test]
@@ -621,12 +748,22 @@ mod tests {
 
         // Populate cache
         let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        cache.insert(&sql_file, project_dir, sql, &JinjaExtraction::default());
+        let input_hash = cache.input_hash(sql);
+        cache.insert(
+            &sql_file,
+            project_dir,
+            input_hash,
+            &JinjaExtraction::default(),
+        );
         cache.save();
 
         // Fresh cache ignores existing entries
         let fresh = ExtractionCache::fresh(project_dir, "prefix", &HashMap::new(), None);
-        assert!(fresh.get(&sql_file, project_dir, sql).is_none());
+        assert!(
+            fresh
+                .get(&sql_file, project_dir, fresh.input_hash(sql))
+                .is_none()
+        );
 
         // But can still save new entries
         let mut fresh = ExtractionCache::fresh(project_dir, "prefix", &HashMap::new(), None);
@@ -639,12 +776,15 @@ mod tests {
             sources: vec![],
             config: SqlConfig::default(),
         };
-        fresh.insert(&sql_file, project_dir, sql, &extraction);
+        let input_hash = fresh.input_hash(sql);
+        fresh.insert(&sql_file, project_dir, input_hash, &extraction);
         fresh.save();
 
         // Reload → new entry is there
         let reloaded = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
-        let hit = reloaded.get(&sql_file, project_dir, sql).unwrap();
+        let hit = reloaded
+            .get(&sql_file, project_dir, reloaded.input_hash(sql))
+            .unwrap();
         assert_eq!(hit.refs[0].name, "fresh_ref");
     }
 }
