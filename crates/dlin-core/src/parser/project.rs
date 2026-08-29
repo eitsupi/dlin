@@ -71,6 +71,10 @@ fn default_analysis_paths() -> Vec<String> {
     vec!["analyses".to_string()]
 }
 
+// dbt recognizes the project-root vars.yml filename exactly; vars.yaml is not
+// an alias, so dlin intentionally follows that behavior.
+const DBT_VARS_FILE_NAME: &str = "vars.yml";
+
 impl DbtProject {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let project_file = project_dir.join("dbt_project.yml");
@@ -99,7 +103,7 @@ impl DbtProject {
             })
             .unwrap_or_default();
 
-        let vars_file = project_dir.join("vars.yml");
+        let vars_file = project_dir.join(DBT_VARS_FILE_NAME);
         let file_vars = if vars_file.exists() {
             let vars_content = std::fs::read_to_string(&vars_file).map_err(|e| {
                 DbtLineageError::FileReadError {
@@ -359,6 +363,30 @@ other_top_level_key: ignored
             serde_json::json!({"retries": 3, "enabled": true})
         );
         assert_eq!(project.vars.len(), 3);
+    }
+
+    #[test]
+    fn test_load_ignores_vars_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: test_project\nvars:\n  source: project\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("vars.yaml"),
+            "vars:\n  source: yaml\n  extra: ignored\n",
+        )
+        .unwrap();
+
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(
+            project.vars,
+            HashMap::from([(
+                "source".to_string(),
+                serde_json::Value::String("project".to_string())
+            )])
+        );
     }
 
     #[test]
