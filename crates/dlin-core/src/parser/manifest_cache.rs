@@ -81,17 +81,32 @@ impl ManifestGraphCache {
     pub fn get(&self, manifest_path: &Path) -> Option<&LineageGraph> {
         let entry = self.entry.as_ref()?;
         let stat = file_stat(manifest_path)?;
-        let identity = manifest_identity(manifest_path);
-        if entry.manifest_identity == identity
-            && entry.mtime_secs == stat.mtime_secs
-            && entry.mtime_nanos == stat.mtime_nanos
-            && entry.file_size == stat.file_size
-            && entry.content_hash == stat.content_hash
-        {
+        if entry_matches_fingerprint(
+            entry,
+            manifest_path,
+            (
+                stat.mtime_secs,
+                stat.mtime_nanos,
+                stat.file_size,
+                stat.content_hash,
+            ),
+        ) {
             Some(&entry.graph)
         } else {
             None
         }
+    }
+
+    /// Look up a cached graph using metadata and content hash computed by the
+    /// caller. This avoids rereading the manifest when its bytes were already
+    /// loaded for parsing and fingerprinting.
+    pub fn get_with_fingerprint(
+        &self,
+        manifest_path: &Path,
+        fingerprint: (u64, u32, u64, u64),
+    ) -> Option<&LineageGraph> {
+        let entry = self.entry.as_ref()?;
+        entry_matches_fingerprint(entry, manifest_path, fingerprint).then_some(&entry.graph)
     }
 
     pub fn insert_if_fingerprint_matches(
@@ -188,6 +203,20 @@ fn file_stat(path: &Path) -> Option<FileStat> {
     })
 }
 
+fn entry_matches_fingerprint(
+    entry: &ManifestCacheEntry,
+    manifest_path: &Path,
+    fingerprint: (u64, u32, u64, u64),
+) -> bool {
+    entry.manifest_identity == manifest_identity(manifest_path)
+        && (
+            entry.mtime_secs,
+            entry.mtime_nanos,
+            entry.file_size,
+            entry.content_hash,
+        ) == fingerprint
+}
+
 fn manifest_identity(path: &Path) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.to_path_buf())
@@ -204,4 +233,42 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn fingerprint_lookup_does_not_require_manifest_reread() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("manifest.json");
+        let bytes = br#"{}"#;
+        std::fs::write(&manifest_path, bytes).unwrap();
+        let metadata = std::fs::metadata(&manifest_path).unwrap();
+        let modified = metadata
+            .modified()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let fingerprint = (
+            modified.as_secs(),
+            modified.subsec_nanos(),
+            metadata.len(),
+            hash_bytes(bytes),
+        );
+
+        let mut cache = ManifestGraphCache::fresh(temp.path(), None);
+        let graph = LineageGraph::new();
+        assert!(cache.insert_if_fingerprint_matches(&manifest_path, &graph, fingerprint));
+        std::fs::remove_file(&manifest_path).unwrap();
+
+        assert!(
+            cache
+                .get_with_fingerprint(&manifest_path, fingerprint)
+                .is_some()
+        );
+        assert!(cache.get(&manifest_path).is_none());
+    }
 }

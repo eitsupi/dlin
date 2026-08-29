@@ -2071,6 +2071,146 @@ mod manifest_only_mode {
         tmp
     }
 
+    fn forward_compat_manifest_dir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("target")).unwrap();
+        let manifest = serde_json::json!({
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+                "dbt_version": "1.9.0"
+            },
+            "nodes": {
+                "model.test_project.orders": {
+                    "unique_id": "model.test_project.orders",
+                    "name": "orders",
+                    "resource_type": "model",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                },
+                "operation.test_project.refresh": {
+                    "unique_id": "operation.test_project.refresh",
+                    "name": "refresh",
+                    "resource_type": "operation",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                }
+            },
+            "future_resources": {
+                "future.test_project.item": {"resource_type": "future_resource"}
+            }
+        });
+        fs::write(
+            tmp.path().join("target/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_manifest_forward_compatibility_warnings_cli_contract() {
+        let tmp = forward_compat_manifest_dir();
+        let manifest_path = tmp.path().join("target/manifest.json");
+        let common_args = [
+            "graph",
+            "--source",
+            "manifest",
+            "--manifest-path",
+            manifest_path.to_str().unwrap(),
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+            "-o",
+            "plain",
+        ];
+
+        let output = Command::new(binary_path())
+            .args(common_args)
+            .output()
+            .expect("failed to run forward-compatible manifest command");
+        assert!(output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("future_schema_version"));
+        assert!(stderr.contains("operation.test_project.refresh"));
+        assert!(stderr.contains("resource type 'operation'"));
+        assert!(stderr.contains("Hint:"));
+
+        let mut json_args = vec!["--error-format", "json"];
+        json_args.extend(common_args);
+        let output = Command::new(binary_path())
+            .args(json_args)
+            .output()
+            .expect("failed to run JSON warning command");
+        assert!(output.status.success());
+        let warnings: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("warning should be JSON"))
+            .collect();
+        let unknown = warnings
+            .iter()
+            .find(|warning| warning["kind"] == "unknown_resource_type")
+            .expect("unknown resource warning");
+        assert_eq!(unknown["raw_resource"], "operation.test_project.refresh");
+        assert_eq!(unknown["raw_type"], "operation");
+        assert!(
+            unknown["what"]
+                .as_str()
+                .is_some_and(|what| !what.is_empty())
+        );
+        assert!(unknown["why"].is_null());
+        assert!(
+            unknown["hint"]
+                .as_str()
+                .is_some_and(|hint| !hint.is_empty())
+        );
+        let future = warnings
+            .iter()
+            .find(|warning| warning["kind"] == "future_schema_version")
+            .expect("future schema warning");
+        assert_eq!(future["level"], "warning");
+        assert!(future["what"].as_str().is_some_and(|what| !what.is_empty()));
+        assert!(future["why"].is_null());
+        assert!(future["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+
+        let output = Command::new(binary_path())
+            .args(common_args.iter().copied().chain(["-q"]))
+            .output()
+            .expect("failed to run quiet command");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+
+        let old = copy_fixture_to_temp();
+        let old_output = Command::new(binary_path())
+            .args([
+                "graph",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                old.path().join("target/manifest.json").to_str().unwrap(),
+                "--project-dir",
+                old.path().to_str().unwrap(),
+                "-o",
+                "plain",
+            ])
+            .output()
+            .expect("failed to run old manifest command");
+        assert!(old_output.status.success());
+        assert!(!String::from_utf8_lossy(&old_output.stderr).contains("Warning:"));
+    }
+
     #[test]
     fn test_summary_manifest_mode_without_project_yml() {
         let tmp = minimal_manifest_dir(None);

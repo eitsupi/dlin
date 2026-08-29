@@ -50,6 +50,7 @@ struct McpState {
     manifest_path: PathBuf,
     dialect: DlinDialect,
     dialect_warning: Option<String>,
+    manifest_warnings: Vec<parser::manifest::ManifestDiagnostic>,
     manifest: parser::manifest::Manifest,
     dag: LineageGraph,
     column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
@@ -117,8 +118,12 @@ impl McpState {
             .unwrap_or_else(|_| args.project_dir.clone());
         let manifest_path =
             resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
-        let manifest = parser::manifest::load_manifest(&manifest_path)?;
-        let dag = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
+        let graph_report = parser::manifest::build_graph_from_manifest_report(&manifest_path)?;
+        let parser::manifest::ManifestGraphReport {
+            graph: dag,
+            diagnostics,
+            manifest,
+        } = graph_report;
         let resolved_dialect = resolve_dialect(args.dialect.as_ref(), &manifest)?;
 
         Ok(Self {
@@ -126,6 +131,10 @@ impl McpState {
             manifest_path,
             dialect: resolved_dialect.dialect,
             dialect_warning: resolved_dialect.warning,
+            manifest_warnings: diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.kind.is_user_visible_warning())
+                .collect(),
             manifest,
             dag,
             column_lineage_cache: RefCell::new(
@@ -325,10 +334,20 @@ fn call_tool(params: &Value, state: &McpState) -> std::result::Result<Value, (i3
 }
 
 fn tool_result(mut value: Value, is_error: bool, state: &McpState) -> Value {
-    if let Some(warning) = &state.dialect_warning
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("warnings".to_string(), json!([warning]));
+    if let Some(object) = value.as_object_mut() {
+        let mut warnings = state
+            .manifest_warnings
+            .iter()
+            .map(parser::manifest::ManifestDiagnostic::to_warning_json)
+            .collect::<Vec<_>>();
+        if let Some(warning) = &state.dialect_warning {
+            // Dialect warnings predate structured manifest diagnostics and
+            // are part of the existing MCP JSON contract.
+            warnings.push(json!(warning));
+        }
+        if !warnings.is_empty() {
+            object.insert("warnings".to_string(), Value::Array(warnings));
+        }
     }
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     json!({
@@ -346,9 +365,12 @@ fn get_project_summary(state: &McpState) -> Result<Value> {
         .clone()
         .unwrap_or_else(|| "(unknown)".to_string());
     let manifest_status = match parser::project::DbtProject::load(&state.project_dir) {
-        Ok(project) => {
-            check_manifest_freshness(&state.project_dir, Some(&state.manifest_path), &project)
-        }
+        Ok(project) => check_manifest_freshness(
+            &state.project_dir,
+            Some(&state.manifest_path),
+            &project,
+            Some(&state.manifest),
+        ),
         Err(_) => None,
     };
     let report = render::summary::SummaryReport {
@@ -912,6 +934,121 @@ mod tests {
         .unwrap();
 
         assert!(result["structuredContent"].get("warnings").is_none());
+    }
+
+    #[test]
+    fn mcp_dialect_warning_preserves_legacy_string_shape() {
+        let mut state = column_lineage_state();
+        state.dialect_warning = Some("using generic instead".to_string());
+        let result = call_tool(
+            &json!({"name": "get_project_summary", "arguments": {}}),
+            &state,
+        )
+        .unwrap();
+        assert!(result["structuredContent"]["warnings"][0].is_string());
+        assert_eq!(
+            result["structuredContent"]["warnings"][0],
+            "using generic instead"
+        );
+    }
+
+    #[test]
+    fn mcp_unknown_resource_warning_preserves_core_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("manifest.json");
+        let manifest = json!({
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {
+                "operation.proj.refresh": {
+                    "unique_id": "operation.proj.refresh",
+                    "name": "refresh",
+                    "resource_type": "operation",
+                    "depends_on": {"nodes": []},
+                    "config": {},
+                    "description": null,
+                    "path": null,
+                    "original_file_path": null,
+                    "columns": {},
+                    "compiled_code": null,
+                    "database": null,
+                    "schema": null
+                }
+            }
+        });
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let state = McpState::load(McpArgs {
+            project_dir: temp.path().to_path_buf(),
+            manifest_path: Some(manifest_path),
+            dialect: Some(generic_dialect()),
+        })
+        .unwrap();
+        let result = call_tool(
+            &json!({"name": "get_project_summary", "arguments": {}}),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            result["structuredContent"]["warnings"][0]["kind"],
+            "unknown_resource_type"
+        );
+        assert_eq!(
+            result["structuredContent"]["warnings"][0]["raw_type"],
+            "operation"
+        );
+        assert_eq!(
+            result["structuredContent"]["warnings"][0]["hint"],
+            state.manifest_warnings[0].hint.as_deref().unwrap()
+        );
+    }
+
+    #[test]
+    fn mcp_future_schema_warning_is_visible_with_structured_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_path = temp.path().join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&json!({
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+                    "dbt_version": "1.9.0"
+                },
+                "nodes": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = McpState::load(McpArgs {
+            project_dir: temp.path().to_path_buf(),
+            manifest_path: Some(manifest_path),
+            dialect: Some(generic_dialect()),
+        })
+        .unwrap();
+        let result = call_tool(
+            &json!({"name": "get_project_summary", "arguments": {}}),
+            &state,
+        )
+        .unwrap();
+        let warning = result["structuredContent"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|warning| warning["kind"] == "future_schema_version")
+            .expect("future schema warning");
+        assert_eq!(warning["level"], "warning");
+        assert!(
+            warning["what"]
+                .as_str()
+                .is_some_and(|what| !what.is_empty())
+        );
+        assert!(warning["why"].is_null());
+        assert!(
+            warning["hint"]
+                .as_str()
+                .is_some_and(|hint| !hint.is_empty())
+        );
     }
 
     #[test]

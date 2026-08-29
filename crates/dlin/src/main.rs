@@ -151,7 +151,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt) = build_dag(
+    let (dag, project_opt, manifest_diagnostics, manifest_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -159,6 +159,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
+    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -258,6 +259,7 @@ fn run_graph_command(args: GraphArgs) -> Result<()> {
         Some(collect_sql_contents_for_source(
             &args.source,
             &project_dir,
+            manifest_opt.as_ref(),
             args.manifest_path.as_ref(),
             &filtered,
         ))
@@ -322,7 +324,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt) = build_dag(
+    let (dag, project_opt, manifest_diagnostics, manifest_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -330,6 +332,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
+    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -408,6 +411,7 @@ fn run_list_command(args: ListArgs) -> Result<()> {
         Some(collect_sql_contents_for_source(
             &args.source,
             &project_dir,
+            manifest_opt.as_ref(),
             args.manifest_path.as_ref(),
             &filtered,
         ))
@@ -420,6 +424,14 @@ fn run_list_command(args: ListArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(tarpaulin_include))]
+type DagBuildResult = Result<(
+    graph::types::LineageGraph,
+    Option<parser::project::DbtProject>,
+    Vec<parser::manifest::ManifestDiagnostic>,
+    Option<parser::manifest::Manifest>,
+)>;
+
 /// Build the lineage DAG from either a manifest file or by parsing SQL files.
 #[cfg(not(tarpaulin_include))]
 fn build_dag(
@@ -429,10 +441,7 @@ fn build_dag(
     cache_dir: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
-) -> Result<(
-    graph::types::LineageGraph,
-    Option<parser::project::DbtProject>,
-)> {
+) -> DagBuildResult {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
@@ -444,12 +453,44 @@ fn build_dag(
                 parser::manifest_cache::ManifestGraphCache::load(project_dir, cache_dir)
             };
 
-            if let Some(graph) = cache.get(&resolved) {
-                return Ok((graph.clone(), None));
+            // Parse exactly once so diagnostics are available on cache hits.
+            // Graph construction is deferred until after the cache lookup.
+            let (load_report, parsed_fingerprint) =
+                load_manifest_report_with_fingerprint(&resolved)?;
+            let (manifest, diagnostics) = load_report.into_parts();
+            let manifest = manifest.ok_or_else(|| {
+                let message = diagnostics
+                    .iter()
+                    .find(|diagnostic| {
+                        diagnostic.severity == parser::manifest::ManifestDiagnosticSeverity::Error
+                    })
+                    .map(|diagnostic| diagnostic.message.clone())
+                    .unwrap_or_else(|| "manifest could not be loaded".to_string());
+                anyhow::anyhow!(message)
+            })?;
+            let cached_graph = parsed_fingerprint.as_ref().and_then(|fingerprint| {
+                cache.get_with_fingerprint(
+                    &resolved,
+                    (
+                        fingerprint.mtime_secs,
+                        fingerprint.mtime_nanos,
+                        fingerprint.size_bytes,
+                        fingerprint.content_hash,
+                    ),
+                )
+            });
+            if let Some(cached_graph) = cached_graph {
+                let graph = cached_graph.clone();
+                return Ok((graph, None, diagnostics, Some(manifest)));
             }
-
-            let (manifest, parsed_fingerprint) = load_manifest_with_fingerprint(&resolved)?;
-            let graph = parser::manifest::build_graph_from_parsed_manifest(&manifest)?;
+            let graph_report = parser::manifest::build_graph_from_load_report(
+                parser::manifest::ManifestLoadReport::from_parts(Some(manifest), diagnostics),
+            )?;
+            let parser::manifest::ManifestGraphReport {
+                graph,
+                diagnostics,
+                manifest,
+            } = graph_report;
             if let Some(parsed_fingerprint) = parsed_fingerprint {
                 let expected = (
                     parsed_fingerprint.mtime_secs,
@@ -472,7 +513,7 @@ fn build_dag(
                 );
             }
 
-            Ok((graph, None))
+            Ok((graph, None, diagnostics, Some(manifest)))
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
@@ -486,7 +527,27 @@ fn build_dag(
                 refresh_cache,
                 &project.vars,
             )?;
-            Ok((graph, Some(project)))
+            Ok((graph, Some(project), Vec::new(), None))
+        }
+    }
+}
+
+/// Emit forward-compatibility diagnostics from the graph report. Missing
+/// producer metadata is valid for older manifests and is intentionally not
+/// surfaced by command warnings.
+#[cfg(not(tarpaulin_include))]
+fn warn_manifest_diagnostics(diagnostics: &[parser::manifest::ManifestDiagnostic]) {
+    if dlin_core::is_quiet() {
+        return;
+    }
+    for diagnostic in diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind.is_user_visible_warning())
+    {
+        if dlin_core::is_error_format_json() {
+            eprintln!("{}", diagnostic.to_warning_json());
+        } else {
+            eprintln!("{}", diagnostic.to_warning_text());
         }
     }
 }
@@ -513,9 +574,12 @@ fn manifest_fingerprint(meta: &std::fs::Metadata, bytes: &[u8]) -> Option<Manife
     })
 }
 
-fn load_manifest_with_fingerprint(
+fn load_manifest_report_with_fingerprint(
     manifest_path: &Path,
-) -> Result<(parser::manifest::Manifest, Option<ManifestFingerprint>)> {
+) -> Result<(
+    parser::manifest::ManifestLoadReport,
+    Option<ManifestFingerprint>,
+)> {
     let meta = std::fs::metadata(manifest_path).map_err(|e| {
         dlin_core::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
@@ -528,9 +592,9 @@ fn load_manifest_with_fingerprint(
             source: e,
         }
     })?;
-    let manifest = parser::manifest::load_manifest_from_bytes(&bytes, manifest_path)?;
+    let load_report = parser::manifest::load_manifest_report_from_bytes(&bytes, manifest_path);
     let fingerprint = manifest_fingerprint(&meta, &bytes);
-    Ok((manifest, fingerprint))
+    Ok((load_report, fingerprint))
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -579,18 +643,24 @@ fn render_output(
 fn collect_sql_contents_for_source(
     source: &SourceType,
     project_dir: &Path,
+    manifest: Option<&parser::manifest::Manifest>,
     manifest_path: Option<&PathBuf>,
     graph: &graph::types::LineageGraph,
 ) -> HashMap<String, String> {
     match source {
         SourceType::Manifest => {
-            let Ok(resolved) = resolve_manifest_path_or_default(manifest_path, project_dir) else {
-                return HashMap::new();
-            };
-            let Ok(manifest) = parser::manifest::load_manifest(&resolved) else {
-                return HashMap::new();
-            };
-            manifest.collect_sql_contents()
+            if let Some(manifest) = manifest {
+                manifest.collect_sql_contents()
+            } else {
+                let Ok(resolved) = resolve_manifest_path_or_default(manifest_path, project_dir)
+                else {
+                    return HashMap::new();
+                };
+                let Ok(manifest) = parser::manifest::load_manifest(&resolved) else {
+                    return HashMap::new();
+                };
+                manifest.collect_sql_contents()
+            }
         }
         SourceType::Sql => collect_sql_contents(graph, project_dir),
     }
@@ -646,7 +716,7 @@ fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, project_opt) = build_dag(
+    let (dag, project_opt, manifest_diagnostics, _manifest) = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -654,6 +724,7 @@ fn run_impact_command(
         no_cache,
         refresh_cache,
     )?;
+    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Resolve file paths to model names (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {
@@ -904,7 +975,9 @@ fn run_column_lineage_command(
 
     // Load manifest once — reused for both path resolution and column lineage analysis.
     let resolved_manifest_path = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-    let manifest = parser::manifest::load_manifest(&resolved_manifest_path)?;
+    let manifest_report = parser::manifest::load_manifest_report(&resolved_manifest_path)?;
+    warn_manifest_diagnostics(&manifest_report.diagnostics);
+    let manifest = manifest_report.into_manifest()?;
 
     let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
     if let Some(warning) = &resolved_dialect.warning {
@@ -931,7 +1004,8 @@ fn run_column_lineage_command(
             input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
         // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
         // file-path expansion — column lineage only supports resource_type == "model".
-        // Analyses map to NodeType::Model in the DAG so we check the manifest directly.
+        // Unknown resource kinds are omitted from the DAG, so check the
+        // manifest directly when applying the model-only filter.
         let manifest_model_names: std::collections::HashSet<&str> = manifest
             .nodes
             .values()
@@ -1112,7 +1186,9 @@ fn run_column_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     let resolved = resolve_manifest_path_or_default(manifest_path, &project_dir)?;
-    let manifest = parser::manifest::load_manifest(&resolved)?;
+    let manifest_report = parser::manifest::load_manifest_report(&resolved)?;
+    warn_manifest_diagnostics(&manifest_report.diagnostics);
+    let manifest = manifest_report.into_manifest()?;
 
     let resolved_dialect = resolve_dialect(dialect.as_ref(), &manifest)?;
     if let Some(warning) = &resolved_dialect.warning {
@@ -1203,7 +1279,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt) = build_dag(
+    let (dag, project_opt, manifest_diagnostics, manifest_opt) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -1211,18 +1287,21 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
         args.no_cache,
         args.refresh_cache,
     )?;
+    warn_manifest_diagnostics(&manifest_diagnostics);
 
     let (project_name, vars_count, manifest_status) = match args.source {
         SourceType::Manifest => {
-            let name = resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)
-                .ok()
-                .and_then(|path| parser::manifest::load_manifest(&path).ok())
-                .and_then(|m| m.metadata.project_name.clone())
+            let name = manifest_opt
+                .as_ref()
+                .and_then(|manifest| manifest.metadata.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
             let status = match parser::project::DbtProject::load(&project_dir) {
-                Ok(project) => {
-                    check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project)
-                }
+                Ok(project) => check_manifest_freshness(
+                    &project_dir,
+                    args.manifest_path.as_ref(),
+                    &project,
+                    manifest_opt.as_ref(),
+                ),
                 Err(e) => {
                     let is_not_found = e
                         .downcast_ref::<dlin_core::error::DbtLineageError>()
@@ -1242,7 +1321,7 @@ fn run_summary_command(args: SummaryArgs) -> Result<()> {
                 anyhow::anyhow!("internal error: DbtProject not available in sql mode")
             })?;
             let status =
-                check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project);
+                check_manifest_freshness(&project_dir, args.manifest_path.as_ref(), &project, None);
             let vars_count = project.vars.len();
             let name = project.name.clone();
             (name, vars_count, status)
@@ -1292,6 +1371,7 @@ fn check_manifest_freshness(
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     project: &parser::project::DbtProject,
+    manifest: Option<&parser::manifest::Manifest>,
 ) -> Option<render::summary::ManifestStatus> {
     let not_found = render::summary::ManifestStatus {
         found: false,
@@ -1340,12 +1420,15 @@ fn check_manifest_freshness(
     stale_files.sort();
 
     // Check for deleted files: paths referenced in manifest but missing on disk
-    let deleted_files = match parser::manifest::load_manifest(&resolved) {
-        Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
-        Err(e) => {
-            dlin_core::warn!("cannot parse manifest.json for deleted-file check: {}", e);
-            return None;
-        }
+    let deleted_files = match manifest {
+        Some(manifest) => find_deleted_manifest_files(manifest, project_dir),
+        None => match parser::manifest::load_manifest(&resolved) {
+            Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
+            Err(e) => {
+                dlin_core::warn!("cannot parse manifest.json for deleted-file check: {}", e);
+                return None;
+            }
+        },
     };
 
     let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
@@ -1372,7 +1455,6 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
 
     let manifest_path =
         resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
-
     let manifest_mtime = std::fs::metadata(&manifest_path)
         .and_then(|m| m.modified())
         .map_err(|e| {
@@ -1421,7 +1503,9 @@ fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     stale_files.sort();
 
     // Check for deleted files: paths referenced in manifest but missing on disk
-    let manifest = parser::manifest::load_manifest(&manifest_path)?;
+    let manifest_report = parser::manifest::load_manifest_report(&manifest_path)?;
+    warn_manifest_diagnostics(&manifest_report.diagnostics);
+    let manifest = manifest_report.into_manifest()?;
     let deleted_files: Vec<PathBuf> = find_deleted_manifest_files(&manifest, &project_dir)
         .into_iter()
         .map(PathBuf::from)

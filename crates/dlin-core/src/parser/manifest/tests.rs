@@ -2,15 +2,220 @@ use super::*;
 use std::fs;
 
 #[test]
-fn test_resource_type_to_node_type() {
-    assert_eq!(resource_type_to_node_type("model"), NodeType::Model);
-    assert_eq!(resource_type_to_node_type("source"), NodeType::Source);
-    assert_eq!(resource_type_to_node_type("seed"), NodeType::Seed);
-    assert_eq!(resource_type_to_node_type("snapshot"), NodeType::Snapshot);
-    assert_eq!(resource_type_to_node_type("test"), NodeType::Test);
-    assert_eq!(resource_type_to_node_type("analysis"), NodeType::Model);
-    assert_eq!(resource_type_to_node_type("exposure"), NodeType::Exposure);
-    assert_eq!(resource_type_to_node_type("unknown"), NodeType::Model);
+fn test_resource_type_classifier() {
+    assert_eq!(
+        classify_resource_type("model"),
+        ManifestResourceType::Known(NodeType::Model)
+    );
+    assert_eq!(
+        classify_resource_type("source"),
+        ManifestResourceType::Known(NodeType::Source)
+    );
+    assert_eq!(
+        classify_resource_type("seed"),
+        ManifestResourceType::Known(NodeType::Seed)
+    );
+    assert_eq!(
+        classify_resource_type("snapshot"),
+        ManifestResourceType::Known(NodeType::Snapshot)
+    );
+    assert_eq!(
+        classify_resource_type("test"),
+        ManifestResourceType::Known(NodeType::Test)
+    );
+    assert_eq!(
+        classify_resource_type("exposure"),
+        ManifestResourceType::Known(NodeType::Exposure)
+    );
+    assert_eq!(
+        classify_resource_type("unknown"),
+        ManifestResourceType::Unknown("unknown".to_string())
+    );
+}
+
+#[test]
+fn test_resource_classifier_does_not_fallback_unknown_types_to_model() {
+    assert_eq!(
+        classify_resource_type("model"),
+        ManifestResourceType::Known(NodeType::Model)
+    );
+    assert_eq!(
+        classify_resource_type("analysis"),
+        ManifestResourceType::Unknown("analysis".to_string())
+    );
+    assert_eq!(
+        classify_resource_type("operation"),
+        ManifestResourceType::Unknown("operation".to_string())
+    );
+    assert_eq!(
+        classify_resource_type("future_resource"),
+        ManifestResourceType::Unknown("future_resource".to_string())
+    );
+}
+
+#[test]
+fn test_unknown_manifest_resource_is_reported_and_omitted_from_graph() {
+    let content = br#"{
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+            "dbt_version": "1.8.0"
+        },
+        "nodes": {
+            "analysis.proj.report": {
+                "unique_id": "analysis.proj.report",
+                "name": "report",
+                "resource_type": "analysis",
+                "depends_on": {"nodes": []},
+                "config": {},
+                "description": null,
+                "path": null,
+                "original_file_path": null,
+                "columns": {},
+                "compiled_code": null,
+                "database": null,
+                "schema": null
+            },
+            "model.proj.orders": {
+                "unique_id": "model.proj.orders",
+                "name": "orders",
+                "resource_type": "model",
+                "depends_on": {"nodes": ["analysis.proj.report"]},
+                "config": {},
+                "description": null,
+                "path": null,
+                "original_file_path": null,
+                "columns": {},
+                "compiled_code": null,
+                "database": null,
+                "schema": null
+            }
+        }
+    }"#;
+    let report = load_manifest_report_from_bytes(content, Path::new("manifest.json"));
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType)
+        .expect("unknown resource should have a typed diagnostic");
+    assert_eq!(
+        diagnostic.raw_resource.as_deref(),
+        Some("analysis.proj.report")
+    );
+    assert_eq!(diagnostic.raw_type.as_deref(), Some("analysis"));
+    assert!(diagnostic.hint.is_some());
+    let manifest = report.manifest.as_ref().expect("permissive load succeeds");
+    let graph = build_graph_from_parsed_manifest(manifest).unwrap();
+    assert!(
+        graph
+            .node_indices()
+            .all(|idx| graph[idx].node_type != NodeType::Model || graph[idx].label == "orders")
+    );
+    assert_eq!(
+        graph
+            .node_indices()
+            .filter(|&idx| graph[idx].node_type == NodeType::Phantom)
+            .count(),
+        0,
+        "a manifest resource omitted for unsupported type is not an unresolved dependency"
+    );
+    assert!(build_graph_from_parsed_manifest_strict(manifest).is_err());
+}
+
+#[test]
+fn strict_graph_rejects_functions_and_unknown_resource_maps() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {},
+            "functions": {
+                "function.proj.helper": {"name": "helper"}
+            },
+            "future_resources": {
+                "future.proj.item": {"resource_type": "future_resource"}
+            }
+        }"#,
+        std::path::Path::new("manifest.json"),
+    );
+    let manifest = report.manifest.expect("permissive load succeeds");
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    assert!(error.to_string().contains("function.proj.helper"));
+
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {},
+            "future_resources": {
+                "future.proj.item": {"resource_type": "future_resource"}
+            }
+        }"#,
+        std::path::Path::new("manifest.json"),
+    );
+    let manifest = report.manifest.expect("permissive load succeeds");
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    assert!(error.to_string().contains("future.proj.item"));
+}
+
+#[test]
+fn strict_graph_rejects_future_schema_capability() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v99/manifest.json",
+                "dbt_version": "1.9.0"
+            },
+            "nodes": {}
+        }"#,
+        std::path::Path::new("manifest.json"),
+    );
+    let manifest = report.manifest.expect("permissive load succeeds");
+    assert!(manifest.capabilities.future_schema);
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    assert!(error.to_string().contains("future dbt schema"));
+}
+
+#[test]
+fn test_manifest_graph_report_propagates_load_diagnostics() {
+    let content = br#"{
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+            "dbt_version": "1.8.0"
+        },
+        "nodes": {
+            "operation.proj.refresh": {
+                "unique_id": "operation.proj.refresh",
+                "name": "refresh",
+                "resource_type": "operation",
+                "depends_on": {"nodes": []},
+                "config": {},
+                "description": null,
+                "path": null,
+                "original_file_path": null,
+                "columns": {},
+                "compiled_code": null,
+                "database": null,
+                "schema": null
+            }
+        }
+    }"#;
+    let report = build_graph_from_load_report(load_manifest_report_from_bytes(
+        content,
+        std::path::Path::new("manifest.json"),
+    ))
+    .unwrap();
+    assert_eq!(report.graph.node_count(), 0);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType)
+    );
+    assert!(report.manifest.nodes.contains_key("operation.proj.refresh"));
 }
 
 #[test]
@@ -537,7 +742,8 @@ fn test_build_graph_empty_manifest() {
 
 #[test]
 fn test_build_graph_missing_dependency() {
-    // A node depends on something not in the manifest -- edge is skipped gracefully
+    // A node depends on something not in the manifest -- skip the unresolved
+    // edge as the compatibility graph builder historically did.
     let manifest = Manifest {
         nodes: HashMap::from([(
             "model.proj.orders".to_string(),
@@ -565,7 +771,7 @@ fn test_build_graph_missing_dependency() {
 
     let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
     assert_eq!(graph.node_count(), 1);
-    assert_eq!(graph.edge_count(), 0); // Edge to nonexistent node is skipped
+    assert_eq!(graph.edge_count(), 0);
 }
 
 #[test]
@@ -694,7 +900,7 @@ fn test_original_file_path_preferred_over_path() {
 }
 
 #[test]
-fn test_build_graph_analysis_maps_to_model() {
+fn test_build_graph_unknown_resource_is_not_a_model() {
     let manifest = Manifest {
         nodes: HashMap::from([(
             "analysis.proj.my_analysis".to_string(),
@@ -719,8 +925,7 @@ fn test_build_graph_analysis_maps_to_model() {
     };
 
     let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
-    let node = &graph[graph.node_indices().next().unwrap()];
-    assert_eq!(node.node_type, NodeType::Model);
+    assert_eq!(graph.node_count(), 0);
 }
 
 #[test]

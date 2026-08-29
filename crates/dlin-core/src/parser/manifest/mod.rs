@@ -232,16 +232,32 @@ impl ManifestNode {
     }
 }
 
-fn resource_type_to_node_type(resource_type: &str) -> NodeType {
+/// The classification used while translating dbt resources into graph nodes.
+///
+/// `NodeType::Model` is deliberately not a fallback here.  dbt adds resource
+/// kinds over time (for example `analysis` and `operation`), and treating an
+/// unknown kind as a model makes a graph look authoritative when it is not.
+/// Unknown resources are retained by the manifest loader and diagnosed by the
+/// report loader, but omitted from the graph. Dependencies whose target is not
+/// represented in the graph are skipped, preserving the historical behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManifestResourceType {
+    Known(NodeType),
+    Unknown(String),
+}
+
+pub(crate) fn classify_resource_type(resource_type: &str) -> ManifestResourceType {
     match resource_type {
-        "model" => NodeType::Model,
-        "source" => NodeType::Source,
-        "seed" => NodeType::Seed,
-        "snapshot" => NodeType::Snapshot,
-        "test" => NodeType::Test,
-        "analysis" => NodeType::Model,
-        "exposure" => NodeType::Exposure,
-        _ => NodeType::Model,
+        "model" => ManifestResourceType::Known(NodeType::Model),
+        "source" => ManifestResourceType::Known(NodeType::Source),
+        "seed" => ManifestResourceType::Known(NodeType::Seed),
+        "snapshot" => ManifestResourceType::Known(NodeType::Snapshot),
+        "test" => ManifestResourceType::Known(NodeType::Test),
+        "exposure" => ManifestResourceType::Known(NodeType::Exposure),
+        "semantic_model" => ManifestResourceType::Known(NodeType::SemanticModel),
+        "metric" => ManifestResourceType::Known(NodeType::Metric),
+        "saved_query" => ManifestResourceType::Known(NodeType::SavedQuery),
+        other => ManifestResourceType::Unknown(other.to_string()),
     }
 }
 
@@ -291,7 +307,11 @@ impl ManifestGraphIdentity {
 mod report;
 pub use report::*;
 mod graph;
-pub use graph::{build_graph_from_manifest, build_graph_from_parsed_manifest};
+pub use graph::{
+    ManifestGraphReport, build_graph_from_load_report, build_graph_from_manifest,
+    build_graph_from_manifest_report, build_graph_from_manifest_strict,
+    build_graph_from_parsed_manifest, build_graph_from_parsed_manifest_strict,
+};
 #[cfg(test)]
 pub(crate) use graph::{infer_edge_type, non_empty_string};
 
@@ -315,6 +335,21 @@ pub fn load_manifest_from_bytes(content: &[u8], manifest_path: &Path) -> Result<
             }
         })?,
     )
+}
+
+/// Load a manifest and reject unsupported resource kinds.
+///
+/// [`load_manifest`] remains the compatibility/permissive API.  Consumers
+/// that need to guarantee a complete graph can opt into this strict wrapper;
+/// malformed artifacts and unknown resource kinds are returned as errors.
+pub fn load_manifest_strict(manifest_path: &Path) -> Result<Manifest> {
+    let report = load_manifest_report(manifest_path)?;
+    report.into_manifest_strict()
+}
+
+/// Parse manifest bytes using strict resource validation.
+pub fn load_manifest_strict_from_bytes(content: &[u8], manifest_path: &Path) -> Result<Manifest> {
+    load_manifest_report_from_bytes(content, manifest_path).into_manifest_strict()
 }
 
 impl Manifest {

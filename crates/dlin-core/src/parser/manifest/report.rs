@@ -31,7 +31,8 @@ pub struct ManifestCapabilities {
 
 /// A stable, machine-readable diagnostic produced while loading a manifest.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManifestDiagnosticKind {
     ParseError,
     MissingSchemaVersion,
@@ -40,19 +41,67 @@ pub enum ManifestDiagnosticKind {
     MissingDbtVersion,
     InvalidDbtVersion,
     UnknownTopLevelKey,
+    /// A node in the manifest uses a resource kind not represented by the
+    /// graph's typed node vocabulary.
+    UnknownResourceType,
+}
+
+impl ManifestDiagnosticKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ParseError => "parse_error",
+            Self::MissingSchemaVersion => "missing_schema_version",
+            Self::InvalidSchemaVersion => "invalid_schema_version",
+            Self::FutureSchemaVersion => "future_schema_version",
+            Self::MissingDbtVersion => "missing_dbt_version",
+            Self::InvalidDbtVersion => "invalid_dbt_version",
+            Self::UnknownTopLevelKey => "unknown_top_level_key",
+            Self::UnknownResourceType => "unknown_resource_type",
+        }
+    }
+
+    /// Whether this diagnostic should be surfaced as a compatibility warning
+    /// to command-line and protocol clients. Missing producer metadata is
+    /// common in older manifests and remains intentionally quiet.
+    pub fn is_user_visible_warning(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidSchemaVersion
+                | Self::FutureSchemaVersion
+                | Self::InvalidDbtVersion
+                | Self::UnknownTopLevelKey
+                | Self::UnknownResourceType
+        )
+    }
+}
+
+impl std::fmt::Display for ManifestDiagnosticKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Severity of a manifest load diagnostic.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManifestDiagnosticSeverity {
     Error,
     Warning,
 }
 
+impl ManifestDiagnosticSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
+}
+
 /// Diagnostic details retained by [`ManifestLoadReport`].
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ManifestDiagnostic {
     pub kind: ManifestDiagnosticKind,
     pub severity: ManifestDiagnosticSeverity,
@@ -60,8 +109,38 @@ pub struct ManifestDiagnostic {
     pub hint: Option<String>,
     /// The raw resource key involved in the diagnostic, when applicable.
     pub raw_resource: Option<String>,
+    /// The exact resource_type spelling from the artifact, when applicable.
+    /// This is kept separately from `raw_resource` (the unique ID/key) so
+    /// text, JSON, and MCP clients can preserve the same identity.
+    pub raw_type: Option<String>,
     /// The raw schema URI involved in the diagnostic, when applicable.
     pub schema: Option<String>,
+}
+
+impl ManifestDiagnostic {
+    /// Stable JSON representation shared by CLI warning output and MCP
+    /// `warnings` values. Keep the raw resource type separate from the
+    /// resource key so clients can reliably group diagnostics.
+    pub fn to_warning_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "level": self.severity.as_str(),
+            "kind": self.kind.as_str(),
+            "raw_resource": self.raw_resource,
+            "raw_type": self.raw_type,
+            "what": self.message,
+            "why": serde_json::Value::Null,
+            "hint": self.hint,
+        })
+    }
+
+    /// Stable text representation for human-facing CLI warnings.
+    pub fn to_warning_text(&self) -> String {
+        let mut text = format!("Warning: [{}] {}", self.kind.as_str(), self.message);
+        if let Some(hint) = &self.hint {
+            text.push_str(&format!("\n  Hint: {hint}"));
+        }
+        text
+    }
 }
 
 /// Result of loading a manifest while retaining non-fatal observations.
@@ -73,6 +152,21 @@ pub struct ManifestLoadReport {
 }
 
 impl ManifestLoadReport {
+    /// Create a report from parsed data and the diagnostics collected while
+    /// decoding it. This is useful when callers defer graph construction.
+    pub fn from_parts(manifest: Option<Manifest>, diagnostics: Vec<ManifestDiagnostic>) -> Self {
+        Self {
+            manifest,
+            diagnostics,
+        }
+    }
+
+    /// Consume the report without discarding either its parsed manifest or
+    /// diagnostics.
+    pub fn into_parts(self) -> (Option<Manifest>, Vec<ManifestDiagnostic>) {
+        (self.manifest, self.diagnostics)
+    }
+
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
@@ -83,6 +177,38 @@ impl ManifestLoadReport {
         self.diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity == ManifestDiagnosticSeverity::Warning)
+    }
+
+    /// Consume the report and return the parsed manifest, preserving the
+    /// original diagnostic message when decoding failed.
+    pub fn into_manifest(self) -> Result<Manifest> {
+        if let Some(diagnostic) = self
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.severity == ManifestDiagnosticSeverity::Error)
+        {
+            anyhow::bail!("{}", diagnostic.message);
+        }
+        self.manifest
+            .ok_or_else(|| anyhow::anyhow!("manifest could not be loaded"))
+    }
+
+    /// Consume the report and fail when parsing failed or an unsupported
+    /// resource type was observed.
+    pub fn into_manifest_strict(self) -> Result<Manifest> {
+        if self.has_errors() {
+            return self.into_manifest();
+        }
+        if let Some(diagnostic) = self.diagnostics.iter().find(|diagnostic| {
+            matches!(
+                diagnostic.kind,
+                ManifestDiagnosticKind::UnknownResourceType
+                    | ManifestDiagnosticKind::FutureSchemaVersion
+            )
+        }) {
+            anyhow::bail!("{}", diagnostic.message);
+        }
+        self.into_manifest()
     }
 }
 
@@ -207,6 +333,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     ),
                     hint: Some("Check that the artifact is valid JSON produced by dbt".to_string()),
                     raw_resource: None,
+                    raw_type: None,
                     schema: None,
                 }],
             };
@@ -222,6 +349,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                 message: "manifest artifact must be a JSON object".to_string(),
                 hint: Some("Pass a dbt manifest.json object".to_string()),
                 raw_resource: None,
+                raw_type: None,
                 schema: None,
             }],
         };
@@ -247,6 +375,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     .to_string(),
             ),
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
+            raw_type: None,
             schema: Some(value.to_string()),
         }),
         (None, None) => diagnostics.push(ManifestDiagnostic {
@@ -257,6 +386,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                 "Generate the artifact with a supported dbt version when possible".to_string(),
             ),
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
+            raw_type: None,
             schema: None,
         }),
         (Some(_), Some(schema)) if schema_number.is_none() => diagnostics
@@ -269,6 +399,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     .to_string(),
             ),
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
+            raw_type: None,
             schema: Some(schema.to_string()),
         }),
         (Some(_), Some(schema)) if schema_number.is_some_and(|number| number > 12) => diagnostics
@@ -280,6 +411,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     "Some resource types may not be understood by this version of dlin".to_string(),
                 ),
                 raw_resource: Some("metadata.dbt_schema_version".to_string()),
+                raw_type: None,
                 schema: Some(schema.to_string()),
             }),
         (Some(_), Some(_)) => {}
@@ -297,6 +429,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             message: format!("dbt_version must be a string, got {value}"),
             hint: Some("Expected a version such as 1.8.0 or 1.8.0rc1".to_string()),
             raw_resource: Some("metadata.dbt_version".to_string()),
+            raw_type: None,
             schema: raw_schema.clone(),
         }),
         (None, None) => diagnostics.push(ManifestDiagnostic {
@@ -305,6 +438,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             message: "manifest metadata is missing dbt_version".to_string(),
             hint: Some("Generate the artifact with dbt to include producer metadata".to_string()),
             raw_resource: Some("metadata.dbt_version".to_string()),
+            raw_type: None,
             schema: raw_schema.clone(),
         }),
         (Some(_), Some(_)) => {}
@@ -321,8 +455,82 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                 "The key is retained in Manifest::extra for forward compatibility".to_string(),
             ),
             raw_resource: Some(key.clone()),
+            raw_type: None,
             schema: raw_schema.clone(),
         });
+    }
+
+    // Resource entries may occur in the active graph `nodes` map, the known
+    // but unsupported `functions` map, or a future top-level resource map.
+    // Do not scan every object-valued map: macros/docs/groups/selectors also
+    // contain arbitrary `resource_type` fields which are not graph resources.
+    let mut diagnosed_resources = BTreeSet::new();
+    let mut resource_maps = Vec::new();
+    if let Some(resource_map) = object.get("nodes").and_then(Value::as_object) {
+        resource_maps.push(("nodes", resource_map));
+    }
+    if let Some(resource_map) = object.get("functions").and_then(Value::as_object) {
+        for (unique_id, node) in resource_map {
+            let raw_type = node
+                .get("resource_type")
+                .and_then(Value::as_str)
+                .unwrap_or("function")
+                .to_string();
+            if matches!(
+                super::classify_resource_type(&raw_type),
+                super::ManifestResourceType::Known(_)
+            ) {
+                continue;
+            }
+            if diagnosed_resources.insert(("functions".to_string(), unique_id.clone())) {
+                diagnostics.push(ManifestDiagnostic {
+                    kind: ManifestDiagnosticKind::UnknownResourceType,
+                    severity: ManifestDiagnosticSeverity::Warning,
+                    message: format!(
+                        "manifest resource '{unique_id}' in 'functions' uses unknown resource type '{raw_type}'"
+                    ),
+                    hint: Some(
+                        "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
+                    ),
+                    raw_resource: Some(unique_id.clone()),
+                    raw_type: Some(raw_type),
+                    schema: raw_schema.clone(),
+                });
+            }
+        }
+    }
+    for key in &unknown_keys {
+        if let Some(resource_map) = object.get(key).and_then(Value::as_object) {
+            resource_maps.push((key.as_str(), resource_map));
+        }
+    }
+    for (map_name, resource_map) in resource_maps {
+        for (unique_id, node) in resource_map {
+            let Some(resource_type) = node.get("resource_type").and_then(Value::as_str) else {
+                continue;
+            };
+            let super::ManifestResourceType::Unknown(raw_type) =
+                super::classify_resource_type(resource_type)
+            else {
+                continue;
+            };
+            if !diagnosed_resources.insert((map_name.to_string(), unique_id.clone())) {
+                continue;
+            }
+            diagnostics.push(ManifestDiagnostic {
+                kind: ManifestDiagnosticKind::UnknownResourceType,
+                severity: ManifestDiagnosticSeverity::Warning,
+                message: format!(
+                    "manifest resource '{unique_id}' in '{map_name}' uses unknown resource type '{raw_type}'"
+                ),
+                hint: Some(
+                    "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
+                ),
+                raw_resource: Some(unique_id.clone()),
+                raw_type: Some(raw_type),
+                schema: raw_schema.clone(),
+            });
+        }
     }
 
     let mut manifest: Manifest = match serde_json::from_value(value) {
@@ -336,6 +544,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     "Check that known resource maps have the shape emitted by dbt".to_string(),
                 ),
                 raw_resource: None,
+                raw_type: None,
                 schema: raw_schema,
             });
             return ManifestLoadReport {
@@ -570,6 +779,16 @@ mod tests {
         assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.kind
             == ManifestDiagnosticKind::FutureSchemaVersion
             && diagnostic.severity == ManifestDiagnosticSeverity::Warning));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::FutureSchemaVersion)
+                .unwrap()
+                .kind
+                .is_user_visible_warning()
+        );
+        assert!(report.into_manifest_strict().is_err());
 
         let invalid = load_manifest_report_from_bytes(b"{", Path::new("manifest.json"));
         assert!(invalid.manifest.is_none());
@@ -607,6 +826,8 @@ mod tests {
         assert!(missing.diagnostics.iter().any(|diagnostic| diagnostic.kind
             == ManifestDiagnosticKind::MissingDbtVersion
             && diagnostic.severity == ManifestDiagnosticSeverity::Warning));
+        assert!(!ManifestDiagnosticKind::MissingSchemaVersion.is_user_visible_warning());
+        assert!(!ManifestDiagnosticKind::MissingDbtVersion.is_user_visible_warning());
 
         let invalid = load_manifest_report_from_bytes(
             br#"{
@@ -644,5 +865,80 @@ mod tests {
         );
         assert!(!prerelease.has_errors());
         assert_eq!(prerelease.warnings().count(), 0);
+    }
+
+    #[test]
+    fn test_unknown_resource_diagnostic_has_shared_warning_identity() {
+        let report = load_manifest_report_from_bytes(
+            br#"{
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                    "dbt_version": "1.8.0"
+                },
+                "nodes": {
+                    "operation.proj.refresh": {
+                        "unique_id": "operation.proj.refresh",
+                        "name": "refresh",
+                        "resource_type": "operation"
+                    }
+                }
+            }"#,
+            Path::new("manifest.json"),
+        );
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType)
+            .expect("unknown resource diagnostic");
+        assert_eq!(diagnostic.kind.as_str(), "unknown_resource_type");
+        assert_eq!(
+            diagnostic.raw_resource.as_deref(),
+            Some("operation.proj.refresh")
+        );
+        assert_eq!(diagnostic.raw_type.as_deref(), Some("operation"));
+        let json = diagnostic.to_warning_json();
+        assert_eq!(json["kind"], "unknown_resource_type");
+        assert_eq!(json["raw_type"], "operation");
+        assert!(json["why"].is_null());
+        assert_eq!(json["hint"], diagnostic.hint.as_deref().unwrap());
+        assert!(
+            diagnostic
+                .to_warning_text()
+                .contains("resource type 'operation'")
+        );
+        assert!(report.into_manifest_strict().is_err());
+    }
+
+    #[test]
+    fn test_known_macro_map_is_not_classified_as_graph_resource() {
+        let report = load_manifest_report_from_bytes(
+            br#"{
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                    "dbt_version": "1.8.0"
+                },
+                "nodes": {},
+                "macros": {"macro.proj.helper": {"resource_type": "macro"}},
+                "functions": {"function.proj.helper": {"name": "helper"}},
+                "future_resources": {
+                    "future.proj.item": {"resource_type": "future_resource"}
+                }
+            }"#,
+            Path::new("manifest.json"),
+        );
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
+                && diagnostic.raw_resource.as_deref() == Some("macro.proj.helper")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
+                && diagnostic.raw_resource.as_deref() == Some("function.proj.helper")
+                && diagnostic.raw_type.as_deref() == Some("function")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
+                && diagnostic.raw_resource.as_deref() == Some("future.proj.item")
+                && diagnostic.raw_type.as_deref() == Some("future_resource")
+        }));
     }
 }
