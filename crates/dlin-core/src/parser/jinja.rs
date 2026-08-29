@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use minijinja::value::{Kwargs, from_args};
 use minijinja::{Environment, ErrorKind, Value};
@@ -45,23 +48,7 @@ pub fn extract_via_jinja_with_vars(
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaOutcome {
-    let template = if macro_prefix.is_empty() {
-        sql.to_string()
-    } else {
-        format!("{}\n{}", macro_prefix, sql)
-    };
-
-    // Render with is_incremental=false first (full-load path)
-    let (mut result, full_ok) = render_with_incremental(&template, false, vars);
-
-    // Render again with is_incremental=true to capture incremental-only refs
-    let (incr, incr_ok) = render_with_incremental(&template, true, vars);
-    merge_extraction(&mut result, incr);
-
-    JinjaOutcome {
-        extraction: result,
-        complete: full_ok && incr_ok,
-    }
+    render_with_incremental(sql, macro_prefix, vars)
 }
 
 /// Build a macro prefix string from individual macro sources, skipping
@@ -116,7 +103,8 @@ fn json_to_minijinja(v: &serde_json::Value) -> Value {
     Value::from_serialize(v)
 }
 
-/// Render a dbt SQL template once with the given `is_incremental` value.
+/// Compile a dbt SQL template once and render it for both values of
+/// `is_incremental`.
 ///
 /// Returns the extraction together with a flag indicating whether rendering
 /// succeeded. On failure the extraction still holds everything recorded up to
@@ -124,10 +112,32 @@ fn json_to_minijinja(v: &serde_json::Value) -> Value {
 /// callee, so e.g. `{{ unknown_macro(ref('a')) }}` records `ref('a')`).
 fn render_with_incremental(
     sql: &str,
-    is_incremental: bool,
+    macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
-) -> (JinjaExtraction, bool) {
-    let extraction = Arc::new(Mutex::new(JinjaExtraction::default()));
+) -> JinjaOutcome {
+    let ((mut extraction, full_complete), (incremental_extraction, incremental_complete)) =
+        render_with_incremental_passes(sql, macro_prefix, vars);
+    merge_extraction(&mut extraction, incremental_extraction);
+
+    JinjaOutcome {
+        extraction,
+        complete: full_complete && incremental_complete,
+    }
+}
+
+/// Compile a dbt SQL template once and render it for both values of
+/// `is_incremental`, returning each pass's result separately.
+fn render_with_incremental_passes(
+    sql: &str,
+    macro_prefix: &str,
+    vars: &HashMap<String, serde_json::Value>,
+) -> ((JinjaExtraction, bool), (JinjaExtraction, bool)) {
+    let template_source = if macro_prefix.is_empty() {
+        sql.to_string()
+    } else {
+        format!("{}\n{}", macro_prefix, sql)
+    };
+    let render_state = Arc::new(RenderState::default());
 
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
@@ -135,11 +145,11 @@ fn render_with_incremental(
     // ref('name'), ref('package', 'name'), or ref('name', version=N)
     // kwargs (e.g. version=2) are appended by minijinja as the last element of args.
     // from_args splits positional args from kwargs so we can extract version.
-    let ext = extraction.clone();
+    let state = render_state.clone();
     env.add_function(
         "ref",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
-            let mut ext = ext.lock().unwrap();
+            let mut extraction = state.extraction.lock().unwrap();
             let (positional, kwargs): (&[Value], Kwargs) = from_args(args)
                 .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string()))?;
             // dbt accepts both `version=N` and `v=N` as shorthand.
@@ -165,7 +175,7 @@ fn render_with_incremental(
             match positional.len() {
                 1 => {
                     let name = positional[0].to_string();
-                    ext.refs.push(RefCall {
+                    extraction.refs.push(RefCall {
                         package: None,
                         name: name.clone(),
                         version,
@@ -175,7 +185,7 @@ fn render_with_incremental(
                 2 => {
                     let pkg = positional[0].to_string();
                     let name = positional[1].to_string();
-                    ext.refs.push(RefCall {
+                    extraction.refs.push(RefCall {
                         package: Some(pkg),
                         name: name.clone(),
                         version,
@@ -191,14 +201,14 @@ fn render_with_incremental(
     );
 
     // source('source_name', 'table_name')
-    let ext = extraction.clone();
+    let state = render_state.clone();
     env.add_function(
         "source",
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
             if args.len() >= 2 {
                 let source_name = args[0].to_string();
                 let table_name = args[1].to_string();
-                ext.lock().unwrap().sources.push(SourceCall {
+                state.extraction.lock().unwrap().sources.push(SourceCall {
                     source_name: source_name.clone(),
                     table_name: table_name.clone(),
                 });
@@ -217,27 +227,30 @@ fn render_with_incremental(
 
     // config(materialized='...', tags=[...], ...)
     // Unknown kwargs (schema, alias, unique_key, etc.) are silently ignored.
-    let ext = extraction.clone();
+    let state = render_state.clone();
     env.add_function(
         "config",
         move |kwargs: Kwargs| -> Result<Value, minijinja::Error> {
-            let mut ext = ext.lock().unwrap();
+            let mut extraction = state.extraction.lock().unwrap();
             if let Ok(mat) = kwargs.get::<&str>("materialized") {
-                ext.config.materialized = Some(mat.to_string());
+                extraction.config.materialized = Some(mat.to_string());
             }
             if let Ok(tags_val) = kwargs.get::<Value>("tags")
                 && let Ok(iter) = tags_val.try_iter()
             {
-                ext.config.tags = iter.map(|v| v.to_string()).collect();
+                extraction.config.tags = iter.map(|v| v.to_string()).collect();
             }
             Ok(Value::from(""))
         },
     );
 
     // is_incremental() → parameterized
+    let state = render_state.clone();
     env.add_function(
         "is_incremental",
-        move || -> Result<Value, minijinja::Error> { Ok(Value::from(is_incremental)) },
+        move || -> Result<Value, minijinja::Error> {
+            Ok(Value::from(state.is_incremental.load(Ordering::Relaxed)))
+        },
     );
 
     // this → dummy relation object
@@ -318,17 +331,38 @@ fn render_with_incremental(
     env.add_global("model", Value::from("__dbt_model__"));
     env.add_global("execute", Value::from(true));
 
-    let render_ok = env.render_str(sql, ()).is_ok();
-    // Both env (function closures) and a render error (its debug info can
-    // capture referenced template values) hold clones of the extraction Arc,
-    // so they must be gone before unwrapping.
-    drop(env);
+    let template = match env.template_from_str(&template_source) {
+        Ok(template) => template,
+        Err(_) => {
+            return (
+                (JinjaExtraction::default(), false),
+                (JinjaExtraction::default(), false),
+            );
+        }
+    };
 
-    let result = Arc::try_unwrap(extraction)
-        .expect("single owner")
-        .into_inner()
-        .unwrap_or_else(|e| e.into_inner());
-    (result, render_ok)
+    let render_pass = |is_incremental: bool| {
+        render_state
+            .is_incremental
+            .store(is_incremental, Ordering::Relaxed);
+        let complete = template.render(()).is_ok();
+        let extraction = std::mem::take(&mut *render_state.extraction.lock().unwrap());
+        (extraction, complete)
+    };
+
+    // Compile once, then render each branch independently. Taking the
+    // extraction after every pass prevents partial state from a failed render
+    // from leaking into the next pass.
+    let full_pass = render_pass(false);
+    let incremental_pass = render_pass(true);
+
+    (full_pass, incremental_pass)
+}
+
+#[derive(Debug, Default)]
+struct RenderState {
+    is_incremental: AtomicBool,
+    extraction: Mutex<JinjaExtraction>,
 }
 
 #[cfg(test)]
@@ -386,6 +420,21 @@ mod tests {
         let ext = extract_complete(sql, "");
         assert_eq!(ext.config.materialized.as_deref(), Some("incremental"));
         assert_eq!(ext.config.tags, vec!["nightly", "finance"]);
+    }
+
+    #[test]
+    fn test_full_load_config_takes_precedence_over_incremental_config() {
+        let sql = r#"
+            {% if is_incremental() %}
+                {{ config(materialized='incremental', tags=['incremental']) }}
+            {% else %}
+                {{ config(materialized='table', tags=['full']) }}
+            {% endif %}
+            SELECT 1
+        "#;
+        let ext = extract_complete(sql, "");
+        assert_eq!(ext.config.materialized.as_deref(), Some("table"));
+        assert_eq!(ext.config.tags, vec!["full"]);
     }
 
     #[test]
@@ -635,6 +684,36 @@ mod tests {
         assert!(!outcome.complete);
         assert_eq!(outcome.extraction.refs.len(), 1);
         assert_eq!(outcome.extraction.refs[0].name, "int_orders");
+    }
+
+    #[test]
+    fn test_failed_pass_does_not_contaminate_successful_pass() {
+        let sql = r#"
+            {% if is_incremental() %}
+                {{ config(materialized='incremental', tags=['incremental']) }}
+                SELECT * FROM {{ ref('incremental_dep') }}
+            {% else %}
+                {{ config(materialized='table', tags=['full']) }}
+                {{ unknown_macro(ref('full_dep')) }}
+            {% endif %}
+        "#;
+        let ((full, full_complete), (incremental, incremental_complete)) =
+            render_with_incremental_passes(sql, "", &HashMap::new());
+
+        assert!(!full_complete);
+        assert_eq!(full.config.materialized.as_deref(), Some("table"));
+        assert_eq!(full.config.tags, vec!["full"]);
+        assert_eq!(full.refs.len(), 1);
+        assert_eq!(full.refs[0].name, "full_dep");
+
+        assert!(incremental_complete);
+        assert_eq!(
+            incremental.config.materialized.as_deref(),
+            Some("incremental")
+        );
+        assert_eq!(incremental.config.tags, vec!["incremental"]);
+        assert_eq!(incremental.refs.len(), 1);
+        assert_eq!(incremental.refs[0].name, "incremental_dep");
     }
 
     #[test]
