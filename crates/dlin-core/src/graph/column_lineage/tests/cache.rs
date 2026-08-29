@@ -509,12 +509,13 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
     let manifest = make_test_manifest();
     let model_name = "stg_orders";
     let node = super::super::find_model_by_name(&manifest, model_name).unwrap();
+    let unique_id = node.unique_id.clone();
     let compiled_code = node.compiled_code.as_deref().unwrap();
     let manifest_columns_hash =
         super::super::schema::compute_manifest_columns_hash(&manifest, node);
 
     let sentinel = ModelColumnLineage {
-        model: model_name.to_string(),
+        model: "manifest-stat-cache-sentinel".to_string(),
         traced_columns: 0,
         total_columns: 0,
         columns: vec![],
@@ -523,7 +524,7 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
 
     let mut seeded = ColumnLineageCache::load(project_dir, None);
     seeded.insert(
-        model_name,
+        &unique_id,
         compiled_code,
         DlinDialect::Generic,
         BackendId::Sqllineage,
@@ -532,6 +533,16 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
         sentinel.into(),
     );
     seeded.save();
+
+    let mut before_change = ColumnLineageCache::load(project_dir, None);
+    let cached = compute_column_lineage_with_manifest_path(
+        &manifest,
+        model_name,
+        DlinDialect::Generic,
+        Some(&manifest_path),
+        &mut before_change,
+    );
+    assert_eq!(cached.model, "manifest-stat-cache-sentinel");
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(&manifest_path, r#"{"nodes":{"changed":1}}"#).unwrap();
@@ -555,11 +566,12 @@ fn test_compute_column_lineage_recomputes_when_manifest_stat_changes() {
 fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     let manifest = make_test_manifest();
     let downstream = super::super::find_model_by_name(&manifest, "orders").unwrap();
+    let unique_id = downstream.unique_id.clone();
     let initial_hash = super::super::schema::compute_manifest_columns_hash(&manifest, downstream);
     let compiled_code = downstream.compiled_code.as_deref().unwrap();
 
     let sentinel = ModelColumnLineage {
-        model: "orders".to_string(),
+        model: "upstream-alias-cache-sentinel".to_string(),
         traced_columns: 0,
         total_columns: 0,
         columns: vec![],
@@ -567,7 +579,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     };
     let mut cache = ColumnLineageCache::disabled();
     cache.insert(
-        "orders",
+        &unique_id,
         compiled_code,
         DlinDialect::Generic,
         BackendId::Sqllineage,
@@ -575,6 +587,9 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         None,
         sentinel.into(),
     );
+
+    let cached = compute_column_lineage(&manifest, "orders", DlinDialect::Generic, &mut cache);
+    assert_eq!(cached.model, "upstream-alias-cache-sentinel");
 
     let mut changed_manifest = manifest;
     changed_manifest
