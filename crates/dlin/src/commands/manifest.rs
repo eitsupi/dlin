@@ -22,7 +22,7 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_opt) = build_dag(
+    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -34,16 +34,18 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     let (project_name, vars_count, manifest_status) = match args.source {
         SourceType::Manifest => {
-            let name = manifest_opt
+            let name = manifest_context
                 .as_ref()
-                .and_then(|manifest| manifest.metadata.project_name.clone())
+                .and_then(|context| context.project_name.clone())
                 .unwrap_or_else(|| "(unknown)".to_string());
             let status = match parser::project::DbtProject::load(&project_dir) {
-                Ok(project) => check_manifest_freshness(
+                Ok(project) => check_manifest_freshness_with_referenced_paths(
                     &project_dir,
                     args.manifest_path.as_ref(),
                     &project,
-                    manifest_opt.as_ref(),
+                    manifest_context
+                        .as_ref()
+                        .map(|context| context.referenced_file_paths.as_slice()),
                 ),
                 Err(e) => {
                     let is_not_found = e
@@ -99,10 +101,18 @@ fn find_deleted_manifest_files(
     manifest: &parser::manifest::Manifest,
     project_dir: &Path,
 ) -> Vec<String> {
-    let mut deleted: Vec<String> = manifest
-        .collect_file_paths()
+    let paths = manifest.collect_file_paths();
+    find_deleted_manifest_paths(paths.iter(), project_dir)
+}
+
+fn find_deleted_manifest_paths<'a>(
+    paths: impl IntoIterator<Item = &'a String>,
+    project_dir: &Path,
+) -> Vec<String> {
+    let mut deleted: Vec<String> = paths
         .into_iter()
         .filter(|p| !project_dir.join(p).exists())
+        .cloned()
         .collect();
     deleted.sort();
     deleted
@@ -165,6 +175,24 @@ pub(crate) fn check_manifest_freshness(
     project: &parser::project::DbtProject,
     manifest: Option<&parser::manifest::Manifest>,
 ) -> Option<render::summary::ManifestStatus> {
+    let paths = manifest.map(|value| value.collect_file_paths().into_iter().collect::<Vec<_>>());
+    check_manifest_freshness_with_referenced_paths(
+        project_dir,
+        manifest_path,
+        project,
+        paths.as_deref(),
+    )
+}
+
+/// Check manifest freshness using compact referenced paths from the model-level
+/// cache. This avoids reparsing the typed manifest on warm summary paths.
+#[cfg(not(tarpaulin_include))]
+pub(crate) fn check_manifest_freshness_with_referenced_paths(
+    project_dir: &Path,
+    manifest_path: Option<&PathBuf>,
+    project: &parser::project::DbtProject,
+    referenced_file_paths: Option<&[String]>,
+) -> Option<render::summary::ManifestStatus> {
     let not_found = render::summary::ManifestStatus {
         found: false,
         is_stale: false,
@@ -199,8 +227,8 @@ pub(crate) fn check_manifest_freshness(
     stale_files.sort();
 
     // Check for deleted files: paths referenced in manifest but missing on disk
-    let deleted_files = match manifest {
-        Some(manifest) => find_deleted_manifest_files(manifest, project_dir),
+    let deleted_files = match referenced_file_paths {
+        Some(paths) => find_deleted_manifest_paths(paths.iter(), project_dir),
         None => match parser::manifest::load_manifest(&resolved) {
             Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
             Err(e) => {

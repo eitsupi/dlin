@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::Result;
 
@@ -9,11 +8,18 @@ use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect};
 use dlin_core::parser;
 
 #[cfg(not(tarpaulin_include))]
+pub(crate) struct ManifestDagContext {
+    pub(crate) manifest: Option<parser::manifest::Manifest>,
+    pub(crate) project_name: Option<String>,
+    pub(crate) referenced_file_paths: Vec<String>,
+}
+
+#[cfg(not(tarpaulin_include))]
 type DagBuildResult = Result<(
     graph::types::LineageGraph,
     Option<parser::project::DbtProject>,
     Vec<parser::manifest::ManifestDiagnostic>,
-    Option<parser::manifest::Manifest>,
+    Option<ManifestDagContext>,
 )>;
 
 /// Build the lineage DAG from either a manifest file or by parsing SQL files.
@@ -30,75 +36,60 @@ pub(crate) fn build_dag(
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
             let mut cache = if no_cache {
-                parser::manifest_cache::ManifestGraphCache::disabled()
+                parser::manifest_cache::ManifestAnalysisCache::disabled()
             } else if refresh_cache {
-                parser::manifest_cache::ManifestGraphCache::fresh(project_dir, cache_dir)
+                parser::manifest_cache::ManifestAnalysisCache::fresh(project_dir, cache_dir)
             } else {
-                parser::manifest_cache::ManifestGraphCache::load(project_dir, cache_dir)
+                parser::manifest_cache::ManifestAnalysisCache::load(project_dir, cache_dir)
             };
 
-            // Parse exactly once so diagnostics are available on cache hits.
-            // Graph construction is deferred until after the cache lookup.
-            let (load_report, parsed_fingerprint) =
-                load_manifest_report_with_fingerprint(&resolved)?;
-            let (manifest, diagnostics) = load_report.into_parts();
-            let manifest = manifest.ok_or_else(|| {
-                let message = diagnostics
-                    .iter()
-                    .find(|diagnostic| {
-                        diagnostic.severity == parser::manifest::ManifestDiagnosticSeverity::Error
-                    })
-                    .map(|diagnostic| diagnostic.message.clone())
-                    .unwrap_or_else(|| "manifest could not be loaded".to_string());
-                anyhow::anyhow!(message)
-            })?;
-            let cached_graph = parsed_fingerprint.as_ref().and_then(|fingerprint| {
-                cache.get_with_fingerprint(
-                    &resolved,
-                    (
-                        fingerprint.mtime_secs,
-                        fingerprint.mtime_nanos,
-                        fingerprint.size_bytes,
-                        fingerprint.content_hash,
-                    ),
-                )
-            });
-            if let Some(cached_graph) = cached_graph {
-                let graph = cached_graph.clone();
-                return Ok((graph, None, diagnostics, Some(manifest)));
+            // Read and hash bytes before parsing. A cache hit restores the
+            // compact model-level analysis without deserializing Manifest.
+            let manifest_bytes = load_manifest_bytes(&resolved)?;
+            if let Some(analysis) = cache.take_for_manifest(&manifest_bytes) {
+                let (graph, diagnostics, project_name, referenced_file_paths) =
+                    analysis.into_parts();
+                let context = ManifestDagContext {
+                    manifest: None,
+                    project_name,
+                    referenced_file_paths,
+                };
+                return Ok((graph, None, diagnostics, Some(context)));
             }
-            let graph_report = parser::manifest::build_graph_from_load_report(
-                parser::manifest::ManifestLoadReport::from_parts(Some(manifest), diagnostics),
-            )?;
+
+            let load_report =
+                parser::manifest::load_manifest_report_from_bytes(&manifest_bytes, &resolved);
+            let graph_report = parser::manifest::build_graph_from_load_report(load_report)?;
             let parser::manifest::ManifestGraphReport {
                 graph,
                 diagnostics,
                 manifest,
                 ..
             } = graph_report;
-            if let Some(parsed_fingerprint) = parsed_fingerprint {
-                let expected = (
-                    parsed_fingerprint.mtime_secs,
-                    parsed_fingerprint.mtime_nanos,
-                    parsed_fingerprint.size_bytes,
-                    parsed_fingerprint.content_hash,
+            let project_name = manifest.metadata.project_name.clone();
+            let referenced_file_paths: Vec<String> =
+                manifest.collect_file_paths().into_iter().collect();
+            if !no_cache {
+                let analysis = parser::manifest_cache::ManifestAnalysis::new(
+                    graph.clone(),
+                    diagnostics.clone(),
+                    project_name.clone(),
+                    referenced_file_paths.clone(),
                 );
-                if cache.insert_if_fingerprint_matches(&resolved, &graph, expected) {
-                    cache.save();
-                } else {
-                    dlin_core::warn!(
-                        "manifest changed after read/parse; skipping manifest graph cache write for {}",
-                        resolved.display()
-                    );
-                }
-            } else {
-                dlin_core::warn!(
-                    "could not compute manifest fingerprint; skipping manifest graph cache write for {}",
-                    resolved.display()
-                );
+                cache.insert_for_manifest(&manifest_bytes, analysis);
+                cache.save();
             }
 
-            Ok((graph, None, diagnostics, Some(manifest)))
+            Ok((
+                graph,
+                None,
+                diagnostics,
+                Some(ManifestDagContext {
+                    project_name,
+                    referenced_file_paths,
+                    manifest: Some(manifest),
+                }),
+            ))
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
@@ -137,62 +128,14 @@ pub(crate) fn warn_manifest_diagnostics(diagnostics: &[parser::manifest::Manifes
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ManifestFingerprint {
-    mtime_secs: u64,
-    mtime_nanos: u32,
-    size_bytes: u64,
-    content_hash: u64,
-}
-
-fn manifest_fingerprint(meta: &std::fs::Metadata, bytes: &[u8]) -> Option<ManifestFingerprint> {
-    let modified = meta
-        .modified()
-        .ok()?
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
-    Some(ManifestFingerprint {
-        mtime_secs: modified.as_secs(),
-        mtime_nanos: modified.subsec_nanos(),
-        size_bytes: meta.len(),
-        content_hash: hash_bytes(bytes),
-    })
-}
-
-fn load_manifest_report_with_fingerprint(
-    manifest_path: &Path,
-) -> Result<(
-    parser::manifest::ManifestLoadReport,
-    Option<ManifestFingerprint>,
-)> {
-    let meta = std::fs::metadata(manifest_path).map_err(|e| {
-        dlin_core::error::DbtLineageError::FileReadError {
-            path: manifest_path.to_path_buf(),
-            source: e,
-        }
-    })?;
+fn load_manifest_bytes(manifest_path: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(manifest_path).map_err(|e| {
         dlin_core::error::DbtLineageError::FileReadError {
             path: manifest_path.to_path_buf(),
             source: e,
         }
     })?;
-    let load_report = parser::manifest::load_manifest_report_from_bytes(&bytes, manifest_path);
-    let fingerprint = manifest_fingerprint(&meta, &bytes);
-    Ok((load_report, fingerprint))
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    // FNV-1a 64-bit constants (offset basis + prime), used for lightweight
-    // non-cryptographic fingerprinting of manifest content.
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET_BASIS;
-    for &b in bytes {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
+    Ok(bytes)
 }
 
 pub(crate) fn warn_sql_mode_test_limitation(source: &SourceType, has_tests: bool) {

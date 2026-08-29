@@ -344,6 +344,125 @@ fn test_summary_manifest_mode_json_output() {
 }
 
 #[test]
+fn test_manifest_cache_warm_summary_restores_metadata_and_deleted_paths() {
+    let tmp = minimal_manifest_dir(Some("cached_project"));
+    fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: cached_project\nmodel-paths: [models]\n",
+    )
+    .unwrap();
+    let manifest_path = tmp.path().join("target/manifest.json");
+    let cache_dir = tmp.path().join("cache");
+    let args = [
+        "summary",
+        "--source",
+        "manifest",
+        "--manifest-path",
+        manifest_path.to_str().unwrap(),
+        "--project-dir",
+        tmp.path().to_str().unwrap(),
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "-o",
+        "json",
+    ];
+
+    let cold = Command::new(binary_path()).args(args).output().unwrap();
+    assert!(cold.status.success(), "cold summary failed: {:?}", cold);
+    let warm = Command::new(binary_path()).args(args).output().unwrap();
+    assert!(warm.status.success(), "warm summary failed: {:?}", warm);
+    assert_eq!(cold.stdout, warm.stdout);
+    let summary: serde_json::Value = serde_json::from_slice(&warm.stdout).unwrap();
+    assert_eq!(summary["project_name"], "cached_project");
+    assert_eq!(summary["manifest_status"]["deleted_file_count"], 2);
+    assert_eq!(
+        summary["manifest_status"]["deleted_files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn test_manifest_cache_warm_sql_content_loads_typed_manifest_lazily() {
+    let tmp = minimal_manifest_dir(None);
+    let manifest_path = tmp.path().join("target/manifest.json");
+    let content = fs::read_to_string(&manifest_path).unwrap();
+    let content = content.replace(
+        "\"description\": \"Staged orders\"",
+        "\"description\": \"Staged orders\", \"compiled_code\": \"select 1 as order_id\"",
+    );
+    fs::write(&manifest_path, content).unwrap();
+    let cache_dir = tmp.path().join("cache");
+    let args = [
+        "graph",
+        "--source",
+        "manifest",
+        "--manifest-path",
+        manifest_path.to_str().unwrap(),
+        "--project-dir",
+        tmp.path().to_str().unwrap(),
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--json-fields",
+        "sql_content",
+        "-o",
+        "json",
+    ];
+    let cold = Command::new(binary_path()).args(args).output().unwrap();
+    assert!(cold.status.success(), "cold graph failed: {:?}", cold);
+    let warm = Command::new(binary_path()).args(args).output().unwrap();
+    assert!(warm.status.success(), "warm graph failed: {:?}", warm);
+    assert_eq!(cold.stdout, warm.stdout);
+    let graph: serde_json::Value = serde_json::from_slice(&warm.stdout).unwrap();
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["sql_content"] == "select 1 as order_id"),
+        "unexpected graph JSON: {}",
+        String::from_utf8_lossy(&warm.stdout)
+    );
+
+    let list_args = [
+        "list",
+        "--source",
+        "manifest",
+        "--manifest-path",
+        manifest_path.to_str().unwrap(),
+        "--project-dir",
+        tmp.path().to_str().unwrap(),
+        "--cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--json-fields",
+        "sql_content",
+        "-o",
+        "json",
+    ];
+    let list_cold = Command::new(binary_path())
+        .args(list_args)
+        .output()
+        .unwrap();
+    assert!(
+        list_cold.status.success(),
+        "cold list failed: {:?}",
+        list_cold
+    );
+    let list_warm = Command::new(binary_path())
+        .args(list_args)
+        .output()
+        .unwrap();
+    assert!(
+        list_warm.status.success(),
+        "warm list failed: {:?}",
+        list_warm
+    );
+    assert_eq!(list_cold.stdout, list_warm.stdout);
+}
+
+#[test]
 fn test_summary_manifest_mode_with_malformed_project_yml() {
     let tmp = minimal_manifest_dir(Some("malformed_test"));
     fs::write(tmp.path().join("dbt_project.yml"), "name: [\ninvalid yaml").unwrap();

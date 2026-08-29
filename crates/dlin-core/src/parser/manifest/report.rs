@@ -31,7 +31,7 @@ pub struct ManifestCapabilities {
 
 /// A stable, machine-readable diagnostic produced while loading a manifest.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestDiagnosticKind {
     ParseError,
@@ -83,7 +83,7 @@ impl std::fmt::Display for ManifestDiagnosticKind {
 
 /// Severity of a manifest load diagnostic.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManifestDiagnosticSeverity {
     Error,
@@ -101,7 +101,7 @@ impl ManifestDiagnosticSeverity {
 
 /// Diagnostic details retained by [`ManifestLoadReport`].
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManifestDiagnostic {
     pub kind: ManifestDiagnosticKind,
     pub severity: ManifestDiagnosticSeverity,
