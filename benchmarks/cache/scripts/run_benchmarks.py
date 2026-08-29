@@ -79,7 +79,13 @@ def file_sizes(root: Path) -> dict[str, int]:
 
 
 def git_head() -> str | None:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     return result.stdout.strip() if result.returncode == 0 else None
 
 
