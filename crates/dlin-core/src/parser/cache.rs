@@ -288,6 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_hit_for_jinja_sql_uses_actual_relative_path() {
+        let tmp = tempdir().unwrap();
+        let project_dir = tmp.path();
+        let sql_file = project_dir.join("models/orders.sql.j2");
+        fs::create_dir_all(sql_file.parent().unwrap()).unwrap();
+        fs::write(&sql_file, "SELECT 1").unwrap();
+
+        let mut cache = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
+        cache.insert(&sql_file, project_dir, &JinjaExtraction::default());
+        cache.save();
+
+        let cache_path = project_dir.join(CACHE_DIR).join(CACHE_FILENAME);
+        let content = fs::read_to_string(cache_path).unwrap();
+        let cache_file: CacheFile = serde_json::from_str(&content).unwrap();
+        assert!(cache_file.entries.contains_key("models/orders.sql.j2"));
+
+        let reloaded = ExtractionCache::load(project_dir, "prefix", &HashMap::new(), None);
+        assert!(reloaded.get(&sql_file, project_dir).is_some());
+    }
+
+    #[test]
     fn test_cache_invalidated_by_macro_change() {
         let tmp = tempdir().unwrap();
         let project_dir = tmp.path();

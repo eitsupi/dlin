@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use path_slash::PathExt as _;
 
 use crate::graph::types::LineageGraph;
-use crate::parser::project::ResolvedPaths;
+use crate::parser::project::{ResolvedPaths, is_sql_file};
 use crate::parser::yaml_schema;
 
 /// Classification of a stdin input line
 enum InputLine {
-    /// A .sql file path under dbt project paths (absolute path)
+    /// A .sql (or enabled Jinja-suffixed SQL) file path under dbt project paths
+    /// (absolute path)
     SqlFile(PathBuf),
     /// A .yml/.yaml file path under dbt project paths (absolute path)
     YamlFile(PathBuf),
@@ -112,15 +113,29 @@ pub fn read_stdin_lines() -> Vec<String> {
 /// under one of the dbt project source directories.
 fn classify_line(line: &str, resolved_paths: &ResolvedPaths, cwd: &Path) -> InputLine {
     let path = Path::new(line);
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("sql") => {
-            let abs = normalize_path(&to_absolute(line, cwd));
-            if is_under_dbt_paths(&abs, resolved_paths) {
-                InputLine::SqlFile(abs)
-            } else {
-                InputLine::Ignore
-            }
+    if is_sql_file(path, resolved_paths.allow_jinja_file_extensions) {
+        let abs = normalize_path(&to_absolute(line, cwd));
+        if is_under_dbt_paths(&abs, resolved_paths) {
+            return InputLine::SqlFile(abs);
         }
+        return InputLine::Ignore;
+    }
+    // Keep disabled, exact Jinja-suffixed SQL filenames from being
+    // reinterpreted as model names. Other dotted names retain the historical
+    // model-name behavior.
+    if !resolved_paths.allow_jinja_file_extensions
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                [".sql.j2", ".sql.jinja2", ".sql.jinja"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            })
+    {
+        return InputLine::Ignore;
+    }
+    match path.extension().and_then(|e| e.to_str()) {
         Some("yml" | "yaml") => {
             let abs = normalize_path(&to_absolute(line, cwd));
             if is_under_dbt_paths(&abs, resolved_paths) {
@@ -205,6 +220,9 @@ pub fn has_path_like_input(inputs: &[String]) -> bool {
         s.contains('/')
             || s.contains('\\')
             || s.ends_with(".sql")
+            || s.ends_with(".sql.j2")
+            || s.ends_with(".sql.jinja2")
+            || s.ends_with(".sql.jinja")
             || s.ends_with(".yml")
             || s.ends_with(".yaml")
     })
@@ -352,6 +370,7 @@ mod tests {
             test_paths: norm("tests"),
             macro_paths: norm("macros"),
             analysis_paths: norm("analyses"),
+            allow_jinja_file_extensions: false,
         }
     }
 
@@ -380,6 +399,42 @@ mod tests {
         let paths = make_resolved_paths(tmp.path());
         let result = classify_line("models/staging/stg_orders.sql", &paths, tmp.path());
         assert!(matches!(result, InputLine::SqlFile(_)));
+    }
+
+    #[test]
+    fn test_classify_jinja_sql_suffix_respects_project_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut paths = make_resolved_paths(tmp.path());
+        assert!(matches!(
+            classify_line("models/orders.sql.jinja", &paths, tmp.path()),
+            InputLine::Ignore
+        ));
+        paths.allow_jinja_file_extensions = true;
+        assert!(matches!(
+            classify_line("models/orders.sql.jinja", &paths, tmp.path()),
+            InputLine::SqlFile(_)
+        ));
+        paths.allow_jinja_file_extensions = false;
+        for filename in ["orders.sql.j2", "orders.sql.jinja2", "orders.sql.jinja"] {
+            assert!(matches!(
+                classify_line(&format!("models/{filename}"), &paths, tmp.path()),
+                InputLine::Ignore
+            ));
+        }
+        assert!(matches!(
+            classify_line("models/orders.sql.other", &paths, tmp.path()),
+            InputLine::Ignore
+        ));
+    }
+
+    #[test]
+    fn test_classify_separator_free_dotted_model_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = make_resolved_paths(tmp.path());
+        assert!(matches!(
+            classify_line("orders.sql.archive", &paths, tmp.path()),
+            InputLine::ModelName(name) if name == "orders.sql.archive"
+        ));
     }
 
     #[test]
@@ -658,6 +713,7 @@ saved_queries:
             "models/bar.yml".into()
         ]));
         assert!(has_path_like_input(&["schema.yaml".into()]));
+        assert!(has_path_like_input(&["orders.sql.jinja".into()]));
     }
 
     #[test]
@@ -750,6 +806,26 @@ saved_queries:
             }
             other => panic!("Expected SqlFile, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    #[test]
+    fn test_classify_and_resolve_jinja_sql_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut paths = make_resolved_paths(tmp.path());
+        paths.allow_jinja_file_extensions = true;
+        let mut graph = LineageGraph::new();
+        let mut node = make_node("model.orders", "orders", NodeType::Model);
+        node.file_path = Some(PathBuf::from("models/orders.sql.jinja"));
+        graph.add_node(node);
+
+        let result = resolve_stdin_inputs(
+            &["models/orders.sql.jinja".to_string()],
+            &graph,
+            &paths,
+            tmp.path(),
+            tmp.path(),
+        );
+        assert_eq!(result, vec!["orders"]);
     }
 
     #[test]

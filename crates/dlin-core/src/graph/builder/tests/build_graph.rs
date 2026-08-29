@@ -2,6 +2,42 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn test_build_graph_uses_logical_stem_for_jinja_sql_filename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path().to_path_buf();
+    let models_dir = project_dir.join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    std::fs::write(models_dir.join("upstream.sql"), "SELECT 1").unwrap();
+    std::fs::write(
+        models_dir.join("orders.sql.jinja"),
+        "SELECT * FROM {{ ref('upstream') }}",
+    )
+    .unwrap();
+
+    let orders_path = models_dir.join("orders.sql.jinja");
+    let files = DiscoveredFiles {
+        model_sql_files: vec![models_dir.join("upstream.sql"), orders_path.clone()],
+        ..Default::default()
+    };
+    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+
+    let orders = graph
+        .node_indices()
+        .find(|&idx| graph[idx].unique_id == "model.orders")
+        .expect("suffixed SQL file should use its logical model name");
+    assert_eq!(graph[orders].label, "orders");
+    assert_eq!(
+        graph[orders].file_path.as_deref(),
+        Some(std::path::Path::new("models/orders.sql.jinja"))
+    );
+    let upstream = graph
+        .node_indices()
+        .find(|&idx| graph[idx].unique_id == "model.upstream")
+        .unwrap();
+    assert!(graph.contains_edge(upstream, orders));
+}
+
+#[test]
 fn test_build_graph_sources_and_models() {
     let (_tmp, project_dir) = setup_temp_project();
 
@@ -415,6 +451,50 @@ fn test_build_graph_duplicate_model_name() {
         .filter(|&i| graph[i].label == "orders")
         .collect();
     assert_eq!(order_nodes.len(), 2);
+}
+
+#[test]
+fn test_build_graph_plain_and_jinja_sql_share_logical_model_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path().to_path_buf();
+    let models_dir = project_dir.join("models");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::write(models_dir.join("orders.sql"), "SELECT 1").unwrap();
+    fs::write(models_dir.join("orders.sql.j2"), "SELECT 2").unwrap();
+
+    let graph = build_graph(
+        &project_dir,
+        &DiscoveredFiles {
+            model_sql_files: vec![
+                models_dir.join("orders.sql"),
+                models_dir.join("orders.sql.j2"),
+            ],
+            ..Default::default()
+        },
+        None,
+        true,
+        false,
+        &HashMap::new(),
+    )
+    .unwrap();
+
+    let model_nodes: Vec<_> = graph
+        .node_indices()
+        .filter(|&idx| graph[idx].node_type == NodeType::Model)
+        .collect();
+    assert_eq!(model_nodes.len(), 2);
+    assert!(
+        model_nodes
+            .iter()
+            .all(|&idx| graph[idx].unique_id == "model.orders")
+    );
+    assert!(model_nodes.iter().all(|&idx| graph[idx].label == "orders"));
+    assert!(model_nodes.iter().all(|&idx| {
+        graph[idx]
+            .file_path
+            .as_ref()
+            .is_some_and(|path| path != std::path::Path::new("models/orders.sql.sql"))
+    }));
 }
 
 #[test]

@@ -679,10 +679,7 @@ fn collect_sql_contents(
     for idx in graph.node_indices() {
         let node = &graph[idx];
         if let Some(ref rel_path) = node.file_path {
-            let is_sql = rel_path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"));
-            if !is_sql {
+            if !parser::project::is_sql_file(rel_path, true) {
                 continue;
             }
             let full_path = project_dir.join(rel_path);
@@ -797,7 +794,13 @@ fn resolve_paths_for_path_input(
     project_opt: Option<&parser::project::DbtProject>,
 ) -> Result<parser::project::ResolvedPaths> {
     if let Some(project) = project_opt {
-        return Ok(project.resolve_paths(project_dir));
+        let mut paths = project.resolve_paths(project_dir);
+        if matches!(source, SourceType::Manifest) {
+            // Manifest file paths are authoritative, so accept dbt's Jinja
+            // SQL suffixes even when the current project flag is disabled.
+            paths.allow_jinja_file_extensions = true;
+        }
+        return Ok(paths);
     }
     // In SQL mode, build_dag always loads DbtProject — project_opt should never be None here.
     if matches!(source, SourceType::Sql) {
@@ -807,7 +810,13 @@ fn resolve_paths_for_path_input(
     // Try loading dbt_project.yml for accurate path config.
     if matches!(source, SourceType::Manifest) {
         match parser::project::DbtProject::load(project_dir) {
-            Ok(project) => return Ok(project.resolve_paths(project_dir)),
+            Ok(project) => {
+                let mut paths = project.resolve_paths(project_dir);
+                // Manifest file paths are authoritative, so accept dbt's
+                // Jinja SQL suffixes regardless of project configuration.
+                paths.allow_jinja_file_extensions = true;
+                return Ok(paths);
+            }
             Err(e) => {
                 // Fall back to default paths only when the file is simply absent.
                 // A present-but-malformed file is a real config error: surface it.
@@ -822,7 +831,12 @@ fn resolve_paths_for_path_input(
             }
         }
     }
-    Ok(parser::project::ResolvedPaths::default_for(project_dir))
+    let mut paths = parser::project::ResolvedPaths::default_for(project_dir);
+    if matches!(source, SourceType::Manifest) {
+        // Manifest file paths are authoritative when no project config exists.
+        paths.allow_jinja_file_extensions = true;
+    }
+    Ok(paths)
 }
 
 /// Validate that --source and --manifest-path flags are consistent.
@@ -1817,5 +1831,33 @@ mod tests {
         let schema = parse_schema_string("t:a,,b").unwrap();
         let cols = schema.table_columns("t").unwrap().to_vec();
         assert_eq!(cols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn collect_sql_contents_reads_jinja_sql_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("models/orders.sql.jinja");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "select 1").unwrap();
+
+        let mut graph = graph::types::LineageGraph::new();
+        graph.add_node(graph::types::NodeData {
+            unique_id: "model.orders".to_string(),
+            label: "orders".to_string(),
+            node_type: graph::types::NodeType::Model,
+            file_path: Some(std::path::PathBuf::from("models/orders.sql.jinja")),
+            description: None,
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+        });
+
+        let contents = collect_sql_contents(&graph, tmp.path());
+        assert_eq!(
+            contents.get("model.orders").map(String::as_str),
+            Some("select 1")
+        );
     }
 }
