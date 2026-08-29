@@ -528,6 +528,53 @@ fn test_build_graph_with_macros() {
 }
 
 #[test]
+fn test_vars_yml_context_is_shared_by_macros_and_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path().to_path_buf();
+    let models_dir = project_dir.join("models");
+    let macros_dir = project_dir.join("macros");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::create_dir_all(&macros_dir).unwrap();
+
+    fs::write(project_dir.join("dbt_project.yml"), "name: vars_test\n").unwrap();
+    fs::write(project_dir.join("vars.yml"), "vars:\n  suffix: file\n").unwrap();
+    fs::write(
+        macros_dir.join("dynamic_ref.sql"),
+        r#"
+{% macro dynamic_ref() %}
+  {{ ref('macro_' ~ var('suffix')) }}
+{% endmacro %}
+"#,
+    )
+    .unwrap();
+    fs::write(models_dir.join("macro_file.sql"), "SELECT 1").unwrap();
+    fs::write(models_dir.join("model_file.sql"), "SELECT 1").unwrap();
+    fs::write(
+        models_dir.join("downstream.sql"),
+        "SELECT * FROM {{ dynamic_ref() }} JOIN {{ ref('model_' ~ var('suffix')) }} USING (id)",
+    )
+    .unwrap();
+
+    let project = crate::parser::project::DbtProject::load(&project_dir).unwrap();
+    let paths = project.resolve_paths(&project_dir);
+    let files = crate::parser::discovery::discover_files(&paths).unwrap();
+    let graph = build_graph(&project_dir, &files, None, true, false, &project.vars).unwrap();
+
+    let downstream = graph
+        .node_indices()
+        .find(|&i| graph[i].label == "downstream")
+        .unwrap();
+    let upstream_labels: std::collections::HashSet<_> = graph
+        .neighbors_directed(downstream, petgraph::Direction::Incoming)
+        .map(|i| graph[i].label.as_str())
+        .collect();
+    assert_eq!(
+        upstream_labels,
+        std::collections::HashSet::from(["macro_file", "model_file"])
+    );
+}
+
+#[test]
 fn test_var_list_expansion_resolves_refs() {
     let tmp = tempfile::tempdir().unwrap();
     let project_dir = tmp.path().to_path_buf();

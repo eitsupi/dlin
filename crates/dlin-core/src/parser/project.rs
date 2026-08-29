@@ -7,6 +7,18 @@ use crate::input::normalize_path;
 
 use crate::error::DbtLineageError;
 
+/// The project-level portion of dbt's optional `vars.yml` file.
+///
+/// `vars.yml` may contain other top-level keys in newer dbt releases, but
+/// dlin intentionally consumes only this top-level mapping. CLI vars are not
+/// part of dlin's input surface yet and can be layered here later without
+/// changing the file/project source selection.
+#[derive(Debug, Default, Deserialize)]
+struct VarsFile {
+    #[serde(default)]
+    vars: Option<HashMap<String, serde_json::Value>>,
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct DbtProject {
@@ -75,7 +87,29 @@ impl DbtProject {
             super::yaml_from_str(&content, &project_file.display().to_string())
                 .context(format!("Failed to parse {}", project_file.display()))?;
 
-        Ok(project)
+        let vars_file = project_dir.join("vars.yml");
+        if !vars_file.exists() {
+            return Ok(project);
+        }
+
+        let vars_content =
+            std::fs::read_to_string(&vars_file).map_err(|e| DbtLineageError::FileReadError {
+                path: vars_file.clone(),
+                source: e,
+            })?;
+        let vars_file_data: VarsFile =
+            super::yaml_from_str(&vars_content, &vars_file.display().to_string())
+                .context(format!("Failed to parse {}", vars_file.display()))?;
+
+        let Some(vars) = vars_file_data.vars.filter(|vars| !vars.is_empty()) else {
+            return Ok(project);
+        };
+
+        if !project.vars.is_empty() {
+            return Err(DbtLineageError::ProjectVarsConflict.into());
+        }
+
+        Ok(DbtProject { vars, ..project })
     }
 
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {
@@ -176,6 +210,76 @@ analysis-paths: ["analyses", "custom_analyses"]
         let project = DbtProject::load(tmp.path()).unwrap();
         assert_eq!(project.name, "test_project");
         assert_eq!(project.model_paths, vec!["models"]);
+    }
+
+    #[test]
+    fn test_load_vars_yml() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("dbt_project.yml"), "name: test_project\n").unwrap();
+        fs::write(
+            tmp.path().join("vars.yml"),
+            r#"
+vars:
+  environment: staging
+  dimensions: [region, channel]
+  settings:
+    retries: 3
+    enabled: true
+other_top_level_key: ignored
+"#,
+        )
+        .unwrap();
+
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(project.vars["environment"], serde_json::json!("staging"));
+        assert_eq!(
+            project.vars["dimensions"],
+            serde_json::json!(["region", "channel"])
+        );
+        assert_eq!(
+            project.vars["settings"],
+            serde_json::json!({"retries": 3, "enabled": true})
+        );
+        assert_eq!(project.vars.len(), 3);
+    }
+
+    #[test]
+    fn test_load_vars_yml_falls_back_to_project_vars_when_empty_or_missing() {
+        for vars_yml in ["", "other_top_level_key: ignored\n", "vars: {}\n"] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(
+                tmp.path().join("dbt_project.yml"),
+                "name: test_project\nvars:\n  source: project\n",
+            )
+            .unwrap();
+            fs::write(tmp.path().join("vars.yml"), vars_yml).unwrap();
+
+            let project = DbtProject::load(tmp.path()).unwrap();
+            assert_eq!(
+                project.vars,
+                HashMap::from([(
+                    "source".to_string(),
+                    serde_json::Value::String("project".to_string())
+                ),])
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_vars_yml_conflicts_with_non_empty_project_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: test_project\nvars:\n  source: project\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("vars.yml"), "vars:\n  source: file\n").unwrap();
+
+        let err = DbtProject::load(tmp.path()).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::ProjectVarsConflict)
+        ));
     }
 
     #[test]
