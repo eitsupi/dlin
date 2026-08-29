@@ -142,6 +142,21 @@ fn collect_manifest_freshness_inputs(
     Ok(inputs)
 }
 
+/// Return whether a freshness input is newer than the manifest.
+///
+/// A file that cannot be inspected is treated as stale. The discovery result
+/// may become unavailable before freshness checking, and considering that
+/// input fresh could make a stale manifest appear up to date.
+fn is_freshness_input_stale(file: &Path, manifest_mtime: std::time::SystemTime) -> bool {
+    match std::fs::metadata(file).and_then(|metadata| metadata.modified()) {
+        Ok(mtime) => mtime > manifest_mtime,
+        Err(e) => {
+            dlin_core::warn!("cannot read metadata for {}: {}", file.display(), e);
+            true
+        }
+    }
+}
+
 /// Check manifest.json freshness, returning None if manifest is irrelevant.
 #[cfg(not(tarpaulin_include))]
 pub(crate) fn check_manifest_freshness(
@@ -176,10 +191,7 @@ pub(crate) fn check_manifest_freshness(
 
     let mut stale_files: Vec<String> = Vec::new();
     for file in &files {
-        if let Ok(meta) = std::fs::metadata(file)
-            && let Ok(mtime) = meta.modified()
-            && mtime > manifest_mtime
-        {
+        if is_freshness_input_stale(file, manifest_mtime) {
             let rel = file.strip_prefix(project_dir).unwrap_or(file);
             stale_files.push(rel.to_slash_lossy().into_owned());
         }
@@ -239,21 +251,9 @@ pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> 
     // Collect all SQL/YAML files and compare mtimes
     let mut stale_files: Vec<PathBuf> = Vec::new();
     for file in &files {
-        match std::fs::metadata(file) {
-            Ok(meta) => {
-                if let Ok(mtime) = meta.modified()
-                    && mtime > manifest_mtime
-                {
-                    let rel = file.strip_prefix(&project_dir).unwrap_or(file);
-                    stale_files.push(rel.to_path_buf());
-                }
-            }
-            Err(e) => {
-                dlin_core::warn!("cannot read metadata for {}: {}", file.display(), e);
-                // Treat unreadable files as stale to fail safe
-                let rel = file.strip_prefix(&project_dir).unwrap_or(file);
-                stale_files.push(rel.to_path_buf());
-            }
+        if is_freshness_input_stale(file, manifest_mtime) {
+            let rel = file.strip_prefix(&project_dir).unwrap_or(file);
+            stale_files.push(rel.to_path_buf());
         }
     }
 
@@ -338,4 +338,18 @@ pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> 
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_freshness_input_stale;
+    use std::time::SystemTime;
+
+    #[test]
+    fn unavailable_freshness_input_is_stale() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_file = temp_dir.path().join("removed.sql");
+
+        assert!(is_freshness_input_stale(&missing_file, SystemTime::now()));
+    }
 }
