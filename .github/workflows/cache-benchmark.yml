@@ -1,0 +1,51 @@
+name: Cache benchmark validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/cache-benchmark.yml
+      - benchmarks/cache/**
+      - crates/**
+      - Cargo.*
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/cache-benchmark.yml
+      - benchmarks/cache/**
+      - crates/**
+      - Cargo.*
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cache-benchmark-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Generate workload
+        run: python3 benchmarks/cache/scripts/generate_workload.py --self-check
+      - name: Validate workload
+        run: python3 benchmarks/cache/scripts/validate_workload.py benchmarks/cache/workloads/default
+      - name: Build dlin
+        run: cargo build -p dlin --locked
+      - name: Validate cache behavior
+        run: >
+          python3 benchmarks/cache/scripts/run_benchmarks.py
+          --workload benchmarks/cache/workloads/default
+          --binary target/debug/dlin
+          --results-dir benchmarks/cache/results/ci
+          --summary-file "$GITHUB_STEP_SUMMARY"
+          --skip-timing
