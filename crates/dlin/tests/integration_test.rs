@@ -2531,6 +2531,114 @@ Warning: [unsupported_resource_type] manifest resource 'future.test_project.item
     }
 
     #[test]
+    fn test_graph_manifest_mode_jinja_path_like_input_without_project_yml() {
+        let tmp = minimal_manifest_dir(None);
+        let manifest_path = tmp.path().join("target/manifest.json");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("models/stg_orders.sql", "models/stg_orders.sql.jinja");
+        fs::write(&manifest_path, manifest).unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "models/stg_orders.sql.jinja",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                manifest_path.to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-u",
+                "0",
+                "-d",
+                "0",
+                "-o",
+                "json",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "graph with Jinja-suffixed path-like input should succeed in manifest mode without dbt_project.yml; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let node_labels: Vec<&str> = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["label"].as_str())
+            .collect();
+        assert!(
+            node_labels.contains(&"stg_orders"),
+            "Should resolve models/stg_orders.sql.jinja to stg_orders node: {:?}",
+            node_labels
+        );
+        assert!(
+            !node_labels.contains(&"orders"),
+            "Should not return unrelated orders node when resolving a single path: {:?}",
+            node_labels
+        );
+    }
+
+    #[test]
+    fn test_graph_manifest_mode_jinja_path_like_input_ignores_project_flag() {
+        let tmp = minimal_manifest_dir(None);
+        let manifest_path = tmp.path().join("target/manifest.json");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("models/stg_orders.sql", "models/stg_orders.sql.jinja");
+        fs::write(&manifest_path, manifest).unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: test_project\nflags:\n  allow_jinja_file_extensions: false\n",
+        )
+        .unwrap();
+
+        let output = Command::new(binary_path())
+            .args([
+                "graph",
+                "models/stg_orders.sql.jinja",
+                "--source",
+                "manifest",
+                "--manifest-path",
+                manifest_path.to_str().unwrap(),
+                "--project-dir",
+                tmp.path().to_str().unwrap(),
+                "-u",
+                "0",
+                "-d",
+                "0",
+                "-o",
+                "json",
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("Failed to run binary");
+
+        assert!(
+            output.status.success(),
+            "graph with Jinja-suffixed path-like input should ignore the project flag in manifest mode; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("Should be valid JSON");
+        let node_labels: Vec<&str> = parsed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|n| n["label"].as_str())
+            .collect();
+        assert_eq!(node_labels, vec!["stg_orders"]);
+    }
+
+    #[test]
     fn test_list_manifest_mode_path_like_input_without_project_yml() {
         let tmp = minimal_manifest_dir(None);
         let output = Command::new(binary_path())

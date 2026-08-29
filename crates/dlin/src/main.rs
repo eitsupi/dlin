@@ -794,7 +794,13 @@ fn resolve_paths_for_path_input(
     project_opt: Option<&parser::project::DbtProject>,
 ) -> Result<parser::project::ResolvedPaths> {
     if let Some(project) = project_opt {
-        return Ok(project.resolve_paths(project_dir));
+        let mut paths = project.resolve_paths(project_dir);
+        if matches!(source, SourceType::Manifest) {
+            // Manifest file paths are authoritative, so accept dbt's Jinja
+            // SQL suffixes even when the current project flag is disabled.
+            paths.allow_jinja_file_extensions = true;
+        }
+        return Ok(paths);
     }
     // In SQL mode, build_dag always loads DbtProject — project_opt should never be None here.
     if matches!(source, SourceType::Sql) {
@@ -804,7 +810,13 @@ fn resolve_paths_for_path_input(
     // Try loading dbt_project.yml for accurate path config.
     if matches!(source, SourceType::Manifest) {
         match parser::project::DbtProject::load(project_dir) {
-            Ok(project) => return Ok(project.resolve_paths(project_dir)),
+            Ok(project) => {
+                let mut paths = project.resolve_paths(project_dir);
+                // Manifest file paths are authoritative, so accept dbt's
+                // Jinja SQL suffixes regardless of project configuration.
+                paths.allow_jinja_file_extensions = true;
+                return Ok(paths);
+            }
             Err(e) => {
                 // Fall back to default paths only when the file is simply absent.
                 // A present-but-malformed file is a real config error: surface it.
@@ -819,7 +831,12 @@ fn resolve_paths_for_path_input(
             }
         }
     }
-    Ok(parser::project::ResolvedPaths::default_for(project_dir))
+    let mut paths = parser::project::ResolvedPaths::default_for(project_dir);
+    if matches!(source, SourceType::Manifest) {
+        // Manifest file paths are authoritative when no project config exists.
+        paths.allow_jinja_file_extensions = true;
+    }
+    Ok(paths)
 }
 
 /// Validate that --source and --manifest-path flags are consistent.
