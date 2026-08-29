@@ -33,7 +33,7 @@ struct CacheFile {
 }
 
 /// In-memory extraction cache that can be loaded from and saved to disk
-pub struct ExtractionCache {
+pub(crate) struct ExtractionCache {
     version: String,
     /// Hash of the exact macro prefix and deterministic effective vars used by
     /// MiniJinja. The dlin package version remains the cache compatibility
@@ -47,7 +47,7 @@ pub struct ExtractionCache {
 
 impl ExtractionCache {
     /// Create a no-op cache that never reads from or writes to disk.
-    pub fn disabled() -> Self {
+    pub(crate) fn disabled() -> Self {
         Self {
             version: String::new(),
             environment_hash: 0,
@@ -64,7 +64,7 @@ impl ExtractionCache {
     /// When `cache_dir` is `None`, the cache is stored under
     /// `<project_dir>/.dlin_cache/extraction_cache.json`. When `cache_dir` is
     /// provided, the cache file is placed directly inside it.
-    pub fn load(
+    pub(crate) fn load(
         project_dir: &Path,
         macro_prefix: &str,
         vars: &HashMap<String, serde_json::Value>,
@@ -96,7 +96,7 @@ impl ExtractionCache {
     /// Create an empty cache that ignores any existing on-disk entries but
     /// still writes results to disk on [`save`](Self::save).
     /// Used by `--refresh-cache` to rebuild the cache from scratch.
-    pub fn fresh(
+    pub(crate) fn fresh(
         project_dir: &Path,
         macro_prefix: &str,
         vars: &HashMap<String, serde_json::Value>,
@@ -156,7 +156,7 @@ impl ExtractionCache {
     }
 
     /// Save the cache to disk if it has been modified.
-    pub fn save(&self) {
+    pub(crate) fn save(&self) {
         let cache_path = match (&self.cache_path, self.dirty) {
             (Some(p), true) => p,
             _ => return,
