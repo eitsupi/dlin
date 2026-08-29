@@ -69,10 +69,9 @@ mod tests {
         assert_eq!(err.to_string(), "cycle detected in lineage graph");
 
         let err = DbtLineageError::ProjectVarsConflict;
-        assert_eq!(
-            err.to_string(),
-            "Variables cannot be defined in both dbt_project.yml and vars.yml"
-        );
+        insta::assert_snapshot!(err.to_string(), @r###"
+Variables cannot be defined in both dbt_project.yml and vars.yml
+"###);
 
         let err = DbtLineageError::DuplicateModel {
             name: "orders".into(),
