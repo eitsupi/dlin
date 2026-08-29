@@ -20,6 +20,7 @@ fn reset_sigpipe() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
+#[cfg(not(tarpaulin_include))]
 fn main() {
     #[cfg(unix)]
     reset_sigpipe();
@@ -121,3 +122,8 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+// Keep a valid binary target when coverage instrumentation excludes the CLI
+// entry point and its command implementations.
+#[cfg(tarpaulin_include)]
+fn main() {}
