@@ -89,7 +89,7 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 
 ### Limitations of SQL parse mode
 
-- `var()` resolves from `dbt_project.yml` only (`--vars` CLI overrides not supported)
+- `var()` resolves from `vars.yml` or `dbt_project.yml` (`--vars` CLI overrides not supported)
 - Runtime context (`target.type`, `env_var()`) is not evaluated
 - Conditional Jinja branches use default values; non-default paths may be missed
 - Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter

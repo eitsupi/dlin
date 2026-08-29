@@ -7,6 +7,16 @@ pub enum DbtLineageError {
     #[error("dbt project not found: no dbt_project.yml in {0}")]
     ProjectNotFound(PathBuf),
 
+    #[error("Variables cannot be defined in both vars.yml and dbt_project.yml.")]
+    ProjectVarsConflict,
+
+    #[error("failed to render {field} in {path}: {message}")]
+    ProjectFieldRenderError {
+        path: PathBuf,
+        field: String,
+        message: String,
+    },
+
     #[error("failed to read file {path}: {source}")]
     FileReadError {
         path: PathBuf,
@@ -64,6 +74,11 @@ mod tests {
 
         let err = DbtLineageError::CycleDetected;
         assert_eq!(err.to_string(), "cycle detected in lineage graph");
+
+        let err = DbtLineageError::ProjectVarsConflict;
+        insta::assert_snapshot!(err.to_string(), @r###"
+Variables cannot be defined in both vars.yml and dbt_project.yml.
+"###);
 
         let err = DbtLineageError::DuplicateModel {
             name: "orders".into(),
