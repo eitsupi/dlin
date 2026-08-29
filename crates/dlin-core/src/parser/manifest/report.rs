@@ -291,6 +291,46 @@ fn resource_map_presence(
     }
 }
 
+fn diagnose_unsupported_resource_map(
+    diagnostics: &mut Vec<ManifestDiagnostic>,
+    diagnosed_resources: &mut BTreeSet<(String, String)>,
+    map_name: &str,
+    resource_map: &serde_json::Map<String, Value>,
+    default_resource_type: Option<&str>,
+    raw_schema: &Option<String>,
+) {
+    for (unique_id, resource) in resource_map {
+        let raw_type = resource
+            .get("resource_type")
+            .and_then(Value::as_str)
+            .or(default_resource_type);
+        let Some(raw_type) = raw_type else {
+            continue;
+        };
+        let super::ManifestResourceType::Unknown(raw_type) =
+            super::classify_resource_type(raw_type)
+        else {
+            continue;
+        };
+        if !diagnosed_resources.insert((map_name.to_string(), unique_id.clone())) {
+            continue;
+        }
+        diagnostics.push(ManifestDiagnostic {
+            kind: ManifestDiagnosticKind::UnknownResourceType,
+            severity: ManifestDiagnosticSeverity::Warning,
+            message: format!(
+                "manifest resource '{unique_id}' in '{map_name}' uses unknown resource type '{raw_type}'"
+            ),
+            hint: Some(
+                "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
+            ),
+            raw_resource: Some(unique_id.clone()),
+            raw_type: Some(raw_type),
+            schema: raw_schema.clone(),
+        });
+    }
+}
+
 /// Decode the compatibility API's manifest with one JSON parse and one owned
 /// value. The caller maps the serde error to its legacy domain error.
 pub(super) fn load_manifest_compat_from_bytes(
@@ -460,8 +500,8 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         });
     }
 
-    // Resource entries may occur in the active graph `nodes` map, the known
-    // but unsupported `functions` map, or a future top-level resource map.
+    // Resource entries may occur in the active graph `nodes` map, known but
+    // unsupported `functions`/`unit_tests` maps, or a future top-level map.
     // Do not scan every object-valued map: macros/docs/groups/selectors also
     // contain arbitrary `resource_type` fields which are not graph resources.
     let mut diagnosed_resources = BTreeSet::new();
@@ -470,34 +510,24 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         resource_maps.push(("nodes", resource_map));
     }
     if let Some(resource_map) = object.get("functions").and_then(Value::as_object) {
-        for (unique_id, node) in resource_map {
-            let raw_type = node
-                .get("resource_type")
-                .and_then(Value::as_str)
-                .unwrap_or("function")
-                .to_string();
-            if matches!(
-                super::classify_resource_type(&raw_type),
-                super::ManifestResourceType::Known(_)
-            ) {
-                continue;
-            }
-            if diagnosed_resources.insert(("functions".to_string(), unique_id.clone())) {
-                diagnostics.push(ManifestDiagnostic {
-                    kind: ManifestDiagnosticKind::UnknownResourceType,
-                    severity: ManifestDiagnosticSeverity::Warning,
-                    message: format!(
-                        "manifest resource '{unique_id}' in 'functions' uses unknown resource type '{raw_type}'"
-                    ),
-                    hint: Some(
-                        "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
-                    ),
-                    raw_resource: Some(unique_id.clone()),
-                    raw_type: Some(raw_type),
-                    schema: raw_schema.clone(),
-                });
-            }
-        }
+        diagnose_unsupported_resource_map(
+            &mut diagnostics,
+            &mut diagnosed_resources,
+            "functions",
+            resource_map,
+            Some("function"),
+            &raw_schema,
+        );
+    }
+    if let Some(resource_map) = object.get("unit_tests").and_then(Value::as_object) {
+        diagnose_unsupported_resource_map(
+            &mut diagnostics,
+            &mut diagnosed_resources,
+            "unit_tests",
+            resource_map,
+            Some("unit_test"),
+            &raw_schema,
+        );
     }
     for key in &unknown_keys {
         if let Some(resource_map) = object.get(key).and_then(Value::as_object) {
@@ -505,32 +535,14 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         }
     }
     for (map_name, resource_map) in resource_maps {
-        for (unique_id, node) in resource_map {
-            let Some(resource_type) = node.get("resource_type").and_then(Value::as_str) else {
-                continue;
-            };
-            let super::ManifestResourceType::Unknown(raw_type) =
-                super::classify_resource_type(resource_type)
-            else {
-                continue;
-            };
-            if !diagnosed_resources.insert((map_name.to_string(), unique_id.clone())) {
-                continue;
-            }
-            diagnostics.push(ManifestDiagnostic {
-                kind: ManifestDiagnosticKind::UnknownResourceType,
-                severity: ManifestDiagnosticSeverity::Warning,
-                message: format!(
-                    "manifest resource '{unique_id}' in '{map_name}' uses unknown resource type '{raw_type}'"
-                ),
-                hint: Some(
-                    "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
-                ),
-                raw_resource: Some(unique_id.clone()),
-                raw_type: Some(raw_type),
-                schema: raw_schema.clone(),
-            });
-        }
+        diagnose_unsupported_resource_map(
+            &mut diagnostics,
+            &mut diagnosed_resources,
+            map_name,
+            resource_map,
+            None,
+            &raw_schema,
+        );
     }
 
     let mut manifest: Manifest = match serde_json::from_value(value) {
@@ -920,6 +932,10 @@ mod tests {
                 "nodes": {},
                 "macros": {"macro.proj.helper": {"resource_type": "macro"}},
                 "functions": {"function.proj.helper": {"name": "helper"}},
+                "unit_tests": {
+                    "unit_test.proj.check": {"name": "check"},
+                    "unit_test.proj.known": {"resource_type": "model"}
+                },
                 "future_resources": {
                     "future.proj.item": {"resource_type": "future_resource"}
                 }
@@ -934,6 +950,15 @@ mod tests {
             diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
                 && diagnostic.raw_resource.as_deref() == Some("function.proj.helper")
                 && diagnostic.raw_type.as_deref() == Some("function")
+        }));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
+                && diagnostic.raw_resource.as_deref() == Some("unit_test.proj.check")
+                && diagnostic.raw_type.as_deref() == Some("unit_test")
+        }));
+        assert!(!report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType
+                && diagnostic.raw_resource.as_deref() == Some("unit_test.proj.known")
         }));
         assert!(report.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind == ManifestDiagnosticKind::UnknownResourceType

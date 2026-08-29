@@ -180,6 +180,26 @@ fn strict_graph_rejects_future_schema_capability() {
 }
 
 #[test]
+fn strict_graph_rejects_unit_tests() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {},
+            "unit_tests": {
+                "unit_test.proj.check": {"name": "check"}
+            }
+        }"#,
+        std::path::Path::new("manifest.json"),
+    );
+    let manifest = report.manifest.expect("permissive load succeeds");
+    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
+    assert!(error.to_string().contains("unit_test.proj.check"));
+}
+
+#[test]
 fn test_manifest_graph_report_propagates_load_diagnostics() {
     let content = br#"{
         "metadata": {

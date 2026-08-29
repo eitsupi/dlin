@@ -123,18 +123,14 @@ fn find_unknown_resource(manifest: &Manifest) -> Option<(String, String)> {
         return node;
     }
 
-    let function = manifest.functions.iter().find_map(|(unique_id, value)| {
-        let raw_type = value
-            .get("resource_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("function");
-        match classify_resource_type(raw_type) {
-            ManifestResourceType::Known(_) => None,
-            ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
-        }
-    });
+    let function = find_unknown_raw_resource(&manifest.functions, "function");
     if function.is_some() {
         return function;
+    }
+
+    let unit_test = find_unknown_raw_resource(&manifest.unit_tests, "unit_test");
+    if unit_test.is_some() {
+        return unit_test;
     }
 
     // `extra` is the parsed representation of the same unknown top-level
@@ -149,6 +145,22 @@ fn find_unknown_resource(manifest: &Manifest) -> Option<(String, String)> {
                 ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
             }
         })
+    })
+}
+
+fn find_unknown_raw_resource(
+    resources: &HashMap<String, serde_json::Value>,
+    default_resource_type: &str,
+) -> Option<(String, String)> {
+    resources.iter().find_map(|(unique_id, resource)| {
+        let raw_type = resource
+            .get("resource_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default_resource_type);
+        match classify_resource_type(raw_type) {
+            ManifestResourceType::Known(_) => None,
+            ManifestResourceType::Unknown(raw_type) => Some((unique_id.clone(), raw_type)),
+        }
     })
 }
 
