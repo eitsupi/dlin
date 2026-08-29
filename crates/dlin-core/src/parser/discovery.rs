@@ -263,10 +263,8 @@ mod tests {
         let project = DbtProject::load(project_dir).unwrap();
         let discovered = discover_files(&project.resolve_paths(project_dir)).unwrap();
 
-        assert_eq!(
-            discovered.model_sql_files,
-            vec![models_dir.join("orders.sql")]
-        );
+        let expected_model = crate::input::normalize_path(&models_dir.join("orders.sql"));
+        assert_eq!(discovered.model_sql_files, vec![expected_model]);
     }
 
     #[test]

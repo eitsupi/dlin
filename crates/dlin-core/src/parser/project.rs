@@ -428,7 +428,8 @@ vars:
         let error = DbtProject::load(tmp.path()).unwrap_err();
         let message = error
             .to_string()
-            .replace(tmp.path().to_str().unwrap(), "<project-dir>");
+            .replace(tmp.path().to_str().unwrap(), "<project-dir>")
+            .replace('\\', "/");
         insta::assert_snapshot!(message, @r###"
 failed to render model-paths[0] in <project-dir>/dbt_project.yml: undefined value: required variable 'missing_dir' is not defined (in <string>:1)
         "###);
