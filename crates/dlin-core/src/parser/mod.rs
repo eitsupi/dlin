@@ -1,4 +1,4 @@
-pub mod cache;
+pub(crate) mod cache;
 pub mod columns;
 pub mod discovery;
 pub mod jinja;

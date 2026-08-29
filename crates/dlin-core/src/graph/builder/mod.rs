@@ -389,6 +389,9 @@ struct ModelExtraction {
     model_name: String,
     extraction: Option<JinjaExtraction>,
     columns: Vec<String>,
+    /// Semantic identity computed from the bytes used for this extraction.
+    /// Keeping only this token avoids retaining the full SQL corpus.
+    input_hash: Option<cache::ExtractionInputHash>,
     /// Whether this extraction came from the disk cache (no need to re-save)
     from_cache: bool,
 }
@@ -421,38 +424,46 @@ fn process_model_files(
         .map(|sql_path| {
             let model_name = file_stem_str(sql_path);
 
-            // Check disk cache first
-            if let Some(cached) = cache_ref.get(sql_path, project_dir) {
-                let sql_content = std::fs::read_to_string(sql_path).ok();
-                let columns = sql_content
-                    .as_ref()
-                    .map(|content| extract_select_columns(content))
-                    .unwrap_or_default();
+            let sql_bytes = std::fs::read(sql_path).ok();
+            let input_hash = sql_bytes
+                .as_deref()
+                .map(|bytes| cache_ref.input_hash(bytes));
+
+            // Check disk cache first. The bytes are read once and shared with
+            // the miss path so cache validation cannot observe a different
+            // file from the one that is rendered.
+            if let Some(cached) =
+                input_hash.and_then(|hash| cache_ref.get(sql_path, project_dir, hash))
+            {
+                let sql_content = sql_bytes
+                    .as_deref()
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok());
+                let columns = sql_content.map(extract_select_columns).unwrap_or_default();
                 return ModelExtraction {
                     sql_path: sql_path.clone(),
                     model_name,
                     extraction: Some(cached.clone()),
                     columns,
+                    input_hash: None,
                     from_cache: true,
                 };
             }
 
-            let sql_content = std::fs::read_to_string(sql_path).ok();
+            let sql_content = sql_bytes
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
 
-            let extraction = sql_content
-                .as_ref()
-                .map(|content| extract_all_with_vars(content, macro_prefix, vars));
+            let extraction =
+                sql_content.map(|content| extract_all_with_vars(content, macro_prefix, vars));
 
-            let columns = sql_content
-                .as_ref()
-                .map(|content| extract_select_columns(content))
-                .unwrap_or_default();
+            let columns = sql_content.map(extract_select_columns).unwrap_or_default();
 
             ModelExtraction {
                 sql_path: sql_path.clone(),
                 model_name,
                 extraction,
                 columns,
+                input_hash,
                 from_cache: false,
             }
         })
@@ -477,8 +488,8 @@ fn process_model_files(
         let (sql_config, cached_refs_sources) = match me.extraction {
             Some(ext) => {
                 // Save newly extracted results to disk cache
-                if !from_cache {
-                    disk_cache.insert(&me.sql_path, project_dir, &ext);
+                if !from_cache && let Some(input_hash) = me.input_hash {
+                    disk_cache.insert(&me.sql_path, project_dir, input_hash, &ext);
                 }
                 (ext.config, Some((ext.refs, ext.sources)))
             }

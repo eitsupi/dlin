@@ -38,6 +38,7 @@ tempfile = { workspace = true }
 regex = { workspace = true }
 insta = { workspace = true }
 serial_test = { workspace = true }
+filetime = { workspace = true }
 
 [lints]
 workspace = true
