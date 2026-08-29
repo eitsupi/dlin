@@ -1,3 +1,6 @@
+use super::*;
+use std::fs;
+
 #[test]
 fn test_build_graph_semantic_layer_full() {
     let (_tmp, project_dir) = setup_temp_project();

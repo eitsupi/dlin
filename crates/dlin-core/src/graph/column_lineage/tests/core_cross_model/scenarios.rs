@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     let manifest = source_free_union_manifest();

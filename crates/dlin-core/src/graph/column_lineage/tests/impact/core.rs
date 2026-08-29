@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_column_impact_preserves_distinct_same_column_errors() {
     let manifest = duplicate_column_impact_manifest();

@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn plain_select_resolves_each_column_directly() {
     assert_resolved(

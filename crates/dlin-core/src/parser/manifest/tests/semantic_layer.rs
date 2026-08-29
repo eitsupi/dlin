@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_build_graph_with_semantic_layer_nodes() {
     let manifest = Manifest {

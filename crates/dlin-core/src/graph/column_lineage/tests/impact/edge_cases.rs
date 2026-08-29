@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_column_impact_excludes_off_path_errors() {
     let manifest = make_off_path_error_manifest();

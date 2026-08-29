@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn sqllineage_bigquery_temporal_date_parts_are_not_columns() {
     let mut catalog = CatalogSnapshot::new();

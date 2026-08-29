@@ -1,3 +1,6 @@
+use super::*;
+use std::collections::HashMap;
+
 #[test]
 fn test_build_graph_uses_logical_stem_for_jinja_sql_filename() {
     let tmp = tempfile::tempdir().unwrap();

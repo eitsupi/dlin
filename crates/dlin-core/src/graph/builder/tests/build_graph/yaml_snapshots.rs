@@ -1,3 +1,6 @@
+use super::*;
+use std::fs;
+
 #[test]
 fn test_build_graph_with_macros() {
     let tmp = tempfile::tempdir().unwrap();

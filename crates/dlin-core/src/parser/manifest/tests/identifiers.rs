@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_simplify_unique_id_model() {
     assert_eq!(

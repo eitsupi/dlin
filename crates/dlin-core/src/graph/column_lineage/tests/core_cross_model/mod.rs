@@ -497,7 +497,4 @@ fn bigquery_nested_star_manifest() -> Manifest {
     }
 }
 
-mod scenarios {
-    use super::*;
-    include!("core_cross_model/scenarios.rs");
-}
+mod scenarios;

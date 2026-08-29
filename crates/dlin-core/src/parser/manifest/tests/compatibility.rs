@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_resource_type_classifier() {
     assert_eq!(

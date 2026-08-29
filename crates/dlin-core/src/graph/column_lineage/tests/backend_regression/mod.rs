@@ -244,10 +244,7 @@ fn assert_failed(
     }
 }
 
-mod basic {
-    use super::*;
-    include!("backend_regression/basic.rs");
-}
+mod basic;
 fn sqllineage_statement(
     sql: &str,
     catalog: Option<&CatalogSnapshot>,
@@ -323,11 +320,5 @@ fn sqllineage_outcome(
         .unwrap_or_else(|| panic!("no outcome for slot {slot}: {:?}", statement.columns))
 }
 
-mod set_operations {
-    use super::*;
-    include!("backend_regression/set_operations.rs");
-}
-mod discovery {
-    use super::*;
-    include!("backend_regression/discovery.rs");
-}
+mod discovery;
+mod set_operations;

@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn sqllineage_unknown_set_operation_outputs_are_indeterminate() {
     let cases = [

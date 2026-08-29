@@ -80,10 +80,7 @@ fn duplicate_column_impact_manifest() -> Manifest {
     }
 }
 
-mod core {
-    use super::*;
-    include!("impact/core.rs");
-}
+mod core;
 fn make_off_path_error_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
@@ -188,7 +185,4 @@ fn make_off_path_error_manifest() -> Manifest {
     }
 }
 
-mod edge_cases {
-    use super::*;
-    include!("impact/edge_cases.rs");
-}
+mod edge_cases;

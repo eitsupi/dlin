@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_build_graph_from_minimal_manifest() {
     let manifest = Manifest {

@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn test_collect_file_paths() {
     let manifest = Manifest {
