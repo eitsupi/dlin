@@ -35,7 +35,8 @@ pub(super) fn render_with_incremental(
             incremental_model_uncertain,
             incremental_scopes,
         ),
-    ) = render_with_incremental_passes(sql, macro_prefix, vars);
+        runtime_analysis,
+    ) = render_with_incremental_passes_with_analysis(sql, macro_prefix, vars);
     merge_extraction(&mut extraction, incremental_extraction);
     for scope in incremental_scopes {
         if !full_scopes.contains(&scope) {
@@ -49,6 +50,9 @@ pub(super) fn render_with_incremental(
         semantic_certain: full_certain && incremental_certain,
         model_uncertain: full_model_uncertain || incremental_model_uncertain,
         uncertain_macro_scopes: full_scopes,
+        local_macro_spans: runtime_analysis.macro_spans,
+        local_macro_spans_scanned: runtime_analysis.macro_spans_scanned,
+        model_local_macro_roots: runtime_analysis.model_local_macro_roots,
     }
 }
 
@@ -56,11 +60,11 @@ pub(super) fn render_with_incremental(
 /// `is_incremental`, returning each pass's result separately.
 type RenderPass = (JinjaExtraction, bool, bool, bool, Vec<String>);
 
-pub(super) fn render_with_incremental_passes(
+fn render_with_incremental_passes_with_analysis(
     sql: &str,
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
-) -> (RenderPass, RenderPass) {
+) -> (RenderPass, RenderPass, RuntimeAnalysis) {
     let runtime_analysis = runtime_analysis(sql);
     let marker_names = (!runtime_analysis.macro_spans.is_empty())
         .then(|| unique_runtime_macro_markers(sql, macro_prefix));
@@ -318,6 +322,7 @@ pub(super) fn render_with_incremental_passes(
             return (
                 (JinjaExtraction::default(), false, false, false, Vec::new()),
                 (JinjaExtraction::default(), false, false, false, Vec::new()),
+                runtime_analysis,
             );
         }
     };
@@ -354,6 +359,17 @@ pub(super) fn render_with_incremental_passes(
     let full_pass = render_pass(false);
     let incremental_pass = render_pass(true);
 
+    (full_pass, incremental_pass, runtime_analysis)
+}
+
+#[cfg(test)]
+pub(super) fn render_with_incremental_passes(
+    sql: &str,
+    macro_prefix: &str,
+    vars: &HashMap<String, serde_json::Value>,
+) -> (RenderPass, RenderPass) {
+    let (full_pass, incremental_pass, _) =
+        render_with_incremental_passes_with_analysis(sql, macro_prefix, vars);
     (full_pass, incremental_pass)
 }
 
@@ -465,6 +481,8 @@ pub(super) struct RuntimeAnalysis {
     pub(super) uses_runtime_scalar: bool,
     pub(super) macro_spans: Vec<super::source::ModelMacroSpan>,
     pub(super) scalar_macro_names: HashSet<String>,
+    pub(super) macro_spans_scanned: bool,
+    pub(super) model_local_macro_roots: Option<HashSet<String>>,
 }
 
 pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
@@ -477,25 +495,33 @@ pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
             uses_runtime_scalar: false,
             macro_spans: Vec::new(),
             scalar_macro_names: HashSet::new(),
+            macro_spans_scanned: false,
+            model_local_macro_roots: None,
         };
     }
 
     let macro_spans = super::source::model_macro_definition_spans(sql);
     let env = Environment::new();
-    let direct_use = if has_scalar_hint {
+    let (direct_use, model_local_macro_roots) = if has_scalar_hint {
         let model_source =
             super::source::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
-        env.template_from_str(&model_source)
-            .ok()
-            .map(|template| {
+        match env.template_from_str(&model_source) {
+            Ok(template) => {
                 let undeclared = template.undeclared_variables(false);
-                RUNTIME_SCALAR_NAMES
+                let direct_use = RUNTIME_SCALAR_NAMES
                     .iter()
-                    .any(|name| undeclared.contains(*name))
-            })
-            .unwrap_or(false)
+                    .any(|name| undeclared.contains(*name));
+                let roots = macro_spans
+                    .iter()
+                    .filter(|definition| undeclared.contains(definition.name.as_str()))
+                    .map(|definition| definition.name.clone())
+                    .collect();
+                (direct_use, Some(roots))
+            }
+            Err(_) => (false, None),
+        }
     } else {
-        false
+        (false, None)
     };
     let scalar_macro_names = if has_scalar_hint {
         macro_spans
@@ -519,6 +545,8 @@ pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
         uses_runtime_scalar: direct_use,
         macro_spans,
         scalar_macro_names,
+        macro_spans_scanned: true,
+        model_local_macro_roots,
     }
 }
 

@@ -45,15 +45,8 @@ pub fn extract_all_with_vars(
     if outcome.complete && outcome.semantic_certain {
         return outcome.extraction;
     }
+    let scoped_macro_names = regex_fallback_macro_scopes(sql, &outcome);
     let mut ext = outcome.extraction;
-    let scoped_macro_names: Option<HashSet<String>> = if outcome.complete
-        && !outcome.model_uncertain
-        && !outcome.uncertain_macro_scopes.is_empty()
-    {
-        Some(outcome.uncertain_macro_scopes.iter().cloned().collect())
-    } else {
-        None
-    };
     super::jinja::merge_extraction(
         &mut ext,
         super::jinja::JinjaExtraction {
@@ -63,6 +56,47 @@ pub fn extract_all_with_vars(
         },
     );
     ext
+}
+
+fn regex_fallback_macro_scopes(
+    sql: &str,
+    outcome: &super::jinja::JinjaOutcome,
+) -> Option<HashSet<String>> {
+    if !outcome.complete {
+        return None;
+    }
+    if outcome.model_uncertain {
+        // Model-level uncertainty can select a local macro that did not
+        // execute in the placeholder render. Build the symbol graph only
+        // on this path; complete certain and macro-local-only renders do
+        // not pay for another MiniJinja compilation pass.
+        return match super::jinja::reachability::reachable_local_macros(
+            sql,
+            outcome
+                .local_macro_spans_scanned
+                .then_some(outcome.local_macro_spans.as_slice()),
+            outcome.model_local_macro_roots.as_ref(),
+        ) {
+            Some((mut scopes, local_macro_count)) => {
+                scopes.extend(outcome.uncertain_macro_scopes.iter().cloned());
+                // A scoped scan of every local macro has the same result as
+                // the conservative whole-model scan, but avoids an owner
+                // lookup for every Jinja block. Keep zero macros scoped-empty
+                // so model-level recovery remains isolated from definitions.
+                if local_macro_count > 0 && scopes.len() == local_macro_count {
+                    None
+                } else {
+                    Some(scopes)
+                }
+            }
+            None => None,
+        };
+    }
+    if !outcome.uncertain_macro_scopes.is_empty() {
+        Some(outcome.uncertain_macro_scopes.iter().cloned().collect())
+    } else {
+        None
+    }
 }
 
 /// Extract all ref() and source() calls from SQL content in a single pass.

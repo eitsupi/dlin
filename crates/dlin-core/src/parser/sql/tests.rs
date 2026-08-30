@@ -359,6 +359,50 @@ fn test_execute_branches_are_merged() {
 }
 
 #[test]
+fn test_all_reachable_local_macros_use_whole_model_recovery() {
+    let sql = r#"
+            {% macro selected() %}
+                {% if env_var('REGION') == 'us' %}{{ ref('selected_us') }}{% endif %}
+            {% endmacro %}
+            {% macro alternate() %}{{ ref('alternate') }}{% endmacro %}
+            {% if execute %}{{ selected() }}{% else %}{{ alternate() }}{% endif %}
+        "#;
+    let outcome = super::super::jinja::extract_via_jinja(sql, "");
+    assert!(outcome.complete && outcome.model_uncertain);
+    assert!(regex_fallback_macro_scopes(sql, &outcome).is_none());
+}
+
+#[test]
+fn test_partial_reachability_keeps_three_of_128_macros_scoped() {
+    let mut sql = String::new();
+    for index in 0..128 {
+        sql.push_str(&format!(
+            "{{% macro runtime_macro_{index:03}() %}}unused{{% endmacro %}}\n"
+        ));
+    }
+    sql.push_str(
+        "{% if execute %}{{ runtime_macro_000() }}{% else %}{{ runtime_macro_001() }}{% endif %}{{ runtime_macro_002() }}",
+    );
+
+    let outcome = super::super::jinja::extract_via_jinja(&sql, "");
+    let scopes = regex_fallback_macro_scopes(&sql, &outcome).unwrap();
+    assert_eq!(scopes.len(), 3);
+    assert!(
+        scopes
+            .iter()
+            .all(|name| name.starts_with("runtime_macro_00"))
+    );
+}
+
+#[test]
+fn test_zero_local_macros_remains_scoped_empty_for_model_recovery() {
+    let sql = "{% if execute %}{{ ref('runtime_ref') }}{% else %}{{ ref('parse_ref') }}{% endif %}";
+    let outcome = super::super::jinja::extract_via_jinja(sql, "");
+    let scopes = regex_fallback_macro_scopes(sql, &outcome).unwrap();
+    assert!(scopes.is_empty());
+}
+
+#[test]
 fn test_top_level_uncertainty_recovers_alternate_macro_refs() {
     let sql = r#"
             {% macro selected() %}
@@ -387,6 +431,42 @@ fn test_top_level_env_var_uncertainty_recovers_alternate_macro_refs() {
     let refs = extract_refs(sql);
     assert!(refs.iter().any(|r| r.name == "selected_env_ref"));
     assert!(refs.iter().any(|r| r.name == "alternate_env_ref"));
+}
+
+#[test]
+fn test_top_level_uncertainty_excludes_unreachable_local_macro_refs() {
+    let sql = r#"
+            {% macro selected() %}
+                {% if env_var('REGION') == 'us' %}
+                    {{ ref('selected_us') }}
+                {% else %}
+                    {{ ref('selected_eu') }}
+                {% endif %}
+            {% endmacro %}
+            {% macro unused() %}{{ ref('unused_local') }}{% endmacro %}
+            {{ selected() }}
+        "#;
+    let refs = extract_refs(sql);
+    assert!(refs.iter().any(|r| r.name == "selected_us"));
+    assert!(refs.iter().any(|r| r.name == "selected_eu"));
+    assert!(!refs.iter().any(|r| r.name == "unused_local"));
+}
+
+#[test]
+fn test_prefix_uncertainty_recovers_local_macro_callbacks_without_hint_scan() {
+    let macro_prefix = r#"
+            {% macro choose(left, right) %}
+                {% if env_var('REGION') == 'us' %}{{ left() }}{% else %}{{ right() }}{% endif %}
+            {% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro left() %}{{ ref('left_local') }}{% endmacro %}
+            {% macro right() %}{{ ref('right_local') }}{% endmacro %}
+            {{ choose(left, right) }}
+        "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "left_local"));
+    assert!(refs.iter().any(|r| r.name == "right_local"));
 }
 
 #[test]

@@ -4,6 +4,7 @@ use minijinja::Environment;
 
 use super::sql::{RefCall, SourceCall, SqlConfig};
 
+pub(crate) mod reachability;
 mod render;
 pub(crate) mod source;
 #[cfg(test)]
@@ -36,12 +37,22 @@ pub struct JinjaOutcome {
     /// successfully rendered with the placeholder dbt environment.
     pub(crate) semantic_certain: bool,
     /// Whether uncertainty was observed in model-level execution (outside a
-    /// local macro). This requires whole-model recovery even when a macro
-    /// scope was also marked uncertain.
+    /// local macro). This triggers model-level recovery; local macro recovery
+    /// is added from the reachable symbol graph when that analysis succeeds.
     pub(crate) model_uncertain: bool,
     /// Local model macro scopes in which an uncertainty callback executed.
     /// Used to limit regex recovery for complete renders.
     pub(crate) uncertain_macro_scopes: Vec<String>,
+    /// Macro spans discovered while preparing the render. Reusing these spans
+    /// keeps scoped recovery from scanning the model source a second time.
+    pub(crate) local_macro_spans: Vec<source::ModelMacroSpan>,
+    /// Whether `local_macro_spans` came from the runtime analysis. The fast
+    /// path deliberately skips that source scan when no runtime hint exists.
+    pub(crate) local_macro_spans_scanned: bool,
+    /// Local macro roots obtained from the runtime analysis' model free-symbol
+    /// scan. `Some(empty)` means the scan succeeded and found no local roots;
+    /// `None` means that scan was not performed or could not compile.
+    pub(crate) model_local_macro_roots: Option<std::collections::HashSet<String>>,
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.
