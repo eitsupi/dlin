@@ -36,13 +36,6 @@ static JINJA_RAW_BLOCK: LazyLock<Regex> =
 static JINJA_BLOCK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}").unwrap());
 
-// Matches macro definitions so static analysis can inspect model-level Jinja
-// without treating free variables in uncalled macro bodies as model uses.
-static JINJA_MACRO_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\b[\s\S]*?\{%-?\s*endmacro\s*-?%\}")
-        .unwrap()
-});
-
 // Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
 // ref('name', version=N), ref('name', v=N), and the pkg variants.
 // Both `version=` and `v=` are accepted per dbt-core v2.
@@ -99,32 +92,197 @@ fn strip_inert_jinja(sql: &str) -> String {
     JINJA_RAW_BLOCK.replace_all(&no_comments, "").to_string()
 }
 
-/// Remove macro definitions before model-level static Jinja analysis.
-pub(super) fn strip_macro_definitions_for_runtime_analysis(sql: &str) -> String {
-    let inert = strip_inert_jinja(sql);
-    let definitions: Vec<_> = JINJA_MACRO_BLOCK
-        .captures_iter(&inert)
-        .filter_map(|captures| {
-            let whole = captures.get(0)?;
-            Some((
-                whole.start(),
-                whole.end(),
-                captures.get(1)?.as_str().to_owned(),
-            ))
-        })
-        .collect();
+/// Remove the supplied model-local macro spans, then remove inert Jinja
+/// constructs. Keeping span discovery separate lets callers reuse one scan
+/// for both direct model and macro-local runtime analysis.
+pub(super) fn strip_macro_definitions_for_runtime_analysis(
+    sql: &str,
+    definitions: &[(usize, usize, usize)],
+) -> String {
     if definitions.is_empty() {
-        return inert;
+        return strip_inert_jinja(sql);
     }
 
-    let mut result = String::with_capacity(inert.len());
+    let mut result = String::with_capacity(sql.len());
     let mut cursor = 0;
     for (start, end, _) in definitions {
-        result.push_str(&inert[cursor..start]);
-        cursor = end;
+        result.push_str(&sql[cursor..*start]);
+        cursor = *end;
     }
-    result.push_str(&inert[cursor..]);
+    result.push_str(&sql[cursor..]);
+    strip_inert_jinja(&result)
+}
+
+/// Return source spans for model-local macro definitions. This scanner skips
+/// Jinja comments, raw blocks, quoted terminators, and nested statement blocks
+/// so a source transformation cannot modify inert template text.
+/// Each tuple contains `(start, end, opening_tag_end)` byte offsets.
+pub(super) fn model_macro_definition_spans(sql: &str) -> Vec<(usize, usize, usize)> {
+    let mut result = Vec::new();
+    let mut cursor = 0;
+    while let Some((start, end, kind, content)) = next_jinja_tag(sql, cursor) {
+        cursor = end;
+        if kind != JinjaTagKind::Statement {
+            continue;
+        }
+        let Some(name) = jinja_tag_name(content) else {
+            continue;
+        };
+        if name == "raw" {
+            cursor = find_raw_end(sql, end).unwrap_or(sql.len());
+            continue;
+        }
+        if name != "macro" {
+            continue;
+        }
+        let Some(definition_end) = find_macro_end(sql, end) else {
+            // Do not guess at the extent of an incomplete definition. A
+            // caller can still render the original source and retain the
+            // ordinary completion/fallback behavior.
+            return Vec::new();
+        };
+        result.push((start, definition_end, end));
+        cursor = definition_end;
+    }
     result
+}
+
+/// Inject an empty-output marker immediately inside selected macro definitions.
+/// The caller determines which definitions have runtime-dependent free
+/// variables; this helper only applies the source transformation at validated
+/// Jinja tag boundaries.
+pub(super) fn inject_macro_runtime_markers(
+    sql: &str,
+    opening_tag_ends: &[usize],
+    marker_name: &str,
+) -> String {
+    if opening_tag_ends.is_empty() {
+        return sql.to_owned();
+    }
+    let mut result = String::with_capacity(sql.len() + opening_tag_ends.len() * marker_name.len());
+    let mut cursor = 0;
+    for &opening_tag_end in opening_tag_ends {
+        if opening_tag_end > sql.len() || opening_tag_end < cursor {
+            return sql.to_owned();
+        }
+        // A `-%}` opening tag trims all whitespace immediately following the
+        // tag. Put the marker after that original whitespace so introducing
+        // the marker cannot make the trim stop at the marker expression.
+        let insertion = if opening_tag_end >= 3 && sql.as_bytes()[opening_tag_end - 3] == b'-' {
+            let mut end = opening_tag_end;
+            while end < sql.len() && sql.as_bytes()[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            end
+        } else {
+            opening_tag_end
+        };
+        result.push_str(&sql[cursor..insertion]);
+        result.push_str("{{ ");
+        result.push_str(marker_name);
+        result.push_str("() }}");
+        cursor = insertion;
+    }
+    result.push_str(&sql[cursor..]);
+    result
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JinjaTagKind {
+    Comment,
+    Expression,
+    Statement,
+}
+
+fn next_jinja_tag(source: &str, from: usize) -> Option<(usize, usize, JinjaTagKind, &str)> {
+    let mut cursor = from;
+    while let Some(relative) = source[cursor..].find("{") {
+        let start = cursor + relative;
+        let remainder = &source[start..];
+        let (kind, close) = if remainder.starts_with("{#") {
+            (JinjaTagKind::Comment, "#}")
+        } else if remainder.starts_with("{{") {
+            (JinjaTagKind::Expression, "}}")
+        } else if remainder.starts_with("{%") {
+            (JinjaTagKind::Statement, "%}")
+        } else {
+            cursor = start + 1;
+            continue;
+        };
+        let end = if kind == JinjaTagKind::Comment {
+            source[start + 2..]
+                .find(close)
+                .map(|offset| start + 2 + offset + 2)?
+        } else {
+            find_jinja_terminator(source, start + 2, close.as_bytes()[0], close.as_bytes()[1])?
+        };
+        let content_end = end - 2;
+        return Some((start, end, kind, &source[start + 2..content_end]));
+    }
+    None
+}
+
+fn find_jinja_terminator(source: &str, from: usize, first: u8, second: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = from;
+    let mut quote = None;
+    while cursor + 1 < bytes.len() {
+        let byte = bytes[cursor];
+        if let Some(quote_byte) = quote {
+            if byte == b'\\' {
+                cursor += 2;
+                continue;
+            }
+            if byte == quote_byte {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == first && bytes[cursor + 1] == second {
+            return Some(cursor + 2);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn jinja_tag_name(content: &str) -> Option<&str> {
+    let content = content.trim().trim_start_matches(['-', '+']).trim();
+    content.split_whitespace().next()
+}
+
+fn find_raw_end(source: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    while let Some((_, end, kind, content)) = next_jinja_tag(source, cursor) {
+        cursor = end;
+        if kind == JinjaTagKind::Statement && jinja_tag_name(content) == Some("endraw") {
+            return Some(end);
+        }
+    }
+    None
+}
+
+fn find_macro_end(source: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    let mut depth = 1;
+    while let Some((_, end, kind, content)) = next_jinja_tag(source, cursor) {
+        cursor = end;
+        if kind != JinjaTagKind::Statement {
+            continue;
+        }
+        match jinja_tag_name(content) {
+            Some("raw") => cursor = find_raw_end(source, end).unwrap_or(source.len()),
+            Some("macro") => depth += 1,
+            Some("endmacro") => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(end);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Byte spans of quoted string literals inside a jinja block, honoring
@@ -721,6 +879,21 @@ mod tests {
     }
 
     #[test]
+    fn test_called_model_macro_runtime_branches_are_merged() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
+            {% endmacro %}
+            {% set invoke = runtime_branch %}
+            {{ invoke() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "called_true"));
+        assert!(refs.iter().any(|r| r.name == "called_false"));
+    }
+
+    #[test]
     fn test_scalar_runtime_branches_are_merged() {
         for scalar in ["dbt_version", "invocation_id", "run_started_at"] {
             let sql = format!(
@@ -731,6 +904,55 @@ mod tests {
             assert!(refs.iter().any(|r| r.name == format!("{scalar}_true")));
             assert!(refs.iter().any(|r| r.name == format!("{scalar}_false")));
         }
+    }
+
+    #[test]
+    fn test_model_macro_spans_ignore_comment_and_raw_text() {
+        let sql = r#"
+            {# {% macro comment_fake() %}{% endmacro %} #}
+            {% raw %}{% macro raw_fake() %}{% endmacro %}{% endraw %}
+        "#;
+        assert!(model_macro_definition_spans(sql).is_empty());
+    }
+
+    #[test]
+    fn test_model_macro_spans_ignore_quoted_terminators() {
+        let sql = r#"
+            {% macro quoted(value="%} endmacro") %}
+                {% set text = "%}" %}
+            {% endmacro %}
+        "#;
+        let spans = model_macro_definition_spans(sql);
+        assert_eq!(spans.len(), 1);
+        let (start, end, opening_end) = spans[0];
+        let transformed = inject_macro_runtime_markers(sql, &[opening_end], "marker");
+        assert_eq!(transformed.matches("{{ marker() }}").count(), 1);
+        assert!(start < end);
+        assert_eq!(sql[start..end].matches("endmacro").count(), 2);
+    }
+
+    #[test]
+    fn test_model_macro_spans_support_plus_and_minus_whitespace_control() {
+        let sql = r#"
+            {%- macro minus() -%}minus{%- endmacro -%}
+            {%+ macro plus() +%}plus{%+ endmacro +%}
+        "#;
+        assert_eq!(model_macro_definition_spans(sql).len(), 2);
+    }
+
+    #[test]
+    fn test_model_macro_spans_find_multiple_macros() {
+        let sql = "{% macro first() %}one{% endmacro %}{% macro second() %}two{% endmacro %}";
+        let spans = model_macro_definition_spans(sql);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].1 <= spans[1].0);
+    }
+
+    #[test]
+    fn test_model_macro_spans_ignore_unclosed_macro() {
+        let sql = "{% macro unclosed() %}{% if execute %}value";
+        assert!(model_macro_definition_spans(sql).is_empty());
+        assert_eq!(inject_macro_runtime_markers(sql, &[], "marker"), sql);
     }
 
     #[test]

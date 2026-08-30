@@ -139,16 +139,32 @@ fn render_with_incremental_passes(
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
 ) -> ((JinjaExtraction, bool, bool), (JinjaExtraction, bool, bool)) {
+    let (uses_runtime_scalar, runtime_macro_openings) = runtime_scalar_analysis(sql);
+    let marker_name = (!runtime_macro_openings.is_empty())
+        .then(|| unique_runtime_macro_marker(sql, macro_prefix));
+    let template_source_without_prefix = marker_name.as_deref().map_or_else(
+        || sql.to_owned(),
+        |marker_name| {
+            super::sql::inject_macro_runtime_markers(sql, &runtime_macro_openings, marker_name)
+        },
+    );
     let template_source = if macro_prefix.is_empty() {
-        sql.to_string()
+        template_source_without_prefix
     } else {
-        format!("{}\n{}", macro_prefix, sql)
+        format!("{}\n{}", macro_prefix, template_source_without_prefix)
     };
     let render_state = Arc::new(RenderState::default());
-    let uses_runtime_scalar = scalar_runtime_global_used_in_model(sql);
 
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
+
+    if let Some(marker_name) = marker_name {
+        let state = render_state.clone();
+        env.add_function(marker_name, move || -> Result<Value, minijinja::Error> {
+            state.semantic_certain.store(false, Ordering::Relaxed);
+            Ok(Value::from(""))
+        });
+    }
 
     // ref('name'), ref('package', 'name'), or ref('name', version=N)
     // kwargs (e.g. version=2) are appended by minijinja as the last element of args.
@@ -428,16 +444,55 @@ impl Object for RuntimeGlobal {
     }
 }
 
-fn scalar_runtime_global_used_in_model(sql: &str) -> bool {
-    let model_source = super::sql::strip_macro_definitions_for_runtime_analysis(sql);
+const RUNTIME_SCALAR_NAMES: [&str; 4] =
+    ["execute", "dbt_version", "invocation_id", "run_started_at"];
+
+fn runtime_scalar_analysis(sql: &str) -> (bool, Vec<usize>) {
+    if !RUNTIME_SCALAR_NAMES.iter().any(|name| sql.contains(name)) {
+        return (false, Vec::new());
+    }
+
+    let macro_spans = super::sql::model_macro_definition_spans(sql);
+    let model_source = super::sql::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
     let env = Environment::new();
-    let Ok(template) = env.template_from_str(&model_source) else {
-        return false;
-    };
-    let undeclared = template.undeclared_variables(false);
-    ["execute", "dbt_version", "invocation_id", "run_started_at"]
-        .iter()
-        .any(|name| undeclared.contains(*name))
+    let direct_use = env
+        .template_from_str(&model_source)
+        .ok()
+        .map(|template| {
+            let undeclared = template.undeclared_variables(false);
+            RUNTIME_SCALAR_NAMES
+                .iter()
+                .any(|name| undeclared.contains(*name))
+        })
+        .unwrap_or(false);
+    let macro_openings = macro_spans
+        .into_iter()
+        .filter_map(|(start, end, opening_end)| {
+            let template = env.template_from_str(&sql[start..end]).ok()?;
+            let undeclared = template.undeclared_variables(false);
+            RUNTIME_SCALAR_NAMES
+                .iter()
+                .any(|name| undeclared.contains(*name))
+                .then_some(opening_end)
+        })
+        .collect();
+
+    (direct_use, macro_openings)
+}
+
+fn unique_runtime_macro_marker(sql: &str, macro_prefix: &str) -> String {
+    const BASE: &str = "__dlin_runtime_macro_marker";
+    let template_source = format!("{macro_prefix}\n{sql}");
+    if !template_source.contains(BASE) {
+        return BASE.to_owned();
+    }
+    for suffix in 0.. {
+        let candidate = format!("{BASE}_{suffix}");
+        if !template_source.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("finite source cannot contain every marker suffix")
 }
 
 #[cfg(test)]
@@ -863,6 +918,13 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_scalar_analysis_fast_path_without_scalar_names() {
+        let (direct_use, macro_openings) = runtime_scalar_analysis("SELECT 1");
+        assert!(!direct_use);
+        assert!(macro_openings.is_empty());
+    }
+
+    #[test]
     fn test_scalar_runtime_context_ignores_unused_macro_prefix() {
         let macro_prefix = r#"
             {% macro runtime_branch() %}
@@ -889,6 +951,142 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_runtime_context_ignores_macro_like_raw_text() {
+        let sql = r#"
+            {% raw %}{% macro fake() %}{% if execute %}raw{% endif %}{% endmacro %}{% endraw %}
+            SELECT 1
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_called_model_macro() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
+            {% endmacro %}
+            {{ runtime_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "called_true");
+    }
+
+    #[test]
+    fn test_runtime_macro_marker_preserves_whitespace_controlled_output() {
+        let sources = [
+            "{% macro text() %}value{% endmacro %}{{ text() }}",
+            "{% macro text() -%}\nvalue{% endmacro %}{{ text() }}",
+            "{%+ macro text() +%}\nvalue{%+ endmacro +%}{{ text() }}",
+        ];
+        for source in sources {
+            let spans = super::super::sql::model_macro_definition_spans(source);
+            assert_eq!(spans.len(), 1);
+            let transformed =
+                super::super::sql::inject_macro_runtime_markers(source, &[spans[0].2], "marker");
+
+            let original = Environment::new()
+                .template_from_str(source)
+                .unwrap()
+                .render(())
+                .unwrap();
+            let mut instrumented_env = Environment::new();
+            instrumented_env.add_function("marker", || -> Result<Value, minijinja::Error> {
+                Ok(Value::from(""))
+            });
+            let instrumented = instrumented_env
+                .template_from_str(&transformed)
+                .unwrap()
+                .render(())
+                .unwrap();
+            assert_eq!(instrumented, original);
+        }
+    }
+
+    #[test]
+    fn test_runtime_macro_marker_preserves_return_value_in_condition() {
+        let sql = r#"
+            {% macro choose() -%}
+            yes{%- if execute %}{%- endif -%}
+            {%- endmacro %}
+            {% if choose() == 'yes' %}{{ ref('return_yes') }}{% else %}{{ ref('return_no') }}{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "return_yes");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_whitespace_controlled_macro() {
+        let sql = r#"
+            {%+ macro runtime_branch() +%}
+                {% if execute %}{{ ref('plus_true') }}{% else %}{{ ref('plus_false') }}{% endif %}
+            {%+ endmacro +%}
+            {{ runtime_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "plus_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_alias_chain() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('alias_true') }}{% else %}{{ ref('alias_false') }}{% endif %}
+            {% endmacro %}
+            {% set first = runtime_branch %}
+            {% set second = first %}
+            {{ second() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "alias_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_transitive_macro() {
+        let sql = r#"
+            {% macro inner_branch() %}
+                {% if execute %}{{ ref('inner_true') }}{% else %}{{ ref('inner_false') }}{% endif %}
+            {% endmacro %}
+            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
+            {{ outer_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "inner_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_higher_order_macro() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('higher_true') }}{% else %}{{ ref('higher_false') }}{% endif %}
+            {% endmacro %}
+            {% macro invoke(callback) %}{{ callback() }}{% endmacro %}
+            {{ invoke(runtime_branch) }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "higher_true");
+    }
+
+    #[test]
     fn test_scalar_runtime_context_ignores_member_macro_call() {
         let sql = r#"
             {% macro runtime_branch() %}{% if execute %}{{ ref('unused_true') }}{% endif %}{% endmacro %}
@@ -896,6 +1094,33 @@ mod tests {
         "#;
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_macro_string_literal() {
+        let sql = r#"
+            {% macro literal_runtime_name() %}{{ "execute" }}{% endmacro %}
+            {{ literal_runtime_name() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_called_macro_shadowing() {
+        let sql = r#"
+            {% macro local_execute() %}
+                {% set execute = false %}
+                {% if execute %}{{ ref('shadow_true') }}{% else %}{{ ref('shadow_false') }}{% endif %}
+            {% endmacro %}
+            {{ local_execute() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "shadow_false");
     }
 
     #[test]
