@@ -84,6 +84,21 @@ python3 benchmarks/cache/scripts/validate_workload.py \
 
 This is also a performance probe rather than a CI timing gate.
 
+To run deterministic semantic checks for any runtime profile, pass an explicit
+dlin binary after building it:
+
+```sh
+cargo build -p dlin --locked
+python3 benchmarks/cache/scripts/validate_workload.py \
+  --binary target/debug/dlin \
+  benchmarks/cache/workloads/runtime-local-macro-heavy
+```
+
+The validator checks summary counts and `impact -o json` results for alternate
+and runtime dependencies, including that unused prefix literals remain
+unresolved. Runtime profiles do not run the cache mutation suite or impose
+timing thresholds.
+
 The `runtime-prefix-macro-heavy` profile isolates prefix-aware recovery. It
 keeps model-local macros absent and generates 64 models with 16 macro files
 containing 128 project macros: three are reachable through a dispatch,

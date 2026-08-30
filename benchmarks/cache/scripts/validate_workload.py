@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -13,9 +14,109 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def semantic_json(binary: Path, command: str, root: Path, names: list[str], parser: argparse.ArgumentParser) -> object:
+    result = subprocess.run(
+        [
+            str(binary),
+            command,
+            *names,
+            "--project-dir",
+            str(root / "sql_project"),
+            "--source",
+            "sql",
+            "--no-cache",
+            "--output",
+            "json",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        parser.error(
+            f"{command} semantic validation failed: {result.stderr.strip()}"
+        )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        parser.error(f"{command} did not produce JSON: {error}")
+
+
+def validate_runtime_semantics(
+    root: Path,
+    metadata: dict[str, object],
+    binary: Path,
+    parser: argparse.ArgumentParser,
+) -> None:
+    profile = metadata["profile"]
+    summary = semantic_json(binary, "summary", root, [], parser)
+    if not isinstance(summary, dict):
+        parser.error("summary semantic validation did not return an object")
+    expected_summary = {
+        "runtime-local-macro-heavy": (129, 65, 128),
+        "runtime-local-macro-dense": (129, 65, 128),
+        "runtime-prefix-macro-heavy": (69, 5, 320),
+    }[profile]
+    node_counts = summary.get("node_counts", {})
+    actual_summary = (
+        node_counts.get("total"),
+        node_counts.get("phantom"),
+        summary.get("edge_count"),
+    )
+    if actual_summary != expected_summary:
+        parser.error(
+            f"{profile} summary mismatch: {actual_summary} != {expected_summary}"
+        )
+
+    if profile in {"runtime-local-macro-heavy", "runtime-local-macro-dense"}:
+        names = [f"runtime_local_alternate_{index:03d}" for index in range(64)]
+        reports = semantic_json(binary, "impact", root, names, parser)
+        if not isinstance(reports, list):
+            parser.error("local runtime impact validation did not return an array")
+        expected_models = {
+            name: ("orders" if index == 0 else f"orders_{index:04d}")
+            for index, name in enumerate(names)
+        }
+        by_source = {report.get("source_model"): report for report in reports}
+        if set(by_source) != set(names):
+            parser.error("local alternate dependency impact set differs from fixture")
+        for name, model in expected_models.items():
+            labels = {node.get("label") for node in by_source[name].get("impacted_nodes", [])}
+            if model not in labels:
+                parser.error(f"{name} does not impact expected model {model}")
+        return
+
+    reachable = {
+        "prefix_execute_true",
+        "prefix_execute_false",
+        "raw.prefix_execute_true",
+        "raw.prefix_execute_false",
+    }
+    unused = {
+        *[f"prefix_unused_ref_{index:03d}" for index in range(125)],
+        *[f"raw.prefix_unused_source_{index:03d}" for index in range(125)],
+    }
+    reports = semantic_json(binary, "impact", root, sorted(reachable | unused), parser)
+    if not isinstance(reports, list):
+        parser.error("prefix runtime impact validation did not return an array")
+    by_source = {report.get("source_model"): report for report in reports}
+    if set(by_source) != reachable:
+        resolved_unused = sorted(set(by_source) & unused)
+        parser.error(f"unused prefix dependencies resolved unexpectedly: {resolved_unused}")
+    for name in reachable:
+        if by_source[name].get("affected_models") != metadata["model_count"]:
+            parser.error(f"{name} does not impact every expected model")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workload", type=Path)
+    parser.add_argument(
+        "--binary",
+        type=Path,
+        help="run deterministic summary/impact semantic checks with this dlin binary",
+    )
     args = parser.parse_args()
     root = args.workload
     metadata_path = root / "workload_metadata.json"
@@ -192,6 +293,17 @@ def main() -> int:
                 parser.error(f"{model} is missing the prefix dispatch call")
             if any(name in content for name in unused):
                 parser.error(f"{model} directly references an unused prefix macro")
+    runtime_profiles = {
+        "runtime-local-macro-heavy",
+        "runtime-local-macro-dense",
+        "runtime-prefix-macro-heavy",
+    }
+    if args.binary is not None:
+        if not args.binary.is_file():
+            parser.error(f"dlin binary does not exist: {args.binary}")
+        if metadata.get("profile") not in runtime_profiles:
+            parser.error("--binary semantic validation is only defined for runtime profiles")
+        validate_runtime_semantics(root, metadata, args.binary, parser)
     print(
         f"validated {metadata['profile']} workload "
         f"({metadata['model_count']} models, "
