@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.5] - 2026-08-30
+
+### Features
+
+- Read project variables from the dbt-standard `vars.yml` file and support dbt's Jinja-suffixed SQL filenames (`.sql.j2`, `.sql.jinja`, and `.sql.jinja2`) during project discovery (#172, #173)
+- Report forward-compatibility issues in newer or partially unsupported manifests as structured diagnostics, while retaining permissive loading and deterministic resource identity/lookup behavior (#169, #170, #171)
+
+### Breaking Changes
+
+- In manifest mode, output node IDs are now always fully qualified dbt `unique_id` values instead of shortened IDs. Short names and aliases remain accepted as input selectors (#169, #170)
+- Raw cache access in `dlin-core` is now crate-private; the legacy free-function column-lineage API has been replaced by session-oriented APIs, and `ManifestGraphCache` has been replaced by `ManifestAnalysisCache` (#175, #176, #177, #180)
+
+### Bug Fixes
+
+- Preserve structured and nested-field source paths across column-lineage analysis, including cross-model field access (#164)
+- Correct cache invalidation and identity handling so cached results are reused only when the relevant manifest, SQL, dialect, and semantic inputs still match; project-root inputs and unreadable freshness inputs are handled safely (#175, #176, #177, #178, #179, #180)
+- Recover dependencies from runtime-dependent Jinja branches and reachable local/project macros that a single default render would otherwise miss (#185)
+
+### Performance
+
+- Reduce repeated manifest and SQL work by sharing a consistent manifest snapshot and memoizing semantic digest and lineage computations, improving repeated graph and column-lineage operations (#177, #180)
+- Compile each Jinja template once across extraction passes and discard unused rendered SQL output, reducing dependency-analysis overhead (#182, #184)
+
 ## [0.2.4] - 2026-08-24
 
 ### Changes
