@@ -192,12 +192,50 @@ fn regex_fallback_scopes(
         };
     }
     if !outcome.uncertain_macro_scopes.is_empty() {
-        Some(RegexFallbackScopes {
-            model: Some(outcome.uncertain_macro_scopes.iter().cloned().collect()),
-            model_spans: None,
-            prefix: Some(HashSet::new()),
-            prefix_spans: Some(Vec::new()),
-        })
+        // A runtime callback inside a local macro can call a project macro
+        // that was not entered by the placeholder render. Treat each
+        // uncertain local scope as a graph root so recovery follows those
+        // prefix dependencies without scanning unrelated project macros.
+        let uncertain_roots = outcome.uncertain_macro_scopes.iter().cloned().collect();
+        let plan = super::jinja::reachability::macro_reachability_with_prepared_prefix(
+            sql,
+            macro_prefix,
+            outcome
+                .local_macro_spans_scanned
+                .then_some(outcome.local_macro_spans.as_slice()),
+            Some(&uncertain_roots),
+        );
+        match plan {
+            Some(plan) => {
+                let prefix = if plan.prefix_macro_count > 0
+                    && plan.prefix_scopes.len() == plan.prefix_macro_count
+                {
+                    None
+                } else {
+                    Some(plan.prefix_scopes)
+                };
+                let prefix_spans = if prefix.is_none() {
+                    None
+                } else {
+                    Some(plan.prefix_definition_spans)
+                };
+                Some(RegexFallbackScopes {
+                    model: Some(plan.local_scopes),
+                    model_spans: Some(plan.local_definition_spans),
+                    prefix,
+                    prefix_spans,
+                })
+            }
+            None => Some(RegexFallbackScopes {
+                model: Some(uncertain_roots),
+                model_spans: None,
+                // A failed reachability analysis cannot establish which
+                // project macro definitions were reachable. Recover the
+                // whole prefix rather than risking a false negative.
+                prefix: None,
+                prefix_spans: None,
+            }),
+        }
     } else {
         None
     }

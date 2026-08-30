@@ -712,6 +712,57 @@ fn test_called_macro_scope_recovery_excludes_uncalled_macro_refs() {
 }
 
 #[test]
+fn test_local_uncertainty_reaches_called_prefix_macro_dependencies() {
+    let macro_prefix = r#"
+            {% macro project_macro() %}
+                {{ ref('project_ref') }}{{ source('raw', 'project_source') }}
+            {% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro local() %}
+                {% if env_var('FLAG') %}{{ project_macro() }}{% endif %}
+            {% endmacro %}
+            {{ local() }}
+        "#;
+    let extracted = extract_all(sql, macro_prefix);
+    assert!(
+        extracted
+            .refs
+            .iter()
+            .any(|reference| reference.name == "project_ref")
+    );
+    assert!(
+        extracted
+            .sources
+            .iter()
+            .any(|source| { source.source_name == "raw" && source.table_name == "project_source" })
+    );
+}
+
+#[test]
+fn test_local_uncertainty_analysis_failure_uses_whole_prefix_recovery() {
+    let sql = r#"
+            {% macro local() %}
+                {% if env_var('FLAG') %}{{ project_macro() }}{% endif %}
+            {% endmacro %}
+            {{ local() }}
+        "#;
+    let macro_prefix = "{% macro project_macro() %}{% invalid_statement %}{% endmacro %}";
+    let prepared = super::super::jinja::reachability::PreparedMacroPrefix::new(macro_prefix);
+    let outcome = super::super::jinja::JinjaOutcome {
+        complete: true,
+        semantic_certain: false,
+        uncertain_macro_scopes: vec!["local".to_owned()],
+        local_macro_spans: super::super::jinja::source::model_macro_definition_spans(sql),
+        local_macro_spans_scanned: true,
+        ..Default::default()
+    };
+    let scopes = super::regex_fallback_scopes(sql, &prepared, &outcome).unwrap();
+    assert!(scopes.prefix.is_none());
+    assert!(scopes.prefix_spans.is_none());
+}
+
+#[test]
 fn test_called_target_macro_scope_recovery_excludes_uncalled_refs() {
     let sql = r#"
             {% macro called_branch() %}
