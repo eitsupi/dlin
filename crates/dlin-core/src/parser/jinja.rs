@@ -345,7 +345,7 @@ fn render_with_incremental_passes(
         render_state
             .is_incremental
             .store(is_incremental, Ordering::Relaxed);
-        let complete = template.render(()).is_ok();
+        let complete = template.render_captured_to((), std::io::sink()).is_ok();
         let extraction = std::mem::take(&mut *render_state.extraction.lock().unwrap());
         (extraction, complete)
     };
