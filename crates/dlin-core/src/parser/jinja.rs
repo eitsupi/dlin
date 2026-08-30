@@ -889,21 +889,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_runtime_context_tracks_called_model_macro() {
-        let sql = r#"
-            {% macro runtime_branch() %}
-                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
-            {% endmacro %}
-            {{ runtime_branch() }}
-        "#;
-        let outcome = extract_via_jinja(sql, "");
-        assert!(outcome.complete);
-        assert!(!outcome.semantic_certain);
-        assert_eq!(outcome.extraction.refs.len(), 1);
-        assert_eq!(outcome.extraction.refs[0].name, "called_true");
-    }
-
-    #[test]
     fn test_scalar_runtime_context_ignores_member_macro_call() {
         let sql = r#"
             {% macro runtime_branch() %}{% if execute %}{{ ref('unused_true') }}{% endif %}{% endmacro %}
@@ -911,22 +896,6 @@ mod tests {
         "#;
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.semantic_certain);
-    }
-
-    #[test]
-    fn test_scalar_runtime_context_tracks_transitive_model_macro() {
-        let sql = r#"
-            {% macro inner_branch() %}
-                {% if execute %}{{ ref('inner_true') }}{% else %}{{ ref('inner_false') }}{% endif %}
-            {% endmacro %}
-            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
-            {{ outer_branch() }}
-        "#;
-        let outcome = extract_via_jinja(sql, "");
-        assert!(outcome.complete);
-        assert!(!outcome.semantic_certain);
-        assert_eq!(outcome.extraction.refs.len(), 1);
-        assert_eq!(outcome.extraction.refs[0].name, "inner_true");
     }
 
     #[test]

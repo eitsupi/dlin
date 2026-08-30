@@ -1,5 +1,4 @@
 use regex::Regex;
-use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// A reference to another dbt model via ref()
@@ -118,71 +117,14 @@ pub(super) fn strip_macro_definitions_for_runtime_analysis(sql: &str) -> String 
         return inert;
     }
 
-    let mut reachable = HashSet::new();
-    for block_match in JINJA_BLOCK.find_iter(&inert) {
-        if owner_of_macro_definition(&definitions, block_match.start()).is_none() {
-            reachable.extend(macro_calls_in_block(block_match.as_str(), &definitions));
-        }
-    }
-    loop {
-        let mut discovered = HashSet::new();
-        for (index, (start, end, _)) in definitions.iter().enumerate() {
-            if reachable.contains(&index) {
-                for block_match in JINJA_BLOCK.find_iter(&inert[*start..*end]) {
-                    discovered.extend(macro_calls_in_block(block_match.as_str(), &definitions));
-                }
-            }
-        }
-        discovered.retain(|index| !reachable.contains(index));
-        if discovered.is_empty() {
-            break;
-        }
-        reachable.extend(discovered);
-    }
-
     let mut result = String::with_capacity(inert.len());
     let mut cursor = 0;
-    for (index, (start, end, _)) in definitions.iter().enumerate() {
-        if !reachable.contains(&index) {
-            result.push_str(&inert[cursor..*start]);
-            cursor = *end;
-        }
+    for (start, end, _) in definitions {
+        result.push_str(&inert[cursor..start]);
+        cursor = end;
     }
     result.push_str(&inert[cursor..]);
     result
-}
-
-fn owner_of_macro_definition(definitions: &[(usize, usize, String)], pos: usize) -> Option<usize> {
-    definitions
-        .iter()
-        .position(|(start, end, _)| *start <= pos && pos < *end)
-}
-
-fn macro_calls_in_block(block: &str, definitions: &[(usize, usize, String)]) -> Vec<usize> {
-    let spans = string_literal_spans(block);
-    let mut calls = Vec::new();
-    for (index, (_, _, name)) in definitions.iter().enumerate() {
-        for (pos, _) in block.match_indices(name) {
-            if inside_string_literal(&spans, pos) {
-                continue;
-            }
-            let before_is_identifier = pos
-                .checked_sub(1)
-                .and_then(|idx| block.as_bytes().get(idx))
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'.');
-            let mut end = pos + name.len();
-            while end < block.len() && block.as_bytes()[end].is_ascii_whitespace() {
-                end += 1;
-            }
-            if !before_is_identifier
-                && block.as_bytes().get(end) == Some(&b'(')
-                && !calls.contains(&index)
-            {
-                calls.push(index);
-            }
-        }
-    }
-    calls
 }
 
 /// Byte spans of quoted string literals inside a jinja block, honoring
@@ -776,35 +718,6 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().any(|r| r.name == "execute_true"));
         assert!(refs.iter().any(|r| r.name == "execute_false"));
-    }
-
-    #[test]
-    fn test_called_model_macro_runtime_branches_are_merged() {
-        let sql = r#"
-            {% macro runtime_branch() %}
-                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
-            {% endmacro %}
-            {{ runtime_branch() }}
-        "#;
-        let refs = extract_refs(sql);
-        assert_eq!(refs.len(), 2);
-        assert!(refs.iter().any(|r| r.name == "called_true"));
-        assert!(refs.iter().any(|r| r.name == "called_false"));
-    }
-
-    #[test]
-    fn test_transitive_called_model_macro_runtime_branches_are_merged() {
-        let sql = r#"
-            {% macro inner_branch() %}
-                {% if execute %}{{ ref('inner_true') }}{% else %}{{ ref('inner_false') }}{% endif %}
-            {% endmacro %}
-            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
-            {{ outer_branch() }}
-        "#;
-        let refs = extract_refs(sql);
-        assert_eq!(refs.len(), 2);
-        assert!(refs.iter().any(|r| r.name == "inner_true"));
-        assert!(refs.iter().any(|r| r.name == "inner_false"));
     }
 
     #[test]
