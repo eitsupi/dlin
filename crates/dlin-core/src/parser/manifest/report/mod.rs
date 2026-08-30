@@ -463,32 +463,14 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         raw_schema.as_deref(),
     );
 
-    let mut node_ids = manifest.nodes.keys().collect::<Vec<_>>();
-    node_ids.sort_unstable();
-    for unique_id in node_ids {
-        let node = &manifest.nodes[unique_id];
-        if !matches!(
-            super::classify_resource_type(&node.resource_type),
-            super::ManifestResourceType::Unknown(_)
-        ) || !diagnosed_resources.insert(("nodes".to_string(), unique_id.to_string()))
-        {
-            continue;
-        }
-        diagnostics.push(ManifestDiagnostic {
-            kind: ManifestDiagnosticKind::UnsupportedResourceType,
-            severity: ManifestDiagnosticSeverity::Warning,
-            message: format!(
-                "manifest resource '{unique_id}' in 'nodes' uses unsupported resource type '{}'",
-                node.resource_type
-            ),
-            hint: Some(
-                "Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results".to_string(),
-            ),
-            raw_resource: Some(unique_id.to_string()),
-            raw_type: Some(node.resource_type.clone()),
-            schema: raw_schema.clone(),
-        });
-    }
+    append_unsupported_resource_diagnostics(
+        "nodes",
+        None,
+        &observations,
+        &mut diagnostics,
+        &mut diagnosed_resources,
+        raw_schema.as_deref(),
+    );
     // Keep diagnostics for future resource maps after the active graph's
     // node diagnostics. This preserves the established warning order while
     // still allowing the decoder to avoid retaining those entries separately.

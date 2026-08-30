@@ -4,7 +4,7 @@ use serde::de::Error as DeError;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use super::super::{Manifest, ManifestResourceType, classify_resource_type};
+use super::super::{Manifest, ManifestNode, ManifestResourceType, classify_resource_type};
 use super::{KNOWN_RESOURCE_MAP_KEYS, KNOWN_TOP_LEVEL_KEYS, ResourceMapPresence};
 
 #[derive(Debug, Default)]
@@ -110,6 +110,21 @@ fn inspect_resource_values(
     }
 }
 
+fn inspect_nodes(values: &HashMap<String, ManifestNode>, observations: &mut ManifestObservations) {
+    let resources = observations
+        .unsupported_resources
+        .entry("nodes".to_string())
+        .or_default();
+    for (unique_id, node) in values {
+        if matches!(
+            classify_resource_type(&node.resource_type),
+            ManifestResourceType::Unknown(_)
+        ) {
+            resources.push((unique_id.clone(), node.resource_type.clone()));
+        }
+    }
+}
+
 fn inspect_unknown_map(map_name: &str, value: &Value, observations: &mut ManifestObservations) {
     let Some(values) = value.as_object() else {
         return;
@@ -179,6 +194,7 @@ impl<'de> Visitor<'de> for ManifestVisitor<'_> {
                 }
                 "nodes" => {
                     manifest.nodes = map.next_value::<HashMap<_, _>>()?;
+                    inspect_nodes(&manifest.nodes, observations);
                     observations
                         .resource_maps
                         .insert(key, map_presence(manifest.nodes.len()));
