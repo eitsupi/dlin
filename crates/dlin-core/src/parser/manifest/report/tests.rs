@@ -453,6 +453,69 @@ fn test_manifest_load_report_keeps_nodes_diagnostic_before_later_decode_error() 
 }
 
 #[test]
+fn test_manifest_load_report_keeps_prior_node_diagnostic_on_later_node_error() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {
+                "operation.proj.refresh": {
+                    "unique_id": "operation.proj.refresh",
+                    "name": "refresh",
+                    "resource_type": "operation"
+                },
+                "model.proj.bad": {}
+            }
+        }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(report.manifest.is_none());
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType
+            && diagnostic.raw_resource.as_deref() == Some("operation.proj.refresh")
+    }));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::ParseError)
+    );
+}
+
+#[test]
+fn test_manifest_load_report_nested_duplicate_node_key_uses_last_value() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {
+                "model.proj.same": {
+                    "unique_id": "model.proj.same",
+                    "name": "same",
+                    "resource_type": "operation"
+                },
+                "model.proj.same": {
+                    "unique_id": "model.proj.same",
+                    "name": "same",
+                    "resource_type": "model"
+                }
+            }
+        }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(!report.has_errors());
+    assert!(!report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType
+            && diagnostic.raw_resource.as_deref() == Some("model.proj.same")
+    }));
+    assert_eq!(report.manifest.expect("manifest").nodes.len(), 1);
+}
+
+#[test]
 fn test_known_macro_map_is_not_classified_as_graph_resource() {
     let report = load_manifest_report_from_bytes(
             br#"{

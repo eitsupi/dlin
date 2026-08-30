@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::de::Error as DeError;
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 use super::super::{Manifest, ManifestNode, ManifestResourceType, classify_resource_type};
@@ -110,21 +110,6 @@ fn inspect_resource_values(
     }
 }
 
-fn inspect_nodes(values: &HashMap<String, ManifestNode>, observations: &mut ManifestObservations) {
-    let resources = observations
-        .unsupported_resources
-        .entry("nodes".to_string())
-        .or_default();
-    for (unique_id, node) in values {
-        if matches!(
-            classify_resource_type(&node.resource_type),
-            ManifestResourceType::Unknown(_)
-        ) {
-            resources.push((unique_id.clone(), node.resource_type.clone()));
-        }
-    }
-}
-
 fn inspect_unknown_map(map_name: &str, value: &Value, observations: &mut ManifestObservations) {
     let Some(values) = value.as_object() else {
         return;
@@ -152,6 +137,64 @@ fn inspect_unknown_map(map_name: &str, value: &Value, observations: &mut Manifes
 
 struct ManifestVisitor<'a> {
     observations: &'a mut ManifestObservations,
+}
+
+struct NodesSeed<'a> {
+    observations: &'a mut ManifestObservations,
+}
+
+impl<'de> DeserializeSeed<'de> for NodesSeed<'_> {
+    type Value = HashMap<String, ManifestNode>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(NodesVisitor {
+            observations: self.observations,
+        })
+    }
+}
+
+struct NodesVisitor<'a> {
+    observations: &'a mut ManifestObservations,
+}
+
+impl<'de> Visitor<'de> for NodesVisitor<'_> {
+    type Value = HashMap<String, ManifestNode>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a manifest nodes map")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut nodes = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+        while let Some(unique_id) = map.next_key::<String>()? {
+            let node = map.next_value::<ManifestNode>()?;
+            let resource_type = node.resource_type.clone();
+            let is_unknown = matches!(
+                classify_resource_type(&node.resource_type),
+                ManifestResourceType::Unknown(_)
+            );
+            let previous = nodes.insert(unique_id.clone(), node);
+            if previous.is_some()
+                && let Some(resources) = self.observations.unsupported_resources.get_mut("nodes")
+            {
+                resources.retain(|(previous_id, _)| previous_id != &unique_id);
+            }
+            if is_unknown {
+                self.observations
+                    .unsupported_resources
+                    .entry("nodes".to_string())
+                    .or_default()
+                    .push((unique_id, resource_type));
+            }
+        }
+        Ok(nodes)
+    }
 }
 
 pub(super) struct DecodeFailure {
@@ -193,8 +236,7 @@ impl<'de> Visitor<'de> for ManifestVisitor<'_> {
                     };
                 }
                 "nodes" => {
-                    manifest.nodes = map.next_value::<HashMap<_, _>>()?;
-                    inspect_nodes(&manifest.nodes, observations);
+                    manifest.nodes = map.next_value_seed(NodesSeed { observations })?;
                     observations
                         .resource_maps
                         .insert(key, map_presence(manifest.nodes.len()));
