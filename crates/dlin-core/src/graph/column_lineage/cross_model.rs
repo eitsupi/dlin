@@ -192,12 +192,22 @@ fn resolve_source_recursive(
             }
         }
     } else {
-        let on_demand = compute_single_column_lineage(
-            ctx.analysis.manifest,
-            &model_unique_id,
-            &source.column,
-            ctx.analysis.dialect,
-        );
+        // A missing column can mean either that the all-column analysis did
+        // not discover it, or that it explicitly reported an uncertainty for
+        // that column (for example, a field selected from a BigQuery row
+        // value). In the latter case, retrying the same model for each
+        // missing field only repeats the full SQL analysis and turns a linear
+        // row-value expansion into quadratic work.
+        let on_demand = should_retry_missing_column(&upstream_result.errors, &source.column)
+            .then(|| {
+                compute_single_column_lineage(
+                    ctx.analysis.manifest,
+                    &model_unique_id,
+                    &source.column,
+                    ctx.analysis.dialect,
+                )
+            })
+            .flatten();
         let transformation = on_demand
             .as_ref()
             .map_or(TransformationType::Unknown, |(_, t)| t.clone());
@@ -233,6 +243,20 @@ fn resolve_source_recursive(
             }
         }
     }
+}
+
+/// Return whether a missing output column should be retried by the
+/// single-column recovery path.
+///
+/// A column-scoped diagnostic means that the regular all-column analysis did
+/// attempt this output and could not establish its lineage. Retrying it would
+/// repeat the same analysis without improving the result. Keep retrying when
+/// no matching diagnostic exists so that the existing recovery behavior for
+/// incomplete output discovery is preserved.
+fn should_retry_missing_column(errors: &[ColumnLineageError], column: &str) -> bool {
+    !errors
+        .iter()
+        .any(|error| error.is_column_scoped() && error.column_name() == Some(column))
 }
 
 fn compute_single_column_lineage(
@@ -348,5 +372,31 @@ mod tests {
                         column: "alpha".to_string(),
                     }]
         ));
+    }
+
+    #[test]
+    fn missing_column_retry_skips_matching_scoped_diagnostic() {
+        let errors = vec![ColumnLineageError {
+            kind: super::super::ColumnLineageErrorKind::ColumnIndeterminate,
+            column: Some("event_field".to_string()),
+            what: "column 'event_field': row-value binding is indeterminate".to_string(),
+            why: None,
+            hint: None,
+        }];
+
+        assert!(!should_retry_missing_column(&errors, "event_field"));
+    }
+
+    #[test]
+    fn missing_column_retry_preserves_recovery_without_matching_diagnostic() {
+        let errors = vec![ColumnLineageError {
+            kind: super::super::ColumnLineageErrorKind::ColumnIndeterminate,
+            column: Some("other_field".to_string()),
+            what: "column 'other_field': row-value binding is indeterminate".to_string(),
+            why: None,
+            hint: None,
+        }];
+
+        assert!(should_retry_missing_column(&errors, "event_field"));
     }
 }
