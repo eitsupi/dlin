@@ -58,3 +58,33 @@ jobs:
           --results-dir benchmarks/cache/results/ci/${{ matrix.profile }}
           --summary-file "$GITHUB_STEP_SUMMARY"
           --skip-timing
+
+  runtime-profile-semantic-validation:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile:
+          - runtime-local-macro-heavy
+          - runtime-local-macro-dense
+          - runtime-prefix-macro-heavy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Generate ${{ matrix.profile }} workload
+        run: >
+          python3 benchmarks/cache/scripts/generate_workload.py
+          --output benchmarks/cache/workloads/${{ matrix.profile }}
+          --profile ${{ matrix.profile }}
+          --self-check
+      - name: Validate ${{ matrix.profile }} structure
+        run: >
+          python3 benchmarks/cache/scripts/validate_workload.py
+          benchmarks/cache/workloads/${{ matrix.profile }}
+      - name: Build dlin
+        run: cargo build -p dlin --locked
+      - name: Validate ${{ matrix.profile }} semantics
+        run: >
+          python3 benchmarks/cache/scripts/validate_workload.py
+          --binary target/debug/dlin
+          benchmarks/cache/workloads/${{ matrix.profile }}

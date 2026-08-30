@@ -19,6 +19,35 @@ PROFILES = {
     # effective macro prefix large enough to expose both per-model prefix
     # parsing and build_macro_prefix's cumulative source validation.
     "macro-heavy": {"model_count": 64, "macro_file_count": 16, "macro_count": 128},
+    # Keep the project macro prefix minimal while stressing lazy reachability
+    # over model-local definitions. Three definitions are reachable; the
+    # remainder are deliberately inert and contain no graph calls.
+    "runtime-local-macro-heavy": {
+        "model_count": 64,
+        "macro_file_count": 1,
+        "macro_count": 1,
+        "local_macro_count": 128,
+        "reachable_local_macro_count": 3,
+        "runtime_uncertainty": ["execute"],
+    },
+    "runtime-local-macro-dense": {
+        "model_count": 64,
+        "macro_file_count": 1,
+        "macro_count": 1,
+        "local_macro_count": 128,
+        "reachable_local_macro_count": 128,
+        "runtime_uncertainty": ["execute"],
+    },
+    # Keep model-local macros absent while exercising the prefix-aware
+    # recovery path. Three project macros are reachable through a model call;
+    # the other 125 contain distinct graph calls to make precision observable.
+    "runtime-prefix-macro-heavy": {
+        "model_count": 64,
+        "macro_file_count": 16,
+        "macro_count": 128,
+        "reachable_prefix_macro_count": 3,
+        "runtime_uncertainty": ["execute"],
+    },
 }
 
 
@@ -45,6 +74,51 @@ def manifest_node(
     }
 
 
+def local_macro_block(
+    relation: str,
+    alternate_ref: str,
+    macro_count: int,
+    *,
+    dense: bool = False,
+) -> str:
+    """Build model-local macros for sparse or dense reachability probes."""
+    if macro_count < 3:
+        raise ValueError("runtime-local-macro profiles require at least 3 local macros")
+    if dense:
+        names = [f"runtime_macro_{index:03d}" for index in range(macro_count)]
+        definitions = [
+            f"{{% macro {names[0]}() %}}{relation}{{% endmacro %}}",
+            f"{{% macro {names[1]}() %}}{{{{ ref('{alternate_ref}') }}}}{{% endmacro %}}",
+            f"{{% macro {names[2]}(callback) %}}{{{{ callback() }}}}{{% endmacro %}}",
+        ]
+        definitions.extend(
+            f"{{% macro {name}() %}}unused{{% endmacro %}}"
+            for name in names[3:]
+        )
+        definitions.extend(
+            [
+                "{% set runtime_callbacks = ["
+                + ", ".join(names)
+                + "] %}",
+                f"{{% set runtime_selected = {names[0]} if execute else {names[1]} %}}",
+            ]
+        )
+        return "\n".join(definitions)
+    definitions = [
+        f"{{% macro runtime_leaf_a() %}}{relation}{{% endmacro %}}",
+        f"{{% macro runtime_leaf_b() %}}{{{{ ref('{alternate_ref}') }}}}{{% endmacro %}}",
+        "{% macro runtime_invoke(callback) %}{{ callback() }}{% endmacro %}",
+    ]
+    definitions.extend(
+        f"{{% macro runtime_unused_{index:03d}() %}}unused{{% endmacro %}}"
+        for index in range(macro_count - 3)
+    )
+    definitions.extend(
+        ["{% set runtime_selected = runtime_leaf_a if execute else runtime_leaf_b %}"]
+    )
+    return "\n".join(definitions)
+
+
 def write_workload(root: Path, profile: str) -> None:
     profile_config = PROFILES[profile]
     count = profile_config["model_count"]
@@ -63,14 +137,38 @@ def write_workload(root: Path, profile: str) -> None:
         "model-paths: [models]\n"
         "macro-paths: [macros]\n"
     )
-    macro_definitions = [
-        "{% macro benchmark_label(value) %}{{ value }}{% endmacro %}"
-    ]
-    macro_definitions.extend(
-        f"{{% macro benchmark_helper_{index:03d}(value) %}}"
-        "{{ value }}{% endmacro %}"
-        for index in range(1, macro_count)
-    )
+    if profile == "runtime-prefix-macro-heavy":
+        macro_definitions = [
+            "{% macro benchmark_label(value) %}{{ value }}{% endmacro %}",
+            "{% macro prefix_dispatch() %}{{ prefix_choose() }}{% endmacro %}",
+            "{% macro prefix_choose() %}"
+            "{% if execute %}"
+            "{{ ref('prefix_execute_true') }}"
+            "{{ source('raw', 'prefix_execute_true') }}"
+            "{{ benchmark_label('true') }}"
+            "{% else %}"
+            "{{ ref('prefix_execute_false') }}"
+            "{{ source('raw', 'prefix_execute_false') }}"
+            "{{ benchmark_label('false') }}"
+            "{% endif %}"
+            "{% endmacro %}",
+        ]
+        macro_definitions.extend(
+            f"{{% macro prefix_unused_{index:03d}() %}}"
+            f"{{{{ ref('prefix_unused_ref_{index:03d}') }}}}"
+            f"{{{{ source('raw', 'prefix_unused_source_{index:03d}') }}}}"
+            "{% endmacro %}"
+            for index in range(macro_count - 3)
+        )
+    else:
+        macro_definitions = [
+            "{% macro benchmark_label(value) %}{{ value }}{% endmacro %}"
+        ]
+        macro_definitions.extend(
+            f"{{% macro benchmark_helper_{index:03d}(value) %}}"
+            "{{ value }}{% endmacro %}"
+            for index in range(1, macro_count)
+        )
     (sql_root / "dbt_project.yml").write_text(dbt_project, encoding="utf-8")
     (sql_root / "macros").mkdir(exist_ok=True)
     for file_index in range(macro_file_count):
@@ -121,6 +219,38 @@ def write_workload(root: Path, profile: str) -> None:
                 f"select {{{{ benchmark_label('id') }}}}, amount + {index} as amount "
                 f"from {{{{ ref('{previous_name}') }}}}"
             )
+        jinja_relation = (
+            "{{ source('raw', 'orders') }}"
+            if index == 0
+            else "{{ ref(var('benchmark_parent')) }}"
+            if index == count - 1
+            else f"{{{{ ref('{previous_name}') }}}}"
+        )
+        if profile == "runtime-prefix-macro-heavy":
+            sql = (
+                "select {{ prefix_dispatch() }}, "
+                f"amount + {index} as amount "
+                f"from {jinja_relation}"
+            )
+        elif profile in {"runtime-local-macro-heavy", "runtime-local-macro-dense"}:
+            sql = (
+                local_macro_block(
+                    jinja_relation,
+                    f"runtime_local_alternate_{index:03d}",
+                    profile_config["local_macro_count"],
+                    dense=profile == "runtime-local-macro-dense",
+                )
+                + "\n"
+                + sql.replace(
+                    f"from {jinja_relation}",
+                    (
+                        "from {{ runtime_macro_002(runtime_selected) }}"
+                        if profile == "runtime-local-macro-dense"
+                        else "from {{ runtime_invoke(runtime_selected) }}"
+                    ),
+                    1,
+                )
+            )
         # The generated manifest contains compiled SQL, while SQL mode exercises
         # the Jinja source/ref extraction path above.
         compiled = (
@@ -153,6 +283,30 @@ def write_workload(root: Path, profile: str) -> None:
         "macro_file_count": macro_file_count,
         "macro_count": macro_count,
     }
+    if profile in {"runtime-local-macro-heavy", "runtime-local-macro-dense"}:
+        metadata.update(
+            {
+                "local_macro_count": profile_config["local_macro_count"],
+                "reachable_local_macro_count": profile_config[
+                    "reachable_local_macro_count"
+                ],
+                "alternate_dependency_count": count,
+                "alternate_dependency_pattern": "runtime_local_alternate_{model_index:03d}",
+                "runtime_uncertainty": profile_config["runtime_uncertainty"],
+            }
+        )
+    if profile == "runtime-prefix-macro-heavy":
+        metadata.update(
+            {
+                "prefix_macro_count": macro_count,
+                "reachable_prefix_macro_count": profile_config[
+                    "reachable_prefix_macro_count"
+                ],
+                "unused_prefix_macro_count": macro_count
+                - profile_config["reachable_prefix_macro_count"],
+                "runtime_uncertainty": profile_config["runtime_uncertainty"],
+            }
+        )
     metadata["files"] = {}
     for file in sorted(root.rglob("*")):
         if file.is_file() and file.name != "workload_metadata.json":
