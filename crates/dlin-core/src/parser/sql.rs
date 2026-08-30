@@ -125,8 +125,8 @@ fn inside_string_literal(spans: &[(usize, usize)], pos: usize) -> bool {
 
 /// Extract all refs, sources, and config from SQL content in a single pass.
 /// Tries minijinja rendering first; if rendering fails partway (e.g. on an
-/// unknown macro), keeps whatever it recorded up to the failure point and
-/// merges in the regex scan to cover the rest.
+/// unknown macro), or if placeholder values make the result semantically
+/// uncertain, keeps whatever it recorded and merges in the regex scan.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
@@ -141,7 +141,7 @@ pub fn extract_all_with_vars(
     vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> super::jinja::JinjaExtraction {
     let outcome = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars);
-    if outcome.complete {
+    if outcome.complete && outcome.semantic_certain {
         return outcome.extraction;
     }
     let mut ext = outcome.extraction;
@@ -157,8 +157,8 @@ pub fn extract_all_with_vars(
 }
 
 /// Extract all ref() and source() calls from SQL content in a single pass.
-/// Tries minijinja rendering first; if rendering fails partway, merges the
-/// partial result with the regex scan.
+/// Tries minijinja rendering first; if rendering fails partway or relies on a
+/// placeholder runtime value, merges the partial result with the regex scan.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
@@ -653,6 +653,36 @@ mod tests {
         let refs = extract_refs(sql);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "model_dev");
+    }
+
+    #[test]
+    fn test_runtime_env_var_branches_are_merged() {
+        let sql = r#"
+            {% if env_var('REGION') == 'us' %}
+                SELECT * FROM {{ ref('orders_us') }}
+            {% else %}
+                SELECT * FROM {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "orders_us"));
+        assert!(refs.iter().any(|r| r.name == "orders_eu"));
+    }
+
+    #[test]
+    fn test_runtime_target_branches_are_merged() {
+        let sql = r#"
+            {% if target.name == 'us' %}
+                SELECT * FROM {{ ref('orders_us') }}
+            {% else %}
+                SELECT * FROM {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "orders_us"));
+        assert!(refs.iter().any(|r| r.name == "orders_eu"));
     }
 
     #[test]

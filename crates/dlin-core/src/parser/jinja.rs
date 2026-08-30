@@ -4,8 +4,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use minijinja::value::{Kwargs, from_args};
-use minijinja::{Environment, ErrorKind, Value};
+use minijinja::value::{Kwargs, Object, Value, from_args};
+use minijinja::{Environment, ErrorKind};
 
 use super::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
@@ -22,12 +22,16 @@ pub struct JinjaExtraction {
 /// minijinja evaluates function arguments before resolving the callee, so even
 /// when rendering fails (e.g. on an unknown macro) the refs/sources recorded up
 /// to the failure point are valid. `complete` tells the caller whether rendering
-/// finished; if not, the regex fallback should be merged in to cover anything
-/// after the failure point.
+/// finished, while `semantic_certain` tells it whether placeholder runtime
+/// values could have selected the wrong branch. The regex fallback should be
+/// merged whenever either property is false.
 #[derive(Debug, Clone, Default)]
 pub struct JinjaOutcome {
     pub extraction: JinjaExtraction,
     pub complete: bool,
+    /// Whether the extraction is semantically certain rather than merely
+    /// successfully rendered with the placeholder dbt environment.
+    pub(crate) semantic_certain: bool,
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.
@@ -106,22 +110,25 @@ fn json_to_minijinja(v: &serde_json::Value) -> Value {
 /// Compile a dbt SQL template once and render it for both values of
 /// `is_incremental`.
 ///
-/// Returns the extraction together with a flag indicating whether rendering
-/// succeeded. On failure the extraction still holds everything recorded up to
-/// the failure point (minijinja evaluates call arguments before resolving the
+/// Returns the extraction together with render-completion and semantic-certainty
+/// flags. On failure the extraction still holds everything recorded up to the
+/// failure point (minijinja evaluates call arguments before resolving the
 /// callee, so e.g. `{{ unknown_macro(ref('a')) }}` records `ref('a')`).
 fn render_with_incremental(
     sql: &str,
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaOutcome {
-    let ((mut extraction, full_complete), (incremental_extraction, incremental_complete)) =
-        render_with_incremental_passes(sql, macro_prefix, vars);
+    let (
+        (mut extraction, full_complete, full_certain),
+        (incremental_extraction, incremental_complete, incremental_certain),
+    ) = render_with_incremental_passes(sql, macro_prefix, vars);
     merge_extraction(&mut extraction, incremental_extraction);
 
     JinjaOutcome {
         extraction,
         complete: full_complete && incremental_complete,
+        semantic_certain: full_certain && incremental_certain,
     }
 }
 
@@ -131,7 +138,7 @@ fn render_with_incremental_passes(
     sql: &str,
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
-) -> ((JinjaExtraction, bool), (JinjaExtraction, bool)) {
+) -> ((JinjaExtraction, bool, bool), (JinjaExtraction, bool, bool)) {
     let template_source = if macro_prefix.is_empty() {
         sql.to_string()
     } else {
@@ -253,9 +260,6 @@ fn render_with_incremental_passes(
         },
     );
 
-    // this → dummy relation object
-    env.add_global("this", Value::from("__dbt_this__"));
-
     // var() → resolves from dbt_project.yml vars, then default, then truthy sentinel
     let vars_map: HashMap<String, Value> = vars
         .iter()
@@ -280,16 +284,21 @@ fn render_with_incremental_passes(
     );
 
     // env_var() → returns default or empty string
-    env.add_function(
-        "env_var",
-        |args: &[Value]| -> Result<Value, minijinja::Error> {
+    env.add_function("env_var", {
+        let state = render_state.clone();
+        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+            // The placeholder value below cannot determine which branch
+            // dbt will render. Mark uncertainty only when the stub is
+            // actually called; merely registering it must not make every
+            // template fall back to regex extraction.
+            state.semantic_certain.store(false, Ordering::Relaxed);
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
                 Ok(Value::from(""))
             }
-        },
-    );
+        }
+    });
 
     // return() → pass through
     env.add_function(
@@ -306,37 +315,52 @@ fn render_with_incremental_passes(
     );
 
     // run_query → no-op
-    env.add_function(
-        "run_query",
-        |_args: &[Value]| -> Result<Value, minijinja::Error> { Ok(Value::from("")) },
-    );
+    env.add_function("run_query", {
+        let state = render_state.clone();
+        move |_args: &[Value]| -> Result<Value, minijinja::Error> {
+            state.semantic_certain.store(false, Ordering::Relaxed);
+            Ok(Value::from(""))
+        }
+    });
 
     // statement → no-op
-    env.add_function(
-        "statement",
-        |_args: &[Value]| -> Result<Value, minijinja::Error> { Ok(Value::from("")) },
-    );
+    env.add_function("statement", {
+        let state = render_state.clone();
+        move |_args: &[Value]| -> Result<Value, minijinja::Error> {
+            state.semantic_certain.store(false, Ordering::Relaxed);
+            Ok(Value::from(""))
+        }
+    });
 
-    // Common dbt globals
-    env.add_global("adapter", Value::from("__dbt_adapter__"));
-    env.add_global("exceptions", Value::from("__dbt_exceptions__"));
-    env.add_global("api", Value::from("__dbt_api__"));
-    env.add_global("graph", Value::from("__dbt_graph__"));
-    env.add_global("target", Value::from("__dbt_target__"));
+    // Common dbt globals. Runtime objects are wrappers so attribute access is
+    // marked uncertain only when the executable template actually evaluates
+    // it; SQL text, comments, and raw blocks never touch these values.
+    for (name, rendered) in [
+        ("adapter", "__dbt_adapter__"),
+        ("exceptions", "__dbt_exceptions__"),
+        ("graph", "__dbt_graph__"),
+        ("model", "__dbt_model__"),
+        ("modules", "__dbt_modules__"),
+        ("target", "__dbt_target__"),
+        ("this", "__dbt_this__"),
+        ("flags", "__dbt_flags__"),
+    ] {
+        env.add_global(
+            name,
+            Value::from_object(RuntimeGlobal::new(render_state.clone(), rendered)),
+        );
+    }
     env.add_global("invocation_id", Value::from("__dbt_invocation_id__"));
     env.add_global("run_started_at", Value::from("2025-01-01T00:00:00Z"));
-    env.add_global("flags", Value::from("__dbt_flags__"));
-    env.add_global("modules", Value::from("__dbt_modules__"));
     env.add_global("dbt_version", Value::from("1.0.0"));
-    env.add_global("model", Value::from("__dbt_model__"));
     env.add_global("execute", Value::from(true));
 
     let template = match env.template_from_str(&template_source) {
         Ok(template) => template,
         Err(_) => {
             return (
-                (JinjaExtraction::default(), false),
-                (JinjaExtraction::default(), false),
+                (JinjaExtraction::default(), false, false),
+                (JinjaExtraction::default(), false, false),
             );
         }
     };
@@ -345,9 +369,11 @@ fn render_with_incremental_passes(
         render_state
             .is_incremental
             .store(is_incremental, Ordering::Relaxed);
+        render_state.semantic_certain.store(true, Ordering::Relaxed);
         let complete = template.render_captured_to((), std::io::sink()).is_ok();
         let extraction = std::mem::take(&mut *render_state.extraction.lock().unwrap());
-        (extraction, complete)
+        let semantic_certain = render_state.semantic_certain.load(Ordering::Relaxed);
+        (extraction, complete, semantic_certain)
     };
 
     // Compile once, then render each branch independently. Taking the
@@ -363,6 +389,39 @@ fn render_with_incremental_passes(
 struct RenderState {
     is_incremental: AtomicBool,
     extraction: Mutex<JinjaExtraction>,
+    semantic_certain: AtomicBool,
+}
+
+#[derive(Debug)]
+struct RuntimeGlobal {
+    state: Arc<RenderState>,
+    rendered: &'static str,
+}
+
+impl RuntimeGlobal {
+    fn new(state: Arc<RenderState>, rendered: &'static str) -> Self {
+        Self { state, rendered }
+    }
+}
+
+impl Object for RuntimeGlobal {
+    fn get_value(self: &Arc<Self>, _key: &Value) -> Option<Value> {
+        self.state.semantic_certain.store(false, Ordering::Relaxed);
+        None
+    }
+
+    fn get_value_by_str(self: &Arc<Self>, _key: &str) -> Option<Value> {
+        self.state.semantic_certain.store(false, Ordering::Relaxed);
+        None
+    }
+
+    fn is_true(self: &Arc<Self>) -> bool {
+        true
+    }
+
+    fn render(self: &Arc<Self>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.rendered)
+    }
 }
 
 #[cfg(test)]
@@ -676,6 +735,94 @@ mod tests {
     }
 
     #[test]
+    fn test_env_var_call_marks_semantic_uncertainty() {
+        let sql = r#"
+            {% if env_var('REGION') == 'us' %}
+                SELECT * FROM {{ ref('orders_us') }}
+            {% else %}
+                SELECT * FROM {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_runtime_global_attribute_marks_semantic_uncertainty() {
+        let sql = r#"
+            {% if target.name == 'us' %}
+                SELECT * FROM {{ ref('orders_us') }}
+            {% else %}
+                SELECT * FROM {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_runtime_global_item_access_marks_semantic_uncertainty() {
+        let sql = r#"
+            {% if target['name'] == 'us' %}SELECT 1{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_runtime_global_attribute_keeps_undefined_truthiness() {
+        let sql = r#"
+            {% if target.name %}
+                {{ ref('target_true') }}
+            {% else %}
+                {{ ref('target_false') }}
+            {% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "target_false");
+    }
+
+    #[test]
+    fn test_runtime_global_truthiness_matches_sentinel() {
+        let sql = r#"
+            {% if target %}{{ ref('target_true') }}{% else %}{{ ref('target_false') }}{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "target_true");
+    }
+
+    #[test]
+    fn test_runtime_certainty_ignores_non_executable_text() {
+        let sql = r#"
+            -- target.name and env_var('REGION') are SQL text
+            {# target.name and env_var('REGION') are comments #}
+            {% raw %}{{ target.name }} {{ env_var('REGION') }}{% endraw %}
+            {%raw%}{{ target.name }}{%endraw%}
+            SELECT 1
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_runtime_stub_is_only_uncertain_when_called() {
+        let sql = "SELECT env_var('REGION') AS region";
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
     fn test_partial_extraction_salvaged_on_render_failure() {
         // minijinja evaluates call arguments before resolving the callee, so
         // refs passed to an unknown macro are recorded before the failure.
@@ -697,16 +844,20 @@ mod tests {
                 {{ unknown_macro(ref('full_dep')) }}
             {% endif %}
         "#;
-        let ((full, full_complete), (incremental, incremental_complete)) =
-            render_with_incremental_passes(sql, "", &HashMap::new());
+        let (
+            (full, full_complete, full_certain),
+            (incremental, incremental_complete, incremental_certain),
+        ) = render_with_incremental_passes(sql, "", &HashMap::new());
 
         assert!(!full_complete);
+        assert!(full_certain);
         assert_eq!(full.config.materialized.as_deref(), Some("table"));
         assert_eq!(full.config.tags, vec!["full"]);
         assert_eq!(full.refs.len(), 1);
         assert_eq!(full.refs[0].name, "full_dep");
 
         assert!(incremental_complete);
+        assert!(incremental_certain);
         assert_eq!(
             incremental.config.materialized.as_deref(),
             Some("incremental")
