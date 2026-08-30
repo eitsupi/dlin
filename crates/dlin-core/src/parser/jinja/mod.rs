@@ -53,6 +53,11 @@ pub struct JinjaOutcome {
     /// symbol scan. `Some(empty)` means the scan succeeded and found no roots;
     /// `None` means that scan was not performed or could not compile.
     pub(crate) model_macro_roots: Option<std::collections::HashSet<String>>,
+    /// Prefix-aware macro graph computed while analyzing runtime globals.
+    pub(crate) macro_reachability: Option<reachability::MacroReachability>,
+    /// True when prefix reachability could not be analyzed; callers must use
+    /// conservative whole-source recovery in that case.
+    pub(crate) macro_reachability_unknown: bool,
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.
@@ -71,6 +76,18 @@ pub fn extract_via_jinja(sql: &str, macro_prefix: &str) -> JinjaOutcome {
 pub fn extract_via_jinja_with_vars(
     sql: &str,
     macro_prefix: &str,
+    vars: &HashMap<String, serde_json::Value>,
+) -> JinjaOutcome {
+    let prepared = reachability::PreparedMacroPrefix::new(macro_prefix);
+    render::render_with_incremental(sql, &prepared, vars)
+}
+
+/// Extract using a prepared project macro prefix shared by multiple model
+/// extractions. The prepared context is immutable and safe to share across
+/// rayon workers.
+pub(crate) fn extract_via_jinja_with_prepared_prefix(
+    sql: &str,
+    macro_prefix: &reachability::PreparedMacroPrefix,
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaOutcome {
     render::render_with_incremental(sql, macro_prefix, vars)

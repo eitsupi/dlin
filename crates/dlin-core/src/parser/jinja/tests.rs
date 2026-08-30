@@ -2,7 +2,9 @@ use super::render::{render_with_incremental_passes, runtime_analysis};
 use super::source::{inject_macro_runtime_markers, model_macro_definition_spans};
 use super::*;
 use minijinja::{Environment, Value};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Extract and assert the template rendered to completion.
 fn extract_complete(sql: &str, macro_prefix: &str) -> JinjaExtraction {
@@ -441,6 +443,36 @@ fn test_runtime_analysis_keeps_prefix_macro_roots_from_model_scan() {
         analysis.model_macro_roots,
         Some(HashSet::from(["choose".to_owned()]))
     );
+}
+
+#[test]
+fn test_top_level_scalar_does_not_compile_or_mark_inert_local_macros() {
+    let mut sql = String::new();
+    for index in 0..128 {
+        sql.push_str(&format!(
+            "{{% macro inert_{index}() %}}inert{{% endmacro %}}\n"
+        ));
+    }
+    sql.push_str("{% if execute %}selected{% endif %}");
+
+    let analysis = runtime_analysis(&sql, "");
+    assert_eq!(analysis.scalar_macro_compile_count, 0);
+    assert!(analysis.marker_macro_spans.is_empty());
+}
+
+#[test]
+fn test_prepared_prefix_catalog_initializes_once_across_parallel_extractions() {
+    let prefix_source = "{% macro choose() %}{% if execute %}{{ left() }}{% else %}{{ right() }}{% endif %}{% endmacro %}\n"
+        .to_owned()
+        + "{% macro left() %}left{% endmacro %}\n"
+        + "{% macro right() %}right{% endmacro %}\n"
+        + "{% macro unused() %}{% if execute %}unused{% endif %}{% endmacro %}";
+    let prefix = Arc::new(reachability::PreparedMacroPrefix::new(&prefix_source));
+    (0..16).into_par_iter().for_each(|_| {
+        let _ = extract_via_jinja_with_prepared_prefix("{{ choose() }}", &prefix, &HashMap::new());
+    });
+    assert_eq!(prefix.catalog_initializations(), 1);
+    assert_eq!(prefix.initialized_definition_count(), 3);
 }
 
 #[test]

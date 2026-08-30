@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::super::jinja::source::{
-    inside_string_literal, model_macro_definition_spans, string_literal_spans, strip_inert_jinja,
+    ModelMacroSpan, inside_string_literal, model_macro_definition_spans, string_literal_spans,
+    strip_inert_jinja,
 };
 use super::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
@@ -79,13 +80,26 @@ pub(super) fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     extract_refs_regex_scoped(sql, None)
 }
 
+#[cfg(test)]
 pub(super) fn extract_refs_regex_scoped(
     sql: &str,
     macro_scopes: Option<&HashSet<String>>,
 ) -> Vec<RefCall> {
+    extract_refs_and_sources_regex_scoped(sql, macro_scopes).0
+}
+
+/// Extract refs and sources in one cleaned-source/Jinja-block traversal.
+/// Keeping the two result vectors separate preserves the public extraction
+/// shape while avoiding duplicate parsing and string-literal scans in the
+/// fallback path.
+pub(super) fn extract_refs_and_sources_regex_scoped(
+    sql: &str,
+    macro_scopes: Option<&HashSet<String>>,
+) -> (Vec<RefCall>, Vec<SourceCall>) {
     let cleaned = strip_inert_jinja(sql);
     let definitions = macro_scopes.map(|_| model_macro_definition_spans(&cleaned));
     let mut refs = Vec::new();
+    let mut sources = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
         if let Some(scopes) = macro_scopes {
@@ -128,38 +142,6 @@ pub(super) fn extract_refs_regex_scoped(
                 });
             }
         }
-    }
-
-    refs
-}
-
-/// Regex fallback for extracting source() calls.
-/// Scans inside every jinja block, like [`extract_refs_regex`].
-#[cfg(test)]
-pub(super) fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
-    extract_sources_regex_scoped(sql, None)
-}
-
-pub(super) fn extract_sources_regex_scoped(
-    sql: &str,
-    macro_scopes: Option<&HashSet<String>>,
-) -> Vec<SourceCall> {
-    let cleaned = strip_inert_jinja(sql);
-    let definitions = macro_scopes.map(|_| model_macro_definition_spans(&cleaned));
-    let mut sources = Vec::new();
-
-    for block in JINJA_BLOCK.find_iter(&cleaned) {
-        if let Some(scopes) = macro_scopes {
-            let owner = definitions.as_ref().and_then(|definitions| {
-                definitions.iter().find(|definition| {
-                    definition.start <= block.start() && block.start() < definition.end
-                })
-            });
-            if owner.is_some_and(|definition| !scopes.contains(&definition.name)) {
-                continue;
-            }
-        }
-        let literal_spans = string_literal_spans(block.as_str());
         for cap in SOURCE_PATTERN.captures_iter(block.as_str()) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
                 continue;
@@ -171,7 +153,50 @@ pub(super) fn extract_sources_regex_scoped(
         }
     }
 
-    sources
+    (refs, sources)
+}
+
+/// Extract refs from already-selected macro definition slices. Reachability
+/// supplies spans from the original prefix, so successful scoped recovery can
+/// avoid rescanning every unrelated prefix definition and its owner lookup.
+#[cfg(test)]
+pub(super) fn extract_refs_regex_spans(source: &str, spans: &[ModelMacroSpan]) -> Vec<RefCall> {
+    extract_refs_and_sources_regex_spans(source, spans).0
+}
+
+/// Extract refs and sources from selected macro definition slices, cleaning
+/// and scanning each slice only once.
+pub(super) fn extract_refs_and_sources_regex_spans(
+    source: &str,
+    spans: &[ModelMacroSpan],
+) -> (Vec<RefCall>, Vec<SourceCall>) {
+    let mut refs = Vec::new();
+    let mut sources = Vec::new();
+    for span in spans {
+        let Some(definition) = source.get(span.start..span.end) else {
+            continue;
+        };
+        let (definition_refs, definition_sources) =
+            extract_refs_and_sources_regex_scoped(definition, None);
+        refs.extend(definition_refs);
+        sources.extend(definition_sources);
+    }
+    (refs, sources)
+}
+
+/// Regex fallback for extracting source() calls.
+/// Scans inside every jinja block, like [`extract_refs_regex`].
+#[cfg(test)]
+pub(super) fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
+    extract_sources_regex_scoped(sql, None)
+}
+
+#[cfg(test)]
+pub(super) fn extract_sources_regex_scoped(
+    sql: &str,
+    macro_scopes: Option<&HashSet<String>>,
+) -> Vec<SourceCall> {
+    extract_refs_and_sources_regex_scoped(sql, macro_scopes).1
 }
 
 // Matches {{ config(...) }} blocks — captures the inner arguments.

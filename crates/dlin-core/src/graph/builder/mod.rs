@@ -11,10 +11,9 @@ use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::DiscoveredFiles;
 use crate::parser::jinja::JinjaExtraction;
+use crate::parser::jinja::reachability::PreparedMacroPrefix;
 use crate::parser::project::sql_file_stem;
-use crate::parser::sql::{
-    RefCall, SourceCall, extract_all_with_vars, extract_refs_and_sources_with_vars, extract_sources,
-};
+use crate::parser::sql::{RefCall, SourceCall, extract_sources};
 use crate::parser::yaml_schema::{
     ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
     SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
@@ -218,7 +217,7 @@ fn process_model_files(
     files: &DiscoveredFiles,
     project_dir: &Path,
     model_meta: &HashMap<String, project_yaml::YamlModelMeta>,
-    macro_prefix: &str,
+    macro_prefix: &PreparedMacroPrefix,
     disk_cache: &mut cache::ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
@@ -261,8 +260,9 @@ fn process_model_files(
                 .as_deref()
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
 
-            let extraction =
-                sql_content.map(|content| extract_all_with_vars(content, macro_prefix, vars));
+            let extraction = sql_content.map(|content| {
+                crate::parser::sql::extract_all_with_prepared_prefix(content, macro_prefix, vars)
+            });
 
             let columns = sql_content.map(extract_select_columns).unwrap_or_default();
 
@@ -405,7 +405,7 @@ fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-    macro_prefix: &str,
+    macro_prefix: &PreparedMacroPrefix,
     extraction_cache: &ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
@@ -467,7 +467,11 @@ fn process_sql_edges(
             (&cached.0, &cached.1)
         } else {
             let content = read_file(sql_path)?;
-            owned = extract_refs_and_sources_with_vars(&content, macro_prefix, vars);
+            owned = crate::parser::sql::extract_refs_and_sources_with_prepared_prefix(
+                &content,
+                macro_prefix,
+                vars,
+            );
             (&owned.0, &owned.1)
         };
 
@@ -756,6 +760,7 @@ pub fn build_graph(
 ) -> Result<LineageGraph> {
     let mut gb = GraphBuilder::new();
     let macro_prefix = load_macro_prefix(files);
+    let prepared_macro_prefix = PreparedMacroPrefix::new(&macro_prefix);
     let mut disk_cache = if no_cache {
         cache::ExtractionCache::disabled()
     } else if refresh_cache {
@@ -770,7 +775,7 @@ pub fn build_graph(
         files,
         project_dir,
         &yaml_result.model_meta,
-        &macro_prefix,
+        &prepared_macro_prefix,
         &mut disk_cache,
         vars,
         &yaml_result.stem_to_versioned,
@@ -797,7 +802,7 @@ pub fn build_graph(
         &mut gb,
         files,
         project_dir,
-        &macro_prefix,
+        &prepared_macro_prefix,
         &extraction_cache,
         vars,
         &yaml_result.stem_to_versioned,

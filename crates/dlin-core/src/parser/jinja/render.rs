@@ -23,7 +23,7 @@ fn json_to_minijinja(v: &serde_json::Value) -> Value {
 /// callee, so e.g. `{{ unknown_macro(ref('a')) }}` records `ref('a')`).
 pub(super) fn render_with_incremental(
     sql: &str,
-    macro_prefix: &str,
+    macro_prefix: &super::reachability::PreparedMacroPrefix,
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaOutcome {
     let (
@@ -44,15 +44,24 @@ pub(super) fn render_with_incremental(
         }
     }
 
+    let prefix_runtime_uncertain = runtime_analysis.macro_reachability_unknown
+        || runtime_analysis
+            .macro_reachability
+            .as_ref()
+            .is_some_and(|plan| plan.prefix_uses_runtime_scalar);
     JinjaOutcome {
         extraction,
         complete: full_complete && incremental_complete,
-        semantic_certain: full_certain && incremental_certain,
-        model_uncertain: full_model_uncertain || incremental_model_uncertain,
+        semantic_certain: full_certain && incremental_certain && !prefix_runtime_uncertain,
+        model_uncertain: full_model_uncertain
+            || incremental_model_uncertain
+            || prefix_runtime_uncertain,
         uncertain_macro_scopes: full_scopes,
         local_macro_spans: runtime_analysis.macro_spans,
         local_macro_spans_scanned: runtime_analysis.macro_spans_scanned,
         model_macro_roots: runtime_analysis.model_macro_roots,
+        macro_reachability: runtime_analysis.macro_reachability,
+        macro_reachability_unknown: runtime_analysis.macro_reachability_unknown,
     }
 }
 
@@ -62,28 +71,32 @@ type RenderPass = (JinjaExtraction, bool, bool, bool, Vec<String>);
 
 fn render_with_incremental_passes_with_analysis(
     sql: &str,
-    macro_prefix: &str,
+    macro_prefix: &super::reachability::PreparedMacroPrefix,
     vars: &HashMap<String, serde_json::Value>,
 ) -> (RenderPass, RenderPass, RuntimeAnalysis) {
-    let runtime_analysis = runtime_analysis(sql, macro_prefix);
-    let marker_names = (!runtime_analysis.macro_spans.is_empty())
+    let runtime_analysis = runtime_analysis_prepared(sql, macro_prefix);
+    let marker_names = (!runtime_analysis.marker_macro_spans.is_empty())
         .then(|| unique_runtime_macro_markers(sql, macro_prefix));
     let template_source_without_prefix = marker_names.as_ref().map_or_else(
         || sql.to_owned(),
         |(enter_marker, exit_marker)| {
             super::source::inject_macro_runtime_markers(
                 sql,
-                &runtime_analysis.macro_spans,
+                &runtime_analysis.marker_macro_spans,
                 &runtime_analysis.scalar_macro_names,
                 enter_marker,
                 exit_marker,
             )
         },
     );
-    let template_source = if macro_prefix.is_empty() {
+    let template_source = if macro_prefix.source().is_empty() {
         template_source_without_prefix
     } else {
-        format!("{}\n{}", macro_prefix, template_source_without_prefix)
+        format!(
+            "{}\n{}",
+            macro_prefix.source(),
+            template_source_without_prefix
+        )
     };
     let render_state = Arc::new(RenderState::default());
 
@@ -368,8 +381,9 @@ pub(super) fn render_with_incremental_passes(
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
 ) -> (RenderPass, RenderPass) {
+    let prepared = super::reachability::PreparedMacroPrefix::new(macro_prefix);
     let (full_pass, incremental_pass, _) =
-        render_with_incremental_passes_with_analysis(sql, macro_prefix, vars);
+        render_with_incremental_passes_with_analysis(sql, &prepared, vars);
     (full_pass, incremental_pass)
 }
 
@@ -480,44 +494,90 @@ const RUNTIME_SCOPE_HINT_NAMES: [&str; 17] = [
 pub(super) struct RuntimeAnalysis {
     pub(super) uses_runtime_scalar: bool,
     pub(super) macro_spans: Vec<super::source::ModelMacroSpan>,
+    pub(super) marker_macro_spans: Vec<super::source::ModelMacroSpan>,
     pub(super) scalar_macro_names: HashSet<String>,
+    #[cfg(test)]
+    pub(super) scalar_macro_compile_count: usize,
     pub(super) macro_spans_scanned: bool,
     pub(super) model_macro_roots: Option<HashSet<String>>,
+    pub(super) macro_reachability: Option<super::reachability::MacroReachability>,
+    pub(super) macro_reachability_unknown: bool,
 }
 
+#[cfg(test)]
 pub(super) fn runtime_analysis(sql: &str, macro_prefix: &str) -> RuntimeAnalysis {
+    let prepared = super::reachability::PreparedMacroPrefix::new(macro_prefix);
+    runtime_analysis_prepared(sql, &prepared)
+}
+
+fn runtime_analysis_prepared(
+    sql: &str,
+    macro_prefix: &super::reachability::PreparedMacroPrefix,
+) -> RuntimeAnalysis {
     let has_scalar_hint = RUNTIME_SCALAR_NAMES.iter().any(|name| sql.contains(name));
-    if !RUNTIME_SCOPE_HINT_NAMES
+    let prefix_has_scalar = RUNTIME_SCALAR_NAMES
         .iter()
-        .any(|name| sql.contains(name))
-    {
+        .any(|name| macro_prefix.source().contains(name));
+    let has_scope_hint = RUNTIME_SCOPE_HINT_NAMES
+        .iter()
+        .any(|name| sql.contains(name));
+    if !has_scope_hint && !prefix_has_scalar {
         return RuntimeAnalysis {
             uses_runtime_scalar: false,
             macro_spans: Vec::new(),
+            marker_macro_spans: Vec::new(),
             scalar_macro_names: HashSet::new(),
+            #[cfg(test)]
+            scalar_macro_compile_count: 0,
             macro_spans_scanned: false,
             model_macro_roots: None,
+            macro_reachability: None,
+            macro_reachability_unknown: false,
         };
     }
 
     let macro_spans = super::source::model_macro_definition_spans(sql);
+    let prefix_spans = macro_prefix.spans();
+    let model_source = (has_scalar_hint || prefix_has_scalar)
+        .then(|| super::source::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans));
+    let macro_name_candidate = prefix_has_scalar
+        && model_source.as_ref().is_some_and(|source| {
+            macro_spans
+                .iter()
+                .chain(prefix_spans.iter())
+                .any(|definition| source.contains(&definition.name))
+        });
+    if !has_scope_hint && !macro_name_candidate {
+        return RuntimeAnalysis {
+            uses_runtime_scalar: false,
+            macro_spans: Vec::new(),
+            marker_macro_spans: Vec::new(),
+            scalar_macro_names: HashSet::new(),
+            #[cfg(test)]
+            scalar_macro_compile_count: 0,
+            macro_spans_scanned: false,
+            model_macro_roots: None,
+            macro_reachability: None,
+            macro_reachability_unknown: false,
+        };
+    }
+
     let env = Environment::new();
-    let (direct_use, model_macro_roots) = if has_scalar_hint {
-        let model_source =
-            super::source::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
-        match env.template_from_str(&model_source) {
+    let (direct_use, model_macro_roots) = if let Some(model_source) = model_source.as_ref() {
+        match env.template_from_str(model_source) {
             Ok(template) => {
                 let undeclared = template.undeclared_variables(false);
                 let direct_use = RUNTIME_SCALAR_NAMES
                     .iter()
                     .any(|name| undeclared.contains(*name));
-                let prefix_names = super::source::model_macro_definition_spans(macro_prefix)
-                    .into_iter()
-                    .map(|definition| definition.name);
                 let roots = macro_spans
                     .iter()
                     .map(|definition| definition.name.clone())
-                    .chain(prefix_names)
+                    .chain(
+                        prefix_spans
+                            .iter()
+                            .map(|definition| definition.name.clone()),
+                    )
                     .filter(|name| undeclared.contains(name))
                     .collect();
                 (direct_use, Some(roots))
@@ -527,10 +587,29 @@ pub(super) fn runtime_analysis(sql: &str, macro_prefix: &str) -> RuntimeAnalysis
     } else {
         (false, None)
     };
-    let scalar_macro_names = if has_scalar_hint {
+    let scalar_macro_candidates = if has_scalar_hint {
         macro_spans
             .iter()
+            .filter(|definition| {
+                let source = &sql[definition.start..definition.end];
+                RUNTIME_SCALAR_NAMES
+                    .iter()
+                    .any(|name| contains_identifier(source, name))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    #[cfg(test)]
+    let mut scalar_macro_compile_count = 0;
+    let scalar_macro_names = if has_scalar_hint {
+        scalar_macro_candidates
+            .iter()
             .filter_map(|definition| {
+                #[cfg(test)]
+                {
+                    scalar_macro_compile_count += 1;
+                }
                 let template = env
                     .template_from_str(&sql[definition.start..definition.end])
                     .ok()?;
@@ -544,20 +623,68 @@ pub(super) fn runtime_analysis(sql: &str, macro_prefix: &str) -> RuntimeAnalysis
     } else {
         HashSet::new()
     };
+    let marker_macro_spans = macro_spans
+        .iter()
+        .filter(|definition| {
+            let source = &sql[definition.start..definition.end];
+            RUNTIME_SCOPE_HINT_NAMES
+                .iter()
+                .any(|name| contains_identifier(source, name))
+        })
+        .cloned()
+        .collect();
+
+    let (macro_reachability, macro_reachability_unknown) =
+        if prefix_has_scalar && macro_name_candidate {
+            match super::reachability::macro_reachability_with_prepared_prefix(
+                sql,
+                macro_prefix,
+                Some(&macro_spans),
+                model_macro_roots.as_ref(),
+            ) {
+                Some(plan) => (Some(plan), false),
+                None => (None, true),
+            }
+        } else {
+            (None, false)
+        };
 
     RuntimeAnalysis {
         uses_runtime_scalar: direct_use,
         macro_spans,
+        marker_macro_spans,
         scalar_macro_names,
+        #[cfg(test)]
+        scalar_macro_compile_count,
         macro_spans_scanned: true,
         model_macro_roots,
+        macro_reachability,
+        macro_reachability_unknown,
     }
 }
 
-fn unique_runtime_macro_markers(sql: &str, macro_prefix: &str) -> (String, String) {
+fn contains_identifier(source: &str, needle: &str) -> bool {
+    source.match_indices(needle).any(|(start, _)| {
+        let before_is_identifier = source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character == '_' || character.is_alphanumeric());
+        let end = start + needle.len();
+        let after_is_identifier = source[end..]
+            .chars()
+            .next()
+            .is_some_and(|character| character == '_' || character.is_alphanumeric());
+        !before_is_identifier && !after_is_identifier
+    })
+}
+
+fn unique_runtime_macro_markers(
+    sql: &str,
+    macro_prefix: &super::reachability::PreparedMacroPrefix,
+) -> (String, String) {
     const ENTER_BASE: &str = "__dlin_runtime_macro_enter";
     const EXIT_BASE: &str = "__dlin_runtime_macro_exit";
-    let template_source = format!("{macro_prefix}\n{sql}");
+    let template_source = format!("{}\n{sql}", macro_prefix.source());
     for suffix in 0.. {
         let enter = if suffix == 0 {
             ENTER_BASE.to_owned()

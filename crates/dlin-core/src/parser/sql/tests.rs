@@ -1,7 +1,12 @@
+use std::collections::HashSet;
+
 use super::*;
 // Access private fallback directly so the regex path is covered independently
 // of the Jinja extractor (which normally runs first in extract_refs).
 use super::extract_refs_regex;
+use super::recovery::{
+    extract_refs_and_sources_regex_scoped, extract_refs_and_sources_regex_spans,
+};
 
 #[test]
 fn test_single_ref() {
@@ -487,6 +492,152 @@ fn test_prefix_uncertainty_recovers_direct_local_macro_references() {
 }
 
 #[test]
+fn test_called_prefix_execute_branches_are_merged() {
+    let macro_prefix = r#"
+            {% macro choose() %}
+                {% if execute %}{{ ref('prefix_execute_true') }}{% else %}{{ ref('prefix_execute_false') }}{% endif %}
+            {% endmacro %}
+        "#;
+    let sql = "{{ choose() }}";
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "prefix_execute_true"));
+    assert!(refs.iter().any(|r| r.name == "prefix_execute_false"));
+}
+
+#[test]
+fn test_all_local_roots_still_reach_transitive_prefix_execute_macro() {
+    let macro_prefix = r#"
+            {% macro dispatch() %}{{ choose() }}{% endmacro %}
+            {% macro choose() %}
+                {% if execute %}{{ ref('prefix_all_roots_true') }}{% else %}{{ ref('prefix_all_roots_false') }}{% endif %}
+            {% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro wrapper() %}{{ dispatch() }}{% endmacro %}
+            {% macro other() %}{{ ref('other_all_roots') }}{% endmacro %}
+            {{ wrapper() }}{{ other() }}
+        "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "prefix_all_roots_true"));
+    assert!(refs.iter().any(|r| r.name == "prefix_all_roots_false"));
+    assert!(refs.iter().any(|r| r.name == "other_all_roots"));
+}
+
+#[test]
+fn test_transitive_prefix_execute_uncertainty_is_recovered() {
+    let macro_prefix = r#"
+            {% macro dispatch() %}{{ choose() }}{% endmacro %}
+            {% macro choose() %}
+                {% if execute %}{{ ref('prefix_transitive_true') }}{% else %}{{ ref('prefix_transitive_false') }}{% endif %}
+            {% endmacro %}
+        "#;
+    let refs = extract_refs_and_sources("{{ dispatch() }}", macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "prefix_transitive_true"));
+    assert!(refs.iter().any(|r| r.name == "prefix_transitive_false"));
+}
+
+#[test]
+fn test_unused_prefix_scalar_macro_is_not_recovered() {
+    let macro_prefix = r#"
+            {% macro used() %}{{ ref('prefix_used') }}{% endmacro %}
+            {% macro unused() %}
+                {% if execute %}{{ ref('prefix_unused_true') }}{% else %}{{ ref('prefix_unused_false') }}{% endif %}
+            {% endmacro %}
+        "#;
+    let refs = extract_refs_and_sources("{{ used() }}", macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "prefix_used"));
+    assert!(!refs.iter().any(|r| r.name == "prefix_unused_true"));
+    assert!(!refs.iter().any(|r| r.name == "prefix_unused_false"));
+}
+
+#[test]
+fn test_prefix_recovery_uses_only_reachable_definition_spans() {
+    let macro_prefix = r#"
+            {% macro used() %}
+                {% if execute %}{{ ref('prefix_used_true') }}{% else %}{{ ref('prefix_used_false') }}{% endif %}
+            {% endmacro %}
+            {% macro unused() %}{{ ref('prefix_unused') }}{{ source('raw', 'prefix_unused') }}{% endmacro %}
+        "#;
+    let sql = "{{ used() }}";
+    let outcome = super::super::jinja::extract_via_jinja(sql, macro_prefix);
+    let plan = outcome.macro_reachability.as_ref().unwrap();
+    assert_eq!(plan.prefix_scopes, HashSet::from(["used".to_owned()]));
+    assert_eq!(plan.prefix_definition_spans.len(), 1);
+    let refs =
+        super::recovery::extract_refs_regex_spans(macro_prefix, &plan.prefix_definition_spans);
+    assert_eq!(
+        refs.iter()
+            .map(|reference| reference.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["prefix_used_true", "prefix_used_false"]
+    );
+    assert!(
+        !refs
+            .iter()
+            .any(|reference| reference.name == "prefix_unused")
+    );
+}
+
+#[test]
+fn test_duplicate_reachable_prefix_definitions_union_selected_spans() {
+    let macro_prefix = r#"
+            {% macro used() %}{{ ref('prefix_first') }}{% endmacro %}
+            {% macro used() %}{{ ref('prefix_second') }}{% endmacro %}
+        "#;
+    let plan = super::super::jinja::reachability::macro_reachability_with_prefix(
+        "{{ used() }}",
+        macro_prefix,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(plan.prefix_definition_spans.len(), 2);
+    let refs =
+        super::recovery::extract_refs_regex_spans(macro_prefix, &plan.prefix_definition_spans);
+    assert!(
+        refs.iter()
+            .any(|reference| reference.name == "prefix_first")
+    );
+    assert!(
+        refs.iter()
+            .any(|reference| reference.name == "prefix_second")
+    );
+}
+
+#[test]
+fn test_incomplete_render_uses_conservative_whole_prefix_recovery() {
+    let macro_prefix = "{% macro unused_prefix() %}{{ ref('unused_prefix_ref') }}{% endmacro %}";
+    let sql = "{{ missing_macro(ref('model_before_failure')) }}";
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "model_before_failure"));
+    assert!(refs.iter().any(|r| r.name == "unused_prefix_ref"));
+}
+
+#[test]
+fn test_model_uncertainty_selects_prefix_macro_branches_and_sources() {
+    let macro_prefix = r#"
+            {% macro us() %}{{ ref('prefix_us') }}{{ source('raw', 'us') }}{% endmacro %}
+            {% macro eu() %}{{ ref('prefix_eu') }}{{ source('raw', 'eu') }}{% endmacro %}
+        "#;
+    let sql = "{% if execute %}{{ us() }}{% else %}{{ eu() }}{% endif %}";
+    let extracted = extract_all(sql, macro_prefix);
+    assert!(extracted.refs.iter().any(|r| r.name == "prefix_us"));
+    assert!(extracted.refs.iter().any(|r| r.name == "prefix_eu"));
+    assert!(
+        extracted
+            .sources
+            .iter()
+            .any(|s| s.source_name == "raw" && s.table_name == "us")
+    );
+    assert!(
+        extracted
+            .sources
+            .iter()
+            .any(|s| s.source_name == "raw" && s.table_name == "eu")
+    );
+}
+
+#[test]
 fn test_prefix_uncertainty_follows_transitive_local_macro_references() {
     let macro_prefix = r#"
             {% macro dispatch() %}
@@ -756,6 +907,40 @@ fn test_regex_fallback_handles_escaped_quotes_in_strings() {
         extract_refs_regex(r#"{{ unknown_macro("a \"quoted\" ref('fake')") + ref('real') }}"#);
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].name, "real");
+}
+
+#[test]
+fn test_combined_regex_fallback_scans_refs_and_sources_once_semantically() {
+    let sql = r#"
+        -- ref('comment_ref') source('raw', 'comment_source')
+        {% raw %}{{ ref('raw_ref') }}{% endraw %}
+        {{ unknown_macro("ref('string_ref')", ref('real_ref'), source('raw', 'real_source')) }}
+    "#;
+    let (refs, sources) = extract_refs_and_sources_regex_scoped(sql, None);
+    assert_eq!(
+        refs.iter()
+            .map(|reference| reference.name.as_str())
+            .collect::<Vec<_>>(),
+        ["real_ref"]
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| (source.source_name.as_str(), source.table_name.as_str()))
+            .collect::<Vec<_>>(),
+        [("raw", "real_source")]
+    );
+}
+
+#[test]
+fn test_combined_regex_fallback_preserves_duplicate_selected_spans() {
+    let source =
+        "{% macro selected() %}{{ ref('selected') }}{{ source('raw', 'selected') }}{% endmacro %}";
+    let spans = super::super::jinja::source::model_macro_definition_spans(source);
+    let (refs, sources) =
+        extract_refs_and_sources_regex_spans(source, &[spans[0].clone(), spans[0].clone()]);
+    assert_eq!(refs.len(), 2);
+    assert_eq!(sources.len(), 2);
 }
 
 #[test]

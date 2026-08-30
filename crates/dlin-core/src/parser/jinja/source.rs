@@ -47,7 +47,7 @@ pub(crate) fn strip_macro_definitions_for_runtime_analysis(
 /// Jinja comments, raw blocks, quoted terminators, and nested statement blocks
 /// so a source transformation cannot modify inert template text.
 /// The offsets are byte positions in the original source.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModelMacroSpan {
     pub(crate) start: usize,
     pub(crate) end: usize,

@@ -1,10 +1,151 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use minijinja::Environment;
 
 use super::source::{
     ModelMacroSpan, model_macro_definition_spans, strip_macro_definitions_for_runtime_analysis,
 };
+
+const RUNTIME_SCALAR_NAMES: [&str; 4] =
+    ["execute", "dbt_version", "invocation_id", "run_started_at"];
+
+/// Immutable project-level macro prefix state shared by model extraction.
+/// Definition spans are collected eagerly, while MiniJinja free-symbol
+/// analysis is initialized only when a runtime reachability query needs it.
+#[derive(Debug)]
+pub(crate) struct PreparedMacroPrefix {
+    source: String,
+    spans: Vec<ModelMacroSpan>,
+    catalog: OnceLock<Option<PrefixCatalog>>,
+    catalog_initializations: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct PrefixCatalog {
+    definitions: Vec<PrefixMacroDefinition>,
+    definitions_by_name: HashMap<String, Vec<usize>>,
+}
+
+#[derive(Debug)]
+struct PrefixMacroDefinition {
+    span: ModelMacroSpan,
+    analysis: OnceLock<Option<PrefixMacroAnalysis>>,
+}
+
+#[derive(Debug)]
+struct PrefixMacroAnalysis {
+    free_symbols: HashSet<String>,
+    uses_runtime_scalar: bool,
+}
+
+impl PreparedMacroPrefix {
+    pub(crate) fn new(source: &str) -> Self {
+        Self {
+            source: source.to_owned(),
+            spans: model_macro_definition_spans(source),
+            catalog: OnceLock::new(),
+            catalog_initializations: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn spans(&self) -> &[ModelMacroSpan] {
+        &self.spans
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catalog_initializations(&self) -> usize {
+        self.catalog_initializations.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialized_definition_count(&self) -> usize {
+        self.catalog
+            .get()
+            .and_then(Option::as_ref)
+            .map_or(0, |catalog| {
+                catalog
+                    .definitions
+                    .iter()
+                    .filter(|definition| definition.analysis.get().is_some())
+                    .count()
+            })
+    }
+
+    fn catalog(&self) -> Option<&PrefixCatalog> {
+        self.catalog
+            .get_or_init(|| {
+                self.catalog_initializations.fetch_add(1, Ordering::Relaxed);
+                build_prefix_catalog(&self.spans)
+            })
+            .as_ref()
+    }
+}
+
+fn build_prefix_catalog(spans: &[ModelMacroSpan]) -> Option<PrefixCatalog> {
+    let mut definitions = Vec::with_capacity(spans.len());
+    for span in spans {
+        definitions.push(PrefixMacroDefinition {
+            span: span.clone(),
+            analysis: OnceLock::new(),
+        });
+    }
+    let mut definitions_by_name = HashMap::new();
+    for (index, definition) in definitions.iter().enumerate() {
+        definitions_by_name
+            .entry(definition.span.name.clone())
+            .or_insert_with(Vec::new)
+            .push(index);
+    }
+    Some(PrefixCatalog {
+        definitions,
+        definitions_by_name,
+    })
+}
+
+impl PrefixMacroDefinition {
+    fn analysis(&self, source: &str) -> Option<&PrefixMacroAnalysis> {
+        self.analysis
+            .get_or_init(|| build_prefix_macro_analysis(source, &self.span))
+            .as_ref()
+    }
+}
+
+fn build_prefix_macro_analysis(source: &str, span: &ModelMacroSpan) -> Option<PrefixMacroAnalysis> {
+    let definition = source.get(span.start..span.end)?;
+    let env = Environment::new();
+    let template = env.template_from_str(definition).ok()?;
+    let free_symbols = template.undeclared_variables(false);
+    let uses_runtime_scalar = free_symbols
+        .iter()
+        .any(|symbol| RUNTIME_SCALAR_NAMES.contains(&symbol.as_str()));
+    Some(PrefixMacroAnalysis {
+        free_symbols,
+        uses_runtime_scalar,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MacroReachability {
+    pub(crate) local_scopes: HashSet<String>,
+    /// Source spans for every reachable local definition. Duplicate macro
+    /// names intentionally retain all definitions for conservative recovery.
+    pub(crate) local_definition_spans: Vec<ModelMacroSpan>,
+    pub(crate) prefix_scopes: HashSet<String>,
+    /// Source spans for every reachable prefix definition. Duplicate macro
+    /// names intentionally retain all definitions for conservative recovery.
+    pub(crate) prefix_definition_spans: Vec<ModelMacroSpan>,
+    pub(crate) local_macro_count: usize,
+    pub(crate) prefix_macro_count: usize,
+    pub(crate) prefix_uses_runtime_scalar: bool,
+}
 
 /// Compute the local macro definitions that can be reached from the model
 /// source and reachable project macros using MiniJinja's free-symbol analysis.
@@ -16,27 +157,137 @@ use super::source::{
 /// conservative whole-model fallback instead. `macro_prefix` is analyzed only
 /// for macro names that the model can reach, so unrelated project macros do
 /// not incur a MiniJinja compilation.
-pub(crate) fn reachable_local_macros_with_prefix(
+#[cfg(test)]
+fn reachable_local_macros_with_prefix(
     sql: &str,
     macro_prefix: &str,
     known_spans: Option<&[ModelMacroSpan]>,
     known_roots: Option<&HashSet<String>>,
 ) -> Option<(HashSet<String>, usize)> {
-    reachable_local_macros_with_status_and_prefix(sql, macro_prefix, known_spans, known_roots)
-        .map(|(reachable, local_macro_count, _, _)| (reachable, local_macro_count))
+    macro_reachability_with_prefix(sql, macro_prefix, known_spans, known_roots)
+        .map(|plan| (plan.local_scopes, plan.local_macro_count))
 }
 
+#[cfg(test)]
 fn reachable_local_macros_with_status_and_prefix(
     sql: &str,
     macro_prefix: &str,
     known_spans: Option<&[ModelMacroSpan]>,
     known_roots: Option<&HashSet<String>>,
 ) -> Option<(HashSet<String>, usize, bool, usize)> {
+    macro_reachability_with_prefix_with_status(sql, macro_prefix, known_spans, known_roots).map(
+        |(plan, root_compile_performed, definition_compile_count)| {
+            (
+                plan.local_scopes,
+                plan.local_macro_count,
+                root_compile_performed,
+                definition_compile_count,
+            )
+        },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn macro_reachability_with_prefix(
+    sql: &str,
+    macro_prefix: &str,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+) -> Option<MacroReachability> {
+    macro_reachability_with_prefix_and_spans(sql, macro_prefix, known_spans, None, known_roots)
+}
+
+/// Variant of [`macro_reachability_with_prefix`] that reuses prefix spans
+/// discovered by runtime analysis. `None` keeps the standalone behavior and
+/// scans the prefix source here.
+#[cfg(test)]
+pub(crate) fn macro_reachability_with_prefix_and_spans(
+    sql: &str,
+    macro_prefix: &str,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_prefix_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+) -> Option<MacroReachability> {
+    macro_reachability_with_prefix_with_status_and_spans(
+        sql,
+        macro_prefix,
+        known_spans,
+        known_prefix_spans,
+        known_roots,
+    )
+    .map(|(plan, _, _)| plan)
+}
+
+/// Compute reachability using an immutable project-level prefix catalog. The
+/// catalog's MiniJinja analysis is shared across all models in a build.
+pub(crate) fn macro_reachability_with_prepared_prefix(
+    sql: &str,
+    macro_prefix: &PreparedMacroPrefix,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+) -> Option<MacroReachability> {
+    let catalog = macro_prefix.catalog()?;
+    macro_reachability_with_status_and_catalog(
+        sql,
+        macro_prefix.source(),
+        known_spans,
+        Some(macro_prefix.spans()),
+        known_roots,
+        Some(catalog),
+    )
+    .map(|(plan, _, _)| plan)
+}
+
+#[cfg(test)]
+fn macro_reachability_with_prefix_with_status(
+    sql: &str,
+    macro_prefix: &str,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+) -> Option<(MacroReachability, bool, usize)> {
+    macro_reachability_with_prefix_with_status_and_spans(
+        sql,
+        macro_prefix,
+        known_spans,
+        None,
+        known_roots,
+    )
+}
+
+#[cfg(test)]
+fn macro_reachability_with_prefix_with_status_and_spans(
+    sql: &str,
+    macro_prefix: &str,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_prefix_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+) -> Option<(MacroReachability, bool, usize)> {
+    macro_reachability_with_status_and_catalog(
+        sql,
+        macro_prefix,
+        known_spans,
+        known_prefix_spans,
+        known_roots,
+        None,
+    )
+}
+
+fn macro_reachability_with_status_and_catalog(
+    sql: &str,
+    macro_prefix: &str,
+    known_spans: Option<&[ModelMacroSpan]>,
+    known_prefix_spans: Option<&[ModelMacroSpan]>,
+    known_roots: Option<&HashSet<String>>,
+    prefix_catalog: Option<&PrefixCatalog>,
+) -> Option<(MacroReachability, bool, usize)> {
     let spans = known_spans.map_or_else(
         || model_macro_definition_spans(sql),
         <[ModelMacroSpan]>::to_vec,
     );
-    let prefix_spans = model_macro_definition_spans(macro_prefix);
+    let prefix_spans = known_prefix_spans.map_or_else(
+        || model_macro_definition_spans(macro_prefix),
+        <[ModelMacroSpan]>::to_vec,
+    );
     if spans.iter().any(|span| !valid_span(sql, span))
         || prefix_spans
             .iter()
@@ -63,73 +314,119 @@ fn reachable_local_macros_with_status_and_prefix(
         (free_local_symbols(&env, &model_source, &all_names)?, true)
     };
     let local_roots: HashSet<String> = roots.intersection(&local_names).cloned().collect();
-    // Every local definition is already a root, so expanding definitions can
-    // add no names. The non-zero guard keeps zero-macro results scoped-empty.
-    if local_macro_count > 0 && local_roots.len() == local_macro_count {
-        return Some((local_roots, local_macro_count, root_compile_performed, 0));
+    // Every local definition is already a root, so local expansion can be
+    // skipped. Prefix roots still need expansion to recover prefix ownership
+    // and scalar uncertainty.
+    let local_roots_cover_all = local_macro_count > 0 && local_roots.len() == local_macro_count;
+    let mut definitions_by_name = HashMap::<String, Vec<&str>>::new();
+    for span in &spans {
+        let definition = &sql[span.start..span.end];
+        // When every local macro is already a root, only local definitions
+        // that could introduce a new prefix edge need expansion. This keeps
+        // the dense no-prefix case at zero local definition compiles while
+        // preserving local -> prefix -> local scalar reachability.
+        if !local_roots_cover_all || prefix_names.iter().any(|name| definition.contains(name)) {
+            definitions_by_name
+                .entry(span.name.clone())
+                .or_default()
+                .push(definition);
+        }
     }
-    // Partial traversal needs indexed definitions so each reachable name is
-    // expanded in O(number of definitions for that name), not O(all spans).
-    let definitions_by_name = spans.iter().enumerate().fold(
-        HashMap::<String, Vec<usize>>::new(),
-        |mut definitions, (index, span)| {
-            definitions
+    let mut prefix_definitions_by_name = HashMap::<String, Vec<&str>>::new();
+    if prefix_catalog.is_none() {
+        for span in &prefix_spans {
+            prefix_definitions_by_name
                 .entry(span.name.clone())
                 .or_default()
-                .push(index);
-            definitions
-        },
-    );
-    let mut prefix_definitions_by_name = prefix_spans.iter().enumerate().fold(
-        HashMap::<String, Vec<usize>>::new(),
-        |mut definitions, (index, span)| {
-            definitions
-                .entry(span.name.clone())
-                .or_default()
-                .push(index);
-            definitions
-        },
-    );
+                .push(&macro_prefix[span.start..span.end]);
+        }
+    }
     let mut reachable = local_roots;
     let mut pending: VecDeque<String> = roots.into_iter().collect();
     let mut expanded = HashSet::new();
     let mut definition_compile_count = 0;
+    let mut prefix_uses_runtime_scalar = false;
     while let Some(name) = pending.pop_front() {
         if !expanded.insert(name.clone()) {
             continue;
         }
         // Compile only definitions that are reachable from the model. If a
         // name is duplicated, conservatively union every definition under it.
-        let definitions = if let Some(indices) = definitions_by_name.get(&name) {
-            indices
-                .iter()
-                .map(|index| &sql[spans[*index].start..spans[*index].end])
-                .collect::<Vec<_>>()
-        } else if let Some(indices) = prefix_definitions_by_name.remove(&name) {
-            indices
-                .iter()
-                .map(|index| &macro_prefix[prefix_spans[*index].start..prefix_spans[*index].end])
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        for definition in definitions {
-            let (dependencies, compiled) =
-                local_macro_dependencies_with_status(&env, definition, &name, &all_names)?;
-            definition_compile_count += usize::from(compiled);
-            for dependency in dependencies {
-                if local_names.contains(&dependency) {
-                    reachable.insert(dependency.clone());
+        if let Some(definitions) = definitions_by_name.remove(&name) {
+            for definition in definitions {
+                let (dependencies, compiled, _uses_runtime_scalar) =
+                    macro_dependencies_with_status(&env, definition, &name, &all_names)?;
+                definition_compile_count += usize::from(compiled);
+                for dependency in dependencies {
+                    if local_names.contains(&dependency) {
+                        reachable.insert(dependency.clone());
+                    }
+                    if all_names.contains(&dependency) {
+                        pending.push_back(dependency);
+                    }
                 }
-                if all_names.contains(&dependency) {
-                    pending.push_back(dependency);
+            }
+        }
+        if let Some(definitions) = prefix_definitions_by_name.remove(&name) {
+            for definition in definitions {
+                let (dependencies, compiled, uses_runtime_scalar) =
+                    macro_dependencies_with_status(&env, definition, &name, &all_names)?;
+                definition_compile_count += usize::from(compiled);
+                prefix_uses_runtime_scalar |= uses_runtime_scalar;
+                for dependency in dependencies {
+                    if local_names.contains(&dependency) {
+                        reachable.insert(dependency.clone());
+                    }
+                    if all_names.contains(&dependency) {
+                        pending.push_back(dependency);
+                    }
+                }
+            }
+        }
+        if let Some(prefix_catalog) = prefix_catalog
+            && let Some(indices) = prefix_catalog.definitions_by_name.get(&name)
+        {
+            for index in indices {
+                let definition = &prefix_catalog.definitions[*index];
+                let analysis = definition.analysis(macro_prefix)?;
+                let dependencies = analysis
+                    .free_symbols
+                    .intersection(&all_names)
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                definition_compile_count += 1;
+                prefix_uses_runtime_scalar |= analysis.uses_runtime_scalar;
+                for dependency in dependencies {
+                    if local_names.contains(&dependency) {
+                        reachable.insert(dependency.clone());
+                    }
+                    if all_names.contains(&dependency) {
+                        pending.push_back(dependency);
+                    }
                 }
             }
         }
     }
+    let local_definition_spans = spans
+        .iter()
+        .filter(|span| reachable.contains(&span.name))
+        .cloned()
+        .collect();
+    let prefix_scopes: HashSet<String> = expanded.intersection(&prefix_names).cloned().collect();
+    let prefix_definition_spans = prefix_spans
+        .into_iter()
+        .filter(|span| prefix_scopes.contains(&span.name))
+        .collect();
     Some((
-        reachable,
-        local_macro_count,
+        MacroReachability {
+            local_scopes: reachable,
+            local_definition_spans,
+            prefix_scopes,
+            prefix_definition_spans,
+            local_macro_count,
+            prefix_macro_count: prefix_names.len(),
+            prefix_uses_runtime_scalar,
+        },
         root_compile_performed,
         definition_compile_count,
     ))
@@ -157,19 +454,43 @@ fn free_local_symbols(
     )
 }
 
+fn macro_dependencies_with_status(
+    env: &Environment<'_>,
+    source: &str,
+    macro_name: &str,
+    local_names: &HashSet<String>,
+) -> Option<(HashSet<String>, bool, bool)> {
+    if !local_names
+        .iter()
+        .any(|name| name != macro_name && source.contains(name))
+        && !RUNTIME_SCALAR_NAMES
+            .iter()
+            .any(|name| source.contains(name))
+    {
+        return Some((HashSet::new(), false, false));
+    }
+    let template = env.template_from_str(source).ok()?;
+    let undeclared = template.undeclared_variables(false);
+    let dependencies = undeclared
+        .iter()
+        .filter(|symbol| local_names.contains(*symbol))
+        .cloned()
+        .collect();
+    let uses_runtime_scalar = undeclared
+        .iter()
+        .any(|symbol| RUNTIME_SCALAR_NAMES.contains(&symbol.as_str()));
+    Some((dependencies, true, uses_runtime_scalar))
+}
+
+#[cfg(test)]
 fn local_macro_dependencies_with_status(
     env: &Environment<'_>,
     source: &str,
     macro_name: &str,
     local_names: &HashSet<String>,
 ) -> Option<(HashSet<String>, bool)> {
-    if !local_names
-        .iter()
-        .any(|name| name != macro_name && source.contains(name))
-    {
-        return Some((HashSet::new(), false));
-    }
-    free_local_symbols(env, source, local_names).map(|dependencies| (dependencies, true))
+    macro_dependencies_with_status(env, source, macro_name, local_names)
+        .map(|(dependencies, compiled, _)| (dependencies, compiled))
 }
 
 #[cfg(test)]
@@ -308,6 +629,19 @@ mod tests {
                 .unwrap();
         assert!(dependencies.is_empty());
         assert!(!compiled);
+    }
+
+    #[test]
+    fn unused_uncompilable_prefix_definition_does_not_poison_reachable_analysis() {
+        let source = "{% macro used() %}used{% endmacro %}\n".to_owned()
+            + "{% macro unused() %}{% invalid_statement %}{% endmacro %}";
+        let prepared = PreparedMacroPrefix::new(&source);
+        let roots = HashSet::from(["used".to_owned()]);
+        let plan =
+            macro_reachability_with_prepared_prefix("{{ used() }}", &prepared, None, Some(&roots))
+                .unwrap();
+        assert_eq!(plan.prefix_scopes, HashSet::from(["used".to_owned()]));
+        assert_eq!(prepared.initialized_definition_count(), 1);
     }
 
     #[test]

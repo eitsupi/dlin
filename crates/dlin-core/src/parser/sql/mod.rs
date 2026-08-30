@@ -41,29 +41,94 @@ pub fn extract_all_with_vars(
     macro_prefix: &str,
     vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> super::jinja::JinjaExtraction {
-    let outcome = super::jinja::extract_via_jinja_with_vars(sql, macro_prefix, vars);
+    let prepared = super::jinja::reachability::PreparedMacroPrefix::new(macro_prefix);
+    extract_all_with_prepared_prefix(sql, &prepared, vars)
+}
+
+pub(crate) fn extract_all_with_prepared_prefix(
+    sql: &str,
+    macro_prefix: &super::jinja::reachability::PreparedMacroPrefix,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> super::jinja::JinjaExtraction {
+    let outcome = super::jinja::extract_via_jinja_with_prepared_prefix(sql, macro_prefix, vars);
     if outcome.complete && outcome.semantic_certain {
         return outcome.extraction;
     }
-    let scoped_macro_names = regex_fallback_macro_scopes(sql, macro_prefix, &outcome);
+    let fallback_scopes = regex_fallback_scopes(sql, macro_prefix, &outcome);
     let mut ext = outcome.extraction;
+    let (model_scopes, model_spans, prefix_scopes, prefix_spans) = fallback_scopes
+        .map(|scopes| {
+            (
+                scopes.model,
+                scopes.model_spans,
+                scopes.prefix,
+                scopes.prefix_spans,
+            )
+        })
+        .unwrap_or((None, None, None, None));
+    let (refs, sources) = model_spans.map_or_else(
+        || recovery::extract_refs_and_sources_regex_scoped(sql, model_scopes.as_ref()),
+        |spans| {
+            let all_spans = outcome.local_macro_spans.as_slice();
+            let model_source =
+                super::jinja::source::strip_macro_definitions_for_runtime_analysis(sql, all_spans);
+            let (mut refs, mut sources) =
+                recovery::extract_refs_and_sources_regex_scoped(&model_source, None);
+            let (local_refs, local_sources) =
+                recovery::extract_refs_and_sources_regex_spans(sql, &spans);
+            refs.extend(local_refs);
+            sources.extend(local_sources);
+            (refs, sources)
+        },
+    );
     super::jinja::merge_extraction(
         &mut ext,
         super::jinja::JinjaExtraction {
-            refs: recovery::extract_refs_regex_scoped(sql, scoped_macro_names.as_ref()),
-            sources: recovery::extract_sources_regex_scoped(sql, scoped_macro_names.as_ref()),
+            refs,
+            sources,
             config: recovery::extract_config_regex(sql),
+        },
+    );
+    let (prefix_refs, prefix_sources) = prefix_spans.as_ref().map_or_else(
+        || {
+            recovery::extract_refs_and_sources_regex_scoped(
+                macro_prefix.source(),
+                prefix_scopes.as_ref(),
+            )
+        },
+        |spans| recovery::extract_refs_and_sources_regex_spans(macro_prefix.source(), spans),
+    );
+    super::jinja::merge_extraction(
+        &mut ext,
+        super::jinja::JinjaExtraction {
+            refs: prefix_refs,
+            sources: prefix_sources,
+            config: SqlConfig::default(),
         },
     );
     ext
 }
 
-fn regex_fallback_macro_scopes(
+struct RegexFallbackScopes {
+    model: Option<HashSet<String>>,
+    /// Selected local definition spans for partial model recovery. `None`
+    /// means whole-model scan; `Some(empty)` means only top-level model SQL.
+    model_spans: Option<Vec<super::jinja::source::ModelMacroSpan>>,
+    prefix: Option<HashSet<String>>,
+    /// Selected prefix definition spans for scoped recovery. `None` means a
+    /// conservative whole-prefix scan; `Some(empty)` means scan no prefix.
+    prefix_spans: Option<Vec<super::jinja::source::ModelMacroSpan>>,
+}
+
+fn regex_fallback_scopes(
     sql: &str,
-    macro_prefix: &str,
+    macro_prefix: &super::jinja::reachability::PreparedMacroPrefix,
     outcome: &super::jinja::JinjaOutcome,
-) -> Option<HashSet<String>> {
+) -> Option<RegexFallbackScopes> {
     if !outcome.complete {
+        // A failed render has incomplete execution provenance: an unvisited
+        // prefix macro may still have been reachable before the failure.
+        // Whole-prefix recovery is therefore intentionally conservative.
         return None;
     }
     if outcome.model_uncertain {
@@ -71,34 +136,81 @@ fn regex_fallback_macro_scopes(
         // execute in the placeholder render. Build the symbol graph only
         // on this path; complete certain and macro-local-only renders do
         // not pay for another MiniJinja compilation pass.
-        return match super::jinja::reachability::reachable_local_macros_with_prefix(
-            sql,
-            macro_prefix,
-            outcome
-                .local_macro_spans_scanned
-                .then_some(outcome.local_macro_spans.as_slice()),
-            outcome.model_macro_roots.as_ref(),
-        ) {
-            Some((mut scopes, local_macro_count)) => {
+        let plan = if outcome.macro_reachability_unknown {
+            None
+        } else {
+            outcome.macro_reachability.clone().or_else(|| {
+                super::jinja::reachability::macro_reachability_with_prepared_prefix(
+                    sql,
+                    macro_prefix,
+                    outcome
+                        .local_macro_spans_scanned
+                        .then_some(outcome.local_macro_spans.as_slice()),
+                    outcome.model_macro_roots.as_ref(),
+                )
+            })
+        };
+        return match plan {
+            Some(plan) => {
+                let mut scopes = plan.local_scopes;
                 scopes.extend(outcome.uncertain_macro_scopes.iter().cloned());
                 // A scoped scan of every local macro has the same result as
                 // the conservative whole-model scan, but avoids an owner
                 // lookup for every Jinja block. Keep zero macros scoped-empty
                 // so model-level recovery remains isolated from definitions.
-                if local_macro_count > 0 && scopes.len() == local_macro_count {
+                let model = if plan.local_macro_count > 0 && scopes.len() == plan.local_macro_count
+                {
                     None
                 } else {
                     Some(scopes)
-                }
+                };
+                let model_spans = if model.is_none() {
+                    None
+                } else {
+                    Some(plan.local_definition_spans)
+                };
+                let prefix = if plan.prefix_macro_count > 0
+                    && plan.prefix_scopes.len() == plan.prefix_macro_count
+                {
+                    None
+                } else {
+                    Some(plan.prefix_scopes)
+                };
+                let prefix_spans = if prefix.is_none() {
+                    None
+                } else {
+                    Some(plan.prefix_definition_spans)
+                };
+                Some(RegexFallbackScopes {
+                    model,
+                    model_spans,
+                    prefix,
+                    prefix_spans,
+                })
             }
             None => None,
         };
     }
     if !outcome.uncertain_macro_scopes.is_empty() {
-        Some(outcome.uncertain_macro_scopes.iter().cloned().collect())
+        Some(RegexFallbackScopes {
+            model: Some(outcome.uncertain_macro_scopes.iter().cloned().collect()),
+            model_spans: None,
+            prefix: Some(HashSet::new()),
+            prefix_spans: Some(Vec::new()),
+        })
     } else {
         None
     }
+}
+
+#[cfg(test)]
+fn regex_fallback_macro_scopes(
+    sql: &str,
+    macro_prefix: &str,
+    outcome: &super::jinja::JinjaOutcome,
+) -> Option<HashSet<String>> {
+    let prepared = super::jinja::reachability::PreparedMacroPrefix::new(macro_prefix);
+    regex_fallback_scopes(sql, &prepared, outcome).and_then(|scopes| scopes.model)
 }
 
 /// Extract all ref() and source() calls from SQL content in a single pass.
@@ -122,6 +234,15 @@ pub fn extract_refs_and_sources_with_vars(
     vars: &std::collections::HashMap<String, serde_json::Value>,
 ) -> (Vec<RefCall>, Vec<SourceCall>) {
     let ext = extract_all_with_vars(sql, macro_prefix, vars);
+    (ext.refs, ext.sources)
+}
+
+pub(crate) fn extract_refs_and_sources_with_prepared_prefix(
+    sql: &str,
+    macro_prefix: &super::jinja::reachability::PreparedMacroPrefix,
+    vars: &std::collections::HashMap<String, serde_json::Value>,
+) -> (Vec<RefCall>, Vec<SourceCall>) {
+    let ext = extract_all_with_prepared_prefix(sql, macro_prefix, vars);
     (ext.refs, ext.sources)
 }
 
