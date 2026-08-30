@@ -197,6 +197,126 @@ fn test_manifest_load_report_distinguishes_future_schema_and_parse_error() {
 }
 
 #[test]
+fn test_manifest_load_report_rejects_duplicate_nodes() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            },
+            "nodes": {},
+            "nodes": {}
+        }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(report.manifest.is_none());
+    assert_eq!(
+        report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::ParseError)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn test_manifest_load_report_preserves_metadata_diagnostics_on_decode_error() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": 1.8
+            },
+            "nodes": []
+        }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(report.manifest.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.kind == ManifestDiagnosticKind::InvalidDbtVersion })
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::ParseError)
+    );
+}
+
+#[test]
+fn test_manifest_load_report_preserves_metadata_diagnostics_on_node_decode_error() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": 1.8
+            },
+            "nodes": {"model.proj.bad": {}}
+        }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(report.manifest.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.kind == ManifestDiagnosticKind::InvalidDbtVersion })
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::ParseError)
+    );
+}
+
+#[test]
+fn test_manifest_load_report_keeps_missing_metadata_diagnostics_on_data_error() {
+    let report = load_manifest_report_from_bytes(br#"{"nodes": []}"#, Path::new("manifest.json"));
+    assert!(report.manifest.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.kind == ManifestDiagnosticKind::MissingSchemaVersion })
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.kind == ManifestDiagnosticKind::MissingDbtVersion })
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == ManifestDiagnosticKind::ParseError)
+    );
+}
+
+#[test]
+fn test_manifest_load_report_does_not_treat_truncated_json_as_data_error() {
+    let report = load_manifest_report_from_bytes(
+        br#"{
+            "metadata": {
+                "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12/manifest.json",
+                "dbt_version": "1.8.0"
+            }"#,
+        Path::new("manifest.json"),
+    );
+    assert!(report.manifest.is_none());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].kind,
+        ManifestDiagnosticKind::ParseError
+    );
+}
+
+#[test]
 fn test_parse_schema_number_requires_manifest_uri_suffix() {
     assert_eq!(
         parse_schema_number("https://schemas.getdbt.com/dbt/manifest/v12.json"),

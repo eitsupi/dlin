@@ -258,9 +258,11 @@ const KNOWN_RESOURCE_MAP_KEYS: &[&str] = &[
 pub(super) fn load_manifest_compat_from_bytes(
     content: &[u8],
 ) -> std::result::Result<Manifest, serde_json::Error> {
-    let (mut manifest, observations) = decode_manifest(content)?.ok_or_else(|| {
+    let decoded = decode_manifest(content)?.ok_or_else(|| {
         <serde_json::Error as serde::de::Error>::custom("manifest artifact must be a JSON object")
     })?;
+    let (mut manifest, observations) = decoded
+        .map_err(|failure| <serde_json::Error as serde::de::Error>::custom(failure.error))?;
     enrich_manifest_observations_inner(&mut manifest, observations);
     Ok(manifest)
 }
@@ -281,8 +283,13 @@ pub fn load_manifest_report(manifest_path: &Path) -> Result<ManifestLoadReport> 
 /// Parse manifest bytes into a report. This function never panics and returns a
 /// parse diagnostic for invalid JSON instead of conflating it with warnings.
 pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> ManifestLoadReport {
-    let (mut manifest, mut observations) = match decode_manifest(content) {
-        Ok(Some((manifest, observations))) => (manifest, observations),
+    let (mut manifest, mut observations, decode_error) = match decode_manifest(content) {
+        Ok(Some(Ok((manifest, observations)))) => (manifest, observations, None),
+        Ok(Some(Err(failure))) => (
+            Manifest::default(),
+            failure.observations,
+            Some(failure.error),
+        ),
         Ok(None) => {
             return ManifestLoadReport {
                 manifest: None,
@@ -494,6 +501,21 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             &mut diagnosed_resources,
             raw_schema.as_deref(),
         );
+    }
+    if let Some(error) = decode_error {
+        diagnostics.push(ManifestDiagnostic {
+            kind: ManifestDiagnosticKind::ParseError,
+            severity: ManifestDiagnosticSeverity::Error,
+            message: format!("failed to decode manifest resources: {error}"),
+            hint: Some("Check that known resource maps have the shape emitted by dbt".to_string()),
+            raw_resource: None,
+            raw_type: None,
+            schema: raw_schema,
+        });
+        return ManifestLoadReport {
+            manifest: None,
+            diagnostics,
+        };
     }
     manifest.metadata.dbt_schema_version_number = schema_number;
     enrich_manifest_observations_inner(&mut manifest, observations);

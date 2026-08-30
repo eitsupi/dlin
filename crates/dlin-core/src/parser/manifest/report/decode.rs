@@ -135,10 +135,20 @@ fn inspect_unknown_map(map_name: &str, value: &Value, observations: &mut Manifes
     }
 }
 
-struct ManifestVisitor;
+struct ManifestVisitor<'a> {
+    observations: &'a mut ManifestObservations,
+}
 
-impl<'de> Visitor<'de> for ManifestVisitor {
-    type Value = Option<(Manifest, ManifestObservations)>;
+pub(super) struct DecodeFailure {
+    pub(super) error: String,
+    pub(super) observations: ManifestObservations,
+}
+
+pub(super) type DecodedManifest = (Manifest, ManifestObservations);
+pub(super) type DecodeOutcome = Option<Result<DecodedManifest, DecodeFailure>>;
+
+impl<'de> Visitor<'de> for ManifestVisitor<'_> {
+    type Value = Option<Manifest>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("manifest JSON object")
@@ -149,13 +159,7 @@ impl<'de> Visitor<'de> for ManifestVisitor {
         A: MapAccess<'de>,
     {
         let mut manifest = Manifest::default();
-        let mut observations = ManifestObservations {
-            resource_maps: KNOWN_RESOURCE_MAP_KEYS
-                .iter()
-                .map(|key| ((*key).to_string(), ResourceMapPresence::Absent))
-                .collect(),
-            ..ManifestObservations::default()
-        };
+        let observations = &mut *self.observations;
         let mut seen = BTreeSet::new();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -166,8 +170,12 @@ impl<'de> Visitor<'de> for ManifestVisitor {
                 "metadata" => {
                     let value = map.next_value::<Value>()?;
                     observations.metadata = metadata_observations(&value);
-                    manifest.metadata = serde_json::from_value(value)
-                        .map_err(|error| A::Error::custom(error.to_string()))?;
+                    manifest.metadata = match serde_json::from_value(value) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return Err(A::Error::custom(error.to_string()));
+                        }
+                    };
                 }
                 "nodes" => {
                     manifest.nodes = map.next_value::<HashMap<_, _>>()?;
@@ -255,14 +263,14 @@ impl<'de> Visitor<'de> for ManifestVisitor {
                     observations
                         .resource_maps
                         .insert(key.clone(), map_presence(manifest.unit_tests.len()));
-                    inspect_resource_values(&key, &manifest.unit_tests, &mut observations);
+                    inspect_resource_values(&key, &manifest.unit_tests, observations);
                 }
                 "functions" => {
                     manifest.functions = map.next_value::<HashMap<_, _>>()?;
                     observations
                         .resource_maps
                         .insert(key.clone(), map_presence(manifest.functions.len()));
-                    inspect_resource_values(&key, &manifest.functions, &mut observations);
+                    inspect_resource_values(&key, &manifest.functions, observations);
                 }
                 "disabled" => {
                     manifest.disabled = map.next_value::<Option<HashMap<_, _>>>()?;
@@ -274,13 +282,13 @@ impl<'de> Visitor<'de> for ManifestVisitor {
                 _ => {
                     observations.unknown_top_level_keys.insert(key.clone());
                     let value = map.next_value::<Value>()?;
-                    inspect_unknown_map(&key, &value, &mut observations);
+                    inspect_unknown_map(&key, &value, observations);
                     manifest.extra.insert(key, value);
                 }
             }
         }
         manifest_field_exhaustiveness_guard(&manifest);
-        Ok(Some((manifest, observations)))
+        Ok(Some(manifest))
     }
 
     fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
@@ -391,9 +399,37 @@ fn manifest_field_exhaustiveness_guard(manifest: &Manifest) {
 
 pub(super) fn decode_manifest(
     content: &[u8],
-) -> std::result::Result<Option<(Manifest, ManifestObservations)>, serde_json::Error> {
+) -> std::result::Result<DecodeOutcome, serde_json::Error> {
+    let mut observations = ManifestObservations {
+        resource_maps: KNOWN_RESOURCE_MAP_KEYS
+            .iter()
+            .map(|key| ((*key).to_string(), ResourceMapPresence::Absent))
+            .collect(),
+        ..ManifestObservations::default()
+    };
     let mut deserializer = serde_json::Deserializer::from_slice(content);
-    let decoded = serde::de::Deserializer::deserialize_any(&mut deserializer, ManifestVisitor)?;
+    let decoded = serde::de::Deserializer::deserialize_any(
+        &mut deserializer,
+        ManifestVisitor {
+            observations: &mut observations,
+        },
+    );
+    let manifest = match decoded {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            deserializer.end()?;
+            return Ok(None);
+        }
+        Err(error) => {
+            if error.classify() == serde_json::error::Category::Data {
+                return Ok(Some(Err(DecodeFailure {
+                    error: error.to_string(),
+                    observations,
+                })));
+            }
+            return Err(error);
+        }
+    };
     deserializer.end()?;
-    Ok(decoded)
+    Ok(Some(Ok((manifest, observations))))
 }
