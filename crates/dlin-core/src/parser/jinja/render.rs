@@ -52,7 +52,7 @@ pub(super) fn render_with_incremental(
         uncertain_macro_scopes: full_scopes,
         local_macro_spans: runtime_analysis.macro_spans,
         local_macro_spans_scanned: runtime_analysis.macro_spans_scanned,
-        model_local_macro_roots: runtime_analysis.model_local_macro_roots,
+        model_macro_roots: runtime_analysis.model_macro_roots,
     }
 }
 
@@ -65,7 +65,7 @@ fn render_with_incremental_passes_with_analysis(
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
 ) -> (RenderPass, RenderPass, RuntimeAnalysis) {
-    let runtime_analysis = runtime_analysis(sql);
+    let runtime_analysis = runtime_analysis(sql, macro_prefix);
     let marker_names = (!runtime_analysis.macro_spans.is_empty())
         .then(|| unique_runtime_macro_markers(sql, macro_prefix));
     let template_source_without_prefix = marker_names.as_ref().map_or_else(
@@ -482,10 +482,10 @@ pub(super) struct RuntimeAnalysis {
     pub(super) macro_spans: Vec<super::source::ModelMacroSpan>,
     pub(super) scalar_macro_names: HashSet<String>,
     pub(super) macro_spans_scanned: bool,
-    pub(super) model_local_macro_roots: Option<HashSet<String>>,
+    pub(super) model_macro_roots: Option<HashSet<String>>,
 }
 
-pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
+pub(super) fn runtime_analysis(sql: &str, macro_prefix: &str) -> RuntimeAnalysis {
     let has_scalar_hint = RUNTIME_SCALAR_NAMES.iter().any(|name| sql.contains(name));
     if !RUNTIME_SCOPE_HINT_NAMES
         .iter()
@@ -496,13 +496,13 @@ pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
             macro_spans: Vec::new(),
             scalar_macro_names: HashSet::new(),
             macro_spans_scanned: false,
-            model_local_macro_roots: None,
+            model_macro_roots: None,
         };
     }
 
     let macro_spans = super::source::model_macro_definition_spans(sql);
     let env = Environment::new();
-    let (direct_use, model_local_macro_roots) = if has_scalar_hint {
+    let (direct_use, model_macro_roots) = if has_scalar_hint {
         let model_source =
             super::source::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
         match env.template_from_str(&model_source) {
@@ -511,10 +511,14 @@ pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
                 let direct_use = RUNTIME_SCALAR_NAMES
                     .iter()
                     .any(|name| undeclared.contains(*name));
+                let prefix_names = super::source::model_macro_definition_spans(macro_prefix)
+                    .into_iter()
+                    .map(|definition| definition.name);
                 let roots = macro_spans
                     .iter()
-                    .filter(|definition| undeclared.contains(definition.name.as_str()))
                     .map(|definition| definition.name.clone())
+                    .chain(prefix_names)
+                    .filter(|name| undeclared.contains(name))
                     .collect();
                 (direct_use, Some(roots))
             }
@@ -546,7 +550,7 @@ pub(super) fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
         macro_spans,
         scalar_macro_names,
         macro_spans_scanned: true,
-        model_local_macro_roots,
+        model_macro_roots,
     }
 }
 

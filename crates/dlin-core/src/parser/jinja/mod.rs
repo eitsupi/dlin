@@ -49,10 +49,10 @@ pub struct JinjaOutcome {
     /// Whether `local_macro_spans` came from the runtime analysis. The fast
     /// path deliberately skips that source scan when no runtime hint exists.
     pub(crate) local_macro_spans_scanned: bool,
-    /// Local macro roots obtained from the runtime analysis' model free-symbol
-    /// scan. `Some(empty)` means the scan succeeded and found no local roots;
+    /// Model and prefix macro roots obtained from the runtime analysis' free-
+    /// symbol scan. `Some(empty)` means the scan succeeded and found no roots;
     /// `None` means that scan was not performed or could not compile.
-    pub(crate) model_local_macro_roots: Option<std::collections::HashSet<String>>,
+    pub(crate) model_macro_roots: Option<std::collections::HashSet<String>>,
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.

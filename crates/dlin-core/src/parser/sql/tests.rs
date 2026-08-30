@@ -369,7 +369,7 @@ fn test_all_reachable_local_macros_use_whole_model_recovery() {
         "#;
     let outcome = super::super::jinja::extract_via_jinja(sql, "");
     assert!(outcome.complete && outcome.model_uncertain);
-    assert!(regex_fallback_macro_scopes(sql, &outcome).is_none());
+    assert!(regex_fallback_macro_scopes(sql, "", &outcome).is_none());
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn test_partial_reachability_keeps_three_of_128_macros_scoped() {
     );
 
     let outcome = super::super::jinja::extract_via_jinja(&sql, "");
-    let scopes = regex_fallback_macro_scopes(&sql, &outcome).unwrap();
+    let scopes = regex_fallback_macro_scopes(&sql, "", &outcome).unwrap();
     assert_eq!(scopes.len(), 3);
     assert!(
         scopes
@@ -398,7 +398,7 @@ fn test_partial_reachability_keeps_three_of_128_macros_scoped() {
 fn test_zero_local_macros_remains_scoped_empty_for_model_recovery() {
     let sql = "{% if execute %}{{ ref('runtime_ref') }}{% else %}{{ ref('parse_ref') }}{% endif %}";
     let outcome = super::super::jinja::extract_via_jinja(sql, "");
-    let scopes = regex_fallback_macro_scopes(sql, &outcome).unwrap();
+    let scopes = regex_fallback_macro_scopes(sql, "", &outcome).unwrap();
     assert!(scopes.is_empty());
 }
 
@@ -467,6 +467,60 @@ fn test_prefix_uncertainty_recovers_local_macro_callbacks_without_hint_scan() {
     let refs = extract_refs_and_sources(sql, macro_prefix).0;
     assert!(refs.iter().any(|r| r.name == "left_local"));
     assert!(refs.iter().any(|r| r.name == "right_local"));
+}
+
+#[test]
+fn test_prefix_uncertainty_recovers_direct_local_macro_references() {
+    let macro_prefix = r#"
+            {% macro choose() %}
+                {% if env_var('REGION') == 'us' %}{{ left() }}{% else %}{{ right() }}{% endif %}
+            {% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro left() %}{{ ref('left_direct') }}{% endmacro %}
+            {% macro right() %}{{ ref('right_direct') }}{% endmacro %}
+            {{ choose() }}
+        "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "left_direct"));
+    assert!(refs.iter().any(|r| r.name == "right_direct"));
+}
+
+#[test]
+fn test_prefix_uncertainty_follows_transitive_local_macro_references() {
+    let macro_prefix = r#"
+            {% macro dispatch() %}
+                {% if env_var('REGION') == 'us' %}{{ choose_us() }}{% else %}{{ choose_eu() }}{% endif %}
+            {% endmacro %}
+            {% macro choose_us() %}{{ left() }}{% endmacro %}
+            {% macro choose_eu() %}{{ right() }}{% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro left() %}{{ ref('left_transitive') }}{% endmacro %}
+            {% macro right() %}{{ ref('right_transitive') }}{% endmacro %}
+            {{ dispatch() }}
+        "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "left_transitive"));
+    assert!(refs.iter().any(|r| r.name == "right_transitive"));
+}
+
+#[test]
+fn test_unused_prefix_macro_does_not_reach_local_definition() {
+    let macro_prefix = r#"
+            {% macro choose() %}
+                {% if env_var('REGION') %}{{ used() }}{% endif %}
+            {% endmacro %}
+            {% macro unused_prefix() %}{{ unused() }}{% endmacro %}
+        "#;
+    let sql = r#"
+            {% macro used() %}{{ ref('used_prefix_graph') }}{% endmacro %}
+            {% macro unused() %}{{ ref('unused_prefix_graph') }}{% endmacro %}
+            {{ choose() }}
+        "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "used_prefix_graph"));
+    assert!(!refs.iter().any(|r| r.name == "unused_prefix_graph"));
 }
 
 #[test]

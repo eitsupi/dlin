@@ -427,9 +427,20 @@ fn test_scalar_runtime_context_ignores_non_executable_text() {
 
 #[test]
 fn test_runtime_scalar_analysis_fast_path_without_scalar_names() {
-    let analysis = runtime_analysis("SELECT 1");
+    let analysis = runtime_analysis("SELECT 1", "");
     assert!(!analysis.uses_runtime_scalar);
     assert!(analysis.macro_spans.is_empty());
+}
+
+#[test]
+fn test_runtime_analysis_keeps_prefix_macro_roots_from_model_scan() {
+    let sql = "{% if execute %}{{ choose() }}{% endif %}";
+    let prefix = "{% macro choose() %}prefix{% endmacro %}";
+    let analysis = runtime_analysis(sql, prefix);
+    assert_eq!(
+        analysis.model_macro_roots,
+        Some(HashSet::from(["choose".to_owned()]))
+    );
 }
 
 #[test]

@@ -7,24 +7,28 @@ use super::source::{
 };
 
 /// Compute the local macro definitions that can be reached from the model
-/// source using MiniJinja's free-symbol analysis.
+/// source and reachable project macros using MiniJinja's free-symbol analysis.
 ///
 /// This intentionally does not parse call syntax. MiniJinja already accounts
 /// for aliases, higher-order values, collections, conditional assignments,
 /// and lexical shadowing when it computes undeclared variables. A failed
 /// compile means that the provenance is unknown, so callers must use the
-/// conservative whole-model fallback instead.
-pub(crate) fn reachable_local_macros(
+/// conservative whole-model fallback instead. `macro_prefix` is analyzed only
+/// for macro names that the model can reach, so unrelated project macros do
+/// not incur a MiniJinja compilation.
+pub(crate) fn reachable_local_macros_with_prefix(
     sql: &str,
+    macro_prefix: &str,
     known_spans: Option<&[ModelMacroSpan]>,
     known_roots: Option<&HashSet<String>>,
 ) -> Option<(HashSet<String>, usize)> {
-    reachable_local_macros_with_status(sql, known_spans, known_roots)
+    reachable_local_macros_with_status_and_prefix(sql, macro_prefix, known_spans, known_roots)
         .map(|(reachable, local_macro_count, _, _)| (reachable, local_macro_count))
 }
 
-fn reachable_local_macros_with_status(
+fn reachable_local_macros_with_status_and_prefix(
     sql: &str,
+    macro_prefix: &str,
     known_spans: Option<&[ModelMacroSpan]>,
     known_roots: Option<&HashSet<String>>,
 ) -> Option<(HashSet<String>, usize, bool, usize)> {
@@ -32,34 +36,37 @@ fn reachable_local_macros_with_status(
         || model_macro_definition_spans(sql),
         <[ModelMacroSpan]>::to_vec,
     );
-    if spans.iter().any(|span| {
-        span.start > span.end
-            || span.end > sql.len()
-            || !sql.is_char_boundary(span.start)
-            || !sql.is_char_boundary(span.end)
-    }) {
+    let prefix_spans = model_macro_definition_spans(macro_prefix);
+    if spans.iter().any(|span| !valid_span(sql, span))
+        || prefix_spans
+            .iter()
+            .any(|span| !valid_span(macro_prefix, span))
+    {
         return None;
     }
     let local_names: HashSet<String> = spans.iter().map(|span| span.name.clone()).collect();
     let local_macro_count = local_names.len();
+    let prefix_names: HashSet<String> = prefix_spans.iter().map(|span| span.name.clone()).collect();
+    let all_names: HashSet<String> = local_names.union(&prefix_names).cloned().collect();
     let env = Environment::new();
 
     let (roots, root_compile_performed) = if let Some(roots) = known_roots {
         (
             roots
-                .intersection(&local_names)
+                .intersection(&all_names)
                 .cloned()
                 .collect::<HashSet<_>>(),
             false,
         )
     } else {
         let model_source = strip_macro_definitions_for_runtime_analysis(sql, &spans);
-        (free_local_symbols(&env, &model_source, &local_names)?, true)
+        (free_local_symbols(&env, &model_source, &all_names)?, true)
     };
+    let local_roots: HashSet<String> = roots.intersection(&local_names).cloned().collect();
     // Every local definition is already a root, so expanding definitions can
     // add no names. The non-zero guard keeps zero-macro results scoped-empty.
-    if local_macro_count > 0 && roots.len() == local_macro_count {
-        return Some((roots, local_macro_count, root_compile_performed, 0));
+    if local_macro_count > 0 && local_roots.len() == local_macro_count {
+        return Some((local_roots, local_macro_count, root_compile_performed, 0));
     }
     // Partial traversal needs indexed definitions so each reachable name is
     // expanded in O(number of definitions for that name), not O(all spans).
@@ -73,8 +80,18 @@ fn reachable_local_macros_with_status(
             definitions
         },
     );
-    let mut reachable = roots;
-    let mut pending: VecDeque<String> = reachable.iter().cloned().collect();
+    let mut prefix_definitions_by_name = prefix_spans.iter().enumerate().fold(
+        HashMap::<String, Vec<usize>>::new(),
+        |mut definitions, (index, span)| {
+            definitions
+                .entry(span.name.clone())
+                .or_default()
+                .push(index);
+            definitions
+        },
+    );
+    let mut reachable = local_roots;
+    let mut pending: VecDeque<String> = roots.into_iter().collect();
     let mut expanded = HashSet::new();
     let mut definition_compile_count = 0;
     while let Some(name) = pending.pop_front() {
@@ -83,14 +100,28 @@ fn reachable_local_macros_with_status(
         }
         // Compile only definitions that are reachable from the model. If a
         // name is duplicated, conservatively union every definition under it.
-        for index in definitions_by_name.get(&name).into_iter().flatten() {
-            let span = &spans[*index];
-            let definition = &sql[span.start..span.end];
+        let definitions = if let Some(indices) = definitions_by_name.get(&name) {
+            indices
+                .iter()
+                .map(|index| &sql[spans[*index].start..spans[*index].end])
+                .collect::<Vec<_>>()
+        } else if let Some(indices) = prefix_definitions_by_name.remove(&name) {
+            indices
+                .iter()
+                .map(|index| &macro_prefix[prefix_spans[*index].start..prefix_spans[*index].end])
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for definition in definitions {
             let (dependencies, compiled) =
-                local_macro_dependencies_with_status(&env, definition, &name, &local_names)?;
+                local_macro_dependencies_with_status(&env, definition, &name, &all_names)?;
             definition_compile_count += usize::from(compiled);
             for dependency in dependencies {
-                if reachable.insert(dependency.clone()) {
+                if local_names.contains(&dependency) {
+                    reachable.insert(dependency.clone());
+                }
+                if all_names.contains(&dependency) {
                     pending.push_back(dependency);
                 }
             }
@@ -102,6 +133,13 @@ fn reachable_local_macros_with_status(
         root_compile_performed,
         definition_compile_count,
     ))
+}
+
+fn valid_span(source: &str, span: &ModelMacroSpan) -> bool {
+    span.start <= span.end
+        && span.end <= source.len()
+        && source.is_char_boundary(span.start)
+        && source.is_char_boundary(span.end)
 }
 
 fn free_local_symbols(
@@ -146,7 +184,7 @@ mod tests {
             {% set alias = outer %}
             {{ alias() }}
         "#;
-        let reachable = reachable_local_macros(sql, None, None).unwrap();
+        let reachable = reachable_local_macros_with_prefix(sql, "", None, None).unwrap();
         assert_eq!(reachable.0, HashSet::from(["inner".into(), "outer".into()]));
     }
 
@@ -157,14 +195,14 @@ mod tests {
             {% macro unused() %}{{ ref('unused') }}{% endmacro %}
             {{ used() }}
         "#;
-        let reachable = reachable_local_macros(sql, None, None).unwrap();
+        let reachable = reachable_local_macros_with_prefix(sql, "", None, None).unwrap();
         assert_eq!(reachable.0, HashSet::from(["used".into()]));
     }
 
     #[test]
     fn returns_empty_for_model_without_local_macros() {
         let (reachable, local_macro_count) =
-            reachable_local_macros("SELECT 1", None, None).unwrap();
+            reachable_local_macros_with_prefix("SELECT 1", "", None, None).unwrap();
         assert!(reachable.is_empty());
         assert_eq!(local_macro_count, 0);
     }
@@ -178,8 +216,25 @@ mod tests {
         "#;
         let roots = HashSet::from(["outer".to_owned()]);
         let (reachable, _local_macro_count, root_compile_performed, _definition_compile_count) =
-            reachable_local_macros_with_status(sql, None, Some(&roots)).unwrap();
+            reachable_local_macros_with_status_and_prefix(sql, "", None, Some(&roots)).unwrap();
         assert_eq!(reachable, HashSet::from(["inner".into(), "outer".into()]));
+        assert!(!root_compile_performed);
+    }
+
+    #[test]
+    fn reuses_known_prefix_roots_without_compiling_model_source() {
+        let prefix = r#"
+            {% macro choose() %}{{ left() }}{% endmacro %}
+        "#;
+        let sql = r#"
+            {% macro left() %}{{ ref('left') }}{% endmacro %}
+            {% macro right() %}{{ ref('right') }}{% endmacro %}
+            {{ choose() }}
+        "#;
+        let roots = HashSet::from(["choose".to_owned()]);
+        let (reachable, _count, root_compile_performed, _definition_compile_count) =
+            reachable_local_macros_with_status_and_prefix(sql, prefix, None, Some(&roots)).unwrap();
+        assert_eq!(reachable, HashSet::from(["left".into()]));
         assert!(!root_compile_performed);
     }
 
@@ -193,7 +248,7 @@ mod tests {
             {% set selected = first if execute else second %}
             {{ invoke(callbacks[0]) }}{{ selected() }}
         "#;
-        let reachable = reachable_local_macros(sql, None, None).unwrap();
+        let reachable = reachable_local_macros_with_prefix(sql, "", None, None).unwrap();
         assert_eq!(
             reachable.0,
             HashSet::from(["first".into(), "second".into(), "invoke".into()])
@@ -209,14 +264,14 @@ mod tests {
             {% endmacro %}
             {{ caller() }}
         "#;
-        let reachable = reachable_local_macros(sql, None, None).unwrap();
+        let reachable = reachable_local_macros_with_prefix(sql, "", None, None).unwrap();
         assert_eq!(reachable.0, HashSet::from(["caller".into()]));
     }
 
     #[test]
     fn reports_uncompilable_source_as_unknown() {
         let sql = "{% macro broken() %}{{ ref('unfinished') }}";
-        assert!(reachable_local_macros(sql, None, None).is_none());
+        assert!(reachable_local_macros_with_prefix(sql, "", None, None).is_none());
     }
 
     #[test]
@@ -238,7 +293,7 @@ mod tests {
                 name: "other".to_owned(),
             },
         ];
-        assert!(reachable_local_macros(sql, Some(&spans), None).is_none());
+        assert!(reachable_local_macros_with_prefix(sql, "", Some(&spans), None).is_none());
     }
 
     #[test]
@@ -289,7 +344,7 @@ mod tests {
         }
 
         let (reachable, local_macro_count, root_compiled, definition_compiles) =
-            reachable_local_macros_with_status(&sql, None, Some(&roots)).unwrap();
+            reachable_local_macros_with_status_and_prefix(&sql, "", None, Some(&roots)).unwrap();
         assert_eq!(reachable, roots);
         assert_eq!(local_macro_count, 128);
         assert!(!root_compiled);
@@ -306,7 +361,8 @@ mod tests {
         }
         sql.push_str("{{ runtime_macro_000() }}{{ runtime_macro_001() }}{{ runtime_macro_002() }}");
 
-        let (reachable, local_macro_count) = reachable_local_macros(&sql, None, None).unwrap();
+        let (reachable, local_macro_count) =
+            reachable_local_macros_with_prefix(&sql, "", None, None).unwrap();
         assert_eq!(local_macro_count, 128);
         assert_eq!(reachable.len(), 3);
         assert!(

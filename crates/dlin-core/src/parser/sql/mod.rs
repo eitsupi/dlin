@@ -45,7 +45,7 @@ pub fn extract_all_with_vars(
     if outcome.complete && outcome.semantic_certain {
         return outcome.extraction;
     }
-    let scoped_macro_names = regex_fallback_macro_scopes(sql, &outcome);
+    let scoped_macro_names = regex_fallback_macro_scopes(sql, macro_prefix, &outcome);
     let mut ext = outcome.extraction;
     super::jinja::merge_extraction(
         &mut ext,
@@ -60,6 +60,7 @@ pub fn extract_all_with_vars(
 
 fn regex_fallback_macro_scopes(
     sql: &str,
+    macro_prefix: &str,
     outcome: &super::jinja::JinjaOutcome,
 ) -> Option<HashSet<String>> {
     if !outcome.complete {
@@ -70,12 +71,13 @@ fn regex_fallback_macro_scopes(
         // execute in the placeholder render. Build the symbol graph only
         // on this path; complete certain and macro-local-only renders do
         // not pay for another MiniJinja compilation pass.
-        return match super::jinja::reachability::reachable_local_macros(
+        return match super::jinja::reachability::reachable_local_macros_with_prefix(
             sql,
+            macro_prefix,
             outcome
                 .local_macro_spans_scanned
                 .then_some(outcome.local_macro_spans.as_slice()),
-            outcome.model_local_macro_roots.as_ref(),
+            outcome.model_macro_roots.as_ref(),
         ) {
             Some((mut scopes, local_macro_count)) => {
                 scopes.extend(outcome.uncertain_macro_scopes.iter().cloned());
