@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// A reference to another dbt model via ref()
@@ -26,8 +27,9 @@ pub struct SourceCall {
 static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
 
 // Matches {% raw %}...{% endraw %} sections, whose content jinja treats as literal text
-static JINJA_RAW_BLOCK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}").unwrap());
+static JINJA_RAW_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{%[+-]?\s*raw\s*[+-]?%\}[\s\S]*?\{%[+-]?\s*endraw\s*[+-]?%\}").unwrap()
+});
 
 // Matches a jinja expression block {{ ... }} or statement block {% ... %}.
 // ref()/source() calls are only meaningful inside these blocks; scanning
@@ -97,7 +99,7 @@ fn strip_inert_jinja(sql: &str) -> String {
 /// for both direct model and macro-local runtime analysis.
 pub(super) fn strip_macro_definitions_for_runtime_analysis(
     sql: &str,
-    definitions: &[(usize, usize, usize)],
+    definitions: &[ModelMacroSpan],
 ) -> String {
     if definitions.is_empty() {
         return strip_inert_jinja(sql);
@@ -105,9 +107,9 @@ pub(super) fn strip_macro_definitions_for_runtime_analysis(
 
     let mut result = String::with_capacity(sql.len());
     let mut cursor = 0;
-    for (start, end, _) in definitions {
-        result.push_str(&sql[cursor..*start]);
-        cursor = *end;
+    for definition in definitions {
+        result.push_str(&sql[cursor..definition.start]);
+        cursor = definition.end;
     }
     result.push_str(&sql[cursor..]);
     strip_inert_jinja(&result)
@@ -116,8 +118,17 @@ pub(super) fn strip_macro_definitions_for_runtime_analysis(
 /// Return source spans for model-local macro definitions. This scanner skips
 /// Jinja comments, raw blocks, quoted terminators, and nested statement blocks
 /// so a source transformation cannot modify inert template text.
-/// Each tuple contains `(start, end, opening_tag_end)` byte offsets.
-pub(super) fn model_macro_definition_spans(sql: &str) -> Vec<(usize, usize, usize)> {
+/// The offsets are byte positions in the original source.
+#[derive(Debug, Clone)]
+pub(super) struct ModelMacroSpan {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) opening_end: usize,
+    pub(super) closing_start: usize,
+    pub(super) name: String,
+}
+
+pub(super) fn model_macro_definition_spans(sql: &str) -> Vec<ModelMacroSpan> {
     let mut result = Vec::new();
     let mut cursor = 0;
     while let Some((start, end, kind, content)) = next_jinja_tag(sql, cursor) {
@@ -135,13 +146,22 @@ pub(super) fn model_macro_definition_spans(sql: &str) -> Vec<(usize, usize, usiz
         if name != "macro" {
             continue;
         }
-        let Some(definition_end) = find_macro_end(sql, end) else {
+        let Some((closing_start, definition_end)) = find_macro_end(sql, end) else {
             // Do not guess at the extent of an incomplete definition. A
             // caller can still render the original source and retain the
             // ordinary completion/fallback behavior.
             return Vec::new();
         };
-        result.push((start, definition_end, end));
+        let Some(macro_name) = macro_tag_name(content) else {
+            continue;
+        };
+        result.push(ModelMacroSpan {
+            start,
+            end: definition_end,
+            opening_end: end,
+            closing_start,
+            name: macro_name.to_owned(),
+        });
         cursor = definition_end;
     }
     result
@@ -153,35 +173,67 @@ pub(super) fn model_macro_definition_spans(sql: &str) -> Vec<(usize, usize, usiz
 /// Jinja tag boundaries.
 pub(super) fn inject_macro_runtime_markers(
     sql: &str,
-    opening_tag_ends: &[usize],
-    marker_name: &str,
+    definitions: &[ModelMacroSpan],
+    scalar_macro_names: &HashSet<String>,
+    enter_marker: &str,
+    exit_marker: &str,
 ) -> String {
-    if opening_tag_ends.is_empty() {
+    if definitions.is_empty() {
         return sql.to_owned();
     }
-    let mut result = String::with_capacity(sql.len() + opening_tag_ends.len() * marker_name.len());
+    let mut result = String::with_capacity(sql.len() + definitions.len() * enter_marker.len() * 2);
     let mut cursor = 0;
-    for &opening_tag_end in opening_tag_ends {
-        if opening_tag_end > sql.len() || opening_tag_end < cursor {
+    for definition in definitions {
+        if definition.end > sql.len() || definition.start < cursor {
             return sql.to_owned();
         }
         // A `-%}` opening tag trims all whitespace immediately following the
         // tag. Put the marker after that original whitespace so introducing
         // the marker cannot make the trim stop at the marker expression.
-        let insertion = if opening_tag_end >= 3 && sql.as_bytes()[opening_tag_end - 3] == b'-' {
-            let mut end = opening_tag_end;
-            while end < sql.len() && sql.as_bytes()[end].is_ascii_whitespace() {
-                end += 1;
+        let opening_insertion =
+            if definition.opening_end >= 3 && sql.as_bytes()[definition.opening_end - 3] == b'-' {
+                let mut end = definition.opening_end;
+                while end < sql.len() && sql.as_bytes()[end].is_ascii_whitespace() {
+                    end += 1;
+                }
+                end
+            } else {
+                definition.opening_end
+            };
+        // A `{%- endmacro` tag trims whitespace immediately before itself.
+        // Put the exit marker before that whitespace so the original trim
+        // still sees the same whitespace run.
+        let closing_insertion = if sql.as_bytes().get(definition.closing_start + 2) == Some(&b'-') {
+            let mut start = definition.closing_start;
+            while start > opening_insertion && sql.as_bytes()[start - 1].is_ascii_whitespace() {
+                start -= 1;
             }
-            end
+            start
         } else {
-            opening_tag_end
+            definition.closing_start
         };
-        result.push_str(&sql[cursor..insertion]);
+        if opening_insertion > closing_insertion || opening_insertion < cursor {
+            return sql.to_owned();
+        }
+        result.push_str(&sql[cursor..opening_insertion]);
         result.push_str("{{ ");
-        result.push_str(marker_name);
-        result.push_str("() }}");
-        cursor = insertion;
+        result.push_str(enter_marker);
+        result.push_str("(\"");
+        result.push_str(&definition.name);
+        result.push_str("\", ");
+        result.push_str(if scalar_macro_names.contains(&definition.name) {
+            "true"
+        } else {
+            "false"
+        });
+        result.push_str(") }}");
+        result.push_str(&sql[opening_insertion..closing_insertion]);
+        result.push_str("{{ ");
+        result.push_str(exit_marker);
+        result.push_str("(\"");
+        result.push_str(&definition.name);
+        result.push_str("\") }}");
+        cursor = closing_insertion;
     }
     result.push_str(&sql[cursor..]);
     result
@@ -251,6 +303,14 @@ fn jinja_tag_name(content: &str) -> Option<&str> {
     content.split_whitespace().next()
 }
 
+fn macro_tag_name(content: &str) -> Option<&str> {
+    let content = content.trim().trim_start_matches(['-', '+']).trim();
+    let rest = content.strip_prefix("macro")?.trim_start();
+    let end = rest.find(|ch: char| ch == '(' || ch.is_whitespace())?;
+    let name = &rest[..end];
+    (!name.is_empty()).then_some(name)
+}
+
 fn find_raw_end(source: &str, from: usize) -> Option<usize> {
     let mut cursor = from;
     while let Some((_, end, kind, content)) = next_jinja_tag(source, cursor) {
@@ -262,10 +322,10 @@ fn find_raw_end(source: &str, from: usize) -> Option<usize> {
     None
 }
 
-fn find_macro_end(source: &str, from: usize) -> Option<usize> {
+fn find_macro_end(source: &str, from: usize) -> Option<(usize, usize)> {
     let mut cursor = from;
     let mut depth = 1;
-    while let Some((_, end, kind, content)) = next_jinja_tag(source, cursor) {
+    while let Some((start, end, kind, content)) = next_jinja_tag(source, cursor) {
         cursor = end;
         if kind != JinjaTagKind::Statement {
             continue;
@@ -276,7 +336,7 @@ fn find_macro_end(source: &str, from: usize) -> Option<usize> {
             Some("endmacro") => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(end);
+                    return Some((start, end));
                 }
             }
             _ => {}
@@ -338,11 +398,19 @@ pub fn extract_all_with_vars(
         return outcome.extraction;
     }
     let mut ext = outcome.extraction;
+    let scoped_macro_names: Option<HashSet<String>> = if outcome.complete
+        && !outcome.model_uncertain
+        && !outcome.uncertain_macro_scopes.is_empty()
+    {
+        Some(outcome.uncertain_macro_scopes.iter().cloned().collect())
+    } else {
+        None
+    };
     super::jinja::merge_extraction(
         &mut ext,
         super::jinja::JinjaExtraction {
-            refs: extract_refs_regex(sql),
-            sources: extract_sources_regex(sql),
+            refs: extract_refs_regex_scoped(sql, scoped_macro_names.as_ref()),
+            sources: extract_sources_regex_scoped(sql, scoped_macro_names.as_ref()),
             config: extract_config_regex(sql),
         },
     );
@@ -352,6 +420,10 @@ pub fn extract_all_with_vars(
 /// Extract all ref() and source() calls from SQL content in a single pass.
 /// Tries minijinja rendering first; if rendering fails partway or relies on a
 /// placeholder runtime value, merges the partial result with the regex scan.
+/// Complete uncertain renders restrict that merge to model-level text and
+/// macro scopes whose execution actually observed an uncertain value; failed
+/// renders retain whole-model recovery because their execution provenance is
+/// incomplete.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.
@@ -409,11 +481,27 @@ pub(super) fn normalize_version_str(s: &str) -> String {
 /// Scans inside every jinja block so calls nested in macro arguments or
 /// {% set %} statements are found too, mirroring dbt which registers a
 /// ref() wherever it is evaluated.
+#[cfg(test)]
 fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
+    extract_refs_regex_scoped(sql, None)
+}
+
+fn extract_refs_regex_scoped(sql: &str, macro_scopes: Option<&HashSet<String>>) -> Vec<RefCall> {
     let cleaned = strip_inert_jinja(sql);
+    let definitions = macro_scopes.map(|_| model_macro_definition_spans(&cleaned));
     let mut refs = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
+        if let Some(scopes) = macro_scopes {
+            let owner = definitions.as_ref().and_then(|definitions| {
+                definitions.iter().find(|definition| {
+                    definition.start <= block.start() && block.start() < definition.end
+                })
+            });
+            if owner.is_some_and(|definition| !scopes.contains(&definition.name)) {
+                continue;
+            }
+        }
         let literal_spans = string_literal_spans(block.as_str());
         for cap in REF_PATTERN.captures_iter(block.as_str()) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
@@ -451,11 +539,30 @@ fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
 
 /// Regex fallback for extracting source() calls.
 /// Scans inside every jinja block, like [`extract_refs_regex`].
+#[cfg(test)]
 fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
+    extract_sources_regex_scoped(sql, None)
+}
+
+fn extract_sources_regex_scoped(
+    sql: &str,
+    macro_scopes: Option<&HashSet<String>>,
+) -> Vec<SourceCall> {
     let cleaned = strip_inert_jinja(sql);
+    let definitions = macro_scopes.map(|_| model_macro_definition_spans(&cleaned));
     let mut sources = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
+        if let Some(scopes) = macro_scopes {
+            let owner = definitions.as_ref().and_then(|definitions| {
+                definitions.iter().find(|definition| {
+                    definition.start <= block.start() && block.start() < definition.end
+                })
+            });
+            if owner.is_some_and(|definition| !scopes.contains(&definition.name)) {
+                continue;
+            }
+        }
         let literal_spans = string_literal_spans(block.as_str());
         for cap in SOURCE_PATTERN.captures_iter(block.as_str()) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
@@ -864,6 +971,23 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_fallback_ignores_plus_controlled_raw_blocks() {
+        let sql = r#"
+            {%+ raw +%}{{ ref('not_a_dependency') }}{%+ endraw +%}
+            {% if execute %}
+                {{ ref('execute_true_raw_guard') }}
+            {% else %}
+                {{ ref('execute_false_raw_guard') }}
+            {% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "execute_true_raw_guard"));
+        assert!(refs.iter().any(|r| r.name == "execute_false_raw_guard"));
+        assert!(!refs.iter().any(|r| r.name == "not_a_dependency"));
+    }
+
+    #[test]
     fn test_execute_branches_are_merged() {
         let sql = r#"
             {% if execute %}
@@ -879,6 +1003,37 @@ mod tests {
     }
 
     #[test]
+    fn test_top_level_uncertainty_recovers_alternate_macro_refs() {
+        let sql = r#"
+            {% macro selected() %}
+                {% if env_var('REGION') == 'us' %}
+                    {{ ref('selected_us_ref') }}
+                {% else %}
+                    {{ ref('selected_eu_ref') }}
+                {% endif %}
+            {% endmacro %}
+            {% macro alternate() %}{{ ref('alternate_ref') }}{% endmacro %}
+            {% if execute %}{{ selected() }}{% else %}{{ alternate() }}{% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert!(refs.iter().any(|r| r.name == "selected_us_ref"));
+        assert!(refs.iter().any(|r| r.name == "selected_eu_ref"));
+        assert!(refs.iter().any(|r| r.name == "alternate_ref"));
+    }
+
+    #[test]
+    fn test_top_level_env_var_uncertainty_recovers_alternate_macro_refs() {
+        let sql = r#"
+            {% macro selected() %}{{ ref('selected_env_ref') }}{% endmacro %}
+            {% macro alternate() %}{{ ref('alternate_env_ref') }}{% endmacro %}
+            {% if env_var('REGION') == 'us' %}{{ selected() }}{% else %}{{ alternate() }}{% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert!(refs.iter().any(|r| r.name == "selected_env_ref"));
+        assert!(refs.iter().any(|r| r.name == "alternate_env_ref"));
+    }
+
+    #[test]
     fn test_called_model_macro_runtime_branches_are_merged() {
         let sql = r#"
             {% macro runtime_branch() %}
@@ -891,6 +1046,94 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().any(|r| r.name == "called_true"));
         assert!(refs.iter().any(|r| r.name == "called_false"));
+    }
+
+    #[test]
+    fn test_called_macro_scope_recovery_excludes_uncalled_macro_refs() {
+        let sql = r#"
+            {% macro called_branch() %}
+                {% if env_var('REGION') == 'us' %}
+                    {{ ref('called_us') }}
+                {% else %}
+                    {{ ref('called_eu') }}
+                {% endif %}
+            {% endmacro %}
+            {% macro unused_branch() %}
+                {{ ref('unused_ref') }}
+            {% endmacro %}
+            {{ called_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "called_us"));
+        assert!(refs.iter().any(|r| r.name == "called_eu"));
+        assert!(!refs.iter().any(|r| r.name == "unused_ref"));
+    }
+
+    #[test]
+    fn test_called_target_macro_scope_recovery_excludes_uncalled_refs() {
+        let sql = r#"
+            {% macro called_branch() %}
+                {% if target.name == 'us' %}{{ ref('target_us') }}{% else %}{{ ref('target_eu') }}{% endif %}
+            {% endmacro %}
+            {% macro unused_branch() %}{{ ref('unused_target') }}{% endmacro %}
+            {{ called_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "target_us"));
+        assert!(refs.iter().any(|r| r.name == "target_eu"));
+        assert!(!refs.iter().any(|r| r.name == "unused_target"));
+    }
+
+    #[test]
+    fn test_called_missing_var_macro_scope_recovery_excludes_uncalled_refs() {
+        let sql = r#"
+            {% macro called_branch() %}
+                {% if var('REGION') == 'us' %}{{ ref('var_us') }}{% else %}{{ ref('var_eu') }}{% endif %}
+            {% endmacro %}
+            {% macro unused_branch() %}{{ ref('unused_var') }}{% endmacro %}
+            {{ called_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "var_us"));
+        assert!(refs.iter().any(|r| r.name == "var_eu"));
+        assert!(!refs.iter().any(|r| r.name == "unused_var"));
+    }
+
+    #[test]
+    fn test_transitive_macro_scope_recovery_excludes_uncalled_refs() {
+        let sql = r#"
+            {% macro inner_branch() %}
+                {% if env_var('REGION') == 'us' %}{{ ref('inner_us') }}{% else %}{{ ref('inner_eu') }}{% endif %}
+            {% endmacro %}
+            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
+            {% macro unused_branch() %}{{ ref('unused_transitive') }}{% endmacro %}
+            {{ outer_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "inner_us"));
+        assert!(refs.iter().any(|r| r.name == "inner_eu"));
+        assert!(!refs.iter().any(|r| r.name == "unused_transitive"));
+    }
+
+    #[test]
+    fn test_higher_order_macro_scope_recovery_excludes_uncalled_refs() {
+        let sql = r#"
+            {% macro callback_branch() %}
+                {% if env_var('REGION') == 'us' %}{{ ref('callback_us') }}{% else %}{{ ref('callback_eu') }}{% endif %}
+            {% endmacro %}
+            {% macro invoke(callback) %}{{ callback() }}{% endmacro %}
+            {% macro unused_branch() %}{{ ref('unused_higher_order') }}{% endmacro %}
+            {{ invoke(callback_branch) }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "callback_us"));
+        assert!(refs.iter().any(|r| r.name == "callback_eu"));
+        assert!(!refs.iter().any(|r| r.name == "unused_higher_order"));
     }
 
     #[test]
@@ -924,11 +1167,22 @@ mod tests {
         "#;
         let spans = model_macro_definition_spans(sql);
         assert_eq!(spans.len(), 1);
-        let (start, end, opening_end) = spans[0];
-        let transformed = inject_macro_runtime_markers(sql, &[opening_end], "marker");
-        assert_eq!(transformed.matches("{{ marker() }}").count(), 1);
-        assert!(start < end);
-        assert_eq!(sql[start..end].matches("endmacro").count(), 2);
+        let definition = &spans[0];
+        let transformed =
+            inject_macro_runtime_markers(sql, &spans, &HashSet::new(), "enter", "exit");
+        assert_eq!(
+            transformed
+                .matches("{{ enter(\"quoted\", false) }}")
+                .count(),
+            1
+        );
+        assert!(definition.start < definition.end);
+        assert_eq!(
+            sql[definition.start..definition.end]
+                .matches("endmacro")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -945,14 +1199,17 @@ mod tests {
         let sql = "{% macro first() %}one{% endmacro %}{% macro second() %}two{% endmacro %}";
         let spans = model_macro_definition_spans(sql);
         assert_eq!(spans.len(), 2);
-        assert!(spans[0].1 <= spans[1].0);
+        assert!(spans[0].end <= spans[1].start);
     }
 
     #[test]
     fn test_model_macro_spans_ignore_unclosed_macro() {
         let sql = "{% macro unclosed() %}{% if execute %}value";
         assert!(model_macro_definition_spans(sql).is_empty());
-        assert_eq!(inject_macro_runtime_markers(sql, &[], "marker"), sql);
+        assert_eq!(
+            inject_macro_runtime_markers(sql, &[], &HashSet::new(), "enter", "exit"),
+            sql
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -23,8 +23,11 @@ pub struct JinjaExtraction {
 /// when rendering fails (e.g. on an unknown macro) the refs/sources recorded up
 /// to the failure point are valid. `complete` tells the caller whether rendering
 /// finished, while `semantic_certain` tells it whether placeholder runtime
-/// values could have selected the wrong branch. The regex fallback should be
-/// merged whenever either property is false.
+/// values could have selected the wrong branch. A complete but uncertain
+/// render is recovered from the model-level template and only the local macro
+/// scopes recorded below when no model-level uncertainty was observed; an
+/// incomplete render uses whole-model recovery because execution provenance
+/// may be truncated at the failure.
 #[derive(Debug, Clone, Default)]
 pub struct JinjaOutcome {
     pub extraction: JinjaExtraction,
@@ -32,6 +35,13 @@ pub struct JinjaOutcome {
     /// Whether the extraction is semantically certain rather than merely
     /// successfully rendered with the placeholder dbt environment.
     pub(crate) semantic_certain: bool,
+    /// Whether uncertainty was observed in model-level execution (outside a
+    /// local macro). This requires whole-model recovery even when a macro
+    /// scope was also marked uncertain.
+    pub(crate) model_uncertain: bool,
+    /// Local model macro scopes in which an uncertainty callback executed.
+    /// Used to limit regex recovery for complete renders.
+    pub(crate) uncertain_macro_scopes: Vec<String>,
 }
 
 /// Try to extract refs, sources, and config from SQL content using minijinja.
@@ -120,32 +130,53 @@ fn render_with_incremental(
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaOutcome {
     let (
-        (mut extraction, full_complete, full_certain),
-        (incremental_extraction, incremental_complete, incremental_certain),
+        (mut extraction, full_complete, full_certain, full_model_uncertain, mut full_scopes),
+        (
+            incremental_extraction,
+            incremental_complete,
+            incremental_certain,
+            incremental_model_uncertain,
+            incremental_scopes,
+        ),
     ) = render_with_incremental_passes(sql, macro_prefix, vars);
     merge_extraction(&mut extraction, incremental_extraction);
+    for scope in incremental_scopes {
+        if !full_scopes.contains(&scope) {
+            full_scopes.push(scope);
+        }
+    }
 
     JinjaOutcome {
         extraction,
         complete: full_complete && incremental_complete,
         semantic_certain: full_certain && incremental_certain,
+        model_uncertain: full_model_uncertain || incremental_model_uncertain,
+        uncertain_macro_scopes: full_scopes,
     }
 }
 
 /// Compile a dbt SQL template once and render it for both values of
 /// `is_incremental`, returning each pass's result separately.
+type RenderPass = (JinjaExtraction, bool, bool, bool, Vec<String>);
+
 fn render_with_incremental_passes(
     sql: &str,
     macro_prefix: &str,
     vars: &HashMap<String, serde_json::Value>,
-) -> ((JinjaExtraction, bool, bool), (JinjaExtraction, bool, bool)) {
-    let (uses_runtime_scalar, runtime_macro_openings) = runtime_scalar_analysis(sql);
-    let marker_name = (!runtime_macro_openings.is_empty())
-        .then(|| unique_runtime_macro_marker(sql, macro_prefix));
-    let template_source_without_prefix = marker_name.as_deref().map_or_else(
+) -> (RenderPass, RenderPass) {
+    let runtime_analysis = runtime_analysis(sql);
+    let marker_names = (!runtime_analysis.macro_spans.is_empty())
+        .then(|| unique_runtime_macro_markers(sql, macro_prefix));
+    let template_source_without_prefix = marker_names.as_ref().map_or_else(
         || sql.to_owned(),
-        |marker_name| {
-            super::sql::inject_macro_runtime_markers(sql, &runtime_macro_openings, marker_name)
+        |(enter_marker, exit_marker)| {
+            super::sql::inject_macro_runtime_markers(
+                sql,
+                &runtime_analysis.macro_spans,
+                &runtime_analysis.scalar_macro_names,
+                enter_marker,
+                exit_marker,
+            )
         },
     );
     let template_source = if macro_prefix.is_empty() {
@@ -158,12 +189,23 @@ fn render_with_incremental_passes(
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
 
-    if let Some(marker_name) = marker_name {
+    if let Some((enter_marker, exit_marker)) = marker_names {
         let state = render_state.clone();
-        env.add_function(marker_name, move || -> Result<Value, minijinja::Error> {
-            state.semantic_certain.store(false, Ordering::Relaxed);
-            Ok(Value::from(""))
-        });
+        env.add_function(
+            enter_marker,
+            move |name: String, scalar_uncertain: bool| -> Result<Value, minijinja::Error> {
+                state.enter_macro(name, scalar_uncertain);
+                Ok(Value::from(""))
+            },
+        );
+        let state = render_state.clone();
+        env.add_function(
+            exit_marker,
+            move |name: String| -> Result<Value, minijinja::Error> {
+                state.exit_macro(&name);
+                Ok(Value::from(""))
+            },
+        );
     }
 
     // ref('name'), ref('package', 'name'), or ref('name', version=N)
@@ -295,7 +337,7 @@ fn render_with_incremental_passes(
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
-                state.semantic_certain.store(false, Ordering::Relaxed);
+                state.mark_uncertain();
                 Ok(Value::from("__dbt_var_unknown__"))
             }
         }
@@ -309,7 +351,7 @@ fn render_with_incremental_passes(
             // dbt will render. Mark uncertainty only when the stub is
             // actually called; merely registering it must not make every
             // template fall back to regex extraction.
-            state.semantic_certain.store(false, Ordering::Relaxed);
+            state.mark_uncertain();
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
@@ -336,7 +378,7 @@ fn render_with_incremental_passes(
     env.add_function("run_query", {
         let state = render_state.clone();
         move |_args: &[Value]| -> Result<Value, minijinja::Error> {
-            state.semantic_certain.store(false, Ordering::Relaxed);
+            state.mark_uncertain();
             Ok(Value::from(""))
         }
     });
@@ -345,7 +387,7 @@ fn render_with_incremental_passes(
     env.add_function("statement", {
         let state = render_state.clone();
         move |_args: &[Value]| -> Result<Value, minijinja::Error> {
-            state.semantic_certain.store(false, Ordering::Relaxed);
+            state.mark_uncertain();
             Ok(Value::from(""))
         }
     });
@@ -377,8 +419,8 @@ fn render_with_incremental_passes(
         Ok(template) => template,
         Err(_) => {
             return (
-                (JinjaExtraction::default(), false, false),
-                (JinjaExtraction::default(), false, false),
+                (JinjaExtraction::default(), false, false, false, Vec::new()),
+                (JinjaExtraction::default(), false, false, false, Vec::new()),
             );
         }
     };
@@ -387,13 +429,26 @@ fn render_with_incremental_passes(
         render_state
             .is_incremental
             .store(is_incremental, Ordering::Relaxed);
+        render_state.macro_scopes.lock().unwrap().clear();
+        render_state.uncertain_macro_scopes.lock().unwrap().clear();
         render_state
             .semantic_certain
-            .store(!uses_runtime_scalar, Ordering::Relaxed);
+            .store(!runtime_analysis.uses_runtime_scalar, Ordering::Relaxed);
+        render_state
+            .model_uncertain
+            .store(runtime_analysis.uses_runtime_scalar, Ordering::Relaxed);
         let complete = template.render_captured_to((), std::io::sink()).is_ok();
         let extraction = std::mem::take(&mut *render_state.extraction.lock().unwrap());
         let semantic_certain = render_state.semantic_certain.load(Ordering::Relaxed);
-        (extraction, complete, semantic_certain)
+        let model_uncertain = render_state.model_uncertain.load(Ordering::Relaxed);
+        let uncertain_scopes = render_state.uncertain_scopes();
+        (
+            extraction,
+            complete,
+            semantic_certain,
+            model_uncertain,
+            uncertain_scopes,
+        )
     };
 
     // Compile once, then render each branch independently. Taking the
@@ -410,6 +465,47 @@ struct RenderState {
     is_incremental: AtomicBool,
     extraction: Mutex<JinjaExtraction>,
     semantic_certain: AtomicBool,
+    model_uncertain: AtomicBool,
+    macro_scopes: Mutex<Vec<String>>,
+    uncertain_macro_scopes: Mutex<HashSet<String>>,
+}
+
+impl RenderState {
+    fn mark_uncertain(&self) {
+        self.semantic_certain.store(false, Ordering::Relaxed);
+        let scopes = self.macro_scopes.lock().unwrap();
+        if scopes.is_empty() {
+            self.model_uncertain.store(true, Ordering::Relaxed);
+        } else {
+            self.uncertain_macro_scopes
+                .lock()
+                .unwrap()
+                .extend(scopes.iter().cloned());
+        }
+    }
+
+    fn enter_macro(&self, name: String, scalar_uncertain: bool) {
+        self.macro_scopes.lock().unwrap().push(name);
+        if scalar_uncertain {
+            self.mark_uncertain();
+        }
+    }
+
+    fn exit_macro(&self, name: &str) {
+        let mut scopes = self.macro_scopes.lock().unwrap();
+        if scopes.last().is_some_and(|active| active == name) {
+            scopes.pop();
+        }
+    }
+
+    fn uncertain_scopes(&self) -> Vec<String> {
+        self.uncertain_macro_scopes
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -426,12 +522,12 @@ impl RuntimeGlobal {
 
 impl Object for RuntimeGlobal {
     fn get_value(self: &Arc<Self>, _key: &Value) -> Option<Value> {
-        self.state.semantic_certain.store(false, Ordering::Relaxed);
+        self.state.mark_uncertain();
         None
     }
 
     fn get_value_by_str(self: &Arc<Self>, _key: &str) -> Option<Value> {
-        self.state.semantic_certain.store(false, Ordering::Relaxed);
+        self.state.mark_uncertain();
         None
     }
 
@@ -447,49 +543,105 @@ impl Object for RuntimeGlobal {
 const RUNTIME_SCALAR_NAMES: [&str; 4] =
     ["execute", "dbt_version", "invocation_id", "run_started_at"];
 
-fn runtime_scalar_analysis(sql: &str) -> (bool, Vec<usize>) {
-    if !RUNTIME_SCALAR_NAMES.iter().any(|name| sql.contains(name)) {
-        return (false, Vec::new());
+const RUNTIME_SCOPE_HINT_NAMES: [&str; 17] = [
+    "execute",
+    "dbt_version",
+    "invocation_id",
+    "run_started_at",
+    "env_var",
+    "var",
+    "run_query",
+    "statement",
+    "adapter",
+    "api",
+    "exceptions",
+    "graph",
+    "model",
+    "modules",
+    "target",
+    "this",
+    "flags",
+];
+
+#[derive(Debug)]
+struct RuntimeAnalysis {
+    uses_runtime_scalar: bool,
+    macro_spans: Vec<super::sql::ModelMacroSpan>,
+    scalar_macro_names: HashSet<String>,
+}
+
+fn runtime_analysis(sql: &str) -> RuntimeAnalysis {
+    let has_scalar_hint = RUNTIME_SCALAR_NAMES.iter().any(|name| sql.contains(name));
+    if !RUNTIME_SCOPE_HINT_NAMES
+        .iter()
+        .any(|name| sql.contains(name))
+    {
+        return RuntimeAnalysis {
+            uses_runtime_scalar: false,
+            macro_spans: Vec::new(),
+            scalar_macro_names: HashSet::new(),
+        };
     }
 
     let macro_spans = super::sql::model_macro_definition_spans(sql);
-    let model_source = super::sql::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
     let env = Environment::new();
-    let direct_use = env
-        .template_from_str(&model_source)
-        .ok()
-        .map(|template| {
-            let undeclared = template.undeclared_variables(false);
-            RUNTIME_SCALAR_NAMES
-                .iter()
-                .any(|name| undeclared.contains(*name))
-        })
-        .unwrap_or(false);
-    let macro_openings = macro_spans
-        .into_iter()
-        .filter_map(|(start, end, opening_end)| {
-            let template = env.template_from_str(&sql[start..end]).ok()?;
-            let undeclared = template.undeclared_variables(false);
-            RUNTIME_SCALAR_NAMES
-                .iter()
-                .any(|name| undeclared.contains(*name))
-                .then_some(opening_end)
-        })
-        .collect();
+    let direct_use = if has_scalar_hint {
+        let model_source =
+            super::sql::strip_macro_definitions_for_runtime_analysis(sql, &macro_spans);
+        env.template_from_str(&model_source)
+            .ok()
+            .map(|template| {
+                let undeclared = template.undeclared_variables(false);
+                RUNTIME_SCALAR_NAMES
+                    .iter()
+                    .any(|name| undeclared.contains(*name))
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let scalar_macro_names = if has_scalar_hint {
+        macro_spans
+            .iter()
+            .filter_map(|definition| {
+                let template = env
+                    .template_from_str(&sql[definition.start..definition.end])
+                    .ok()?;
+                let undeclared = template.undeclared_variables(false);
+                RUNTIME_SCALAR_NAMES
+                    .iter()
+                    .any(|name| undeclared.contains(*name))
+                    .then_some(definition.name.clone())
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
 
-    (direct_use, macro_openings)
+    RuntimeAnalysis {
+        uses_runtime_scalar: direct_use,
+        macro_spans,
+        scalar_macro_names,
+    }
 }
 
-fn unique_runtime_macro_marker(sql: &str, macro_prefix: &str) -> String {
-    const BASE: &str = "__dlin_runtime_macro_marker";
+fn unique_runtime_macro_markers(sql: &str, macro_prefix: &str) -> (String, String) {
+    const ENTER_BASE: &str = "__dlin_runtime_macro_enter";
+    const EXIT_BASE: &str = "__dlin_runtime_macro_exit";
     let template_source = format!("{macro_prefix}\n{sql}");
-    if !template_source.contains(BASE) {
-        return BASE.to_owned();
-    }
     for suffix in 0.. {
-        let candidate = format!("{BASE}_{suffix}");
-        if !template_source.contains(&candidate) {
-            return candidate;
+        let enter = if suffix == 0 {
+            ENTER_BASE.to_owned()
+        } else {
+            format!("{ENTER_BASE}_{suffix}")
+        };
+        let exit = if suffix == 0 {
+            EXIT_BASE.to_owned()
+        } else {
+            format!("{EXIT_BASE}_{suffix}")
+        };
+        if !template_source.contains(&enter) && !template_source.contains(&exit) {
+            return (enter, exit);
         }
     }
     unreachable!("finite source cannot contain every marker suffix")
@@ -714,6 +866,7 @@ mod tests {
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.complete);
         assert!(!outcome.semantic_certain);
+        assert!(outcome.model_uncertain);
         assert_eq!(outcome.extraction.refs.len(), 1);
         assert_eq!(outcome.extraction.refs[0].name, "orders_eu");
     }
@@ -833,6 +986,7 @@ mod tests {
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.complete);
         assert!(!outcome.semantic_certain);
+        assert!(outcome.model_uncertain);
     }
 
     #[test]
@@ -847,6 +1001,7 @@ mod tests {
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.complete);
         assert!(!outcome.semantic_certain);
+        assert!(outcome.model_uncertain);
     }
 
     #[test]
@@ -919,9 +1074,9 @@ mod tests {
 
     #[test]
     fn test_runtime_scalar_analysis_fast_path_without_scalar_names() {
-        let (direct_use, macro_openings) = runtime_scalar_analysis("SELECT 1");
-        assert!(!direct_use);
-        assert!(macro_openings.is_empty());
+        let analysis = runtime_analysis("SELECT 1");
+        assert!(!analysis.uses_runtime_scalar);
+        assert!(analysis.macro_spans.is_empty());
     }
 
     #[test]
@@ -972,6 +1127,7 @@ mod tests {
         let outcome = extract_via_jinja(sql, "");
         assert!(outcome.complete);
         assert!(!outcome.semantic_certain);
+        assert!(!outcome.model_uncertain);
         assert_eq!(outcome.extraction.refs.len(), 1);
         assert_eq!(outcome.extraction.refs[0].name, "called_true");
     }
@@ -986,8 +1142,13 @@ mod tests {
         for source in sources {
             let spans = super::super::sql::model_macro_definition_spans(source);
             assert_eq!(spans.len(), 1);
-            let transformed =
-                super::super::sql::inject_macro_runtime_markers(source, &[spans[0].2], "marker");
+            let transformed = super::super::sql::inject_macro_runtime_markers(
+                source,
+                &spans,
+                &HashSet::new(),
+                "enter",
+                "exit",
+            );
 
             let original = Environment::new()
                 .template_from_str(source)
@@ -995,7 +1156,11 @@ mod tests {
                 .render(())
                 .unwrap();
             let mut instrumented_env = Environment::new();
-            instrumented_env.add_function("marker", || -> Result<Value, minijinja::Error> {
+            instrumented_env.add_function(
+                "enter",
+                |_: String, _: bool| -> Result<Value, minijinja::Error> { Ok(Value::from("")) },
+            );
+            instrumented_env.add_function("exit", |_: String| -> Result<Value, minijinja::Error> {
                 Ok(Value::from(""))
             });
             let instrumented = instrumented_env
@@ -1206,12 +1371,19 @@ mod tests {
             {% endif %}
         "#;
         let (
-            (full, full_complete, full_certain),
-            (incremental, incremental_complete, incremental_certain),
+            (full, full_complete, full_certain, full_model_uncertain, _),
+            (
+                incremental,
+                incremental_complete,
+                incremental_certain,
+                incremental_model_uncertain,
+                _,
+            ),
         ) = render_with_incremental_passes(sql, "", &HashMap::new());
 
         assert!(!full_complete);
         assert!(full_certain);
+        assert!(!full_model_uncertain);
         assert_eq!(full.config.materialized.as_deref(), Some("table"));
         assert_eq!(full.config.tags, vec!["full"]);
         assert_eq!(full.refs.len(), 1);
@@ -1219,6 +1391,7 @@ mod tests {
 
         assert!(incremental_complete);
         assert!(incremental_certain);
+        assert!(!incremental_model_uncertain);
         assert_eq!(
             incremental.config.materialized.as_deref(),
             Some("incremental")
@@ -1226,6 +1399,39 @@ mod tests {
         assert_eq!(incremental.config.tags, vec!["incremental"]);
         assert_eq!(incremental.refs.len(), 1);
         assert_eq!(incremental.refs[0].name, "incremental_dep");
+    }
+
+    #[test]
+    fn test_model_uncertainty_is_isolated_between_incremental_passes() {
+        let sql = r#"
+            {% if is_incremental() %}
+                {% if env_var('REGION') == 'us' %}{{ ref('incremental_us') }}{% endif %}
+            {% else %}
+                {{ ref('full_dep') }}
+            {% endif %}
+        "#;
+        let (
+            (full, full_complete, full_certain, full_model_uncertain, full_scopes),
+            (
+                incremental,
+                incremental_complete,
+                incremental_certain,
+                incremental_model_uncertain,
+                incremental_scopes,
+            ),
+        ) = render_with_incremental_passes(sql, "", &HashMap::new());
+
+        assert!(full_complete);
+        assert!(full_certain);
+        assert!(!full_model_uncertain);
+        assert!(full_scopes.is_empty());
+        assert_eq!(full.refs[0].name, "full_dep");
+
+        assert!(incremental_complete);
+        assert!(!incremental_certain);
+        assert!(incremental_model_uncertain);
+        assert!(incremental_scopes.is_empty());
+        assert!(incremental.refs.is_empty());
     }
 
     #[test]
