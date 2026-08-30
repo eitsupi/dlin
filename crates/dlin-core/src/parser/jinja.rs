@@ -818,6 +818,41 @@ mod tests {
     }
 
     #[test]
+    fn test_build_macro_prefix_preserves_exact_order_and_newlines() {
+        let macro_a = "{% macro a() %}ok{% endmacro %}".to_string();
+        let invalid = "{% materialization custom %}invalid{% endmaterialization %}".to_string();
+        let macro_b = "{% macro b() %}ok{% endmacro %}".to_string();
+        let sources = vec![macro_a.clone(), String::new(), invalid, macro_b.clone()];
+
+        assert_eq!(
+            build_macro_prefix(&sources),
+            format!("{macro_a}\n\n{macro_b}\n")
+        );
+    }
+
+    #[test]
+    fn test_build_macro_prefix_keeps_reparse_for_duplicate_blocks() {
+        // MiniJinja's default `multi_template` grammar rejects duplicate block
+        // names in one template, even though each source parses individually.
+        // Keep the accumulated validation in build_macro_prefix so this valid
+        // individually-but-conflicting source is skipped as before.
+        let block_a = "{% block shared %}a{% endblock %}".to_string();
+        let block_b = "{% block shared %}b{% endblock %}".to_string();
+        let env = Environment::new();
+
+        assert!(env.template_from_str(&block_a).is_ok());
+        assert!(env.template_from_str(&block_b).is_ok());
+        assert!(
+            env.template_from_str(&format!("{block_a}\n{block_b}\n"))
+                .is_err()
+        );
+        assert_eq!(
+            build_macro_prefix(&[block_a.clone(), block_b]),
+            format!("{block_a}\n")
+        );
+    }
+
+    #[test]
     fn test_invalid_macro_skipped_refs_still_extracted() {
         let sources = vec![
             // Bad macro that would poison everything if not filtered
