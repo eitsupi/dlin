@@ -81,10 +81,29 @@ def validate_runtime_semantics(
         by_source = {report.get("source_model"): report for report in reports}
         if set(by_source) != set(names):
             parser.error("local alternate dependency impact set differs from fixture")
-        for name, model in expected_models.items():
-            labels = {node.get("label") for node in by_source[name].get("impacted_nodes", [])}
-            if model not in labels:
-                parser.error(f"{name} does not impact expected model {model}")
+        for index, name in enumerate(names):
+            model = expected_models[name]
+            expected_labels = {
+                "orders" if suffix == 0 else f"orders_{suffix:04d}"
+                for suffix in range(index, 64)
+            }
+            report = by_source[name]
+            impacted_nodes = report.get("impacted_nodes", [])
+            labels = {node.get("label") for node in impacted_nodes}
+            if report.get("affected_models") != 64 - index:
+                parser.error(
+                    f"{name} affected model count does not match expected suffix"
+                )
+            if labels != expected_labels:
+                parser.error(
+                    f"{name} impact labels do not match expected downstream suffix"
+                )
+            expected_node = next(
+                (node for node in impacted_nodes if node.get("label") == model),
+                None,
+            )
+            if expected_node is None or expected_node.get("distance") != 1:
+                parser.error(f"{name} does not directly impact expected model {model}")
         return
 
     reachable = {
