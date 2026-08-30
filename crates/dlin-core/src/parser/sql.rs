@@ -671,6 +671,21 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_var_branches_are_merged() {
+        let sql = r#"
+            {% if var('REGION') == 'us' %}
+                SELECT * FROM {{ ref('orders_us') }}
+            {% else %}
+                SELECT * FROM {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "orders_us"));
+        assert!(refs.iter().any(|r| r.name == "orders_eu"));
+    }
+
+    #[test]
     fn test_runtime_target_branches_are_merged() {
         let sql = r#"
             {% if target.name == 'us' %}

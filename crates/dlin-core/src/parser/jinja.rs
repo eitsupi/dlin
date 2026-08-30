@@ -265,8 +265,8 @@ fn render_with_incremental_passes(
         .iter()
         .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
         .collect();
-    env.add_function(
-        "var",
+    env.add_function("var", {
+        let state = render_state.clone();
         move |args: &[Value]| -> Result<Value, minijinja::Error> {
             if let Some(key) = args.first()
                 && let Some(key_str) = key.as_str()
@@ -278,10 +278,11 @@ fn render_with_incremental_passes(
             if args.len() >= 2 {
                 Ok(args[1].clone())
             } else {
+                state.semantic_certain.store(false, Ordering::Relaxed);
                 Ok(Value::from("__dbt_var_unknown__"))
             }
-        },
-    );
+        }
+    });
 
     // env_var() → returns default or empty string
     env.add_function("env_var", {
@@ -337,6 +338,7 @@ fn render_with_incremental_passes(
     // it; SQL text, comments, and raw blocks never touch these values.
     for (name, rendered) in [
         ("adapter", "__dbt_adapter__"),
+        ("api", "__dbt_api__"),
         ("exceptions", "__dbt_exceptions__"),
         ("graph", "__dbt_graph__"),
         ("model", "__dbt_model__"),
@@ -632,6 +634,22 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_var_without_default_marks_semantic_uncertainty() {
+        let sql = r#"
+            {% if var('region') == 'us' %}
+                {{ ref('orders_us') }}
+            {% else %}
+                {{ ref('orders_eu') }}
+            {% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "orders_eu");
+    }
+
+    #[test]
     fn test_for_loop_with_refs() {
         let sql = r#"
             {% for src in ['orders', 'customers'] %}
@@ -798,6 +816,18 @@ mod tests {
         assert!(outcome.semantic_certain);
         assert_eq!(outcome.extraction.refs.len(), 1);
         assert_eq!(outcome.extraction.refs[0].name, "target_true");
+    }
+
+    #[test]
+    fn test_api_global_truthiness_matches_sentinel() {
+        let sql = r#"
+            {% if api %}{{ ref('api_true') }}{% else %}{{ ref('api_false') }}{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "api_true");
     }
 
     #[test]
