@@ -9,9 +9,6 @@ use minijinja::{Environment, ErrorKind};
 
 use super::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
-const RUNTIME_SCALAR_GLOBALS: &[&str] =
-    &["execute", "dbt_version", "invocation_id", "run_started_at"];
-
 /// All extracted information from rendering a dbt Jinja SQL template
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct JinjaExtraction {
@@ -148,8 +145,7 @@ fn render_with_incremental_passes(
         format!("{}\n{}", macro_prefix, sql)
     };
     let render_state = Arc::new(RenderState::default());
-    let uses_runtime_scalar =
-        super::sql::contains_executable_jinja_identifier(sql, RUNTIME_SCALAR_GLOBALS);
+    let uses_runtime_scalar = scalar_runtime_global_used_in_model(sql);
 
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
@@ -361,7 +357,6 @@ fn render_with_incremental_passes(
     env.add_global("run_started_at", Value::from("2025-01-01T00:00:00Z"));
     env.add_global("dbt_version", Value::from("1.0.0"));
     env.add_global("execute", Value::from(true));
-
     let template = match env.template_from_str(&template_source) {
         Ok(template) => template,
         Err(_) => {
@@ -431,6 +426,18 @@ impl Object for RuntimeGlobal {
     fn render(self: &Arc<Self>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.rendered)
     }
+}
+
+fn scalar_runtime_global_used_in_model(sql: &str) -> bool {
+    let model_source = super::sql::strip_macro_definitions_for_runtime_analysis(sql);
+    let env = Environment::new();
+    let Ok(template) = env.template_from_str(&model_source) else {
+        return false;
+    };
+    let undeclared = template.undeclared_variables(false);
+    ["execute", "dbt_version", "invocation_id", "run_started_at"]
+        .iter()
+        .any(|name| undeclared.contains(*name))
 }
 
 #[cfg(test)]
@@ -842,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_runtime_scan_ignores_non_executable_text() {
+    fn test_scalar_runtime_context_ignores_non_executable_text() {
         let sql = r#"
             -- execute dbt_version invocation_id run_started_at
             {# execute dbt_version invocation_id run_started_at #}
@@ -856,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_runtime_scan_ignores_unused_macro_prefix() {
+    fn test_scalar_runtime_context_ignores_unused_macro_prefix() {
         let macro_prefix = r#"
             {% macro runtime_branch() %}
                 {% if execute %}runtime{% endif %}
@@ -865,6 +872,87 @@ mod tests {
         let outcome = extract_via_jinja("SELECT 1", macro_prefix);
         assert!(outcome.complete);
         assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_uncalled_model_macro() {
+        let sql = r#"
+            {% macro unused_runtime_branch() %}
+                {% if execute %}{{ ref('unused_true') }}{% endif %}
+            {% endmacro %}
+            SELECT 1
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert!(outcome.extraction.refs.is_empty());
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_called_model_macro() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
+            {% endmacro %}
+            {{ runtime_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "called_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_member_macro_call() {
+        let sql = r#"
+            {% macro runtime_branch() %}{% if execute %}{{ ref('unused_true') }}{% endif %}{% endmacro %}
+            {{ obj.runtime_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_tracks_transitive_model_macro() {
+        let sql = r#"
+            {% macro inner_branch() %}
+                {% if execute %}{{ ref('inner_true') }}{% else %}{{ ref('inner_false') }}{% endif %}
+            {% endmacro %}
+            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
+            {{ outer_branch() }}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "inner_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_local_shadowing() {
+        let sql = r#"
+            {% set execute = false %}
+            {% if execute %}{{ ref('execute_true') }}{% else %}{{ ref('execute_false') }}{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "execute_false");
+    }
+
+    #[test]
+    fn test_scalar_runtime_context_ignores_member_names() {
+        let sql = r#"
+            {% set obj = {'execute': true} %}
+            {% if obj.execute %}{{ ref('member_true') }}{% else %}{{ ref('member_false') }}{% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "member_true");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// A reference to another dbt model via ref()
@@ -35,6 +36,13 @@ static JINJA_RAW_BLOCK: LazyLock<Regex> =
 // e.g. SQL comments that mention ref('...') outside any jinja block.
 static JINJA_BLOCK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}").unwrap());
+
+// Matches macro definitions so static analysis can inspect model-level Jinja
+// without treating free variables in uncalled macro bodies as model uses.
+static JINJA_MACRO_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\b[\s\S]*?\{%-?\s*endmacro\s*-?%\}")
+        .unwrap()
+});
 
 // Matches ref('name'), ref("name"), ref('pkg', 'name'), ref("pkg", "name"),
 // ref('name', version=N), ref('name', v=N), and the pkg variants.
@@ -92,6 +100,91 @@ fn strip_inert_jinja(sql: &str) -> String {
     JINJA_RAW_BLOCK.replace_all(&no_comments, "").to_string()
 }
 
+/// Remove macro definitions before model-level static Jinja analysis.
+pub(super) fn strip_macro_definitions_for_runtime_analysis(sql: &str) -> String {
+    let inert = strip_inert_jinja(sql);
+    let definitions: Vec<_> = JINJA_MACRO_BLOCK
+        .captures_iter(&inert)
+        .filter_map(|captures| {
+            let whole = captures.get(0)?;
+            Some((
+                whole.start(),
+                whole.end(),
+                captures.get(1)?.as_str().to_owned(),
+            ))
+        })
+        .collect();
+    if definitions.is_empty() {
+        return inert;
+    }
+
+    let mut reachable = HashSet::new();
+    for block_match in JINJA_BLOCK.find_iter(&inert) {
+        if owner_of_macro_definition(&definitions, block_match.start()).is_none() {
+            reachable.extend(macro_calls_in_block(block_match.as_str(), &definitions));
+        }
+    }
+    loop {
+        let mut discovered = HashSet::new();
+        for (index, (start, end, _)) in definitions.iter().enumerate() {
+            if reachable.contains(&index) {
+                for block_match in JINJA_BLOCK.find_iter(&inert[*start..*end]) {
+                    discovered.extend(macro_calls_in_block(block_match.as_str(), &definitions));
+                }
+            }
+        }
+        discovered.retain(|index| !reachable.contains(index));
+        if discovered.is_empty() {
+            break;
+        }
+        reachable.extend(discovered);
+    }
+
+    let mut result = String::with_capacity(inert.len());
+    let mut cursor = 0;
+    for (index, (start, end, _)) in definitions.iter().enumerate() {
+        if !reachable.contains(&index) {
+            result.push_str(&inert[cursor..*start]);
+            cursor = *end;
+        }
+    }
+    result.push_str(&inert[cursor..]);
+    result
+}
+
+fn owner_of_macro_definition(definitions: &[(usize, usize, String)], pos: usize) -> Option<usize> {
+    definitions
+        .iter()
+        .position(|(start, end, _)| *start <= pos && pos < *end)
+}
+
+fn macro_calls_in_block(block: &str, definitions: &[(usize, usize, String)]) -> Vec<usize> {
+    let spans = string_literal_spans(block);
+    let mut calls = Vec::new();
+    for (index, (_, _, name)) in definitions.iter().enumerate() {
+        for (pos, _) in block.match_indices(name) {
+            if inside_string_literal(&spans, pos) {
+                continue;
+            }
+            let before_is_identifier = pos
+                .checked_sub(1)
+                .and_then(|idx| block.as_bytes().get(idx))
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'.');
+            let mut end = pos + name.len();
+            while end < block.len() && block.as_bytes()[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if !before_is_identifier
+                && block.as_bytes().get(end) == Some(&b'(')
+                && !calls.contains(&index)
+            {
+                calls.push(index);
+            }
+        }
+    }
+    calls
+}
+
 /// Byte spans of quoted string literals inside a jinja block, honoring
 /// backslash escapes. Used to reject ref()/source() text that appears
 /// inside a string literal (e.g. a log message) rather than as a call.
@@ -121,30 +214,6 @@ fn string_literal_spans(block: &str) -> Vec<(usize, usize)> {
 /// outside every span).
 fn inside_string_literal(spans: &[(usize, usize)], pos: usize) -> bool {
     spans.iter().any(|&(start, end)| pos > start && pos < end)
-}
-
-/// Whether an identifier occurs in an executable Jinja block, excluding
-/// quoted strings and constructs stripped by [`strip_inert_jinja`].
-pub(super) fn contains_executable_jinja_identifier(sql: &str, identifiers: &[&str]) -> bool {
-    let cleaned = strip_inert_jinja(sql);
-    JINJA_BLOCK.find_iter(&cleaned).any(|block_match| {
-        let block = block_match.as_str();
-        let spans = string_literal_spans(block);
-        identifiers.iter().any(|identifier| {
-            block.match_indices(identifier).any(|(pos, _)| {
-                let before_is_identifier = pos
-                    .checked_sub(1)
-                    .and_then(|idx| block.as_bytes().get(idx))
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
-                let end = pos + identifier.len();
-                let after_is_identifier = block
-                    .as_bytes()
-                    .get(end)
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
-                !before_is_identifier && !after_is_identifier && !inside_string_literal(&spans, pos)
-            })
-        })
-    })
 }
 
 /// Extract all refs, sources, and config from SQL content in a single pass.
@@ -707,6 +776,35 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().any(|r| r.name == "execute_true"));
         assert!(refs.iter().any(|r| r.name == "execute_false"));
+    }
+
+    #[test]
+    fn test_called_model_macro_runtime_branches_are_merged() {
+        let sql = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}{{ ref('called_true') }}{% else %}{{ ref('called_false') }}{% endif %}
+            {% endmacro %}
+            {{ runtime_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "called_true"));
+        assert!(refs.iter().any(|r| r.name == "called_false"));
+    }
+
+    #[test]
+    fn test_transitive_called_model_macro_runtime_branches_are_merged() {
+        let sql = r#"
+            {% macro inner_branch() %}
+                {% if execute %}{{ ref('inner_true') }}{% else %}{{ ref('inner_false') }}{% endif %}
+            {% endmacro %}
+            {% macro outer_branch() %}{{ inner_branch() }}{% endmacro %}
+            {{ outer_branch() }}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "inner_true"));
+        assert!(refs.iter().any(|r| r.name == "inner_false"));
     }
 
     #[test]
