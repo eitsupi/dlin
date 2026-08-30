@@ -17,6 +17,7 @@
 - Preserve structured and nested-field source paths across column-lineage analysis, including cross-model field access (#164)
 - Correct cache invalidation and identity handling so cached results are reused only when the relevant manifest, SQL, dialect, and semantic inputs still match; project-root inputs and unreadable freshness inputs are handled safely (#175, #176, #177, #178, #179, #180)
 - Recover dependencies from runtime-dependent Jinja branches and reachable local/project macros that a single default render would otherwise miss (#185)
+- Distinguish unproven partial column lineage from missing or ambiguous columns, preserve the nearest honest terminal, and prevent diagnostics from unrelated or excluded columns from leaking; indeterminate-only results remain exit 0 while retaining warnings and JSON diagnostics
 
 ### Performance
 

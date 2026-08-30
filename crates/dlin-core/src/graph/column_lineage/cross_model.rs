@@ -47,6 +47,7 @@ fn compute_cross_model_inner(
         for source in &entry.sources {
             resolve_source_recursive(
                 source,
+                &entry.column,
                 &upstream_models,
                 &mut visited,
                 &mut resolved_sources,
@@ -97,6 +98,7 @@ pub(super) fn build_upstream_model_relations(
 #[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
     source: &InternalColumnSource,
+    root_output_column: &str,
     upstream_models: &[(RelationRef, String)],
     visited: &mut HashSet<(String, String)>,
     resolved: &mut Vec<InternalColumnSource>,
@@ -149,8 +151,15 @@ fn resolve_source_recursive(
     let upstream_result = ctx.in_memory_cache.get(&model_unique_id).unwrap();
 
     for err in &upstream_result.errors {
-        if !errors.contains(err) {
-            errors.push(err.clone());
+        // A diagnostic for a different output column belongs to a sibling
+        // branch (and can even refer to an EXCEPT-ed projection). Only global
+        // diagnostics and the column currently being followed may cross this
+        // model boundary.
+        if !err.is_column_scoped() || err.column_name() == Some(source.column.as_str()) {
+            let rebased = err.rebase_column(root_output_column);
+            if !errors.contains(&rebased) {
+                errors.push(rebased);
+            }
         }
     }
 
@@ -213,6 +222,7 @@ fn resolve_source_recursive(
             for s in &on_demand_sources {
                 resolve_source_recursive(
                     s,
+                    root_output_column,
                     &further_upstream,
                     visited,
                     resolved,

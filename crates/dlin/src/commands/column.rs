@@ -129,19 +129,9 @@ pub(crate) fn run_column_lineage_command(
                     // Remove per-column errors for columns outside the filter.
                     // Global errors (e.g. SQL parse failures) are always preserved.
                     report.errors.retain(|err| match err {
-                        graph::column_lineage::ColumnLineageError {
-                            kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
-                            what,
-                            ..
-                        } => {
-                            // Extract column name from "column '<name>': ..." pattern
-                            if let Some(rest) = what.strip_prefix("column '")
-                                && let Some(col_end) = rest.find('\'')
-                            {
-                                return column_filter.contains(&rest[..col_end]);
-                            }
-                            true
-                        }
+                        err if err.is_column_scoped() => err
+                            .column_name()
+                            .is_none_or(|name| column_filter.contains(name)),
                         _ => true,
                     });
                     report.traced_columns = report.columns.len();
@@ -149,21 +139,23 @@ pub(crate) fn run_column_lineage_command(
 
                     // When there are no global errors, explicitly flag requested columns
                     // that are absent from both the output and per-column errors.
-                    let has_global_errors =
-                        report.errors.iter().any(|err| !matches!(err.kind, graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound));
+                    let has_global_errors = report
+                        .errors
+                        .iter()
+                        .any(|err| !err.is_column_scoped());
                     if !has_global_errors {
                         let mut sorted_cols: Vec<&str> = column_filter.iter().copied().collect();
                         sorted_cols.sort_unstable();
                         for col in sorted_cols {
                             let in_output = report.columns.iter().any(|c| c.column == col);
-                            let col_error_prefix = format!("column '{}': ", col);
                             let has_col_error = report
                                 .errors
                                 .iter()
-                                .any(|err| err.what.starts_with(&col_error_prefix));
+                                .any(|err| err.column_name() == Some(col));
                             if !in_output && !has_col_error {
                                 report.errors.push(graph::column_lineage::ColumnLineageError {
                                     kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
+                                    column: Some(col.to_string()),
                                     what: format!("column '{}': not found in model output", col),
                                     why: None,
                                     hint: None,
@@ -182,7 +174,7 @@ pub(crate) fn run_column_lineage_command(
     for report in &reports {
         for err in &report.errors {
             dlin_core::warn!("{}", err);
-            has_errors = true;
+            has_errors |= err.is_fatal();
         }
     }
 
@@ -279,7 +271,7 @@ pub(crate) fn run_column_impact_command(
     for report in &reports {
         for err in &report.errors {
             dlin_core::warn!("{}", err);
-            has_errors = true;
+            has_errors |= err.is_fatal();
         }
     }
 

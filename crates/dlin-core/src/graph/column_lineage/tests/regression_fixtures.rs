@@ -322,7 +322,16 @@ fn assert_exact_column_outcomes(
         .errors
         .iter()
         .map(|error| {
-            assert_eq!(error.kind, ColumnLineageErrorKind::ColumnNotFound);
+            assert!(
+                matches!(
+                    error.kind,
+                    ColumnLineageErrorKind::ColumnNotFound
+                        | ColumnLineageErrorKind::ColumnAmbiguous
+                        | ColumnLineageErrorKind::ColumnIndeterminate
+                ),
+                "expected a column-scoped diagnostic, got: {:?}",
+                error
+            );
             error
                 .what
                 .strip_prefix("column '")

@@ -174,6 +174,7 @@ pub(super) fn compute_column_lineage_internal(
                 columns: vec![],
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::ModelNotFound,
+                    column: None,
                     what: format!("model '{}' not found in manifest", model_name),
                     why: None,
                     hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
@@ -198,6 +199,7 @@ pub(super) fn compute_column_lineage_internal(
                 columns: vec![],
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::NoCompiledCode,
+                    column: None,
                     what: format!("model '{}' has no compiled_code", display_name),
                     why: Some("compiled SQL is required for column lineage analysis".to_string()),
                     hint: Some(
@@ -250,6 +252,7 @@ pub(super) fn compute_column_lineage_internal(
             columns: vec![],
             errors: vec![ColumnLineageError {
                 kind: ColumnLineageErrorKind::ColumnInferenceFailed,
+                column: None,
                 what: format!("model '{}': could not determine output columns", display_name),
                 why: Some("YAML has no columns defined and SQL column inference failed".to_string()),
                 hint: Some(
@@ -292,6 +295,7 @@ pub(super) fn compute_column_lineage_internal(
                 columns: vec![],
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::ParseFailure,
+                    column: None,
                     what: format!("failed to parse SQL for '{}'", display_name),
                     why: Some(e.message),
                     hint: Some(
@@ -312,6 +316,7 @@ pub(super) fn compute_column_lineage_internal(
                 columns: vec![],
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::ParseFailure,
+                    column: None,
                     what: format!("failed to parse SQL for '{}'", display_name),
                     why: Some(e.message),
                     hint: Some(
@@ -361,8 +366,30 @@ pub(super) fn compute_column_lineage_internal(
                      define upstream columns in the model YAML to enable full resolution"
                         .to_string()
                 });
+                let (kind, column) = match failure.error.kind {
+                    BackendErrorKind::ColumnResolution {
+                        state: ResolutionState::Ambiguous,
+                    } => (
+                        ColumnLineageErrorKind::ColumnAmbiguous,
+                        Some(col_name.clone()),
+                    ),
+                    BackendErrorKind::ColumnResolution {
+                        state: ResolutionState::Indeterminate,
+                    } => (
+                        ColumnLineageErrorKind::ColumnIndeterminate,
+                        Some(col_name.clone()),
+                    ),
+                    BackendErrorKind::ColumnResolution {
+                        state: ResolutionState::NotFound,
+                    } => (
+                        ColumnLineageErrorKind::ColumnNotFound,
+                        Some(col_name.clone()),
+                    ),
+                    _ => (ColumnLineageErrorKind::Internal, None),
+                };
                 errors.push(ColumnLineageError {
-                    kind: ColumnLineageErrorKind::ColumnNotFound,
+                    kind,
+                    column,
                     what: format!("column '{}': {}", col_name, failure.error.message),
                     why: None,
                     hint,
@@ -371,7 +398,8 @@ pub(super) fn compute_column_lineage_internal(
         }
     }
     errors.extend(contract_errors.into_iter().map(|error| ColumnLineageError {
-        kind: ColumnLineageErrorKind::ColumnNotFound,
+        kind: ColumnLineageErrorKind::Internal,
+        column: None,
         what: "backend contract violation while correlating column outcomes".to_string(),
         why: Some(error.message),
         hint: None,

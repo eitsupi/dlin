@@ -136,11 +136,31 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
             }]
         );
     }
+    for output_column in ["qualified_field", "bare_field"] {
+        let diagnostic = result
+            .errors
+            .iter()
+            .find(|error| error.column_name() == Some(output_column))
+            .unwrap_or_else(|| {
+                panic!(
+                    "row-value diagnostic should be rebased to {output_column}: {:?}",
+                    result.errors
+                )
+            });
+        assert_eq!(diagnostic.kind, ColumnLineageErrorKind::ColumnIndeterminate);
+        assert!(
+            diagnostic
+                .what
+                .starts_with(&format!("column '{output_column}':"))
+        );
+        assert!(!diagnostic.is_fatal());
+    }
     assert!(
-        result.errors.iter().any(|error| {
-            error.what.contains("event") && error.what.contains("no visible binding")
-        }),
-        "row-value child should remain indeterminate: {:?}",
+        !result
+            .errors
+            .iter()
+            .any(|error| error.column_name() == Some("event")),
+        "upstream origin column must not be exposed as the output diagnostic: {:?}",
         result.errors
     );
 
@@ -151,6 +171,136 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
             "public result must not expose {forbidden}: {public}"
         );
     }
+}
+
+#[test]
+fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fatal_error() {
+    let mut manifest = bigquery_struct_field_cross_model_manifest();
+    let upstream = manifest.nodes.get_mut("model.proj.upstream_model").unwrap();
+    upstream.columns = ["col_a"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                crate::parser::manifest::ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    upstream.compiled_code = Some(
+        "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.col_a AS col_a FROM latest".to_string(),
+    );
+
+    let downstream = manifest.nodes.get_mut("model.proj.quoting_model").unwrap();
+    downstream.name = "repro_model".to_string();
+    downstream.unique_id = "model.proj.repro_model".to_string();
+    downstream.columns = ["col_a"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                crate::parser::manifest::ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    downstream.compiled_code = Some("SELECT col_a FROM `p`.`d`.`upstream_model`".to_string());
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "repro_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let col_a = result
+        .columns
+        .iter()
+        .find(|column| column.column == "col_a")
+        .expect("col_a should remain published");
+    assert_eq!(col_a.sources.len(), 1, "sources: {:?}", col_a.sources);
+    assert_eq!(col_a.sources[0].table, "p.d.upstream_model");
+    assert_eq!(col_a.sources[0].column, "col_a");
+    assert!(col_a.sources[0].model_path.is_empty());
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| error.column_name() == Some("col_a"))
+        .expect("partial lineage should remain explicit");
+    assert_eq!(diagnostic.kind, ColumnLineageErrorKind::ColumnIndeterminate);
+    assert!(!diagnostic.is_fatal());
+}
+
+#[test]
+fn test_cross_model_rebases_deep_diagnostic_to_root_output() {
+    let manifest = same_named_deep_error_manifest();
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "target_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    let x = result
+        .columns
+        .iter()
+        .find(|column| column.column == "x")
+        .expect("x should be present");
+    assert_eq!(x.sources.len(), 1);
+    assert_eq!(x.sources[0].table, "p.d.middle_model");
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| error.column_name() != Some("x")),
+        "diagnostic from middle_model.y must not leak into target_model.x: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn test_cross_model_rebases_diagnostic_across_rename() {
+    let mut manifest = same_named_deep_error_manifest();
+    let middle = manifest.nodes.get_mut("model.proj.middle_model").unwrap();
+    middle.compiled_code =
+        Some("SELECT deep.x AS x, 1 AS y FROM `p`.`d`.`deep_model` AS deep".to_string());
+    let target = manifest.nodes.get_mut("model.proj.target_model").unwrap();
+    target.columns = ["z"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                crate::parser::manifest::ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    target.compiled_code = Some("SELECT x AS z FROM `p`.`d`.`middle_model`".to_string());
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "target_model",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| error.column_name() == Some("z"))
+        .expect("deep indeterminate diagnostic should follow renamed output");
+    assert_eq!(diagnostic.kind, ColumnLineageErrorKind::ColumnIndeterminate);
+    assert!(diagnostic.what.starts_with("column 'z':"));
+    assert!(!diagnostic.is_fatal());
+    assert!(
+        result
+            .errors
+            .iter()
+            .all(|error| error.column_name() != Some("x")),
+        "rebased diagnostic must not retain the upstream column: {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -186,7 +336,7 @@ fn test_cross_model_bigquery_unnest_reaches_external_array_column() {
 }
 
 #[test]
-fn test_cross_model_preserves_distinct_same_column_errors() {
+fn test_cross_model_rebases_distinct_same_column_errors_to_target_outputs() {
     let manifest = duplicate_column_error_manifest();
     let result = compute_cross_model_column_lineage(
         &manifest,
@@ -195,44 +345,25 @@ fn test_cross_model_preserves_distinct_same_column_errors() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    let duplicate_errors: Vec<_> = result
+    let left_error = result
         .errors
         .iter()
-        .filter(|error| error.what.starts_with("column 'dup_col':"))
-        .collect();
-    assert_eq!(duplicate_errors.len(), 2, "errors: {:?}", result.errors);
-    assert_eq!(
-        duplicate_errors
-            .iter()
-            .filter(|error| error.hint.is_some())
-            .count(),
-        1,
-        "expected one unresolved-star hint: {:?}",
-        result.errors
-    );
-    assert_eq!(
-        duplicate_errors
-            .iter()
-            .filter(|error| error.hint.is_none())
-            .count(),
-        1,
-        "expected one no-mapping diagnostic: {:?}",
-        result.errors
-    );
-    assert!(
-        duplicate_errors
-            .iter()
-            .any(|error| error.what.contains("unexpanded SELECT *")),
-        "expected unresolved-star reason: {:?}",
-        result.errors
-    );
-    assert!(
-        duplicate_errors
-            .iter()
-            .any(|error| error.what.contains("no sqllineage mapping")),
-        "expected no-mapping reason: {:?}",
-        result.errors
-    );
+        .find(|error| error.column_name() == Some("dup_col"))
+        .expect("left diagnostic should remain scoped to dup_col");
+    assert_eq!(left_error.kind, ColumnLineageErrorKind::ColumnIndeterminate);
+    assert!(left_error.what.starts_with("column 'dup_col':"));
+    assert!(left_error.hint.is_some());
+    assert!(left_error.what.contains("unexpanded SELECT *"));
+
+    let right_error = result
+        .errors
+        .iter()
+        .find(|error| error.column_name() == Some("other_col"))
+        .expect("right diagnostic should be rebased to other_col");
+    assert_eq!(right_error.kind, ColumnLineageErrorKind::ColumnNotFound);
+    assert!(right_error.what.starts_with("column 'other_col':"));
+    assert!(right_error.hint.is_none());
+    assert!(right_error.what.contains("no sqllineage mapping"));
 }
 
 #[test]
@@ -271,10 +402,18 @@ fn test_cross_model_bigquery_nested_star_keeps_known_user_id_lineage() {
     );
     assert!(
         result.errors.iter().any(|error| {
-            error.kind == ColumnLineageErrorKind::ColumnNotFound
+            error.kind == ColumnLineageErrorKind::ColumnIndeterminate
                 && error.what.starts_with("column 'updated_at':")
         }),
         "expected an uncertainty/error for nested field star, got: {:?}",
+        result.errors
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| error.column_name() == Some("event")),
+        "diagnostics for EXCEPT-ed event must not leak: {:?}",
         result.errors
     );
 }
