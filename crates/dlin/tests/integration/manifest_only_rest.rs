@@ -167,6 +167,95 @@ fn minimal_manifest_dir_with_compiled_code() -> tempfile::TempDir {
     tmp
 }
 
+/// A small BigQuery manifest covering row-value alias partial lineage. The
+/// upstream model's STRUCT field cannot be proven by the backend, but the
+/// downstream model still has an honest nearest model terminal.
+fn row_value_alias_manifest_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("target")).unwrap();
+    let manifest_json = r#"{
+  "metadata": {"adapter_type": "bigquery"},
+  "nodes": {
+    "model.test_project.upstream_model": {
+      "unique_id": "model.test_project.upstream_model",
+      "name": "upstream_model",
+      "resource_type": "model",
+      "depends_on": {"nodes": []},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"col_a": {"name": "col_a"}},
+      "compiled_code": "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.col_a AS col_a FROM latest"
+    },
+    "model.test_project.repro_model": {
+      "unique_id": "model.test_project.repro_model",
+      "name": "repro_model",
+      "resource_type": "model",
+      "depends_on": {"nodes": ["model.test_project.upstream_model"]},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"col_a": {"name": "col_a"}},
+      "compiled_code": "SELECT col_a FROM `p`.`d`.`upstream_model`"
+    }
+  },
+  "sources": {}, "exposures": {}
+}"#;
+    fs::write(tmp.path().join("target/manifest.json"), manifest_json).unwrap();
+    tmp
+}
+
+#[test]
+fn test_row_value_alias_partial_lineage_is_non_fatal_and_structured() {
+    let tmp = row_value_alias_manifest_dir();
+    let output = Command::new(binary_path())
+        .args([
+            "column",
+            "upstream",
+            "repro_model",
+            "--manifest-path",
+            tmp.path().join("target/manifest.json").to_str().unwrap(),
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+            "--no-cache",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run dlin");
+
+    assert!(
+        output.status.success(),
+        "indeterminate-only lineage should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = &reports[0];
+    let source = &report["columns"][0]["sources"][0];
+    assert_eq!(source["table"], "p.d.upstream_model");
+    assert_eq!(source["column"], "col_a");
+    assert!(source["model_path"].is_null() || source["model_path"].as_array().unwrap().is_empty());
+    assert_eq!(report["errors"][0]["kind"], "column_indeterminate");
+    assert_eq!(report["errors"][0]["column"], "col_a");
+
+    let filtered = Command::new(binary_path())
+        .args([
+            "column",
+            "upstream",
+            "repro_model",
+            "--column",
+            "col_a",
+            "--manifest-path",
+            tmp.path().join("target/manifest.json").to_str().unwrap(),
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+            "--no-cache",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run filtered dlin");
+    assert!(
+        filtered.status.success(),
+        "column-scoped indeterminate should survive --column filtering without becoming fatal; stderr: {}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+}
+
 #[test]
 fn test_column_manifest_mode_path_like_input_without_project_yml() {
     let tmp = minimal_manifest_dir_with_compiled_code();

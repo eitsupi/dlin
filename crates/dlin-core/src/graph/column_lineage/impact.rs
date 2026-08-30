@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use serde::Serialize;
@@ -88,6 +88,7 @@ pub(super) fn compute_column_impact(
                 impacted_columns: vec![],
                 errors: vec![ColumnLineageError {
                     kind: ColumnLineageErrorKind::ModelNotFound,
+                    column: None,
                     what: format!("model '{}' not found in manifest", model_name),
                     why: None,
                     hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
@@ -136,6 +137,7 @@ pub(super) fn compute_column_impact(
                 .or_insert_with(|| super::compute_column_lineage_internal(analysis, dep_uid));
 
             let mut found_on_path = false;
+            let mut path_columns = HashSet::new();
 
             for entry in &lineage.columns {
                 let target_key = (dep_uid.clone(), entry.column.clone());
@@ -155,6 +157,7 @@ pub(super) fn compute_column_impact(
 
                 if references_source {
                     found_on_path = true;
+                    path_columns.insert(entry.column.clone());
                     let next_path = Rc::new(PathNode {
                         hop: (
                             dep_name.clone(),
@@ -185,14 +188,17 @@ pub(super) fn compute_column_impact(
                 }
             }
 
-            // ColumnNotFound errors are per-column noise: only include them when the model
-            // has at least one column confirmed on the impact path. Model-level failures
+            // Column-scoped diagnostics are per-column: only include them when the model
+            // has the diagnosed column confirmed on the impact path. Model-level failures
             // (ParseFailure, NoCompiledCode, ColumnInferenceFailed) mean the model could
             // not be analyzed at all, so they are always propagated — the path through
             // that model may be incomplete and the user needs to know.
             for err in &lineage.errors {
-                let is_column_level = err.kind == ColumnLineageErrorKind::ColumnNotFound;
-                if (!is_column_level || found_on_path) && !errors.contains(err) {
+                let is_column_level = err.is_column_scoped();
+                let is_on_path = err
+                    .column_name()
+                    .is_some_and(|column| path_columns.contains(column));
+                if (!is_column_level || (found_on_path && is_on_path)) && !errors.contains(err) {
                     errors.push(err.clone());
                 }
             }

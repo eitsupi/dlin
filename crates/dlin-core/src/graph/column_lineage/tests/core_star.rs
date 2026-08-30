@@ -284,6 +284,8 @@ fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
         .iter()
         .find(|error| error.what.starts_with("column 'c1':"))
         .expect("c1 should have a column-lineage error");
+    assert_eq!(c1_error.kind, ColumnLineageErrorKind::ColumnIndeterminate);
+    assert_eq!(c1_error.column_name(), Some("c1"));
     assert!(
         c1_error.hint.as_deref().unwrap_or("").contains("SELECT *"),
         "the public result should retain the SELECT * hint: {c1_error:?}"

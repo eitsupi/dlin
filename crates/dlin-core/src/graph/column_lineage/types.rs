@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::relation::RelationRef;
 
 /// Error kind discriminator for column lineage errors.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ColumnLineageErrorKind {
     /// The specified model was not found in the dbt manifest.
@@ -18,6 +18,13 @@ pub enum ColumnLineageErrorKind {
     ParseFailure,
     /// Lineage for a specific column could not be traced.
     ColumnNotFound,
+    /// A specific column has multiple possible bindings.
+    ColumnAmbiguous,
+    /// A specific column could not be proven due to incomplete semantic information.
+    /// This preserves the nearest honest lineage terminal and is non-fatal to CLI callers.
+    ColumnIndeterminate,
+    /// The lineage backend violated its response contract.
+    Internal,
 }
 
 /// A structured error from column lineage analysis.
@@ -27,6 +34,10 @@ pub enum ColumnLineageErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnLineageError {
     pub kind: ColumnLineageErrorKind,
+    /// Structured output-column identity. Older cached reports omit this field;
+    /// callers should use [`Self::column_name`] to retain their legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
     pub what: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
@@ -37,6 +48,52 @@ pub struct ColumnLineageError {
 impl std::fmt::Display for ColumnLineageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.what)
+    }
+}
+
+impl ColumnLineageError {
+    /// Return the output column associated with this diagnostic.
+    ///
+    /// New reports carry the identity explicitly. Legacy cache entries and
+    /// serialized reports are supported by parsing the historical
+    /// `column '<name>': ...` message prefix.
+    pub fn column_name(&self) -> Option<&str> {
+        self.column.as_deref().or_else(|| {
+            let rest = self.what.strip_prefix("column '")?;
+            let end = rest.find("':")?;
+            (!rest[..end].is_empty()).then_some(&rest[..end])
+        })
+    }
+
+    pub fn is_column_scoped(&self) -> bool {
+        self.column.is_some()
+            || matches!(
+                self.kind,
+                ColumnLineageErrorKind::ColumnNotFound
+                    | ColumnLineageErrorKind::ColumnAmbiguous
+                    | ColumnLineageErrorKind::ColumnIndeterminate
+            ) && self.column_name().is_some()
+    }
+
+    pub fn is_fatal(&self) -> bool {
+        !matches!(self.kind, ColumnLineageErrorKind::ColumnIndeterminate)
+    }
+
+    /// Re-associate a column-scoped diagnostic with the output column whose
+    /// lineage traversal surfaced it. This keeps the structured identity and
+    /// the historical human-readable prefix consistent for API consumers.
+    pub fn rebase_column(&self, column: &str) -> Self {
+        if !self.is_column_scoped() {
+            return self.clone();
+        }
+        let mut rebased = self.clone();
+        rebased.column = Some(column.to_string());
+        if let Some(rest) = self.what.strip_prefix("column '")
+            && let Some((_, detail)) = rest.split_once("':")
+        {
+            rebased.what = format!("column '{column}':{detail}");
+        }
+        rebased
     }
 }
 
@@ -148,21 +205,31 @@ impl InternalModelColumnLineage {
 
 /// Collapse parseable per-column diagnostics at a public output boundary.
 ///
-/// A single column can produce the same `ColumnNotFound` finding through more
-/// than one resolver path. Keep the first group's position, selecting the
-/// hinted diagnostic when the other diagnostic identity fields are equal.
+/// A single column can produce the same column-scoped finding through more than
+/// one resolver path. Keep the first group's position, selecting the hinted
+/// diagnostic when the other diagnostic identity fields are equal.
 pub(crate) fn normalize_column_lineage_errors(
     errors: Vec<ColumnLineageError>,
 ) -> Vec<ColumnLineageError> {
     let mut normalized = Vec::with_capacity(errors.len());
-    let mut groups = HashMap::<(String, String, Option<String>), usize>::new();
+    let mut groups =
+        HashMap::<(String, ColumnLineageErrorKind, String, Option<String>), usize>::new();
 
     for error in errors {
-        let Some(column) = parse_column_not_found_name(&error) else {
+        let Some(column) = error.column_name() else {
             normalized.push(error);
             continue;
         };
-        let key = (column.to_string(), error.what.clone(), error.why.clone());
+        if !error.is_column_scoped() {
+            normalized.push(error);
+            continue;
+        }
+        let key = (
+            column.to_string(),
+            error.kind,
+            error.what.clone(),
+            error.why.clone(),
+        );
 
         if let Some(&index) = groups.get(&key) {
             if diagnostic_precedes(&error, &normalized[index]) {
@@ -175,15 +242,6 @@ pub(crate) fn normalize_column_lineage_errors(
     }
 
     normalized
-}
-
-fn parse_column_not_found_name(error: &ColumnLineageError) -> Option<&str> {
-    if error.kind != ColumnLineageErrorKind::ColumnNotFound || !error.what.starts_with("column '") {
-        return None;
-    }
-    let rest = &error.what[8..];
-    let end = rest.find("':")?;
-    (!rest[..end].is_empty()).then_some(&rest[..end])
 }
 
 fn diagnostic_precedes(candidate: &ColumnLineageError, current: &ColumnLineageError) -> bool {
@@ -228,8 +286,13 @@ mod tests {
     use super::*;
 
     fn error(what: &str, why: Option<&str>, hint: Option<&str>) -> ColumnLineageError {
+        let column = what.strip_prefix("column '").and_then(|rest| {
+            let end = rest.find("':")?;
+            (!rest[..end].is_empty()).then_some(rest[..end].to_string())
+        });
         ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnNotFound,
+            column,
             what: what.to_string(),
             why: why.map(str::to_string),
             hint: hint.map(str::to_string),
@@ -241,6 +304,7 @@ mod tests {
         let errors = normalize_column_lineage_errors(vec![
             ColumnLineageError {
                 kind: ColumnLineageErrorKind::ParseFailure,
+                column: None,
                 what: "parse".to_string(),
                 why: None,
                 hint: None,
@@ -267,6 +331,7 @@ mod tests {
             error("column dup_col: malformed", None, None),
             ColumnLineageError {
                 kind: ColumnLineageErrorKind::ParseFailure,
+                column: None,
                 what: "column 'dup_col': same".to_string(),
                 why: None,
                 hint: None,
@@ -277,5 +342,49 @@ mod tests {
         assert_eq!(errors[0].hint.as_deref(), Some("a"));
         assert_eq!(errors[1].what, "column dup_col: malformed");
         assert_eq!(errors[2].kind, ColumnLineageErrorKind::ParseFailure);
+    }
+
+    #[test]
+    fn structured_column_identity_and_legacy_messages_share_filter_contract() {
+        let structured = ColumnLineageError {
+            kind: ColumnLineageErrorKind::ColumnIndeterminate,
+            column: Some("col_a".to_string()),
+            what: "row value could not be expanded".to_string(),
+            why: None,
+            hint: None,
+        };
+        let legacy = ColumnLineageError {
+            kind: ColumnLineageErrorKind::ColumnNotFound,
+            column: None,
+            what: "column 'col_a': not found".to_string(),
+            why: None,
+            hint: None,
+        };
+        assert_eq!(structured.column_name(), Some("col_a"));
+        assert_eq!(legacy.column_name(), Some("col_a"));
+        assert!(structured.is_column_scoped());
+        assert!(legacy.is_column_scoped());
+        assert!(!structured.is_fatal());
+        assert!(legacy.is_fatal());
+        assert!(
+            ColumnLineageError {
+                kind: ColumnLineageErrorKind::ColumnAmbiguous,
+                column: Some("col_a".to_string()),
+                what: "ambiguous".to_string(),
+                why: None,
+                hint: None,
+            }
+            .is_fatal()
+        );
+
+        let encoded = serde_json::to_value(&structured).unwrap();
+        assert_eq!(encoded["column"], "col_a");
+        let old = serde_json::json!({
+            "kind": "column_not_found",
+            "what": "column 'col_a': not found"
+        });
+        let decoded: ColumnLineageError = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.column, None);
+        assert_eq!(decoded.column_name(), Some("col_a"));
     }
 }

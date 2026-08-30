@@ -58,7 +58,10 @@ Output format (-o/--output):
                       — rendered as \"(literal)\" in plain/mermaid/dot outputs
         column        source column name
         model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
-    errors[]    parse or resolution errors (non-empty → exit code 1)
+    errors[]    parse or resolution diagnostics. An indeterminate per-column
+                diagnostic is non-fatal and does not change the exit code;
+                model-level, missing-column, ambiguous, and parse diagnostics
+                are fatal (exit code 1).
   plain           human-readable text, one model per block
   mermaid         Mermaid flowchart (LR) with subgraphs per model
   dot             Graphviz DOT format; models as clusters, columns as nodes
@@ -66,7 +69,7 @@ Output format (-o/--output):
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, analysis errors, etc.)",
+  1   Error (model not found, no manifest, fatal analysis errors, etc.)",
         after_long_help = "\
 Examples:
   # Column lineage for a single model (JSON output)
@@ -124,7 +127,7 @@ Output format (-o/--output):
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, analysis errors, etc.)",
+  1   Error (model not found, no manifest, fatal analysis errors, etc.)",
         after_long_help = "\
 Examples:
   # Impact of changing a single column (JSON output)

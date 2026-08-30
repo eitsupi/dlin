@@ -2,13 +2,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::cli::{DialectArg, McpArgs};
-use dlin_core::graph::column_lineage::DlinDialect;
+use dlin_core::graph::column_lineage::{ColumnLineageError, ColumnLineageErrorKind, DlinDialect};
 use serde_json::{Value, json};
 
 use super::protocol::{McpState, handle_request, parse_request};
 use super::tools::{
-    call_tool, error_names_upstream_model, extract_column_not_found_name, find_nodes,
-    get_column_lineage, get_impact, get_lineage, list_nodes, normalize_table_short_name, tools,
+    call_tool, error_names_upstream_model, find_nodes, get_column_lineage, get_impact, get_lineage,
+    list_nodes, normalize_table_short_name, tools,
 };
 
 fn fixture_project_dir() -> PathBuf {
@@ -52,6 +52,52 @@ fn column_lineage_state() -> McpState {
         dialect: Some(generic_dialect()),
     })
     .unwrap()
+}
+
+fn row_value_alias_state() -> (tempfile::TempDir, McpState) {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("target")).unwrap();
+    let manifest = r#"{
+  "metadata": {"adapter_type": "bigquery"},
+  "nodes": {
+    "model.test.standalone": {
+      "unique_id": "model.test.standalone", "name": "standalone",
+      "resource_type": "model", "depends_on": {"nodes": []},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"x": {"name": "x"}},
+      "compiled_code": "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.x AS x FROM latest"
+    },
+    "model.test.deep": {
+      "unique_id": "model.test.deep", "name": "deep",
+      "resource_type": "model", "depends_on": {"nodes": []},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"x": {"name": "x"}},
+      "compiled_code": "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.x AS x FROM latest"
+    },
+    "model.test.middle": {
+      "unique_id": "model.test.middle", "name": "middle",
+      "resource_type": "model", "depends_on": {"nodes": ["model.test.deep"]},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"x": {"name": "x"}, "y": {"name": "y"}},
+      "compiled_code": "SELECT deep.x AS x, deep.x AS y FROM `p`.`d`.`deep` AS deep"
+    },
+    "model.test.target": {
+      "unique_id": "model.test.target", "name": "target",
+      "resource_type": "model", "depends_on": {"nodes": ["model.test.middle"]},
+      "config": {"materialized": "view", "tags": []},
+      "columns": {"z": {"name": "z"}},
+      "compiled_code": "SELECT x AS z FROM `p`.`d`.`middle`"
+    }
+  }, "sources": {}, "exposures": {}
+}"#;
+    std::fs::write(tmp.path().join("target/manifest.json"), manifest).unwrap();
+    let state = McpState::load(McpArgs {
+        project_dir: tmp.path().to_path_buf(),
+        manifest_path: None,
+        dialect: None,
+    })
+    .unwrap();
+    (tmp, state)
 }
 
 #[test]
@@ -122,6 +168,56 @@ fn mcp_explicit_supported_dialect_has_no_warning() {
     .unwrap();
 
     assert!(result["structuredContent"].get("warnings").is_none());
+}
+
+#[test]
+fn mcp_keeps_target_source_less_indeterminate_diagnostic() {
+    let (_tmp, state) = row_value_alias_state();
+    let result = get_column_lineage(
+        &json!({
+            "model": "standalone",
+            "column": "x",
+            "direction": "upstream"
+        }),
+        &state,
+    )
+    .unwrap();
+    let errors = result["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error["kind"] == "column_indeterminate" && error["column"] == "x" })
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error["kind"] == "column_not_found")
+    );
+}
+
+#[test]
+fn mcp_rebases_rename_and_suppresses_unrelated_same_named_diagnostics() {
+    let (_tmp, state) = row_value_alias_state();
+    let result = get_column_lineage(
+        &json!({
+            "model": "target",
+            "column": "z",
+            "direction": "upstream"
+        }),
+        &state,
+    )
+    .unwrap();
+    let errors = result["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|error| {
+        error["kind"] == "column_indeterminate"
+            && error["column"] == "z"
+            && error["what"].as_str().unwrap().starts_with("column 'z':")
+    }));
+    assert!(
+        errors
+            .iter()
+            .all(|error| { error["column"] != "x" && error["column"] != "y" })
+    );
 }
 
 #[test]
@@ -695,12 +791,26 @@ fn find_nodes_resolves_semantic_layer_full_unique_ids() {
 }
 
 #[test]
-fn extract_column_not_found_name_parses_column_prefix() {
+fn column_error_name_parses_structured_and_legacy_prefixes() {
+    let error = ColumnLineageError {
+        kind: ColumnLineageErrorKind::ColumnNotFound,
+        column: None,
+        what: "column 'order_id': not found in model output".to_string(),
+        why: None,
+        hint: None,
+    };
+    assert_eq!(error.column_name(), Some("order_id"));
     assert_eq!(
-        extract_column_not_found_name("column 'order_id': not found in model output"),
-        Some("order_id")
+        ColumnLineageError {
+            kind: ColumnLineageErrorKind::ParseFailure,
+            column: None,
+            what: "failed to parse SQL".to_string(),
+            why: None,
+            hint: None,
+        }
+        .column_name(),
+        None
     );
-    assert_eq!(extract_column_not_found_name("failed to parse SQL"), None);
 }
 
 #[test]

@@ -273,6 +273,86 @@ fn bigquery_struct_field_cross_model_manifest() -> Manifest {
     }
 }
 
+fn same_named_deep_error_manifest() -> Manifest {
+    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+    fn model(
+        unique_id: &str,
+        name: &str,
+        dependencies: &[&str],
+        output_columns: &[&str],
+        sql: &str,
+    ) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: columns(output_columns),
+            compiled_code: Some(sql.to_string()),
+            database: Some("p".to_string()),
+            schema: Some("d".to_string()),
+        }
+    }
+
+    let deep_id = "model.proj.deep_model";
+    let middle_id = "model.proj.middle_model";
+    let target_id = "model.proj.target_model";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        deep_id.to_string(),
+        model(
+            deep_id,
+            "deep_model",
+            &[],
+            &["x"],
+            "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.x AS x FROM latest",
+        ),
+    );
+    nodes.insert(
+        middle_id.to_string(),
+        model(
+            middle_id,
+            "middle_model",
+            &[deep_id],
+            &["x", "y"],
+            "SELECT 1 AS x, deep.x AS y FROM `p`.`d`.`deep_model` AS deep",
+        ),
+    );
+    nodes.insert(
+        target_id.to_string(),
+        model(
+            target_id,
+            "target_model",
+            &[middle_id],
+            &["x"],
+            "SELECT x FROM `p`.`d`.`middle_model`",
+        ),
+    );
+    Manifest {
+        nodes,
+        ..Default::default()
+    }
+}
+
 fn bigquery_unnest_cross_model_manifest() -> Manifest {
     let mut manifest = bigquery_compound_field_access_manifest();
     let mut downstream = manifest
