@@ -9,6 +9,9 @@ use minijinja::{Environment, ErrorKind};
 
 use super::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
+const RUNTIME_SCALAR_GLOBALS: &[&str] =
+    &["execute", "dbt_version", "invocation_id", "run_started_at"];
+
 /// All extracted information from rendering a dbt Jinja SQL template
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct JinjaExtraction {
@@ -145,6 +148,8 @@ fn render_with_incremental_passes(
         format!("{}\n{}", macro_prefix, sql)
     };
     let render_state = Arc::new(RenderState::default());
+    let uses_runtime_scalar =
+        super::sql::contains_executable_jinja_identifier(sql, RUNTIME_SCALAR_GLOBALS);
 
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
@@ -371,7 +376,9 @@ fn render_with_incremental_passes(
         render_state
             .is_incremental
             .store(is_incremental, Ordering::Relaxed);
-        render_state.semantic_certain.store(true, Ordering::Relaxed);
+        render_state
+            .semantic_certain
+            .store(!uses_runtime_scalar, Ordering::Relaxed);
         let complete = template.render_captured_to((), std::io::sink()).is_ok();
         let extraction = std::mem::take(&mut *render_state.extraction.lock().unwrap());
         let semantic_certain = render_state.semantic_certain.load(Ordering::Relaxed);
@@ -816,6 +823,48 @@ mod tests {
         assert!(outcome.semantic_certain);
         assert_eq!(outcome.extraction.refs.len(), 1);
         assert_eq!(outcome.extraction.refs[0].name, "target_true");
+    }
+
+    #[test]
+    fn test_execute_keeps_placeholder_branch_but_marks_uncertainty() {
+        let sql = r#"
+            {% if execute %}
+                {{ ref('execute_true') }}
+            {% else %}
+                {{ ref('execute_false') }}
+            {% endif %}
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(!outcome.semantic_certain);
+        assert_eq!(outcome.extraction.refs.len(), 1);
+        assert_eq!(outcome.extraction.refs[0].name, "execute_true");
+    }
+
+    #[test]
+    fn test_scalar_runtime_scan_ignores_non_executable_text() {
+        let sql = r#"
+            -- execute dbt_version invocation_id run_started_at
+            {# execute dbt_version invocation_id run_started_at #}
+            {% raw %}execute dbt_version invocation_id run_started_at{% endraw %}
+            {% set label = "execute" %}
+            SELECT 1
+        "#;
+        let outcome = extract_via_jinja(sql, "");
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
+    }
+
+    #[test]
+    fn test_scalar_runtime_scan_ignores_unused_macro_prefix() {
+        let macro_prefix = r#"
+            {% macro runtime_branch() %}
+                {% if execute %}runtime{% endif %}
+            {% endmacro %}
+        "#;
+        let outcome = extract_via_jinja("SELECT 1", macro_prefix);
+        assert!(outcome.complete);
+        assert!(outcome.semantic_certain);
     }
 
     #[test]

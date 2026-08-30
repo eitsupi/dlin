@@ -123,6 +123,30 @@ fn inside_string_literal(spans: &[(usize, usize)], pos: usize) -> bool {
     spans.iter().any(|&(start, end)| pos > start && pos < end)
 }
 
+/// Whether an identifier occurs in an executable Jinja block, excluding
+/// quoted strings and constructs stripped by [`strip_inert_jinja`].
+pub(super) fn contains_executable_jinja_identifier(sql: &str, identifiers: &[&str]) -> bool {
+    let cleaned = strip_inert_jinja(sql);
+    JINJA_BLOCK.find_iter(&cleaned).any(|block_match| {
+        let block = block_match.as_str();
+        let spans = string_literal_spans(block);
+        identifiers.iter().any(|identifier| {
+            block.match_indices(identifier).any(|(pos, _)| {
+                let before_is_identifier = pos
+                    .checked_sub(1)
+                    .and_then(|idx| block.as_bytes().get(idx))
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+                let end = pos + identifier.len();
+                let after_is_identifier = block
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+                !before_is_identifier && !after_is_identifier && !inside_string_literal(&spans, pos)
+            })
+        })
+    })
+}
+
 /// Extract all refs, sources, and config from SQL content in a single pass.
 /// Tries minijinja rendering first; if rendering fails partway (e.g. on an
 /// unknown macro), or if placeholder values make the result semantically
@@ -668,6 +692,34 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().any(|r| r.name == "orders_us"));
         assert!(refs.iter().any(|r| r.name == "orders_eu"));
+    }
+
+    #[test]
+    fn test_execute_branches_are_merged() {
+        let sql = r#"
+            {% if execute %}
+                SELECT * FROM {{ ref('execute_true') }}
+            {% else %}
+                SELECT * FROM {{ ref('execute_false') }}
+            {% endif %}
+        "#;
+        let refs = extract_refs(sql);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|r| r.name == "execute_true"));
+        assert!(refs.iter().any(|r| r.name == "execute_false"));
+    }
+
+    #[test]
+    fn test_scalar_runtime_branches_are_merged() {
+        for scalar in ["dbt_version", "invocation_id", "run_started_at"] {
+            let sql = format!(
+                "{{% if {scalar} %}}SELECT * FROM {{{{ ref('{scalar}_true') }}}}{{% else %}}SELECT * FROM {{{{ ref('{scalar}_false') }}}}{{% endif %}}"
+            );
+            let refs = extract_refs(&sql);
+            assert_eq!(refs.len(), 2, "expected both refs for {scalar}");
+            assert!(refs.iter().any(|r| r.name == format!("{scalar}_true")));
+            assert!(refs.iter().any(|r| r.name == format!("{scalar}_false")));
+        }
     }
 
     #[test]
