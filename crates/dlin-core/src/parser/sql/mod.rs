@@ -56,22 +56,25 @@ pub(crate) fn extract_all_with_prepared_prefix(
     }
     let fallback_scopes = regex_fallback_scopes(sql, macro_prefix, &outcome);
     let mut ext = outcome.extraction;
-    let (model_scopes, model_spans, prefix_scopes, prefix_spans) = fallback_scopes
-        .map(|scopes| {
-            (
-                scopes.model,
-                scopes.model_spans,
-                scopes.prefix,
-                scopes.prefix_spans,
-            )
-        })
-        .unwrap_or((None, None, None, None));
+    let (model_scopes, model_spans, local_definition_spans, prefix_scopes, prefix_spans) =
+        fallback_scopes
+            .map(|scopes| {
+                (
+                    scopes.model,
+                    scopes.model_spans,
+                    scopes.local_definition_spans,
+                    scopes.prefix,
+                    scopes.prefix_spans,
+                )
+            })
+            .unwrap_or((None, None, outcome.local_macro_spans.clone(), None, None));
     let (refs, sources) = model_spans.map_or_else(
         || recovery::extract_refs_and_sources_regex_scoped(sql, model_scopes.as_ref()),
         |spans| {
-            let all_spans = outcome.local_macro_spans.as_slice();
-            let model_source =
-                super::jinja::source::strip_macro_definitions_for_runtime_analysis(sql, all_spans);
+            let model_source = super::jinja::source::strip_macro_definitions_for_runtime_analysis(
+                sql,
+                &local_definition_spans,
+            );
             let (mut refs, mut sources) =
                 recovery::extract_refs_and_sources_regex_scoped(&model_source, None);
             let (local_refs, local_sources) =
@@ -114,6 +117,9 @@ struct RegexFallbackScopes {
     /// Selected local definition spans for partial model recovery. `None`
     /// means whole-model scan; `Some(empty)` means only top-level model SQL.
     model_spans: Option<Vec<super::jinja::source::ModelMacroSpan>>,
+    /// All local definitions, including unreachable ones, so model-body
+    /// recovery can exclude macro bodies before scanning top-level SQL.
+    local_definition_spans: Vec<super::jinja::source::ModelMacroSpan>,
     prefix: Option<HashSet<String>>,
     /// Selected prefix definition spans for scoped recovery. `None` means a
     /// conservative whole-prefix scan; `Some(empty)` means scan no prefix.
@@ -126,10 +132,46 @@ fn regex_fallback_scopes(
     outcome: &super::jinja::JinjaOutcome,
 ) -> Option<RegexFallbackScopes> {
     if !outcome.complete {
-        // A failed render has incomplete execution provenance: an unvisited
-        // prefix macro may still have been reachable before the failure.
-        // Whole-prefix recovery is therefore intentionally conservative.
-        return None;
+        // Render failure truncates execution provenance, but static symbol
+        // analysis can still identify the model's reachable local and project
+        // macros. If that analysis itself fails, scan only the model source
+        // and exclude the project prefix.
+        let local_definition_spans = if outcome.local_macro_spans_scanned {
+            outcome.local_macro_spans.clone()
+        } else {
+            super::jinja::source::model_macro_definition_spans(sql)
+        };
+        let plan = if outcome.macro_reachability_unknown {
+            None
+        } else {
+            outcome.macro_reachability.clone().or_else(|| {
+                super::jinja::reachability::macro_reachability_with_prepared_prefix(
+                    sql,
+                    macro_prefix,
+                    Some(&local_definition_spans),
+                    outcome.model_macro_roots.as_ref(),
+                )
+            })
+        };
+        return Some(match plan {
+            Some(plan) => RegexFallbackScopes {
+                model: Some(plan.local_scopes),
+                model_spans: Some(plan.local_definition_spans),
+                local_definition_spans,
+                prefix: Some(plan.prefix_scopes),
+                prefix_spans: Some(plan.prefix_definition_spans),
+            },
+            None => RegexFallbackScopes {
+                // With no static provenance, scan the model source as a
+                // whole. Unlike the project prefix, it is always in scope;
+                // this also preserves dependencies inside local macros.
+                model: None,
+                model_spans: None,
+                local_definition_spans,
+                prefix: Some(HashSet::new()),
+                prefix_spans: Some(Vec::new()),
+            },
+        });
     }
     if outcome.model_uncertain {
         // Model-level uncertainty can select a local macro that did not
@@ -152,6 +194,11 @@ fn regex_fallback_scopes(
         };
         return match plan {
             Some(plan) => {
+                let local_definition_spans = if outcome.local_macro_spans_scanned {
+                    outcome.local_macro_spans.clone()
+                } else {
+                    super::jinja::source::model_macro_definition_spans(sql)
+                };
                 let mut scopes = plan.local_scopes;
                 scopes.extend(outcome.uncertain_macro_scopes.iter().cloned());
                 // A scoped scan of every local macro has the same result as
@@ -184,6 +231,7 @@ fn regex_fallback_scopes(
                 Some(RegexFallbackScopes {
                     model,
                     model_spans,
+                    local_definition_spans,
                     prefix,
                     prefix_spans,
                 })
@@ -222,6 +270,11 @@ fn regex_fallback_scopes(
                 Some(RegexFallbackScopes {
                     model: Some(plan.local_scopes),
                     model_spans: Some(plan.local_definition_spans),
+                    local_definition_spans: if outcome.local_macro_spans_scanned {
+                        outcome.local_macro_spans.clone()
+                    } else {
+                        super::jinja::source::model_macro_definition_spans(sql)
+                    },
                     prefix,
                     prefix_spans,
                 })
@@ -229,6 +282,7 @@ fn regex_fallback_scopes(
             None => Some(RegexFallbackScopes {
                 model: Some(uncertain_roots),
                 model_spans: None,
+                local_definition_spans: outcome.local_macro_spans.clone(),
                 // A failed reachability analysis cannot establish which
                 // project macro definitions were reachable. Recover the
                 // whole prefix rather than risking a false negative.
@@ -255,9 +309,9 @@ fn regex_fallback_macro_scopes(
 /// Tries minijinja rendering first; if rendering fails partway or relies on a
 /// placeholder runtime value, merges the partial result with the regex scan.
 /// Complete uncertain renders restrict that merge to model-level text and
-/// macro scopes whose execution actually observed an uncertain value; failed
-/// renders retain whole-model recovery because their execution provenance is
-/// incomplete.
+/// reachable macro scopes whose execution may vary. Incomplete renders use
+/// static macro reachability when available; if analysis fails, recovery scans
+/// only the model source and excludes the project macro prefix.
 ///
 /// `macro_prefix` is the pre-built concatenation of valid macro SQL files
 /// so that custom macros containing ref()/source() are expanded and tracked.

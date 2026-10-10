@@ -1,5 +1,24 @@
 use super::*;
 
+fn setup_cyclic_project() -> tempfile::TempDir {
+    use std::fs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("models")).unwrap();
+    fs::write(tmp.path().join("dbt_project.yml"), "name: cycle_test\n").unwrap();
+    fs::write(
+        tmp.path().join("models/a.sql"),
+        "select * from {{ ref('b') }}\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("models/b.sql"),
+        "select * from {{ ref('a') }}\n",
+    )
+    .unwrap();
+    tmp
+}
+
 #[test]
 fn test_error_format_json_on_error() {
     // Run impact on a nonexistent project to trigger an error
@@ -89,5 +108,56 @@ fn test_error_format_default_is_text() {
     assert!(
         stderr.starts_with("Error: "),
         "Expected text error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_cycle_diagnostic_in_text_format_includes_unique_id_path() {
+    let project = setup_cyclic_project();
+    let output = std::process::Command::new(binary_path())
+        .args([
+            "--error-format",
+            "text",
+            "graph",
+            "-p",
+            project.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cycle detected in lineage graph: model.a -> model.b -> model.a"),
+        "Expected the directed cycle path, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_cycle_diagnostic_in_json_format_includes_unique_id_path() {
+    let project = setup_cyclic_project();
+    let output = std::process::Command::new(binary_path())
+        .args([
+            "--error-format",
+            "json",
+            "graph",
+            "-p",
+            project.path().to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|error| {
+        panic!("stderr is not valid JSON: {error}\nstderr: {stderr}");
+    });
+    assert_eq!(parsed["level"], "error");
+    assert!(
+        parsed["what"]
+            .as_str()
+            .unwrap()
+            .contains("model.a -> model.b -> model.a"),
+        "Expected the directed cycle path, got: {parsed}"
     );
 }

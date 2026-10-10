@@ -605,12 +605,166 @@ fn test_duplicate_reachable_prefix_definitions_union_selected_spans() {
 }
 
 #[test]
-fn test_incomplete_render_uses_conservative_whole_prefix_recovery() {
-    let macro_prefix = "{% macro unused_prefix() %}{{ ref('unused_prefix_ref') }}{% endmacro %}";
-    let sql = "{{ missing_macro(ref('model_before_failure')) }}";
-    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+fn test_incomplete_render_excludes_unreachable_prefix_macros() {
+    let macro_prefix = "{% macro unused_prefix() %}{{ ref('unused_prefix_ref') }}{{ source('raw', 'unused') }}{% endmacro %}";
+    let sql = "{{ missing_macro(ref('model_before_failure'), source('direct', 'before')) }} {{ ref('model_after_failure') }} {{ source('direct', 'after') }}";
+    let (refs, sources) = extract_refs_and_sources(sql, macro_prefix);
     assert!(refs.iter().any(|r| r.name == "model_before_failure"));
-    assert!(refs.iter().any(|r| r.name == "unused_prefix_ref"));
+    assert!(refs.iter().any(|r| r.name == "model_after_failure"));
+    assert!(!refs.iter().any(|r| r.name == "unused_prefix_ref"));
+    assert!(sources.iter().any(|s| s.table_name == "before"));
+    assert!(sources.iter().any(|s| s.table_name == "after"));
+    assert!(!sources.iter().any(|s| s.table_name == "unused"));
+}
+
+#[test]
+fn test_incomplete_render_recovers_reachable_prefix_macro_called_after_failure() {
+    let macro_prefix = r#"
+        {% macro outer() %}{{ inner() }}{% endmacro %}
+        {% macro inner() %}{{ ref('reachable_after_failure') }}{{ source('raw', 'reachable') }}{% endmacro %}
+        {% macro unused() %}{{ ref('unreachable') }}{% endmacro %}
+    "#;
+    let sql = "{{ missing_macro() }} {{ outer() }}";
+    let ext = extract_all(sql, macro_prefix);
+    assert!(ext.refs.iter().any(|r| r.name == "reachable_after_failure"));
+    assert!(!ext.refs.iter().any(|r| r.name == "unreachable"));
+    assert!(ext.sources.iter().any(|s| s.table_name == "reachable"));
+}
+
+#[test]
+fn test_incomplete_render_does_not_map_unresolved_member_to_flat_macro_name() {
+    let sql = r#"
+        {{ missing_namespace.matched(ref('argument_ref'), source('raw', 'argument_source')) }}
+        {{ ref('direct_after_failure') }}
+        {{ source('raw', 'direct_after_failure') }}
+        {{ flat_used() }}
+    "#;
+    let prefixes = [
+        r#"
+            {% macro matched() %}{{ ref('forbidden_member_ref') }}{{ source('raw', 'forbidden_member_source') }}{% endmacro %}
+            {% macro flat_used() %}{{ ref('flat_used_ref') }}{{ source('raw', 'flat_used_source') }}{% endmacro %}
+        "#,
+        r#"
+            {% macro matched() %}
+                {% if execute %}{{ ref('forbidden_member_ref') }}{{ source('raw', 'forbidden_member_source') }}{% endif %}
+            {% endmacro %}
+            {% macro flat_used() %}{{ ref('flat_used_ref') }}{{ source('raw', 'flat_used_source') }}{% endmacro %}
+        "#,
+    ];
+
+    for macro_prefix in prefixes {
+        let outcome = super::super::jinja::extract_via_jinja(sql, macro_prefix);
+        assert!(!outcome.complete);
+
+        let extraction = extract_all(sql, macro_prefix);
+        for expected in ["argument_ref", "direct_after_failure", "flat_used_ref"] {
+            assert!(
+                extraction
+                    .refs
+                    .iter()
+                    .any(|reference| reference.name == expected),
+                "missing {expected:?} for prefix {macro_prefix:?}: {:?}",
+                extraction.refs
+            );
+        }
+        assert!(
+            !extraction
+                .refs
+                .iter()
+                .any(|reference| reference.name == "forbidden_member_ref"),
+            "unrelated flat macro ref leaked through: {:?}",
+            extraction.refs
+        );
+        for expected in [
+            "argument_source",
+            "direct_after_failure",
+            "flat_used_source",
+        ] {
+            assert!(
+                extraction
+                    .sources
+                    .iter()
+                    .any(|source| source.table_name == expected),
+                "missing {expected:?} for prefix {macro_prefix:?}: {:?}",
+                extraction.sources
+            );
+        }
+        assert!(
+            !extraction
+                .sources
+                .iter()
+                .any(|source| source.table_name == "forbidden_member_source"),
+            "unrelated flat macro source leaked through: {:?}",
+            extraction.sources
+        );
+    }
+}
+
+#[test]
+fn test_malformed_jinja_recovers_direct_refs_without_unrelated_prefix() {
+    let macro_prefix =
+        "{% macro unused() %}{{ ref('unused') }}{{ source('raw', 'unused') }}{% endmacro %}";
+    let sql = "{{ ref('direct') }} {{ source('direct', 'before_malformed') }} {% if broken %} {{ ref('after_malformed') }} {{ source('direct', 'after_malformed') }}";
+    let ext = extract_all(sql, macro_prefix);
+    assert!(ext.refs.iter().any(|r| r.name == "direct"));
+    assert!(ext.refs.iter().any(|r| r.name == "after_malformed"));
+    assert!(!ext.refs.iter().any(|r| r.name == "unused"));
+    assert!(
+        ext.sources
+            .iter()
+            .any(|s| s.table_name == "before_malformed")
+    );
+    assert!(
+        ext.sources
+            .iter()
+            .any(|s| s.table_name == "after_malformed")
+    );
+    assert!(!ext.sources.iter().any(|s| s.table_name == "unused"));
+}
+
+#[test]
+fn test_malformed_model_still_recovers_called_local_macro_dependencies() {
+    let macro_prefix = "{% macro unused_project() %}{{ ref('unused_project_ref') }}{% endmacro %}";
+    let sql = r#"
+        {% macro local_used() %}{{ ref('called_local_ref') }}{% endmacro %}
+        {% macro local_unused() %}{{ ref('unused_local_ref') }}{% endmacro %}
+        {{ local_used() }}
+        {% if malformed %}
+    "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "called_local_ref"));
+    assert!(!refs.iter().any(|r| r.name == "unused_project_ref"));
+}
+
+#[test]
+fn test_incomplete_render_recovers_reachable_local_and_prefix_graph() {
+    let macro_prefix = r#"
+        {% macro project_entry() %}{{ project_leaf() }}{% endmacro %}
+        {% macro project_leaf() %}{{ ref('project_reachable') }}{% endmacro %}
+        {% macro project_unused() %}{{ ref('project_unreachable') }}{% endmacro %}
+    "#;
+    let sql = r#"
+        {% macro local_alias() %}{{ project_entry() }}{% endmacro %}
+        {% macro local_unused() %}{{ ref('local_unreachable') }}{% endmacro %}
+        {% set alias = local_alias %}
+        {{ missing_macro() }} {{ alias() }}
+    "#;
+    let refs = extract_refs_and_sources(sql, macro_prefix).0;
+    assert!(refs.iter().any(|r| r.name == "project_reachable"));
+    assert!(!refs.iter().any(|r| r.name == "project_unreachable"));
+    assert!(!refs.iter().any(|r| r.name == "local_unreachable"));
+}
+
+#[test]
+fn test_incomplete_render_without_runtime_hint_excludes_uncalled_local_macro() {
+    let sql = r#"
+        {% macro unused_local() %}{{ ref('local_unused') }}{% endmacro %}
+        {{ missing_macro() }}
+        {{ ref('direct_after_failure') }}
+    "#;
+    let refs = extract_refs(sql);
+    assert!(refs.iter().any(|r| r.name == "direct_after_failure"));
+    assert!(!refs.iter().any(|r| r.name == "local_unused"));
 }
 
 #[test]

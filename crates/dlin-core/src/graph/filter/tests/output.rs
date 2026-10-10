@@ -157,5 +157,94 @@ fn test_filter_graph_rejects_cycle() {
     g.add_edge(b, a, EdgeData::direct(EdgeType::Ref));
 
     let result = filter_graph(&g, &[], None, None, &[], false);
-    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
+    assert!(
+        error.to_string().contains("model.a -> model.b -> model.a"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_cycle_path_is_real_and_excludes_downstream_nodes() {
+    let mut g = LineageGraph::new();
+    g.add_node(make_node("model.aaa", "aaa", NodeType::Model, None, vec![]));
+    let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+    let b = g.add_node(make_node("model.b", "b", NodeType::Model, None, vec![]));
+    let c = g.add_node(make_node("model.c", "c", NodeType::Model, None, vec![]));
+    let downstream = g.add_node(make_node(
+        "model.downstream",
+        "downstream",
+        NodeType::Model,
+        None,
+        vec![],
+    ));
+    g.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
+    g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
+    g.add_edge(c, a, EdgeData::direct(EdgeType::Ref));
+    g.add_edge(c, downstream, EdgeData::direct(EdgeType::Ref));
+
+    // The isolated node and downstream tail cannot be reported as cycle
+    // members, and every adjacent pair in the path must be an actual edge.
+    let cycle = find_directed_cycle(&g).unwrap();
+    assert_eq!(cycle.first(), cycle.last());
+    assert!(!cycle.contains(&"model.aaa".to_string()));
+    assert!(!cycle.contains(&"model.downstream".to_string()));
+    for pair in cycle.windows(2) {
+        let from = g
+            .node_indices()
+            .find(|&i| g[i].unique_id == pair[0])
+            .unwrap();
+        let to = g
+            .node_indices()
+            .find(|&i| g[i].unique_id == pair[1])
+            .unwrap();
+        assert!(g.find_edge(from, to).is_some(), "missing edge: {pair:?}");
+    }
+    let error = filter_graph(&g, &[], None, None, &[], false).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("cycle detected in lineage graph: {}", cycle.join(" -> "))
+    );
+}
+
+#[test]
+fn test_cycle_path_reports_self_loop() {
+    let mut g = LineageGraph::new();
+    let a = g.add_node(make_node("model.a", "a", NodeType::Model, None, vec![]));
+    g.add_edge(a, a, EdgeData::direct(EdgeType::Ref));
+
+    assert_eq!(find_directed_cycle(&g).unwrap(), ["model.a", "model.a"]);
+    let error = filter_graph(&g, &[], None, None, &[], false).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "cycle detected in lineage graph: model.a -> model.a"
+    );
+}
+
+#[test]
+fn test_acyclic_graph_has_no_cycle_path_and_passes_filter() {
+    let graph = make_test_graph();
+    assert!(find_directed_cycle(&graph).is_none());
+    assert!(filter_graph(&graph, &[], None, None, &[], false).is_ok());
 }
