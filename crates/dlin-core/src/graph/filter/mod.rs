@@ -277,7 +277,12 @@ pub fn filter_graph(
     if petgraph::algo::is_cyclic_directed(graph) {
         let cycle = find_directed_cycle(graph)
             .expect("petgraph reported a cycle but cycle path extraction found none");
-        return Err(DbtLineageError::CycleDetected(cycle.join(" -> ")).into());
+        return Err(
+            anyhow::Error::new(DbtLineageError::CycleDetected).context(format!(
+                "cycle detected in lineage graph: {}",
+                cycle.join(" -> ")
+            )),
+        );
     }
 
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();

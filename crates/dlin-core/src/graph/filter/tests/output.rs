@@ -157,8 +157,18 @@ fn test_filter_graph_rejects_cycle() {
     g.add_edge(b, a, EdgeData::direct(EdgeType::Ref));
 
     let result = filter_graph(&g, &[], None, None, &[], false);
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("model.a -> model.b -> model.a"), "{error}");
+    let error = result.unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
+    assert!(
+        error.to_string().contains("model.a -> model.b -> model.a"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -197,10 +207,16 @@ fn test_cycle_path_is_real_and_excludes_downstream_nodes() {
             .unwrap();
         assert!(g.find_edge(from, to).is_some(), "missing edge: {pair:?}");
     }
+    let error = filter_graph(&g, &[], None, None, &[], false).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
     assert_eq!(
-        filter_graph(&g, &[], None, None, &[], false)
-            .unwrap_err()
-            .to_string(),
+        error.to_string(),
         format!("cycle detected in lineage graph: {}", cycle.join(" -> "))
     );
 }
@@ -212,7 +228,18 @@ fn test_cycle_path_reports_self_loop() {
     g.add_edge(a, a, EdgeData::direct(EdgeType::Ref));
 
     assert_eq!(find_directed_cycle(&g).unwrap(), ["model.a", "model.a"]);
-    assert!(filter_graph(&g, &[], None, None, &[], false).is_err());
+    let error = filter_graph(&g, &[], None, None, &[], false).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<DbtLineageError>(),
+            Some(DbtLineageError::CycleDetected)
+        ),
+        "expected the original CycleDetected error in the anyhow chain: {error:#}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "cycle detected in lineage graph: model.a -> model.a"
+    );
 }
 
 #[test]
