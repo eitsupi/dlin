@@ -27,8 +27,10 @@ pub struct JinjaExtraction {
 /// values could have selected the wrong branch. A complete but uncertain
 /// render is recovered from the model-level template and only the local macro
 /// scopes recorded below when no model-level uncertainty was observed; an
-/// incomplete render uses whole-model recovery because execution provenance
-/// may be truncated at the failure.
+/// incomplete render uses statically reachable local/project macro recovery
+/// because execution provenance may be truncated at the failure. If
+/// reachability cannot be established, callers use a broader model-only
+/// fallback and exclude the project prefix.
 #[derive(Debug, Clone, Default)]
 pub struct JinjaOutcome {
     pub extraction: JinjaExtraction,
@@ -55,8 +57,8 @@ pub struct JinjaOutcome {
     pub(crate) model_macro_roots: Option<std::collections::HashSet<String>>,
     /// Prefix-aware macro graph computed while analyzing runtime globals.
     pub(crate) macro_reachability: Option<reachability::MacroReachability>,
-    /// True when prefix reachability could not be analyzed; callers must use
-    /// conservative whole-source recovery in that case.
+    /// True when prefix reachability could not be analyzed. The fallback
+    /// policy depends on whether rendering was incomplete or merely uncertain.
     pub(crate) macro_reachability_unknown: bool,
 }
 

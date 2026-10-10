@@ -76,5 +76,7 @@ mod generic_test_metadata;
 mod manifest_only;
 #[path = "integration/parsing.rs"]
 mod parsing;
+#[path = "integration/render_failure.rs"]
+mod render_failure;
 #[path = "integration/sql_mode_test_warning.rs"]
 mod sql_mode_test_warning;
