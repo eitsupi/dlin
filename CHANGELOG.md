@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.6-rc.1] - 2026-10-10
+
+### Bug Fixes
+
+- Keep column-lineage results available when individual columns cannot be resolved, reporting those columns as indeterminate while still surfacing actual analysis errors (#188)
+- Avoid adding dependencies from unused project macros when SQL rendering fails, while preserving recovery from reachable macros and runtime-dependent branches; show the directed path when a real lineage cycle is detected (#200)
+- Treat calls and chained access on known dbt runtime objects, such as `adapter.get_relation()`, as runtime placeholders so they do not unnecessarily fail SQL rendering (#200)
+
+### Performance
+
+- Reduce manifest-loading overhead for commands such as `check-manifest` and column lineage (#187)
+
+### Known Limitations
+
+- The previous release's whole-prefix recovery incidentally included some dependencies from macros selected through `adapter.dispatch()`. Scoped recovery can omit those dependencies; dispatch-aware macro resolution is not yet supported.
+
 ## [0.2.5] - 2026-08-30
 
 ### Features
