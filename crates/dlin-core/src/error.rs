@@ -32,8 +32,8 @@ pub enum DbtLineageError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
 
-    #[error("cycle detected in lineage graph")]
-    CycleDetected,
+    #[error("cycle detected in lineage graph: {0}")]
+    CycleDetected(String),
 
     #[error("duplicate model name '{name}' found in {path1} and {path2}")]
     DuplicateModel {
@@ -72,8 +72,11 @@ mod tests {
         let err = DbtLineageError::ModelNotFound("orders".into());
         assert_eq!(err.to_string(), "model not found: orders");
 
-        let err = DbtLineageError::CycleDetected;
-        assert_eq!(err.to_string(), "cycle detected in lineage graph");
+        let err = DbtLineageError::CycleDetected("model.orders -> model.orders".into());
+        assert_eq!(
+            err.to_string(),
+            "cycle detected in lineage graph: model.orders -> model.orders"
+        );
 
         let err = DbtLineageError::ProjectVarsConflict;
         insta::assert_snapshot!(err.to_string(), @r###"

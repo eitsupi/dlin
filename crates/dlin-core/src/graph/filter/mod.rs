@@ -275,7 +275,9 @@ pub fn filter_graph(
 ) -> Result<LineageGraph> {
     // Check for cycles
     if petgraph::algo::is_cyclic_directed(graph) {
-        return Err(DbtLineageError::CycleDetected.into());
+        let cycle = find_directed_cycle(graph)
+            .expect("petgraph reported a cycle but cycle path extraction found none");
+        return Err(DbtLineageError::CycleDetected(cycle.join(" -> ")).into());
     }
 
     let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
@@ -341,6 +343,97 @@ pub fn filter_graph(
     } else {
         Ok(build_subgraph(graph, &keep_nodes))
     }
+}
+
+/// Find one real directed cycle, with its first node repeated at the end.
+///
+/// This runs only after the linear-time acyclic check has found a cycle. The
+/// iterative DFS avoids recursion depth limits on large lineage graphs, and
+/// sorted roots/neighbors make the reported path deterministic.
+fn find_directed_cycle(graph: &LineageGraph) -> Option<Vec<String>> {
+    struct Frame {
+        node: NodeIndex,
+        neighbors: Vec<NodeIndex>,
+        next_neighbor: usize,
+    }
+
+    let mut roots: Vec<_> = graph.node_indices().collect();
+    roots.sort_by(|left, right| {
+        graph[*left]
+            .unique_id
+            .cmp(&graph[*right].unique_id)
+            .then_with(|| left.index().cmp(&right.index()))
+    });
+
+    let mut color = HashMap::<NodeIndex, u8>::new();
+    let mut parent = HashMap::<NodeIndex, NodeIndex>::new();
+
+    for root in roots {
+        if color.get(&root).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        color.insert(root, 1);
+        let mut stack = vec![Frame {
+            node: root,
+            neighbors: sorted_successors(graph, root),
+            next_neighbor: 0,
+        }];
+
+        while let Some(frame) = stack.last_mut() {
+            if frame.next_neighbor == frame.neighbors.len() {
+                color.insert(frame.node, 2);
+                stack.pop();
+                continue;
+            }
+
+            let node = frame.node;
+            let next = frame.neighbors[frame.next_neighbor];
+            frame.next_neighbor += 1;
+            match color.get(&next).copied().unwrap_or(0) {
+                0 => {
+                    parent.insert(next, node);
+                    color.insert(next, 1);
+                    stack.push(Frame {
+                        node: next,
+                        neighbors: sorted_successors(graph, next),
+                        next_neighbor: 0,
+                    });
+                }
+                1 => {
+                    let mut cycle = vec![node];
+                    let mut cursor = node;
+                    while cursor != next {
+                        cursor = *parent.get(&cursor)?;
+                        cycle.push(cursor);
+                    }
+                    cycle.reverse();
+                    cycle.push(next);
+                    return Some(
+                        cycle
+                            .into_iter()
+                            .map(|index| graph[index].unique_id.clone())
+                            .collect(),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn sorted_successors(graph: &LineageGraph, node: NodeIndex) -> Vec<NodeIndex> {
+    let mut successors: Vec<_> = graph
+        .neighbors_directed(node, Direction::Outgoing)
+        .collect();
+    successors.sort_by(|left, right| {
+        graph[*left]
+            .unique_id
+            .cmp(&graph[*right].unique_id)
+            .then_with(|| left.index().cmp(&right.index()))
+    });
+    successors
 }
 
 /// Build a new graph containing only the specified nodes and their interconnecting edges.
