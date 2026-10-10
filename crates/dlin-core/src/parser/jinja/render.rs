@@ -439,27 +439,59 @@ impl RenderState {
 struct RuntimeGlobal {
     state: Arc<RenderState>,
     rendered: &'static str,
+    root: bool,
 }
 
 impl RuntimeGlobal {
     fn new(state: Arc<RenderState>, rendered: &'static str) -> Self {
-        Self { state, rendered }
+        Self {
+            state,
+            rendered,
+            root: true,
+        }
+    }
+
+    fn child(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            rendered: "",
+            root: false,
+        }
     }
 }
 
 impl Object for RuntimeGlobal {
     fn get_value(self: &Arc<Self>, _key: &Value) -> Option<Value> {
         self.state.mark_uncertain();
-        None
+        Some(Value::from_object(self.child()))
     }
 
     fn get_value_by_str(self: &Arc<Self>, _key: &str) -> Option<Value> {
         self.state.mark_uncertain();
-        None
+        Some(Value::from_object(self.child()))
     }
 
     fn is_true(self: &Arc<Self>) -> bool {
-        true
+        self.root
+    }
+
+    fn call(
+        self: &Arc<Self>,
+        _state: &minijinja::State<'_, '_>,
+        _args: &[Value],
+    ) -> Result<Value, minijinja::Error> {
+        self.state.mark_uncertain();
+        Ok(Value::from_object(self.child()))
+    }
+
+    fn call_method(
+        self: &Arc<Self>,
+        _state: &minijinja::State<'_, '_>,
+        _method: &str,
+        _args: &[Value],
+    ) -> Result<Value, minijinja::Error> {
+        self.state.mark_uncertain();
+        Ok(Value::from_object(self.child()))
     }
 
     fn render(self: &Arc<Self>, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

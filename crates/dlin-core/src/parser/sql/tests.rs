@@ -632,6 +632,75 @@ fn test_incomplete_render_recovers_reachable_prefix_macro_called_after_failure()
 }
 
 #[test]
+fn test_incomplete_render_does_not_map_unresolved_member_to_flat_macro_name() {
+    let sql = r#"
+        {{ missing_namespace.matched(ref('argument_ref'), source('raw', 'argument_source')) }}
+        {{ ref('direct_after_failure') }}
+        {{ source('raw', 'direct_after_failure') }}
+        {{ flat_used() }}
+    "#;
+    let prefixes = [
+        r#"
+            {% macro matched() %}{{ ref('forbidden_member_ref') }}{{ source('raw', 'forbidden_member_source') }}{% endmacro %}
+            {% macro flat_used() %}{{ ref('flat_used_ref') }}{{ source('raw', 'flat_used_source') }}{% endmacro %}
+        "#,
+        r#"
+            {% macro matched() %}
+                {% if execute %}{{ ref('forbidden_member_ref') }}{{ source('raw', 'forbidden_member_source') }}{% endif %}
+            {% endmacro %}
+            {% macro flat_used() %}{{ ref('flat_used_ref') }}{{ source('raw', 'flat_used_source') }}{% endmacro %}
+        "#,
+    ];
+
+    for macro_prefix in prefixes {
+        let outcome = super::super::jinja::extract_via_jinja(sql, macro_prefix);
+        assert!(!outcome.complete);
+
+        let extraction = extract_all(sql, macro_prefix);
+        for expected in ["argument_ref", "direct_after_failure", "flat_used_ref"] {
+            assert!(
+                extraction
+                    .refs
+                    .iter()
+                    .any(|reference| reference.name == expected),
+                "missing {expected:?} for prefix {macro_prefix:?}: {:?}",
+                extraction.refs
+            );
+        }
+        assert!(
+            !extraction
+                .refs
+                .iter()
+                .any(|reference| reference.name == "forbidden_member_ref"),
+            "unrelated flat macro ref leaked through: {:?}",
+            extraction.refs
+        );
+        for expected in [
+            "argument_source",
+            "direct_after_failure",
+            "flat_used_source",
+        ] {
+            assert!(
+                extraction
+                    .sources
+                    .iter()
+                    .any(|source| source.table_name == expected),
+                "missing {expected:?} for prefix {macro_prefix:?}: {:?}",
+                extraction.sources
+            );
+        }
+        assert!(
+            !extraction
+                .sources
+                .iter()
+                .any(|source| source.table_name == "forbidden_member_source"),
+            "unrelated flat macro source leaked through: {:?}",
+            extraction.sources
+        );
+    }
+}
+
+#[test]
 fn test_malformed_jinja_recovers_direct_refs_without_unrelated_prefix() {
     let macro_prefix =
         "{% macro unused() %}{{ ref('unused') }}{{ source('raw', 'unused') }}{% endmacro %}";

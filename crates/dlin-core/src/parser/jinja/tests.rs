@@ -398,6 +398,101 @@ fn test_runtime_global_truthiness_matches_sentinel() {
 }
 
 #[test]
+fn test_runtime_global_method_calls_and_chains_mark_uncertainty() {
+    let sql = r#"
+        {% set relation = adapter.get_relation(database='db', schema='public', identifier='orders') %}
+        {% if relation %}{{ ref('relation_true') }}{% else %}{{ ref('relation_false') }}{% endif %}
+        {{ adapter.get_relation(database='db', identifier='orders').include(database='db').name }}
+    "#;
+    let outcome = extract_via_jinja(sql, "");
+    assert!(outcome.complete);
+    assert!(!outcome.semantic_certain);
+    assert!(outcome.model_uncertain);
+    assert_eq!(outcome.extraction.refs.len(), 1);
+    assert_eq!(outcome.extraction.refs[0].name, "relation_false");
+}
+
+#[test]
+fn test_runtime_method_branch_recovery_keeps_both_ref_and_source_dependencies() {
+    let sql = r#"
+        {% if adapter.get_relation(database='db', identifier='orders') %}
+            {{ ref('runtime_method_true') }}{{ source('raw', 'true') }}
+        {% else %}
+            {{ ref('runtime_method_false') }}{{ source('raw', 'false') }}
+        {% endif %}
+    "#;
+    let outcome = extract_via_jinja(sql, "");
+    assert!(outcome.complete);
+    assert!(!outcome.semantic_certain);
+    let extraction = super::super::sql::extract_all(sql, "");
+    assert!(
+        extraction
+            .refs
+            .iter()
+            .any(|r| r.name == "runtime_method_true")
+    );
+    assert!(
+        extraction
+            .refs
+            .iter()
+            .any(|r| r.name == "runtime_method_false")
+    );
+    assert!(extraction.sources.iter().any(|s| s.table_name == "true"));
+    assert!(extraction.sources.iter().any(|s| s.table_name == "false"));
+}
+
+#[test]
+fn test_dbt_adapter_runtime_example_renders_completely_as_uncertain() {
+    let sql = r#"
+        {% set gmid = adapter.get_relation(this.database, this.schema, this.identifier) %}
+        {% if is_incremental() and execute and gmid is not none %}
+            {% set prior = run_query('select max(updated_at) from ' ~ this) %}
+        {% endif %}
+        select * from {{ ref('base') }}
+    "#;
+    let outcome = extract_via_jinja(sql, "");
+    assert!(outcome.complete);
+    assert!(!outcome.semantic_certain);
+    assert!(outcome.model_uncertain);
+    assert!(outcome.extraction.refs.iter().any(|r| r.name == "base"));
+}
+
+#[test]
+fn test_issue_199_gmid_macro_runtime_example_renders_completely_as_uncertain() {
+    let macro_prefix = r#"
+        {% macro gmid(c) %}
+            {% if is_incremental() %}
+                {% set r = adapter.get_relation(this.database, this.schema, this.identifier) %}
+                {% if r %}{% set q = run_query('select 1') %}{% endif %}
+            {% endif %}
+            current_date()
+        {% endmacro %}
+    "#;
+    let sql = "{% if is_incremental() %}select {{ gmid('d') }} from {{ ref('base') }}{% else %}select 1 from {{ ref('base') }}{% endif %}";
+    let outcome = extract_via_jinja(sql, macro_prefix);
+    assert!(outcome.complete);
+    assert!(!outcome.semantic_certain);
+    assert!(outcome.extraction.refs.iter().any(|r| r.name == "base"));
+}
+
+#[test]
+fn test_runtime_global_attribute_calls_remain_callable_but_unknown_macro_fails() {
+    let outcome = extract_via_jinja(
+        "{{ adapter.dispatch('materialization', 'dbt')('view') }}",
+        "",
+    );
+    assert!(outcome.complete);
+    assert!(!outcome.semantic_certain);
+
+    let outcome = extract_via_jinja("{{ missing_runtime_macro() }}", "");
+    assert!(!outcome.complete);
+
+    let item_call = extract_via_jinja("{{ adapter['get_relation'](identifier='orders') }}", "");
+    assert!(item_call.complete);
+    assert!(!item_call.semantic_certain);
+}
+
+#[test]
 fn test_execute_keeps_placeholder_branch_but_marks_uncertainty() {
     let sql = r#"
             {% if execute %}
