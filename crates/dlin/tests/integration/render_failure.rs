@@ -98,6 +98,110 @@ fn test_issue_199_adapter_runtime_case_does_not_create_self_cycle() {
     );
 }
 
+#[test]
+fn test_runtime_macro_branches_recover_only_reachable_dependencies() {
+    let project = runtime_macro_branch_project();
+    let no_cache = run_graph(project.path(), &["--no-cache"]);
+    assert!(
+        no_cache.status.success(),
+        "uncached graph failed: {}",
+        String::from_utf8_lossy(&no_cache.stderr)
+    );
+    let no_cache_graph: serde_json::Value = serde_json::from_slice(&no_cache.stdout).unwrap();
+    assert_runtime_macro_edges(&no_cache_graph);
+
+    let cache_dir = project.path().join("dlin-cache");
+    let cache_dir_arg = cache_dir.to_str().unwrap();
+    let cold = run_graph(project.path(), &["--cache-dir", cache_dir_arg]);
+    assert!(
+        cold.status.success(),
+        "cold cached graph failed: {}",
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let warm = run_graph(project.path(), &["--cache-dir", cache_dir_arg]);
+    assert!(
+        warm.status.success(),
+        "warm cached graph failed: {}",
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let cold_graph: serde_json::Value = serde_json::from_slice(&cold.stdout).unwrap();
+    let warm_graph: serde_json::Value = serde_json::from_slice(&warm.stdout).unwrap();
+    assert_runtime_macro_edges(&cold_graph);
+    assert_runtime_macro_edges(&warm_graph);
+    assert_eq!(cold_graph, warm_graph, "cold and warm graph output differs");
+    assert_eq!(
+        no_cache_graph, cold_graph,
+        "cached and uncached graph output differs"
+    );
+}
+
+fn runtime_macro_branch_project() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("models")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("macros")).unwrap();
+    std::fs::write(
+        tmp.path().join("dbt_project.yml"),
+        "name: runtime_macro_repro\nmodel-paths: [models]\nmacro-paths: [macros]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/downstream.sql"),
+        "select {{ choose() }} as chosen\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("models/yes_branch.sql"), "select 1 as id\n").unwrap();
+    std::fs::write(tmp.path().join("models/no_branch.sql"), "select 0 as id\n").unwrap();
+    std::fs::write(
+        tmp.path().join("models/schema.yml"),
+        "version: 2\nsources:\n  - name: unused\n    tables:\n      - name: tbl\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("macros/choose.sql"),
+        r#"
+            {% macro choose() %}
+                {% if adapter.get_relation(identifier='x') %}
+                    {{ ref('yes_branch') }}
+                {% else %}
+                    {{ ref('no_branch') }}
+                {% endif %}
+            {% endmacro %}
+
+            {% macro unused() %}{{ ref('downstream') }}{{ source('unused', 'tbl') }}{% endmacro %}
+        "#,
+    )
+    .unwrap();
+    tmp
+}
+
+fn assert_runtime_macro_edges(graph: &serde_json::Value) {
+    let edges = graph["edges"].as_array().unwrap();
+    for source in ["model.yes_branch", "model.no_branch"] {
+        assert!(
+            edges.iter().any(|edge| {
+                edge["source"].as_str() == Some(source)
+                    && edge["target"].as_str() == Some("model.downstream")
+                    && edge["edge_type"].as_str() == Some("ref")
+            }),
+            "missing {source} edge: {edges:?}"
+        );
+    }
+    assert!(
+        !edges.iter().any(|edge| {
+            edge["source"].as_str() == Some("model.downstream")
+                && edge["target"].as_str() == Some("model.downstream")
+        }),
+        "unused macro added downstream self-edge: {edges:?}"
+    );
+    assert!(
+        !edges.iter().any(|edge| {
+            edge["source"].as_str() == Some("source.unused.tbl")
+                && edge["target"].as_str() == Some("model.downstream")
+        }),
+        "unused macro source edge leaked into graph: {edges:?}"
+    );
+}
+
 fn assert_issue_project_has_no_false_self_edge(project: &tempfile::TempDir) {
     let no_cache = run_graph(project.path(), &["--no-cache"]);
     assert!(
