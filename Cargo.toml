@@ -27,7 +27,7 @@ globset = "0.4"
 sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "b010d8083c60aee977055ea36f8a6807c1d51c62", default-features = false }
 # Must stay in lockstep with the sqlparser version sqllineage depends on; see
 # `sqlparser_version_matches_sqllineage` in dlin-core.
-sqlparser = { version = "0.62", features = ["serde", "visitor"] }
+sqlparser = { version = "0.63", features = ["serde", "visitor"] }
 path-slash = "0.2.1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
