@@ -21,7 +21,7 @@ colored = "3"
 anyhow = "1"
 thiserror = "2"
 indexmap = "2"
-minijinja = "2"
+minijinja = "3"
 rayon = "1"
 globset = "0.4"
 sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "b010d8083c60aee977055ea36f8a6807c1d51c62", default-features = false }
