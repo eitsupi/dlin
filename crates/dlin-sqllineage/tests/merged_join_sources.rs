@@ -1,8 +1,8 @@
 //! A column merged by `USING` or `NATURAL` takes its value from the join's
 //! contributing side: both sides for an inner or full join, and the
 //! preserved side for a left or right join. The lineage of an unqualified
-//! reference lists those relations in FROM order, whether they are physical
-//! tables, CTEs or derived tables.
+//! reference lists those relations sorted by relation and column rather than
+//! in FROM order, whether they are physical tables, CTEs or derived tables.
 
 use dlin_sqllineage::{
     Analyzer, Candidate, Catalog, CatalogColumn, CatalogEntry, Dialect, Ident, Lineage,

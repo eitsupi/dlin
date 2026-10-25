@@ -3,7 +3,10 @@ mod common;
 use common::{
     analyze_one_with, catalog_entry, concrete_sources, find_mapping, output_name, unresolved,
 };
-use dlin_sqllineage::{Catalog, CatalogEntry, Dialect, Lineage, Relation, Shape, Unresolved};
+use dlin_sqllineage::{
+    Catalog, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Lineage, Relation, Severity, Shape,
+    Unresolved,
+};
 
 struct MockCatalog;
 
@@ -19,9 +22,10 @@ impl Catalog for MockCatalog {
 
 struct EagerCatalog;
 
+/// Claims every relation it is asked about has a `missing` column.
 impl Catalog for EagerCatalog {
-    fn lookup(&self, _relation: &Relation) -> Option<CatalogEntry<'_>> {
-        None
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        Some(catalog_entry(relation, &["missing"]))
     }
 }
 
@@ -286,19 +290,36 @@ fn qualified_exclude_requires_exact_catalog_qualification() {
 fn qualified_field_path_star_does_not_forge_table_ref() {
     let result = configured("SELECT base.event.* FROM base", Dialect::Generic, None);
 
-    assert!(matches!(
-        &result.output.shape,
-        dlin_sqllineage::Shape::Open { .. }
-    ));
+    assert!(result.has_unresolved_stars);
     assert!(!result.read.iter().any(|table| table.name.value == "event"));
-    assert!(result
-        .output
-        .columns
-        .iter()
-        .flat_map(unresolved)
-        .all(|source| {
-            !matches!(source, Unresolved::BehindStar { relation } if relation.name.value == "event")
-        }));
+    // The field star is not an output column and has no relation of its own.
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded field star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert!(unexpanded[0].relation.is_none());
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    // Its lineage keeps the field itself and marks the expansion as unknown.
+    let Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
+        panic!("expected partial lineage, got {:?}", unexpanded[0].lineage)
+    };
+    assert_eq!(
+        known
+            .iter()
+            .map(|source| (
+                source.relation.name.value.as_str(),
+                source.column.value.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [("base", "event")]
+    );
+    assert_eq!(
+        unresolved.as_slice(),
+        [Unresolved::Unsupported {
+            what: "star expansion"
+        }]
+    );
 }
 
 #[test]
@@ -529,15 +550,39 @@ fn qualified_alias_star_uses_catalog_table_binding() {
 fn qualified_alias_star_without_catalog_keeps_actual_table_wildcard() {
     let result = configured("SELECT a.* FROM actual_table AS a", Dialect::Generic, None);
 
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "actual_table"))));
+    assert!(result.has_unresolved_stars);
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    assert_eq!(
+        unexpanded[0]
+            .relation
+            .as_ref()
+            .map(|r| r.name.value.as_str()),
+        Some("actual_table")
+    );
 }
 
 #[test]
 fn select_star_without_catalog_preserved() {
     let result = configured("SELECT * FROM users", Dialect::Generic, None);
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "users"))));
+    assert!(result.has_unresolved_stars);
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    assert_eq!(
+        unexpanded[0]
+            .relation
+            .as_ref()
+            .map(|r| r.name.value.as_str()),
+        Some("users")
+    );
 }
 
 #[test]
@@ -560,10 +605,14 @@ fn ambiguous_column_without_catalog() {
 
 #[test]
 fn catalog_does_not_fabricate_unresolved_column_owner() {
+    // The catalog claims that any relation has a `missing` column. A column
+    // without a relation in scope must not be attributed to one of them.
     let result = configured("SELECT missing", Dialect::Generic, Some(&EagerCatalog));
     let m = find_mapping(&result.output.columns, "missing");
-    assert!(matches!(&m.lineage, Lineage::Partial { unresolved, .. }
-        if matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "missing")));
+    assert!(matches!(&m.lineage, Lineage::Partial { known, unresolved }
+        if known.is_empty()
+            && matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "missing")));
+    assert!(result.read.is_empty());
 }
 
 #[test]
@@ -652,7 +701,7 @@ fn set_operation_branches_survive_cte_and_derived_boundaries() {
 }
 
 #[test]
-fn non_leading_star_in_right_set_branch_contributes_to_named_output() {
+fn source_free_left_branch_does_not_hide_star_source_of_right_branch() {
     let sql = "WITH lit AS (SELECT 1 AS col_a), \
                u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) \
                SELECT col_a FROM u";
@@ -660,6 +709,11 @@ fn non_leading_star_in_right_set_branch_contributes_to_named_output() {
 
     assert_eq!(result.output.columns.len(), 1);
     assert_eq!(output_name(&result.output.columns[0]), Some("col_a"));
+    // The literal branch contributes no source, so the lineage stays complete.
+    assert!(matches!(
+        &result.output.columns[0].lineage,
+        Lineage::Complete(sources) if sources.len() == 1
+    ));
     assert_eq!(
         concrete_sources(&result.output.columns[0]),
         vec![("ext_a".into(), "col_x".into())]
@@ -757,8 +811,12 @@ fn catalog_known_set_arity_mismatch_is_an_analysis_error() {
         Some(&SetOperationCatalog),
     );
     assert!(result.output.columns.is_empty());
-    assert!(result.diagnostics.iter().any(|diagnostic| matches!(
-        diagnostic.kind,
-        dlin_sqllineage::DiagnosticKind::SetOperationArityMismatch { left: 3, right: 4 }
-    )));
+    assert_eq!(
+        result.diagnostics,
+        [Diagnostic {
+            severity: Severity::Error,
+            kind: DiagnosticKind::SetOperationArityMismatch { left: 3, right: 4 },
+            location: None,
+        }]
+    );
 }

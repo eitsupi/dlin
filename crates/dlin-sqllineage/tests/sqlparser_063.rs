@@ -549,8 +549,8 @@ fn merge_update_wildcard_is_an_unexpanded_star_without_catalog() {
     assert_eq!(result.kind, StatementKind::Merge);
     assert_eq!(result.written, Some(common::table("target")));
     assert_eq!(input_names(&result), vec!["source"]);
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))));
+    assert_wildcard_on_source(&result);
+    assert!(result.has_unresolved_stars);
 }
 
 #[test]
@@ -561,8 +561,7 @@ fn merge_insert_wildcard_is_an_unexpanded_star_without_catalog() {
         Dialect::Databricks,
     );
     assert_eq!(result.kind, StatementKind::Merge);
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))));
+    assert_wildcard_on_source(&result);
 }
 
 #[test]
@@ -575,11 +574,29 @@ fn merge_insert_row_is_an_unexpanded_star_without_catalog() {
     assert_eq!(result.kind, StatementKind::Merge);
     assert_eq!(result.written, Some(common::table("target")));
     assert_eq!(input_names(&result), vec!["source"]);
-    assert!(
-        matches!(&result.output.shape, Shape::Open { unexpanded }
-            if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))),
-        "expected an unexpanded wildcard on source, got {:?}",
-        result.output.shape
+    assert_wildcard_on_source(&result);
+    assert!(result.has_unresolved_stars);
+}
+
+/// The merge's only output is an unexpanded star over the `source` relation.
+fn assert_wildcard_on_source(result: &StatementAnalysis) {
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!(
+            "expected an unexpanded wildcard, got {:?}",
+            result.output.shape
+        )
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    let source = common::table("source");
+    assert_eq!(unexpanded[0].relation.as_ref(), Some(&source));
+    assert_eq!(
+        unexpanded[0].lineage,
+        Lineage::Partial {
+            known: Vec::new(),
+            unresolved: vec![Unresolved::BehindStar { relation: source }],
+        }
     );
 }
 
@@ -632,6 +649,7 @@ fn merge_wildcards_expand_from_catalog() {
             "{dialect:?}: {action}"
         );
         assert_eq!(result.output.shape, Shape::Closed, "{dialect:?}: {action}");
+        assert!(!result.has_unresolved_stars, "{dialect:?}: {action}");
     }
 }
 

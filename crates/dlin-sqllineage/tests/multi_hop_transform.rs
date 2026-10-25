@@ -4,7 +4,9 @@
 mod common;
 
 use common::{concrete_sources, find_mapping};
-use dlin_sqllineage::{Analyzer, Candidate, Dialect, Lineage, OutputColumn, Transform, Unresolved};
+use dlin_sqllineage::{
+    Analyzer, Candidate, Dialect, Ident, Lineage, OutputColumn, Transform, Unresolved,
+};
 
 fn run(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
     Analyzer::new(dialect)
@@ -197,14 +199,27 @@ fn unqualified_reference_in_a_join_keeps_every_set_operation_branch() {
 #[test]
 fn unqualified_reference_between_two_providers_is_still_ambiguous() {
     let result = run(
-        "SELECT s FROM (SELECT SUM(x) AS s FROM t) d1 JOIN (SELECT COUNT(y) AS s FROM u) d2 ON true",
+        "SELECT s FROM (SELECT SUM(x) AS s FROM t) d2 JOIN (SELECT COUNT(y) AS s FROM u) d1 ON true",
         Dialect::Generic,
     );
-    assert!(matches!(
-        &mapping(&result, "s").lineage,
-        Lineage::Partial { unresolved, .. }
-            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-                if column.value == "s" && candidates.len() == 2
-                    && candidates.iter().all(|candidate| matches!(candidate, Candidate::Derived(Some(_)))))
-    ));
+    // Candidates are sorted by name, not listed in FROM order.
+    match &mapping(&result, "s").lineage {
+        Lineage::Partial { known, unresolved } => {
+            assert!(known.is_empty());
+            match &unresolved[..] {
+                [Unresolved::Ambiguous { column, candidates }] => {
+                    assert_eq!(column.value, "s");
+                    assert_eq!(
+                        candidates,
+                        &[
+                            Candidate::Derived(Some(Ident::unquoted("d1"))),
+                            Candidate::Derived(Some(Ident::unquoted("d2"))),
+                        ]
+                    );
+                }
+                other => panic!("expected one ambiguous column, got {other:?}"),
+            }
+        }
+        other => panic!("expected partial lineage, got {other:?}"),
+    }
 }

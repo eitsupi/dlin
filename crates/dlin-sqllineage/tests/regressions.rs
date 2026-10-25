@@ -47,6 +47,7 @@ fn named_projection_through_unknown_star_keeps_requested_column_and_uncertainty(
         "SELECT id FROM (SELECT * FROM some_unknown_source) src",
     ] {
         let result = first_result(sql, None);
+        assert!(result.has_unresolved_stars, "SQL: {sql}");
         assert!(
             matches!(&result.output.shape, dlin_sqllineage::Shape::Closed),
             "SQL: {sql}"
@@ -66,6 +67,9 @@ fn nested_join_star_does_not_open_a_closed_root_projection() {
         "SELECT id FROM some_table JOIN (SELECT * FROM some_unknown_source) src ON 1=1",
         None,
     );
+    // The statement still depends on an unknown schema, but the root output
+    // is fully listed.
+    assert!(result.has_unresolved_stars);
     assert!(matches!(
         &result.output.shape,
         dlin_sqllineage::Shape::Closed
@@ -83,6 +87,7 @@ fn leading_unknown_star_does_not_publish_nonleading_only_set_names() {
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table UNION ALL SELECT id, fee FROM third_table",
         None,
     );
+    assert!(result.has_unresolved_stars);
     assert!(matches!(
         &result.output.shape,
         dlin_sqllineage::Shape::Open { .. }
@@ -97,7 +102,7 @@ fn leading_unknown_star_does_not_publish_nonleading_only_set_names() {
 }
 
 #[test]
-fn source_free_set_branch_is_retained_as_incomplete_lineage() {
+fn source_free_set_branch_contributes_no_source_and_keeps_lineage_complete() {
     let result = first_result(
         "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c1, 2 AS c2 UNION ALL SELECT a.col_x, a.col_y FROM a) SELECT c1 FROM u",
         Some(&ExtCatalog),

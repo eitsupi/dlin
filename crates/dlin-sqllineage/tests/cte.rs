@@ -1,18 +1,41 @@
 mod common;
 
-use common::{analyze_one, concrete_sources, find_mapping, table};
+use common::{analyze_one, concrete_sources, find_mapping, known_sources, table};
 use common::{output_name, unresolved};
 use dlin_sqllineage::{
-    Analyzer, Dialect, Ident, Lineage, OutputColumn, Relation, Shape, Transform, Unresolved,
+    Analyzer, Diagnostic, DiagnosticKind, Dialect, Ident, Lineage, OutputColumn, Relation,
+    Severity, Shape, StatementAnalysis, Transform, UnexpandedStar, Unresolved,
 };
 
 fn has_wildcard_from(column: &OutputColumn, table_name: &str) -> bool {
-    unresolved(column).iter().any(|source| match source {
-        Unresolved::BehindStar { relation } | Unresolved::NamedBehindStar { relation, .. } => {
-            relation.name.value == table_name
-        }
-        _ => false,
+    unresolved(column).iter().any(|source| {
+        matches!(source, Unresolved::BehindStar { relation } if relation.name.value == table_name)
     })
+}
+
+fn unexpanded(result: &StatementAnalysis) -> &[UnexpandedStar] {
+    match &result.output.shape {
+        Shape::Open { unexpanded } => unexpanded,
+        Shape::Closed => panic!("expected an open output shape"),
+    }
+}
+
+/// The relations behind the unresolved stars of an unexpanded projection.
+fn star_relations(star: &UnexpandedStar) -> Vec<&str> {
+    let Lineage::Partial { known, unresolved } = &star.lineage else {
+        panic!("an unexpanded star is never complete: {:?}", star.lineage)
+    };
+    assert!(known.is_empty());
+    let mut names: Vec<_> = unresolved
+        .iter()
+        .map(|item| match item {
+            Unresolved::BehindStar { relation } => relation.name.value.as_str(),
+            other => panic!("expected a wildcard, got {other:?}"),
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 #[test]
@@ -92,9 +115,22 @@ fn recursive_cte_base_case() {
 
     let m = &result.output.columns[0];
     assert_eq!(output_name(m), Some("a"));
-    assert!(matches!(&m.lineage, Lineage::Partial { known, unresolved }
-        if known.iter().any(|source| source.relation.name.value == "t" && source.column.value == "a")
-            && unresolved.iter().any(|source| matches!(source, Unresolved::Recursive))));
+    // The base case contributes `t.a`; the recursive step must not feed the
+    // CTE back into its own sources.
+    let Lineage::Partial { known, unresolved } = &m.lineage else {
+        panic!("expected partial lineage, got {:?}", m.lineage)
+    };
+    assert_eq!(
+        known
+            .iter()
+            .map(|source| (
+                source.relation.name.value.as_str(),
+                source.column.value.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [("t", "a")]
+    );
+    assert_eq!(unresolved.as_slice(), [Unresolved::Recursive]);
 }
 
 #[test]
@@ -217,26 +253,72 @@ fn union_transform_prefers_aggregation_across_branches() {
 #[test]
 fn unknown_leading_star_is_preserved_without_catalog() {
     let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT a, b FROM known");
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_left"))));
-    assert!(
-        result
-            .output
-            .columns
-            .iter()
-            .any(|column| has_wildcard_from(column, "unknown_left"))
+    assert!(result.has_unresolved_stars);
+    let stars = unexpanded(&result);
+    assert_eq!(stars.len(), 1);
+    assert_eq!(
+        stars[0].relation.as_ref().map(|r| r.name.value.as_str()),
+        Some("unknown_left")
     );
+    assert_eq!(stars[0].after_ordinal, None);
+    assert_eq!(star_relations(&stars[0]), ["unknown_left"]);
+
+    // The known branch's columns follow the star, so their positions are unknown.
+    assert_eq!(result.output.columns.len(), 2);
+    for (column, name) in result.output.columns.iter().zip(["a", "b"]) {
+        assert_eq!(output_name(column), Some(name));
+        assert_eq!(column.ordinal, None);
+        assert!(has_wildcard_from(column, "unknown_left"));
+        assert_eq!(
+            known_sources(column)
+                .iter()
+                .map(|source| (
+                    source.relation.name.value.as_str(),
+                    source.column.value.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("known", name)]
+        );
+    }
 }
 
 #[test]
 fn unknown_non_leading_star_does_not_drop_known_branch_columns() {
     let result = analyze_one("SELECT id, * FROM unknown_left UNION ALL SELECT a, b, c FROM known");
-    assert!(matches!(&result.output.shape, Shape::Open { .. }));
+    assert_eq!(result.output.columns.len(), 3);
+
+    let id = find_mapping(&result.output.columns, "id");
+    assert_eq!(id.ordinal, Some(0));
+    assert_eq!(
+        concrete_sources(id),
+        vec![
+            ("known".into(), "a".into()),
+            ("unknown_left".into(), "id".into())
+        ]
+    );
     for name in ["b", "c"] {
         let column = find_mapping(&result.output.columns, name);
         assert_eq!(column.ordinal, None);
         assert!(has_wildcard_from(column, "unknown_left"));
+        assert_eq!(
+            known_sources(column)
+                .iter()
+                .map(|source| (
+                    source.relation.name.value.as_str(),
+                    source.column.value.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("known", name)]
+        );
     }
+
+    let stars = unexpanded(&result);
+    assert_eq!(stars.len(), 1);
+    assert_eq!(
+        stars[0].relation.as_ref().map(|r| r.name.value.as_str()),
+        Some("unknown_left")
+    );
+    assert_eq!(stars[0].after_ordinal, Some(0));
 }
 
 #[test]
@@ -252,9 +334,18 @@ fn unknown_right_star_marks_known_left_tail_as_unresolved() {
 #[test]
 fn unknown_stars_on_both_set_branches_are_both_retained() {
     let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT * FROM unknown_right");
-    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
-        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_left"))
-            && unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_right"))));
+    assert!(result.output.columns.is_empty());
+    let stars = unexpanded(&result);
+    // Each branch's star is retained, and either branch may supply the columns.
+    for table_name in ["unknown_left", "unknown_right"] {
+        assert!(stars.iter().any(|star| {
+            star.relation.as_ref().map(|r| r.name.value.as_str()) == Some(table_name)
+        }));
+    }
+    for star in stars {
+        assert_eq!(star.after_ordinal, None);
+        assert_eq!(star_relations(star), ["unknown_left", "unknown_right"]);
+    }
 }
 
 #[test]
@@ -262,15 +353,22 @@ fn nested_unknown_set_keeps_every_branch_mapping() {
     let result = analyze_one(
         "SELECT * FROM unknown_left UNION ALL SELECT a FROM known UNION ALL SELECT * FROM unknown_right",
     );
-    assert!(matches!(&result.output.shape, Shape::Open { .. }));
-    assert!(has_wildcard_from(
-        find_mapping(&result.output.columns, "a"),
-        "unknown_left"
-    ));
-    assert!(has_wildcard_from(
-        find_mapping(&result.output.columns, "a"),
-        "unknown_right"
-    ));
+    assert_eq!(result.output.columns.len(), 1);
+    let a = find_mapping(&result.output.columns, "a");
+    assert_eq!(a.ordinal, None);
+    assert!(has_wildcard_from(a, "unknown_left"));
+    assert!(has_wildcard_from(a, "unknown_right"));
+
+    // Both unknown branches keep their star, each aware of the other branch.
+    let stars = unexpanded(&result);
+    for table_name in ["unknown_left", "unknown_right"] {
+        assert!(stars.iter().any(|star| {
+            star.relation.as_ref().map(|r| r.name.value.as_str()) == Some(table_name)
+        }));
+    }
+    for star in stars {
+        assert_eq!(star_relations(star), ["unknown_left", "unknown_right"]);
+    }
 }
 
 #[test]
@@ -295,15 +393,15 @@ fn exact_set_arity_mismatch_is_an_analysis_error() {
     let result = Analyzer::new(Dialect::Generic)
         .analyze("SELECT a FROM t1 UNION ALL SELECT b, c FROM t2")
         .unwrap();
+    assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].output.columns.is_empty());
-    assert!(
-        result.statements[0]
-            .diagnostics
-            .iter()
-            .any(|diagnostic| matches!(
-                diagnostic.kind,
-                dlin_sqllineage::DiagnosticKind::SetOperationArityMismatch { left: 1, right: 2 }
-            ))
+    assert_eq!(
+        result.statements[0].diagnostics,
+        [Diagnostic {
+            severity: Severity::Error,
+            kind: DiagnosticKind::SetOperationArityMismatch { left: 1, right: 2 },
+            location: None,
+        }]
     );
 }
 
