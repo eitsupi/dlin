@@ -22,18 +22,7 @@ impl sqllineage::Catalog for CatalogAdapter<'_> {
             .snapshot
             .resolve_table_exact(&query, self.dialect)
             .or_else(|| {
-                let legacy_case_fold =
-                    matches!(self.dialect, DlinDialect::Generic | DlinDialect::BigQuery)
-                        && query
-                            .catalog()
-                            .into_iter()
-                            .chain(query.schema())
-                            .chain(std::iter::once(query.name()))
-                            .all(|part| {
-                                part.quote_style()
-                                    == crate::graph::column_lineage::relation::QuoteStyle::Unquoted
-                            });
-                legacy_case_fold
+                allows_case_folding(&query, self.dialect)
                     .then(|| self.snapshot.resolve_table_exact_case_insensitive(&query))
                     .flatten()
             })?;
@@ -84,7 +73,7 @@ pub(crate) fn source_relation(
     let query = relation_ref_from_engine(relation);
     if let Some(table) = catalog.and_then(|catalog| {
         catalog.resolve_table_exact(&query, dialect).or_else(|| {
-            matches!(dialect, DlinDialect::Generic | DlinDialect::BigQuery)
+            allows_case_folding(&query, dialect)
                 .then(|| catalog.resolve_table_exact_case_insensitive(&query))
                 .flatten()
         })
@@ -122,6 +111,48 @@ fn relation_from_ref(relation: &RelationRef) -> sqllineage::Relation {
         catalog: relation.catalog().map(ident),
         schema: relation.schema().map(ident),
         name: ident(relation.name()),
+    }
+}
+
+fn allows_case_folding(query: &RelationRef, dialect: DlinDialect) -> bool {
+    use crate::graph::column_lineage::relation::QuoteStyle;
+    matches!(dialect, DlinDialect::Generic | DlinDialect::BigQuery)
+        && query
+            .catalog()
+            .into_iter()
+            .chain(query.schema())
+            .chain(std::iter::once(query.name()))
+            .all(|part| part.quote_style() == QuoteStyle::Unquoted)
+}
+
+#[cfg(test)]
+mod source_relation_tests {
+    use super::*;
+
+    #[test]
+    fn quoted_sources_do_not_use_case_insensitive_catalog_fallback() {
+        let mut catalog = CatalogSnapshot::new();
+        catalog.add_table("Users", ["id".to_string()]);
+        for dialect in [DlinDialect::Generic, DlinDialect::BigQuery] {
+            let mut relation = sqllineage::Relation {
+                catalog: None,
+                schema: None,
+                name: sqllineage::Ident::quoted("users", sqllineage::Quote::Double),
+            };
+            assert_eq!(
+                source_relation(&relation, Some(&catalog), dialect)
+                    .name()
+                    .value(),
+                "users"
+            );
+            relation.name = sqllineage::Ident::unquoted("users");
+            assert_eq!(
+                source_relation(&relation, Some(&catalog), dialect)
+                    .name()
+                    .value(),
+                "Users"
+            );
+        }
     }
 }
 
