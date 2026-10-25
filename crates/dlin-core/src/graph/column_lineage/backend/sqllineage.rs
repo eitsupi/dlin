@@ -86,9 +86,8 @@ pub fn debug_parse_sql_json(
     pretty: bool,
 ) -> Result<String, String> {
     let dialect = engine_dialect(dialect)?;
-    parse(sql, dialect)
-        .map(|parsed| parsed.ast_json(pretty))
-        .map_err(|error| format!("parse error: {error}"))
+    let parsed = parse(sql, dialect).map_err(|error| format!("parse error: {error}"))?;
+    parsed.ast_json(pretty).map_err(|error| error.to_string())
 }
 
 /// Analyze a column for the CLI's debug trace command.

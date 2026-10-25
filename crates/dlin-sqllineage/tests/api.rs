@@ -26,10 +26,10 @@ fn parsing_reuse_debug_and_json_are_always_available() {
     let parsed = parse("SELECT x FROM t; SELECT 1", Dialect::Generic).unwrap();
     assert_eq!(parsed.statement_count(), 2);
     assert!(parsed.ast_debug().contains("Query"));
-    let json: serde_json::Value = serde_json::from_str(&parsed.ast_json(false)).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&parsed.ast_json(false).unwrap()).unwrap();
     assert_eq!(json.as_array().unwrap().len(), 2);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&parsed.ast_json(true)).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&parsed.ast_json(true).unwrap()).unwrap(),
         json
     );
     assert_eq!(

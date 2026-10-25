@@ -64,13 +64,16 @@ impl ParsedSql {
     /// Serialize the parser's AST for debugging.
     ///
     /// The JSON representation is not a stable contract.
-    pub fn ast_json(&self, pretty: bool) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error if the AST cannot be represented as JSON.
+    pub fn ast_json(&self, pretty: bool) -> Result<String, serde_json::Error> {
         if pretty {
             serde_json::to_string_pretty(&self.statements)
         } else {
             serde_json::to_string(&self.statements)
         }
-        .expect("SQL AST serialization cannot fail")
     }
 
     /// Analyze the parsed statements without parsing them again.
