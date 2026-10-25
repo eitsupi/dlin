@@ -1,10 +1,10 @@
-use sqllineage::{AnalyzeOptions, StatementType, TableRef, analyze};
+use dlin_sqllineage::{AnalyzeOptions, StatementType, TableRef, analyze};
 
 fn table(name: &str) -> TableRef {
     TableRef::new(name)
 }
 
-fn ok(sql: &str) -> Vec<sqllineage::AnalyzeResult> {
+fn ok(sql: &str) -> Vec<dlin_sqllineage::AnalyzeResult> {
     analyze(sql, AnalyzeOptions::default()).expect("should parse")
 }
 

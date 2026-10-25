@@ -14,11 +14,11 @@
     clippy::match_wildcard_for_single_variants
 )]
 
-//! # sqllineage
+//! # dlin-sqllineage
 //!
 //! Extract table-level and column-level data lineage from SQL statements.
 //!
-//! Given a SQL string, `sqllineage` produces:
+//! Given a SQL string, `dlin-sqllineage` produces:
 //! - **Table-level lineage** — which tables are read (inputs) and written (output)
 //! - **Column-level lineage** — which source columns each output column derives from
 //!
@@ -28,7 +28,7 @@
 //! # Quick start
 //!
 //! ```
-//! use sqllineage::{analyze, AnalyzeOptions};
+//! use dlin_sqllineage::{analyze, AnalyzeOptions};
 //!
 //! let results = analyze(
 //!     "INSERT INTO summary SELECT user_id, SUM(score) AS total FROM events GROUP BY user_id",

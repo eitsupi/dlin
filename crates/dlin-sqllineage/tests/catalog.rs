@@ -1,7 +1,7 @@
 mod common;
 
 use common::find_mapping;
-use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, analyze};
+use dlin_sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, analyze};
 
 struct MockCatalog;
 
@@ -70,7 +70,7 @@ fn opts_with_catalog() -> AnalyzeOptions {
     }
 }
 
-fn concrete_sources(mapping: &sqllineage::ColumnMapping) -> Vec<(String, String)> {
+fn concrete_sources(mapping: &dlin_sqllineage::ColumnMapping) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = mapping
         .sources
         .iter()
@@ -1050,7 +1050,7 @@ fn named_lookup_through_projection_preserves_inner_transform() {
     );
     assert_eq!(
         result.columns.mappings[0].transform,
-        sqllineage::TransformKind::Aggregation
+        dlin_sqllineage::TransformKind::Aggregation
     );
 }
 
@@ -1076,7 +1076,7 @@ fn named_lookup_through_projection_preserves_inner_expression_transform() {
     );
     assert_eq!(
         result.columns.mappings[0].transform,
-        sqllineage::TransformKind::Expression
+        dlin_sqllineage::TransformKind::Expression
     );
 }
 

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::StatementType;
+use dlin_sqllineage::StatementType;
 
 #[test]
 fn cte_wrapped_delete() {

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping};
-use sqllineage::TransformKind;
+use dlin_sqllineage::TransformKind;
 
 #[test]
 fn sum_over_partition_by() {

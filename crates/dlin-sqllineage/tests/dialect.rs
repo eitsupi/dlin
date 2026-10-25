@@ -1,4 +1,4 @@
-use sqllineage::{AnalyzeOptions, Dialect, StatementType, analyze};
+use dlin_sqllineage::{AnalyzeOptions, Dialect, StatementType, analyze};
 
 #[test]
 fn all_public_dialects_parse_basic_queries() {

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::{StatementType, TransformKind};
+use dlin_sqllineage::{StatementType, TransformKind};
 
 #[test]
 fn update_set_direct() {

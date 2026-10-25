@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::{ColumnMapping, ColumnOrigin, TableRef, TransformKind};
+use dlin_sqllineage::{ColumnMapping, ColumnOrigin, TableRef, TransformKind};
 
 fn has_wildcard_from(mapping: &ColumnMapping, table_name: &str) -> bool {
     mapping.sources.iter().any(|source| {
@@ -128,7 +128,7 @@ fn recursive_cte_no_cycle_warning() {
         !result
             .warnings
             .iter()
-            .any(|w| matches!(w.kind, sqllineage::WarningKind::UnexpectedCycle)),
+            .any(|w| matches!(w.kind, dlin_sqllineage::WarningKind::UnexpectedCycle)),
         "topological sort should succeed after back-edge removal"
     );
 }
@@ -350,9 +350,9 @@ fn leading_unknown_star_hides_nonleading_only_set_names() {
 
 #[test]
 fn exact_set_arity_mismatch_is_an_analysis_error() {
-    let result = sqllineage::analyze(
+    let result = dlin_sqllineage::analyze(
         "SELECT a FROM t1 UNION ALL SELECT b, c FROM t2",
-        sqllineage::AnalyzeOptions::default(),
+        dlin_sqllineage::AnalyzeOptions::default(),
     );
     let error = match result {
         Ok(_) => panic!("exact arity mismatch should not be truncated"),

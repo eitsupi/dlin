@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::{ColumnOrigin, TransformKind};
+use dlin_sqllineage::{ColumnOrigin, TransformKind};
 
 #[test]
 fn select_columns() {
@@ -172,7 +172,10 @@ fn unnest_source_free_alias_has_no_physical_sources() {
     );
     let mapping = find_mapping(&result.columns.mappings, "item");
     assert!(mapping.sources.is_empty());
-    assert_eq!(result.tables.inputs, Vec::<sqllineage::TableRef>::new());
+    assert_eq!(
+        result.tables.inputs,
+        Vec::<dlin_sqllineage::TableRef>::new()
+    );
 }
 
 #[test]

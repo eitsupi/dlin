@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::TransformKind;
+use dlin_sqllineage::TransformKind;
 
 #[test]
 fn merge_when_matched_update_set() {

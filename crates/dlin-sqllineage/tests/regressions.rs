@@ -1,6 +1,9 @@
-use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, analyze};
+use dlin_sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, analyze};
 
-fn first_result(sql: &str, catalog: Option<Box<dyn CatalogProvider>>) -> sqllineage::AnalyzeResult {
+fn first_result(
+    sql: &str,
+    catalog: Option<Box<dyn CatalogProvider>>,
+) -> dlin_sqllineage::AnalyzeResult {
     analyze(
         sql,
         AnalyzeOptions {

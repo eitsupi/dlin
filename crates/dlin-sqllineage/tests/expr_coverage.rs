@@ -1,11 +1,11 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping};
-use sqllineage::{
+use dlin_sqllineage::{
     AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, TransformKind, analyze,
 };
 
-fn analyze_with_dialect(sql: &str, dialect: Dialect) -> sqllineage::AnalyzeResult {
+fn analyze_with_dialect(sql: &str, dialect: Dialect) -> dlin_sqllineage::AnalyzeResult {
     analyze(
         sql,
         AnalyzeOptions {

@@ -1,4 +1,6 @@
-use sqllineage::{AnalyzeOptions, AnalyzeResult, ColumnMapping, ColumnOrigin, TableRef, analyze};
+use dlin_sqllineage::{
+    AnalyzeOptions, AnalyzeResult, ColumnMapping, ColumnOrigin, TableRef, analyze,
+};
 
 #[allow(dead_code)]
 pub fn analyze_one(sql: &str) -> AnalyzeResult {

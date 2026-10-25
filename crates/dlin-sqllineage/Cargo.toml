@@ -1,34 +1,18 @@
 [package]
-name = "sqllineage"
-version = "0.2.0"
-edition = "2024"
-description = "Extract table and column-level lineage from SQL"
+name = "dlin-sqllineage"
+version.workspace = true
+edition.workspace = true
+description = "Column-level SQL lineage engine used by dlin, forked from sqllineage"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/funcpp/sqllineage"
-readme = "../README.md"
-
-[lib]
-name = "sqllineage"
-path = "src/lib.rs"
-
-[[bin]]
-name = "sqllineage"
-path = "src/bin/sqllineage.rs"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["sql", "lineage", "dbt"]
+categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
-sqlparser = "0.62"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+sqlparser = { workspace = true }
+serde = { workspace = true }
 
-[dependencies.clap]
-version = "4.6"
-features = ["derive"]
-optional = true
-
-[features]
-default = ["cli"]
-cli = ["clap"]
-
-[dev-dependencies]
-pretty_assertions = "1"
-insta = { version = "1", features = ["yaml"] }
+[lints]
+workspace = true

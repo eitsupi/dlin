@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, table};
-use sqllineage::TableRef;
+use dlin_sqllineage::TableRef;
 
 #[test]
 fn bare_select_single_table() {
