@@ -264,6 +264,15 @@ impl LineageBuilder {
                         }
                     }
                 }
+                // The ORDER BY of `WITHIN GROUP` orders the values an
+                // ordered-set aggregate computes over (`PERCENTILE_CONT`,
+                // `MODE`, `LISTAGG`), so its columns are inputs of the result.
+                // `FILTER (WHERE ...)` and the clauses inside the argument
+                // list (`ORDER BY`, `WHERE`, `LIMIT`) only choose or order
+                // rows for the other arguments and are deliberately skipped.
+                for order in &func.within_group {
+                    ancestors.extend(self.collect_ancestors(&order.expr));
+                }
                 if let FunctionArguments::Subquery(q) = &func.args {
                     let _sub = self.push_scope(ScopeKind::Subquery);
                     self.visit_query(q);
@@ -570,7 +579,7 @@ pub(crate) fn determine_edge_kind(expr: &Expr) -> EdgeKind {
         Expr::Function(f) => {
             if f.over.is_some() {
                 EdgeKind::ViaExpression
-            } else if is_aggregate(&f.name.to_string()) {
+            } else if !f.within_group.is_empty() || is_aggregate(&f.name.to_string()) {
                 EdgeKind::ViaAggregation
             } else {
                 EdgeKind::ViaExpression
