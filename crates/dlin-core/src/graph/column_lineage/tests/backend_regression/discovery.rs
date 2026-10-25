@@ -327,6 +327,27 @@ fn sqllineage_discovery_drops_field_path_star_without_forged_output_name() {
     };
     assert_eq!(unexpanded.len(), 1);
     assert!(unexpanded[0].relation.is_none());
+    // The field itself stays a known source of the star, and the expansion is
+    // marked as unknown.
+    let sqllineage::Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
+        panic!("expected partial lineage, got {:?}", unexpanded[0].lineage);
+    };
+    assert_eq!(
+        known
+            .iter()
+            .map(|source| (
+                source.relation.name.value.as_str(),
+                source.column.value.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [("source", "event")]
+    );
+    assert_eq!(
+        unresolved.as_slice(),
+        [sqllineage::Unresolved::Unsupported {
+            what: "star expansion"
+        }]
+    );
 
     let discovery = sqllineage_discovery_with_dialect(
         "SELECT base.event.* FROM source AS base",
