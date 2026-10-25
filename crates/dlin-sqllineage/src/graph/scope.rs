@@ -45,15 +45,36 @@ struct Scope {
     /// binding name was later taken by another relation (`s.t` and `o.t`
     /// share the name `t`). Multi-part qualifiers are matched against these.
     relations: Vec<TableRef>,
-    /// Column names merged by a `JOIN ... USING (...)` in this scope. Such a
-    /// name denotes one column of the join result, not one per relation.
-    using_columns: HashSet<String>,
-    /// Whether a `NATURAL JOIN` merges an unknown set of columns.
-    natural_join: bool,
+    /// Binding names in the order they were added, including names that a
+    /// later relation took over. A join reads the slice added while its
+    /// operands were visited to learn which relations it combines.
+    binding_log: Vec<String>,
+    /// Joins in this scope that merge columns, in source order.
+    join_merges: Vec<JoinMerge>,
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
     virtual_sources: Vec<VirtualSource>,
+}
+
+/// The columns a join merges into one column of its result.
+#[derive(Debug, Clone)]
+pub(crate) enum MergedColumns {
+    /// `USING (...)`: the listed names.
+    Using(Vec<String>),
+    /// `NATURAL`: every name both sides publish.
+    Natural,
+}
+
+/// A `USING` or `NATURAL` join. Each side lists the binding names of the
+/// relations it combines (several for an earlier join or a parenthesized
+/// join), so a merged column can be attributed to exactly those relations
+/// rather than to the whole scope.
+#[derive(Debug, Clone)]
+pub(crate) struct JoinMerge {
+    pub left: Vec<String>,
+    pub right: Vec<String>,
+    pub columns: MergedColumns,
 }
 
 #[derive(Debug, Clone)]
@@ -99,8 +120,8 @@ impl ScopeTree {
                 parent: None,
                 bindings: IndexMap::new(),
                 relations: Vec::new(),
-                using_columns: HashSet::new(),
-                natural_join: false,
+                binding_log: Vec::new(),
+                join_merges: Vec::new(),
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
@@ -119,8 +140,8 @@ impl ScopeTree {
             parent: Some(parent),
             bindings: IndexMap::new(),
             relations: Vec::new(),
-            using_columns: HashSet::new(),
-            natural_join: false,
+            binding_log: Vec::new(),
+            join_merges: Vec::new(),
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
@@ -134,34 +155,41 @@ impl ScopeTree {
     }
 
     pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
+        self.scopes[scope].binding_log.push(name.clone());
         if let Binding::Table(table) = &binding {
             self.scopes[scope].relations.push(table.clone());
         }
         self.scopes[scope].bindings.insert(name, binding);
     }
 
-    pub fn add_using_column(&mut self, scope: ScopeId, name: String) {
-        self.scopes[scope].using_columns.insert(name);
+    /// Number of bindings added to `scope` so far; pass it to
+    /// [`Self::bindings_added_since`] to learn what a FROM item introduced.
+    pub fn binding_mark(&self, scope: ScopeId) -> usize {
+        self.scopes[scope].binding_log.len()
     }
 
-    pub fn mark_natural_join(&mut self, scope: ScopeId) {
-        self.scopes[scope].natural_join = true;
+    /// Binding names added to `scope` since `mark`, in the order added.
+    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<String> {
+        self.scopes[scope].binding_log[mark..].to_vec()
     }
 
-    /// Whether a join in the scope that supplies unqualified names merges
-    /// `name`, so that a column of that name shared by several relations is
-    /// not ambiguous. A `NATURAL JOIN` merges columns the engine cannot see,
-    /// so it is treated as merging every name.
-    pub fn is_merged_column(&self, scope: ScopeId, name: &str) -> bool {
+    pub fn add_join_merge(&mut self, scope: ScopeId, merge: JoinMerge) {
+        self.scopes[scope].join_merges.push(merge);
+    }
+
+    /// Joins that merge columns among the relations an unqualified name is
+    /// looked up in: those of the nearest scope with a FROM clause, in source
+    /// order.
+    pub fn join_merges(&self, scope: ScopeId) -> &[JoinMerge] {
         let mut current = Some(scope);
         while let Some(id) = current {
             let s = &self.scopes[id];
             if !s.bindings.is_empty() {
-                return s.natural_join || s.using_columns.contains(name);
+                return &s.join_merges;
             }
             current = s.parent;
         }
-        false
+        &[]
     }
 
     pub fn add_virtual_source(

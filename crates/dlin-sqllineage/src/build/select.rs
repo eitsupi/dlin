@@ -6,7 +6,9 @@ use sqlparser::ast::{
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
-use crate::graph::scope::{Binding, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState};
+use crate::graph::scope::{
+    Binding, JoinMerge, MergedColumns, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState,
+};
 
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
@@ -196,17 +198,30 @@ impl LineageBuilder {
     /// Process FROM clause items (including JOINs).
     pub(crate) fn visit_from(&mut self, from: &[TableWithJoins]) {
         for table_with_joins in from {
-            self.visit_table_factor(&table_with_joins.relation);
-            for join in &table_with_joins.joins {
-                self.visit_table_factor(&join.relation);
-                self.note_join_constraint(join);
-            }
+            self.visit_table_with_joins(table_with_joins);
         }
     }
 
-    /// Record the columns a join merges, so an unqualified reference to one of
-    /// them is not reported as ambiguous between the joined relations.
-    fn note_join_constraint(&mut self, join: &Join) {
+    /// Visit a relation and the joins chained onto it. Each join combines
+    /// everything to its left in the chain with its own relation, which is
+    /// what a `USING` or `NATURAL` constraint merges columns across.
+    fn visit_table_with_joins(&mut self, table_with_joins: &TableWithJoins) {
+        let scope = self.current_scope;
+        let start = self.graph.scopes.binding_mark(scope);
+        self.visit_table_factor(&table_with_joins.relation);
+        for join in &table_with_joins.joins {
+            let left = self.graph.scopes.bindings_added_since(scope, start);
+            let right_start = self.graph.scopes.binding_mark(scope);
+            self.visit_table_factor(&join.relation);
+            let right = self.graph.scopes.bindings_added_since(scope, right_start);
+            self.note_join_constraint(join, left, right);
+        }
+    }
+
+    /// Record the columns a join merges between the relations on its two
+    /// sides, so an unqualified reference to one of them is not reported as
+    /// ambiguous between those relations.
+    fn note_join_constraint(&mut self, join: &Join, left: Vec<String>, right: Vec<String>) {
         let constraint = match &join.join_operator {
             JoinOperator::Join(constraint)
             | JoinOperator::Inner(constraint)
@@ -230,17 +245,24 @@ impl LineageBuilder {
             | JoinOperator::LeftArrayJoin
             | JoinOperator::InnerArrayJoin => return,
         };
-        match constraint {
-            JoinConstraint::Using(columns) => {
-                for column in columns {
-                    for name in self.object_name_parts(column) {
-                        self.graph.scopes.add_using_column(self.current_scope, name);
-                    }
-                }
-            }
-            JoinConstraint::Natural => self.graph.scopes.mark_natural_join(self.current_scope),
-            JoinConstraint::On(_) | JoinConstraint::None => {}
-        }
+        let columns = match constraint {
+            JoinConstraint::Using(columns) => MergedColumns::Using(
+                columns
+                    .iter()
+                    .flat_map(|column| self.object_name_parts(column))
+                    .collect(),
+            ),
+            JoinConstraint::Natural => MergedColumns::Natural,
+            JoinConstraint::On(_) | JoinConstraint::None => return,
+        };
+        self.graph.scopes.add_join_merge(
+            self.current_scope,
+            JoinMerge {
+                left,
+                right,
+                columns,
+            },
+        );
     }
 
     /// Process a single table factor — register table as input and as scope binding.
@@ -296,11 +318,7 @@ impl LineageBuilder {
                 table_with_joins,
                 alias,
             } => {
-                self.visit_table_factor(&table_with_joins.relation);
-                for join in &table_with_joins.joins {
-                    self.visit_table_factor(&join.relation);
-                    self.note_join_constraint(join);
-                }
+                self.visit_table_with_joins(table_with_joins);
                 let _ = alias;
             }
 

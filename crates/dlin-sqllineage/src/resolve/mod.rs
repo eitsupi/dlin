@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
-use crate::graph::scope::{Binding, OutputPlan, ScopeTree, VirtualColumnState, VirtualSourceId};
+use crate::graph::scope::{
+    Binding, MergedColumns, OutputPlan, ScopeTree, VirtualColumnState, VirtualSourceId,
+};
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
     ParseError, StatementType, TableRef, TransformKind, Warning, WarningKind,
@@ -2351,7 +2353,7 @@ fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize
 
 /// The relation an unqualified column reference is read from: the only
 /// relation in scope, or else the CTE/derived table that is the only (or, for
-/// a merged join column, the leftmost) one publishing the name. This is the
+/// a join-merged column, the leftmost) one publishing the name. This is the
 /// relation `resolve_from_bindings` resolves through, so a reference is
 /// followed the same way whether or not other relations share the scope.
 fn find_unqualified_binding(name: &str, scope: usize, graph: &RawGraph) -> Option<Binding> {
@@ -2360,10 +2362,83 @@ fn find_unqualified_binding(name: &str, scope: usize, graph: &RawGraph) -> Optio
         return Some(bindings[0].1.clone());
     }
     let providers = column_providers(name, &bindings, graph);
-    if providers.len() > 1 && !graph.scopes.is_merged_column(scope, name) {
+    if !providers_form_one_column(name, &providers, &bindings, scope, graph) {
         return None;
     }
     providers.first().map(|provider| provider.binding.clone())
+}
+
+/// Whether `name` denotes a single column across `providers`: either one
+/// relation publishes it, or `USING`/`NATURAL` joins merge every publisher
+/// into one column. A join merges only the relations on its own two sides, so
+/// a publisher outside them (a comma-joined relation, or one joined with `ON`)
+/// keeps the name a real choice even when other publishers are merged.
+fn providers_form_one_column(
+    name: &str,
+    providers: &[ColumnProvider<'_>],
+    bindings: &[(String, Binding)],
+    scope: usize,
+    graph: &RawGraph,
+) -> bool {
+    if providers.len() < 2 {
+        return true;
+    }
+    let publishes = |binding_name: &str| {
+        bindings.iter().any(|(candidate, binding)| {
+            candidate == binding_name && binding_publishes(binding, name, graph)
+        })
+    };
+    // Merge group of each relation publishing the name; starts as one each.
+    let mut groups: HashMap<&str, usize> = bindings
+        .iter()
+        .filter(|(binding_name, _)| publishes(binding_name))
+        .enumerate()
+        .map(|(index, (binding_name, _))| (binding_name.as_str(), index))
+        .collect();
+    for merge in graph.scopes.join_merges(scope) {
+        let merges_name = match &merge.columns {
+            MergedColumns::Using(columns) => columns.iter().any(|column| column == name),
+            MergedColumns::Natural => true,
+        };
+        if !merges_name {
+            continue;
+        }
+        // A side that already holds several unmerged publishers makes the
+        // name ambiguous within the join itself, so the join merges nothing.
+        let side_group = |side: &[String]| {
+            let mut found = side
+                .iter()
+                .filter_map(|member| groups.get(member.as_str()).copied());
+            let first = found.next()?;
+            found.all(|group| group == first).then_some(first)
+        };
+        let (Some(left), Some(right)) = (side_group(&merge.left), side_group(&merge.right)) else {
+            continue;
+        };
+        for group in groups.values_mut() {
+            if *group == right {
+                *group = left;
+            }
+        }
+    }
+    let mut provider_groups = providers
+        .iter()
+        .filter_map(|provider| groups.get(provider.name));
+    let Some(first) = provider_groups.next() else {
+        return true;
+    };
+    provider_groups.all(|group| group == first)
+}
+
+fn binding_publishes(binding: &Binding, name: &str, graph: &RawGraph) -> bool {
+    let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
+        return false;
+    };
+    graph
+        .scopes
+        .output_columns(*scope)
+        .iter()
+        .any(|column| column.name == name)
 }
 
 /// A CTE or derived table in a FROM clause that publishes a column.
@@ -2385,11 +2460,7 @@ fn column_providers<'a>(
         let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
             continue;
         };
-        if graph
-            .scopes
-            .output_columns(*scope)
-            .iter()
-            .any(|column| column.name == name)
+        if binding_publishes(binding, name, graph)
             && !providers.iter().any(|provider| provider.scope == *scope)
         {
             providers.push(ColumnProvider {
@@ -2416,7 +2487,7 @@ fn resolve_unqualified(
     resolve_from_bindings(
         name,
         &effective_bindings(scope, graph),
-        graph.scopes.is_merged_column(scope, name),
+        scope,
         graph,
         resolved,
         incoming,
@@ -2430,7 +2501,7 @@ fn resolve_unqualified(
 fn resolve_from_bindings(
     name: &str,
     bindings: &[(String, Binding)],
-    merged_by_join: bool,
+    scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
@@ -2472,8 +2543,8 @@ fn resolve_from_bindings(
             .collect();
         let providers = column_providers(name, bindings, graph);
         // Two relations offering the same name make an unqualified reference
-        // a real choice, unless a join merges that column into one.
-        if providers.len() > 1 && !merged_by_join {
+        // a real choice, unless joins merge that column into one.
+        if !providers_form_one_column(name, &providers, bindings, scope, graph) {
             return Some(ColumnOrigin::Ambiguous {
                 column: name.to_string(),
                 candidates: providers
