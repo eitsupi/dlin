@@ -1,5 +1,5 @@
 use crate::parser::manifest::Manifest;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 mod backend;
 mod cache;
@@ -11,14 +11,13 @@ mod schema;
 mod tests;
 mod types;
 
-use backend::{
-    AnalysisSlot, Backend, BackendColumnOutcome, BackendErrorKind, BackendSource, LineageBackend,
-    LineageRequest, OutputColumnRequest, OutputDiscoveryRequest, ResolutionState,
-    SqllineageBackend, normalize_column_outcomes, require_single_lineage_statement,
+use backend::sqllineage::{
+    OutputFailureKind, analysis_error, analyze_parsed, analyze_sql, discovered_output_names,
+    legacy_single_error, lineage_failure, parse_sql, resolve_statement_output,
 };
 pub use backend::{
-    BackendId, CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS,
-    check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
+    CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
+    debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
 pub use impact::{ColumnImpactReport, ImpactedColumn};
@@ -33,39 +32,89 @@ use types::{
 };
 
 fn discover_named_output_columns(
-    backend: &dyn LineageBackend,
-    request: &OutputDiscoveryRequest<'_>,
+    sql: &str,
+    dialect: DlinDialect,
+    catalog: Option<&CatalogSnapshot>,
 ) -> HashSet<String> {
     // Deliberately preserve the previous parse-failure behavior:
     // YAML columns remain usable when discovery cannot parse the SQL.
     // Surfacing discovery parse errors is an error-model change to decide on
     // its own merits, rather than inherit from this refactor.
-    match backend.discover_output_columns(request) {
-        Ok(discovery) => discovery
-            .outputs
-            .into_iter()
-            .filter_map(|output| match output.name {
-                backend::OutputName::Named(name) => Some(name),
-                backend::OutputName::UnaliasedExpression => None,
-            })
-            .collect(),
-        Err(error) => {
-            // These are the ways a backend says "I cannot name this model's outputs":
-            // the SQL does not parse, it is not a single statement, or the statement
-            // carries no lineage. Falling back to the YAML columns is right for all
-            // three. Any other kind means the backend failed for a reason this caller
-            // does not understand, and swallowing it would hide a bug.
-            debug_assert!(
-                matches!(
-                    error.kind,
-                    BackendErrorKind::Parse
-                        | BackendErrorKind::IncompleteAnalysis
-                        | BackendErrorKind::UnsupportedStatement
-                ),
-                "unexpected discovery error kind: {error:?}"
-            );
-            HashSet::new()
-        }
+    let Ok(analysis) = analyze_sql(sql, dialect, catalog) else {
+        return HashSet::new();
+    };
+    discovered_output_names(&analysis).into_iter().collect()
+}
+
+fn output_failure_state(kind: OutputFailureKind) -> &'static str {
+    match kind {
+        OutputFailureKind::NotFound => "not_found",
+        OutputFailureKind::Ambiguous => "ambiguous",
+        OutputFailureKind::Indeterminate => "indeterminate",
+    }
+}
+
+fn column_resolution_error_with_message(
+    column: &str,
+    state: &str,
+    detail: String,
+    has_open_shape: bool,
+) -> ColumnLineageError {
+    let (kind, hint) = match state {
+        "ambiguous" => (ColumnLineageErrorKind::ColumnAmbiguous, None),
+        "not_found" => (ColumnLineageErrorKind::ColumnNotFound, None),
+        _ => (
+            ColumnLineageErrorKind::ColumnIndeterminate,
+            has_open_shape.then(|| {
+                "column may be introduced via SELECT * that could not be expanded; \
+                 define upstream columns in the model YAML to enable full resolution"
+                    .to_string()
+            }),
+        ),
+    };
+    ColumnLineageError {
+        kind,
+        column: Some(column.to_string()),
+        what: format!("column '{column}': {detail}"),
+        why: None,
+        hint,
+    }
+}
+
+fn parse_failure(model: &str, total: usize, reason: String) -> InternalModelColumnLineage {
+    InternalModelColumnLineage {
+        model: model.to_string(),
+        traced_columns: 0,
+        total_columns: total,
+        columns: vec![],
+        errors: vec![ColumnLineageError {
+            kind: ColumnLineageErrorKind::ParseFailure,
+            column: None,
+            what: format!("failed to parse SQL for '{model}'"),
+            why: Some(reason),
+            hint: Some(
+                "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set"
+                    .to_string(),
+            ),
+        }],
+    }
+}
+
+fn column_inference_failure(model: &str) -> InternalModelColumnLineage {
+    InternalModelColumnLineage {
+        model: model.to_string(),
+        traced_columns: 0,
+        total_columns: 0,
+        columns: vec![],
+        errors: vec![ColumnLineageError {
+            kind: ColumnLineageErrorKind::ColumnInferenceFailed,
+            column: None,
+            what: format!("model '{model}': could not determine output columns"),
+            why: Some("YAML has no columns defined and SQL column inference failed".to_string()),
+            hint: Some(
+                "Add column definitions to the model's YAML, or ensure the SQL is parseable by `dlin debug parse-sql`".to_string(),
+            ),
+        }],
     }
 }
 
@@ -211,7 +260,6 @@ pub(super) fn compute_column_lineage_internal(
     };
 
     let semantic_digest = analysis.semantic_digests.digest_for_node(manifest, node);
-    let backend = Backend::Sqllineage(SqllineageBackend::new());
     // Cache entries are keyed by the manifest's canonical identity. Callers
     // may address the same model by its short name or its unique_id, but both
     // spellings must share one persistent entry.
@@ -227,183 +275,99 @@ pub(super) fn compute_column_lineage_internal(
         return cached;
     }
 
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
-
-    let column_names: Vec<String> = {
-        let mut names: HashSet<String> = node.columns.keys().cloned().collect();
-        let yaml_schema = build_yaml_schema_for_node(manifest, node);
-        let request = OutputDiscoveryRequest {
-            sql: compiled_code,
-            dialect,
-            catalog: yaml_schema.as_ref(),
-        };
-        let inferred_names = discover_named_output_columns(&backend, &request);
-        names.extend(inferred_names);
-        let mut names: Vec<String> = names.into_iter().collect();
-        names.sort();
-        names
+    #[cfg(test)]
+    let catalog = {
+        let backend = backend::backend_for_tests(backend::BackendId::Sqllineage);
+        schema::build_schema_from_manifest(manifest, node, dialect, &backend)
     };
+    #[cfg(not(test))]
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+
+    let parsed = match parse_sql(compiled_code, dialect) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            if node.columns.is_empty() {
+                return column_inference_failure(display_name);
+            }
+            return parse_failure(display_name, node.columns.len(), message);
+        }
+    };
+    let yaml_schema = build_yaml_schema_for_node(manifest, node);
+    let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
+    let discovered = if yaml_schema.as_ref() == catalog.as_ref() {
+        discovered_output_names(&analyzed)
+    } else {
+        discovered_output_names(&analyze_parsed(&parsed, dialect, yaml_schema.as_ref()))
+    };
+    let mut names: HashSet<String> = node.columns.keys().cloned().collect();
+    names.extend(discovered);
+    let mut column_names: Vec<String> = names.into_iter().collect();
+    column_names.sort();
 
     if column_names.is_empty() {
-        return InternalModelColumnLineage {
-            model: display_name.to_string(),
-            traced_columns: 0,
-            total_columns: 0,
-            columns: vec![],
-            errors: vec![ColumnLineageError {
-                kind: ColumnLineageErrorKind::ColumnInferenceFailed,
-                column: None,
-                what: format!("model '{}': could not determine output columns", display_name),
-                why: Some("YAML has no columns defined and SQL column inference failed".to_string()),
-                hint: Some(
-                    "Add column definitions to the model's YAML, or ensure the SQL is parseable by `dlin debug parse-sql`".to_string(),
-                ),
-            }],
-        };
+        return column_inference_failure(display_name);
     }
 
     let total = column_names.len();
-
-    let outputs: Vec<OutputColumnRequest> = column_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| OutputColumnRequest {
-            // The slot index follows the alphabetically sorted name list above.
-            slot: AnalysisSlot(i),
-            name: name.clone(),
-        })
-        .collect();
-    // Duplicate detection is a backend capability that mod.rs's own caller never
-    // triggers: `column_names` above is built from a `HashSet`, so it never contains
-    // duplicate names.
-    let duplicate_output_names: BTreeSet<String> = BTreeSet::new();
-    let request = LineageRequest {
-        sql: compiled_code,
-        dialect,
-        catalog: catalog.as_ref(),
-        outputs: &outputs,
-        duplicate_output_names: &duplicate_output_names,
-    };
-
-    let backend_analysis = match backend.analyze(&request) {
-        Ok(analysis) => analysis,
-        Err(e) => {
-            return InternalModelColumnLineage {
-                model: display_name.to_string(),
-                traced_columns: 0,
-                total_columns: column_names.len(),
-                columns: vec![],
-                errors: vec![ColumnLineageError {
-                    kind: ColumnLineageErrorKind::ParseFailure,
-                    column: None,
-                    what: format!("failed to parse SQL for '{}'", display_name),
-                    why: Some(e.message),
-                    hint: Some(
-                        "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set".to_string(),
-                    ),
-                }],
-            };
-        }
-    };
-
-    let statement = match require_single_lineage_statement(backend_analysis) {
+    if let Some(detail) = analysis_error(&analyzed) {
+        return parse_failure(display_name, total, detail);
+    }
+    let statement = match analyzed.into_single() {
         Ok(statement) => statement,
-        Err(e) => {
-            return InternalModelColumnLineage {
-                model: display_name.to_string(),
-                traced_columns: 0,
-                total_columns: column_names.len(),
-                columns: vec![],
-                errors: vec![ColumnLineageError {
-                    kind: ColumnLineageErrorKind::ParseFailure,
-                    column: None,
-                    what: format!("failed to parse SQL for '{}'", display_name),
-                    why: Some(e.message),
-                    hint: Some(
-                        "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set".to_string(),
-                    ),
-                }],
-            };
-        }
+        Err(error) => return parse_failure(display_name, total, legacy_single_error(error)),
     };
+    if !statement.kind.carries_lineage() {
+        return parse_failure(
+            display_name,
+            total,
+            "statement is not lineage-bearing".to_string(),
+        );
+    }
 
     let has_star_columns = statement.has_unresolved_stars;
-    let (normalized_outcomes, contract_errors) =
-        normalize_column_outcomes(&outputs, statement.columns);
-
     let mut columns = Vec::new();
     let mut errors = Vec::new();
-    for (col_name, outcome) in column_names.iter().zip(normalized_outcomes) {
-        match outcome {
-            BackendColumnOutcome::Resolved(result) => columns.push(InternalColumnLineageEntry {
-                column: col_name.clone(),
-                transformation: result.transformation,
-                sources: result
-                    .sources
-                    .into_iter()
-                    .map(|s| match s {
-                        BackendSource::Concrete { relation, column } => InternalColumnSource {
-                            relation,
-                            column,
-                            model_path: vec![],
-                        },
-                        other => {
-                            unreachable!("backend never produces this source variant: {:?}", other)
-                        }
-                    })
-                    .collect(),
-            }),
-            BackendColumnOutcome::Failed(failure) => {
-                let hint = (has_star_columns
-                    && matches!(
-                        failure.error.kind,
-                        BackendErrorKind::ColumnResolution {
-                            state: ResolutionState::NotFound | ResolutionState::Indeterminate
-                        }
-                    ))
-                .then(|| {
-                    "column may be introduced via SELECT * that could not be expanded; \
-                     define upstream columns in the model YAML to enable full resolution"
-                        .to_string()
-                });
-                let (kind, column) = match failure.error.kind {
-                    BackendErrorKind::ColumnResolution {
-                        state: ResolutionState::Ambiguous,
-                    } => (
-                        ColumnLineageErrorKind::ColumnAmbiguous,
-                        Some(col_name.clone()),
-                    ),
-                    BackendErrorKind::ColumnResolution {
-                        state: ResolutionState::Indeterminate,
-                    } => (
-                        ColumnLineageErrorKind::ColumnIndeterminate,
-                        Some(col_name.clone()),
-                    ),
-                    BackendErrorKind::ColumnResolution {
-                        state: ResolutionState::NotFound,
-                    } => (
-                        ColumnLineageErrorKind::ColumnNotFound,
-                        Some(col_name.clone()),
-                    ),
-                    _ => (ColumnLineageErrorKind::Internal, None),
+    for col_name in &column_names {
+        match resolve_statement_output(&statement, col_name, false) {
+            Ok(output) => {
+                if let Some(failure) = lineage_failure(&output.lineage) {
+                    let state = output_failure_state(failure.kind);
+                    errors.push(column_resolution_error_with_message(
+                        col_name,
+                        state,
+                        failure.message,
+                        has_star_columns,
+                    ));
+                    continue;
+                }
+                let sqllineage::Lineage::Complete(sources) = &output.lineage else {
+                    unreachable!("lineage failure was handled above")
                 };
-                errors.push(ColumnLineageError {
-                    kind,
-                    column,
-                    what: format!("column '{}': {}", col_name, failure.error.message),
-                    why: None,
-                    hint,
+                columns.push(InternalColumnLineageEntry {
+                    column: col_name.clone(),
+                    transformation: backend::sqllineage::transformation(output.transform),
+                    sources: sources
+                        .iter()
+                        .map(|source| InternalColumnSource {
+                            relation: backend::source_relation(
+                                &source.relation,
+                                catalog.as_ref(),
+                                dialect,
+                            ),
+                            column: source.column.value.clone(),
+                            model_path: vec![],
+                        })
+                        .collect(),
                 });
             }
+            Err(failure) => errors.push(column_resolution_error_with_message(
+                col_name,
+                output_failure_state(failure.kind),
+                failure.message,
+                has_star_columns,
+            )),
         }
     }
-    errors.extend(contract_errors.into_iter().map(|error| ColumnLineageError {
-        kind: ColumnLineageErrorKind::Internal,
-        column: None,
-        what: "backend contract violation while correlating column outcomes".to_string(),
-        why: Some(error.message),
-        hint: None,
-    }));
 
     let result = InternalModelColumnLineage {
         model: display_name.to_string(),

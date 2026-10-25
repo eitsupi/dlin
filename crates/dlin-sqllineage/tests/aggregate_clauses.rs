@@ -7,41 +7,34 @@
 //! `AGG(x WHERE ...)`) or order the inputs of an ordinary aggregate
 //! (`ARRAY_AGG(x ORDER BY y)`) do not contribute values to the result.
 
-use dlin_sqllineage::{
-    AnalyzeOptions, AnalyzeResult, ColumnMapping, ColumnOrigin, Dialect, TransformKind, analyze,
-};
+use dlin_sqllineage::{Analyzer, Dialect, Lineage, OutputColumn, Transform};
 
-fn run(sql: &str, dialect: Dialect) -> AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
-    .remove(0)
+fn run(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+        .into_single()
+        .unwrap()
 }
 
-fn concrete(mapping: &ColumnMapping) -> Vec<String> {
-    let mut sources: Vec<_> = mapping
-        .sources
-        .iter()
-        .map(|source| match source {
-            ColumnOrigin::Concrete { table, column } => format!("{}.{column}", table.table),
-            other => panic!("expected Concrete, got {other:?}"),
-        })
-        .collect();
+fn concrete(mapping: &OutputColumn) -> Vec<String> {
+    let mut sources: Vec<_> = match &mapping.lineage {
+        Lineage::Complete(sources) => sources
+            .iter()
+            .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
+            .collect(),
+        other => panic!("expected complete lineage, got {other:?}"),
+    };
     sources.sort();
     sources
 }
 
 /// Analyze `SELECT <expr> AS r FROM t` and check sources and transform.
-fn check(dialects: &[Dialect], expr: &str, sources: &[&str], transform: &TransformKind) {
+fn check(dialects: &[Dialect], expr: &str, sources: &[&str], transform: &Transform) {
     let sql = format!("SELECT {expr} AS r FROM t");
     for &dialect in dialects {
         let result = run(&sql, dialect);
-        let mapping = &result.columns.mappings[0];
+        let mapping = &result.output.columns[0];
         assert_eq!(concrete(mapping), sources, "{dialect:?}: {sql}");
         assert_eq!(&mapping.transform, transform, "{dialect:?}: {sql}");
     }
@@ -69,13 +62,13 @@ fn within_group_order_by_column_is_the_aggregated_value() {
         ORDERED_SET,
         "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY y)",
         &["t.y"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
     check(
         ORDERED_SET,
         "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY y DESC)",
         &["t.y"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -85,7 +78,7 @@ fn mode_within_group_reads_its_order_by_column() {
         &[Dialect::Generic, Dialect::PostgreSql, Dialect::DuckDb],
         "MODE() WITHIN GROUP (ORDER BY y)",
         &["t.y"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -95,7 +88,7 @@ fn listagg_within_group_reads_value_and_order_columns() {
         ORDERED_SET,
         "LISTAGG(x, ',') WITHIN GROUP (ORDER BY y)",
         &["t.x", "t.y"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -105,7 +98,7 @@ fn within_group_order_expression_contributes_every_column() {
         ORDERED_SET,
         "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY y + z)",
         &["t.y", "t.z"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -115,7 +108,7 @@ fn within_group_ignores_the_row_filter() {
         &[Dialect::Generic, Dialect::PostgreSql, Dialect::DuckDb],
         "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY y) FILTER (WHERE c > 0)",
         &["t.y"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -125,13 +118,13 @@ fn filter_clause_columns_are_not_sources() {
         FILTERABLE,
         "COUNT(x) FILTER (WHERE c > 0)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
     check(
         FILTERABLE,
         "SUM(x) FILTER (WHERE c > 0 AND d IS NOT NULL)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -147,7 +140,7 @@ fn aggregate_internal_order_by_columns_are_not_sources() {
         ],
         "ARRAY_AGG(x ORDER BY y)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
     check(
         &[
@@ -158,7 +151,7 @@ fn aggregate_internal_order_by_columns_are_not_sources() {
         ],
         "STRING_AGG(x, ',' ORDER BY y)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -173,7 +166,7 @@ fn where_inside_the_argument_list_is_not_a_source() {
         ],
         "SUM(x WHERE c > 0)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -183,7 +176,7 @@ fn clauses_combine_without_leaking_columns() {
         &[Dialect::Generic, Dialect::PostgreSql, Dialect::DuckDb],
         "ARRAY_AGG(x ORDER BY y) FILTER (WHERE c > 0)",
         &["t.x"],
-        &TransformKind::Aggregation,
+        &Transform::Aggregation,
     );
 }
 
@@ -195,7 +188,7 @@ fn within_group_aggregation_survives_a_hop() {
          SELECT p FROM s",
         Dialect::PostgreSql,
     );
-    let mapping = &result.columns.mappings[0];
+    let mapping = &result.output.columns[0];
     assert_eq!(concrete(mapping), ["t.y"]);
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 }

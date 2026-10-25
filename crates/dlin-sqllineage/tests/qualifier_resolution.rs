@@ -2,59 +2,53 @@
 //! A qualifier that names no relation must never be turned into a table by
 //! joining its text.
 
-use dlin_sqllineage::{AnalyzeOptions, AnalyzeResult, ColumnOrigin, Dialect, TableRef, analyze};
+use common::output_name;
+use dlin_sqllineage::{Analyzer, Dialect, Ident, Lineage, Relation, StatementAnalysis, Unresolved};
+mod common;
 
-fn run(sql: &str, dialect: Dialect) -> AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
-    .remove(0)
+fn run(sql: &str, dialect: Dialect) -> StatementAnalysis {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+        .into_single()
+        .unwrap()
 }
 
-fn schema_table(schema: &str, table: &str) -> TableRef {
-    TableRef::with_schema(schema, table)
+fn schema_table(schema: &str, table: &str) -> Relation {
+    Relation {
+        catalog: None,
+        schema: Some(Ident::unquoted(schema)),
+        name: Ident::unquoted(table),
+    }
 }
 
-fn sources<'a>(result: &'a AnalyzeResult, target: &str) -> &'a [ColumnOrigin] {
+fn sources<'a>(result: &'a StatementAnalysis, target: &str) -> &'a Lineage {
     &result
+        .output
         .columns
-        .mappings
         .iter()
-        .find(|mapping| mapping.target.column == target)
+        .find(|mapping| output_name(mapping) == Some(target))
         .unwrap_or_else(|| panic!("no mapping for {target}"))
-        .sources
+        .lineage
 }
 
-fn assert_concrete(result: &AnalyzeResult, target: &str, expected: &TableRef, column: &str) {
+fn assert_concrete(result: &StatementAnalysis, target: &str, expected: &Relation, column: &str) {
     match sources(result, target) {
-        [
-            ColumnOrigin::Concrete {
-                table,
-                column: actual,
-            },
-        ] => {
-            assert_eq!(table, expected, "table of {target}");
-            assert_eq!(actual, column, "column of {target}");
+        Lineage::Complete(sources) if sources.len() == 1 => {
+            let source = &sources[0];
+            assert_eq!(&source.relation, expected, "table of {target}");
+            assert_eq!(source.column.value, column, "column of {target}");
         }
-        other => panic!("expected Concrete for {target}, got {other:?}"),
+        other => panic!("expected complete lineage for {target}, got {other:?}"),
     }
 }
 
-fn assert_unresolved(result: &AnalyzeResult, target: &str, column: &str) {
-    match sources(result, target) {
-        [
-            ColumnOrigin::Ambiguous {
-                column: actual,
-                candidates,
-            },
-        ] if candidates.is_empty() => assert_eq!(actual, column),
-        other => panic!("expected unresolved Ambiguous for {target}, got {other:?}"),
-    }
+fn assert_unresolved(result: &StatementAnalysis, target: &str, column: &str) {
+    assert!(
+        matches!(sources(result, target), Lineage::Partial { unresolved: items, .. }
+        if matches!(&items[..], [Unresolved::Unbound { column: actual }] if actual.value == column)),
+        "expected unbound lineage for {target}"
+    );
 }
 
 const DIALECTS: [Dialect; 5] = [
@@ -70,7 +64,7 @@ fn schema_qualified_column_resolves_to_the_relation() {
     for dialect in DIALECTS {
         let result = run("SELECT sch.tbl.col FROM sch.tbl", dialect);
         assert_concrete(&result, "col", &schema_table("sch", "tbl"), "col");
-        assert_eq!(result.tables.inputs, [schema_table("sch", "tbl")]);
+        assert_eq!(result.read, [schema_table("sch", "tbl")]);
     }
 }
 
@@ -102,10 +96,10 @@ fn fully_qualified_columns_in_a_join_keep_their_schemas() {
 fn catalog_qualified_column_resolves_to_the_relation() {
     for dialect in DIALECTS {
         let result = run("SELECT cat.sch.tbl.col FROM cat.sch.tbl", dialect);
-        let expected = TableRef {
-            catalog: Some("cat".into()),
-            schema: Some("sch".into()),
-            table: "tbl".into(),
+        let expected = Relation {
+            catalog: Some(Ident::unquoted("cat")),
+            schema: Some(Ident::unquoted("sch")),
+            name: Ident::unquoted("tbl"),
         };
         assert_concrete(&result, "col", &expected, "col");
     }
@@ -143,7 +137,16 @@ fn overlong_qualifier_without_a_relation_is_unresolved() {
 #[test]
 fn short_qualifier_without_from_keeps_structured_relation() {
     let result = run("SELECT orders.id AS id", Dialect::Generic);
-    assert_concrete(&result, "id", &TableRef::new("orders"), "id");
+    assert_concrete(
+        &result,
+        "id",
+        &Relation {
+            catalog: None,
+            schema: None,
+            name: Ident::unquoted("orders"),
+        },
+        "id",
+    );
     let result = run("SELECT raw.orders.id AS id", Dialect::Generic);
     assert_concrete(&result, "id", &schema_table("raw", "orders"), "id");
 }

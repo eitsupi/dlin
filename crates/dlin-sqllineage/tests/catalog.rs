@@ -1,23 +1,20 @@
 mod common;
 
-use common::find_mapping;
-use dlin_sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, analyze};
+use common::{
+    analyze_one_with, catalog_entry, concrete_sources, find_mapping, output_name, unresolved,
+};
+use dlin_sqllineage::{
+    Catalog, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Lineage, Relation, Severity, Shape,
+    Unresolved,
+};
 
 struct MockCatalog;
 
-impl CatalogProvider for MockCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        match table.table.as_str() {
-            "users" => Some(vec!["id".into(), "name".into(), "email".into()]),
-            "orders" => Some(vec!["id".into(), "user_id".into(), "amount".into()]),
-            _ => None,
-        }
-    }
-
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        match column {
-            "name" | "email" => candidates.iter().find(|t| t.table == "users").cloned(),
-            "amount" => candidates.iter().find(|t| t.table == "orders").cloned(),
+impl Catalog for MockCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        match relation.name.value.as_str() {
+            "users" => Some(catalog_entry(relation, &["id", "name", "email"])),
+            "orders" => Some(catalog_entry(relation, &["id", "user_id", "amount"])),
             _ => None,
         }
     }
@@ -25,132 +22,91 @@ impl CatalogProvider for MockCatalog {
 
 struct EagerCatalog;
 
-impl CatalogProvider for EagerCatalog {
-    fn list_columns(&self, _table: &TableRef) -> Option<Vec<String>> {
-        None
-    }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        Some(TableRef::new("fabricated"))
+/// Claims every relation it is asked about has a `missing` column.
+impl Catalog for EagerCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        Some(catalog_entry(relation, &["missing"]))
     }
 }
 
 struct AliasCatalog;
 
-impl CatalogProvider for AliasCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        (table.table == "actual_table").then(|| vec!["id".into(), "event".into()])
-    }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
+impl Catalog for AliasCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        (relation.name.value == "actual_table").then(|| catalog_entry(relation, &["id", "event"]))
     }
 }
 
 struct WildcardCatalog;
 
-impl CatalogProvider for WildcardCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        match table.table.as_str() {
-            "users" => Some(vec!["id".into(), "name".into(), "secret".into()]),
-            "other" => Some(vec!["a".into(), "b".into()]),
+impl Catalog for WildcardCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        match relation.name.value.as_str() {
+            "users" => Some(catalog_entry(relation, &["id", "name", "secret"])),
+            "other" => Some(catalog_entry(relation, &["a", "b"])),
             _ => None,
         }
     }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
-    }
 }
 
-fn opts_with_catalog() -> AnalyzeOptions {
-    AnalyzeOptions {
-        catalog: Some(Box::new(MockCatalog)),
-        ..AnalyzeOptions::default()
-    }
-}
-
-fn concrete_sources(mapping: &dlin_sqllineage::ColumnMapping) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = mapping
-        .sources
-        .iter()
-        .map(|s| match s {
-            ColumnOrigin::Concrete { table, column } => (table.table.clone(), column.clone()),
-            other => panic!("expected Concrete, got {other:?}"),
-        })
-        .collect();
-    v.sort();
-    v
+fn configured(
+    sql: &str,
+    dialect: Dialect,
+    catalog: Option<&dyn Catalog>,
+) -> dlin_sqllineage::StatementAnalysis {
+    analyze_one_with(sql, dialect, catalog)
 }
 
 #[test]
 fn select_star_with_catalog_expands() {
-    let result = analyze("SELECT * FROM users", opts_with_catalog())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(result.columns.mappings.len(), 3);
+    let result = configured("SELECT * FROM users", Dialect::Generic, Some(&MockCatalog));
+    assert_eq!(result.output.columns.len(), 3);
 
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "id")),
+        concrete_sources(find_mapping(&result.output.columns, "id")),
         vec![("users".into(), "id".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "name")),
+        concrete_sources(find_mapping(&result.output.columns, "name")),
         vec![("users".into(), "name".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "email")),
+        concrete_sources(find_mapping(&result.output.columns, "email")),
         vec![("users".into(), "email".into())]
     );
 }
 
 #[test]
 fn wildcard_except_removes_catalog_column() {
-    let result = analyze(
+    let result = configured(
         "SELECT * EXCEPT (secret) FROM users",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        Some(&WildcardCatalog),
+    );
 
     let names = result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.as_str())
+        .map(|mapping| output_name(mapping).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(names, ["id", "name"]);
 }
 
 #[test]
 fn qualified_wildcard_except_uses_relation_binding() {
-    let result = analyze(
+    let result = configured(
         "SELECT u.* EXCEPT (secret) FROM users AS u",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        Some(&WildcardCatalog),
+    );
 
     assert_eq!(
         result
+            .output
             .columns
-            .mappings
             .iter()
-            .map(|mapping| mapping.target.column.as_str())
+            .map(|mapping| output_name(mapping).unwrap())
             .collect::<Vec<_>>(),
         ["id", "name"]
     );
@@ -158,25 +114,18 @@ fn qualified_wildcard_except_uses_relation_binding() {
 
 #[test]
 fn wildcard_ilike_filters_known_columns() {
-    let result = analyze(
+    let result = configured(
         "SELECT * ILIKE '%na%' FROM users",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        Some(&WildcardCatalog),
+    );
 
     assert_eq!(
         result
+            .output
             .columns
-            .mappings
             .iter()
-            .map(|mapping| mapping.target.column.as_str())
+            .map(|mapping| output_name(mapping).unwrap())
             .collect::<Vec<_>>(),
         ["name"]
     );
@@ -184,173 +133,125 @@ fn wildcard_ilike_filters_known_columns() {
 
 #[test]
 fn unknown_cte_star_does_not_recompose_excluded_names() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * FROM unknown_source) SELECT * EXCEPT (missing) FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
-    assert!(result.columns.has_unresolved_stars);
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
     assert!(
         !result
+            .output
             .columns
-            .mappings
             .iter()
-            .any(|mapping| mapping.target.column == "missing")
+            .any(|mapping| output_name(mapping) == Some("missing"))
     );
 }
 
 #[test]
 fn unknown_cte_excluded_name_is_not_named_wildcard_fallback() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * EXCEPT (secret) FROM unknown_source) SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Ambiguous { candidates, .. }] if candidates.is_empty()
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. } if matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "secret")
     ));
 }
 
 #[test]
 fn unknown_cte_allowed_name_keeps_named_wildcard_fallback() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * EXCEPT (secret) FROM unknown_source) SELECT id FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::NamedWildcard { column, .. }] if column == "id"
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. } if matches!(&unresolved[..], [Unresolved::NamedBehindStar { column, .. }] if column.value == "id")
     ));
 }
 
 #[test]
 fn unknown_cte_rename_maps_new_name_without_restoring_old_name() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * RENAME (id AS user_id) FROM unknown_source) \
          SELECT user_id, id FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::NamedWildcard { column, .. }] if column == "id"
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. } if matches!(&unresolved[..], [Unresolved::NamedBehindStar { column, .. }] if column.value == "id")
     ));
     assert!(matches!(
-        result.columns.mappings[1].sources.as_slice(),
-        [ColumnOrigin::Ambiguous { candidates, .. }] if candidates.is_empty()
+        &result.output.columns[1].lineage,
+        Lineage::Partial { unresolved, .. } if matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "id")
     ));
 }
 
 #[test]
 fn unknown_cte_replace_keeps_replacement_lineage() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * REPLACE (other AS id) FROM unknown_source) \
          SELECT id FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { column, .. }] if column == "other"
+        &result.output.columns[0].lineage,
+        Lineage::Complete(sources) if sources.len() == 1 && sources[0].column.value == "other"
     ));
 }
 
 #[test]
 fn wildcard_replace_uses_replacement_expression_lineage() {
-    let result = analyze(
+    let result = configured(
         "SELECT * REPLACE (name AS id) FROM users",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        Some(&WildcardCatalog),
+    );
 
-    let id = find_mapping(&result.columns.mappings, "id");
+    let id = find_mapping(&result.output.columns, "id");
     assert_eq!(concrete_sources(id), vec![("users".into(), "name".into())]);
 }
 
 #[test]
 fn wildcard_rename_preserves_position() {
-    let result = analyze(
+    let result = configured(
         "SELECT * EXCLUDE (secret) RENAME (id AS user_id) FROM users",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        Some(&WildcardCatalog),
+    );
 
-    assert_eq!(result.columns.mappings[0].target.column, "user_id");
-    assert_eq!(result.columns.mappings[1].target.column, "name");
+    assert_eq!(output_name(&result.output.columns[0]).unwrap(), "user_id");
+    assert_eq!(output_name(&result.output.columns[1]).unwrap(), "name");
 }
 
 #[test]
 fn qualified_exclude_uses_qualified_relation_not_suffix_matching() {
-    let result = analyze(
+    let result = configured(
         "SELECT u.* EXCLUDE (u.secret) FROM users AS u",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        Some(&WildcardCatalog),
+    );
 
     assert_eq!(
         result
+            .output
             .columns
-            .mappings
             .iter()
-            .map(|mapping| mapping.target.column.as_str())
+            .map(|mapping| output_name(mapping).unwrap())
             .collect::<Vec<_>>(),
         ["id", "name"]
     );
@@ -358,359 +259,279 @@ fn qualified_exclude_uses_qualified_relation_not_suffix_matching() {
 
 #[test]
 fn qualified_exclude_width_is_used_for_set_operation_arity() {
-    let result = analyze(
+    let result = configured(
         "SELECT u.* EXCLUDE (u.secret) FROM users AS u \
          UNION ALL SELECT a, b FROM other",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        Some(&WildcardCatalog),
+    );
 
-    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.output.columns.len(), 2);
 }
 
 #[test]
 fn qualified_exclude_requires_exact_catalog_qualification() {
-    let result = analyze(
+    let result = configured(
         "SELECT u.* EXCLUDE (cat2.sch.users.secret) FROM cat1.sch.users AS u",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            catalog: Some(Box::new(WildcardCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        Some(&WildcardCatalog),
+    );
 
     assert!(
         result
+            .output
             .columns
-            .mappings
             .iter()
-            .any(|mapping| mapping.target.column == "secret")
+            .any(|mapping| output_name(mapping) == Some("secret"))
     );
 }
 
 #[test]
 fn qualified_field_path_star_does_not_forge_table_ref() {
-    let result = analyze("SELECT base.event.* FROM base", AnalyzeOptions::default())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
+    let result = configured("SELECT base.event.* FROM base", Dialect::Generic, None);
 
-    assert!(result.columns.has_unresolved_stars);
-    assert!(
-        !result
-            .tables
-            .inputs
+    assert!(result.has_unresolved_stars);
+    assert!(!result.read.iter().any(|table| table.name.value == "event"));
+    // The field star is not an output column and has no relation of its own.
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded field star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert!(unexpanded[0].relation.is_none());
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    // Its lineage keeps the field itself and marks the expansion as unknown.
+    let Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
+        panic!("expected partial lineage, got {:?}", unexpanded[0].lineage)
+    };
+    assert_eq!(
+        known
             .iter()
-            .any(|table| table.table == "event")
+            .map(|source| (
+                source.relation.name.value.as_str(),
+                source.column.value.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [("base", "event")]
     );
-    assert!(!result.columns.mappings.iter().any(|mapping| {
-        mapping.sources.iter().any(
-            |source| matches!(source, ColumnOrigin::Wildcard { table } if table.table == "event"),
-        )
-    }));
-    assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [
-            ColumnOrigin::Concrete { table, column },
-            ColumnOrigin::Ambiguous { column: marker, .. }
-        ] if table.table == "base" && column == "event" && marker == "*"
-    ));
+    assert_eq!(
+        unresolved.as_slice(),
+        [Unresolved::Unsupported {
+            what: "star expansion"
+        }]
+    );
 }
 
 #[test]
 fn cte_field_path_star_keeps_upstream_field_ancestry() {
-    let result = analyze(
+    let result = configured(
         "WITH base AS (SELECT event FROM source) SELECT base.event.* FROM base",
-        AnalyzeOptions::default(),
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
-
-    assert!(result.columns.has_unresolved_stars);
-    assert!(result.columns.mappings.iter().any(|mapping| {
-        mapping.sources.iter().any(|source| {
-            matches!(
-                source,
-                ColumnOrigin::Concrete { table, column }
-                    if table.table == "source" && column == "event"
-            )
-        })
-    }));
-    assert!(
-        !result
-            .tables
-            .inputs
-            .iter()
-            .any(|table| table.table == "event")
+        Dialect::Generic,
+        None,
     );
+
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded field star")
+    };
+    assert!(unexpanded.iter().any(|star| {
+        let sources = match &star.lineage {
+            Lineage::Complete(sources) | Lineage::Partial { known: sources, .. } => sources,
+        };
+        sources
+            .iter()
+            .any(|source| source.relation.name.value == "source" && source.column.value == "event")
+    }));
+    assert!(!result.read.iter().any(|table| table.name.value == "event"));
 }
 
 #[test]
 fn derived_field_path_star_keeps_upstream_field_ancestry() {
-    let result = analyze(
+    let result = configured(
         "SELECT base.event.* FROM (SELECT event FROM source) AS base",
-        AnalyzeOptions::default(),
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
-
-    assert!(result.columns.has_unresolved_stars);
-    assert!(result.columns.mappings.iter().any(|mapping| {
-        mapping.sources.iter().any(|source| {
-            matches!(
-                source,
-                ColumnOrigin::Concrete { table, column }
-                    if table.table == "source" && column == "event"
-            )
-        })
-    }));
-    assert!(
-        !result
-            .tables
-            .inputs
-            .iter()
-            .any(|table| table.table == "event")
+        Dialect::Generic,
+        None,
     );
+
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded field star")
+    };
+    assert!(unexpanded.iter().any(|star| {
+        let sources = match &star.lineage {
+            Lineage::Complete(sources) | Lineage::Partial { known: sources, .. } => sources,
+        };
+        sources
+            .iter()
+            .any(|source| source.relation.name.value == "source" && source.column.value == "event")
+    }));
+    assert!(!result.read.iter().any(|table| table.name.value == "event"));
 }
 
 #[test]
 fn unknown_root_replace_keeps_barrier_and_adds_replacement_mapping() {
-    let result = analyze(
+    let result = configured(
         "SELECT * REPLACE (other AS id) FROM unknown_source",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
-
-    assert!(result.columns.has_unresolved_stars);
-    assert!(
-        result
-            .columns
-            .mappings
-            .iter()
-            .any(|mapping| mapping.target.column == "*")
+        Dialect::BigQuery,
+        None,
     );
-    assert!(result.columns.mappings.iter().any(|mapping| {
-        mapping.target.column == "id"
-            && matches!(
-                mapping.sources.as_slice(),
-                [ColumnOrigin::Concrete { column, .. }] if column == "other"
-            )
+
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
+    assert!(result.output.columns.iter().any(|mapping| {
+        output_name(mapping) == Some("id")
+            && matches!(&mapping.lineage, Lineage::Complete(sources)
+                if sources.len() == 1 && sources[0].column.value == "other")
     }));
 }
 
 #[test]
 fn unknown_root_rename_keeps_barrier_and_adds_named_wildcard() {
-    let result = analyze(
+    let result = configured(
         "SELECT * RENAME (id AS user_id) FROM unknown_source",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        None,
+    );
 
-    assert!(result.columns.has_unresolved_stars);
-    assert!(result.columns.mappings.iter().any(|mapping| {
-        mapping.target.column == "user_id"
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+    assert!(result.output.columns.iter().any(|mapping| {
+        output_name(mapping) == Some("user_id")
             && matches!(
-                mapping.sources.as_slice(),
-                [ColumnOrigin::NamedWildcard { column, .. }] if column == "id"
+                &mapping.lineage,
+                Lineage::Partial { unresolved, .. }
+                    if matches!(&unresolved[..], [Unresolved::NamedBehindStar { column, .. }] if column.value == "id")
             )
     }));
 }
 
 #[test]
 fn multiple_unknown_stars_keep_name_available_from_unfiltered_star() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT *, * EXCEPT (secret) FROM unknown_source) SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::NamedWildcard { column, .. }] if column == "secret"
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::NamedBehindStar { column, .. }] if column.value == "secret")
     ));
 }
 
 #[test]
 fn unknown_qualified_exclude_does_not_restore_excluded_name() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT u.* EXCLUDE (u.secret) FROM unknown_source AS u) \
          SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Ambiguous { candidates, .. }] if candidates.is_empty()
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "secret")
     ));
 }
 
 #[test]
 fn unqualified_qualified_exclude_keeps_other_relation_wildcard() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * EXCLUDE (u.secret) FROM unknown_source AS u, other_source AS v) \
          SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::Snowflake,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Snowflake,
+        None,
+    );
 
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::NamedWildcard { table, column }] if table.table == "other_source" && column == "secret"
+        &result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::NamedBehindStar { relation, column }]
+                if relation.name.value == "other_source" && column.value == "secret")
     ));
 }
 
 #[test]
 fn set_operation_name_decision_uses_left_branch_only() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * FROM unknown_left UNION ALL SELECT * EXCEPT (secret) FROM unknown_right) \
          SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
-    let sources = &result.columns.mappings[0].sources;
-    assert!(sources.iter().any(|source| {
-        matches!(source, ColumnOrigin::NamedWildcard { table, column }
-            if table.table == "unknown_left" && column == "secret")
-    }));
-    assert!(sources.iter().any(|source| {
-        matches!(source, ColumnOrigin::Ambiguous { column, candidates }
-            if column == "secret" && candidates.is_empty())
-    }));
+    let sources = unresolved(&result.output.columns[0]);
+    assert!(sources.iter().any(|source| matches!(source,
+        Unresolved::NamedBehindStar { relation, column }
+            if relation.name.value == "unknown_left" && column.value == "secret")));
+    assert!(sources.iter().any(|source| matches!(source,
+        Unresolved::Unbound { column } if column.value == "secret")));
 }
 
 #[test]
 fn set_operation_keeps_named_wildcard_sources_from_both_branches() {
-    let result = analyze(
+    let result = configured(
         "WITH x AS (SELECT * FROM unknown_left UNION ALL SELECT * FROM unknown_right) \
          SELECT secret FROM x",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
-    let sources = &result.columns.mappings[0].sources;
+    let sources = unresolved(&result.output.columns[0]);
     for table_name in ["unknown_left", "unknown_right"] {
         assert!(sources.iter().any(|source| {
-            matches!(source, ColumnOrigin::NamedWildcard { table, column }
-                if table.table == table_name && column == "secret")
+            matches!(source, Unresolved::NamedBehindStar { relation, column }
+                if relation.name.value == table_name && column.value == "secret")
         }));
     }
     assert!(
         !sources
             .iter()
-            .any(|source| matches!(source, ColumnOrigin::Ambiguous { .. }))
+            .any(|source| matches!(source, Unresolved::Unbound { .. }))
     );
 }
 
 #[test]
 fn expr_qualified_star_is_an_unknown_shape_set_barrier() {
-    let result = analyze(
+    let result = configured(
         "SELECT STRUCT(1 AS value).* UNION ALL SELECT id FROM known",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::BigQuery,
+        None,
+    );
 
-    assert!(result.columns.has_unresolved_stars);
-    assert!(result.columns.mappings.iter().any(|mapping| {
-        mapping.target.column == "*"
-            && mapping.sources.iter().any(
-                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*"),
-            )
-    }));
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
 }
 
 fn assert_qualified_alias_star_expands(sql: &str) {
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(AliasCatalog)),
-            dialect: Dialect::Generic,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&AliasCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 2);
-    assert!(result.columns.mappings.iter().all(|mapping| {
-        mapping
-            .sources
+    assert_eq!(result.output.columns.len(), 2);
+    assert!(
+        result
+            .output
+            .columns
             .iter()
-            .all(|source| matches!(source, ColumnOrigin::Concrete { .. }))
-    }));
+            .all(|mapping| matches!(&mapping.lineage, Lineage::Complete(_)))
+    );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "id")),
+        concrete_sources(find_mapping(&result.output.columns, "id")),
         vec![("actual_table".into(), "id".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "event")),
+        concrete_sources(find_mapping(&result.output.columns, "event")),
         vec![("actual_table".into(), "event".into())]
     );
 }
@@ -727,153 +548,116 @@ fn qualified_alias_star_uses_catalog_table_binding() {
 
 #[test]
 fn qualified_alias_star_without_catalog_keeps_actual_table_wildcard() {
-    let result = analyze(
-        "SELECT a.* FROM actual_table AS a",
-        AnalyzeOptions {
-            dialect: Dialect::Generic,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured("SELECT a.* FROM actual_table AS a", Dialect::Generic, None);
 
-    assert_eq!(result.columns.mappings.len(), 1);
-    match &result.columns.mappings[0].sources[0] {
-        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "actual_table"),
-        other => panic!("expected Wildcard, got {other:?}"),
-    }
+    assert!(result.has_unresolved_stars);
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    assert_eq!(
+        unexpanded[0]
+            .relation
+            .as_ref()
+            .map(|r| r.name.value.as_str()),
+        Some("actual_table")
+    );
 }
 
 #[test]
 fn select_star_without_catalog_preserved() {
-    let result = analyze("SELECT * FROM users", AnalyzeOptions::default())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(result.columns.mappings.len(), 1);
-    match &result.columns.mappings[0].sources[0] {
-        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "users"),
-        other => panic!("expected Wildcard, got {other:?}"),
-    }
+    let result = configured("SELECT * FROM users", Dialect::Generic, None);
+    assert!(result.has_unresolved_stars);
+    assert!(result.output.columns.is_empty());
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("expected an unexpanded star")
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].after_ordinal, None);
+    assert_eq!(
+        unexpanded[0]
+            .relation
+            .as_ref()
+            .map(|r| r.name.value.as_str()),
+        Some("users")
+    );
 }
 
 #[test]
 fn ambiguous_column_resolved_by_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, opts_with_catalog())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
-    let m = find_mapping(&result.columns.mappings, "name");
+    let result = configured(sql, Dialect::Generic, Some(&MockCatalog));
+    let m = find_mapping(&result.output.columns, "name");
     assert_eq!(concrete_sources(m), vec![("users".into(), "name".into())]);
 }
 
 #[test]
 fn ambiguous_column_without_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, AnalyzeOptions::default())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
-    let m = find_mapping(&result.columns.mappings, "name");
-    match &m.sources[0] {
-        ColumnOrigin::Ambiguous { column, candidates } => {
-            assert_eq!(column, "name");
-            assert!(candidates.len() >= 2);
-        }
-        other => panic!("expected Ambiguous, got {other:?}"),
-    }
+    let result = configured(sql, Dialect::Generic, None);
+    let m = find_mapping(&result.output.columns, "name");
+    assert!(matches!(&m.lineage, Lineage::Partial { unresolved, .. }
+        if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+            if column.value == "name" && candidates.len() >= 2)));
 }
 
 #[test]
 fn catalog_does_not_fabricate_unresolved_column_owner() {
-    let result = analyze(
-        "SELECT missing",
-        AnalyzeOptions {
-            catalog: Some(Box::new(EagerCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
-    let m = find_mapping(&result.columns.mappings, "missing");
-    match &m.sources[0] {
-        ColumnOrigin::Ambiguous { column, candidates } => {
-            assert_eq!(column, "missing");
-            assert!(candidates.is_empty());
-        }
-        other => panic!("expected Ambiguous, got {other:?}"),
-    }
+    // The catalog claims that any relation has a `missing` column. A column
+    // without a relation in scope must not be attributed to one of them.
+    let result = configured("SELECT missing", Dialect::Generic, Some(&EagerCatalog));
+    let m = find_mapping(&result.output.columns, "missing");
+    assert!(matches!(&m.lineage, Lineage::Partial { known, unresolved }
+        if known.is_empty()
+            && matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "missing")));
+    assert!(result.read.is_empty());
 }
 
 #[test]
 fn catalog_preserves_qualified_columns() {
     let sql =
         "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, opts_with_catalog())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&MockCatalog));
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "name")),
+        concrete_sources(find_mapping(&result.output.columns, "name")),
         vec![("users".into(), "name".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "amount")),
+        concrete_sources(find_mapping(&result.output.columns, "amount")),
         vec![("orders".into(), "amount".into())]
     );
 }
 
 struct SetOperationCatalog;
 
-impl CatalogProvider for SetOperationCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        match table.table.as_str() {
-            "users" => Some(vec!["id".into(), "name".into(), "email".into()]),
-            "other" => Some(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
-            "ext_a" => Some(vec!["col_x".into(), "col_y".into()]),
+impl Catalog for SetOperationCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        match relation.name.value.as_str() {
+            "users" => Some(catalog_entry(relation, &["id", "name", "email"])),
+            "other" => Some(catalog_entry(relation, &["a", "b", "c", "d"])),
+            "ext_a" => Some(catalog_entry(relation, &["col_x", "col_y"])),
             _ => None,
         }
-    }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
     }
 }
 
 #[test]
 fn set_operation_expands_leading_star_before_positional_merge() {
     let sql = "SELECT * FROM users UNION ALL SELECT a, b, c FROM other";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 3);
-    assert_eq!(result.columns.mappings[0].target.column, "id");
-    assert_eq!(result.columns.mappings[1].target.column, "name");
-    assert_eq!(result.columns.mappings[2].target.column, "email");
+    assert_eq!(result.output.columns.len(), 3);
+    assert_eq!(output_name(&result.output.columns[0]).unwrap(), "id");
+    assert_eq!(output_name(&result.output.columns[1]).unwrap(), "name");
+    assert_eq!(output_name(&result.output.columns[2]).unwrap(), "email");
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("other".into(), "a".into()), ("users".into(), "id".into())]
     );
     assert_eq!(
-        concrete_sources(&result.columns.mappings[1]),
+        concrete_sources(&result.output.columns[1]),
         vec![
             ("other".into(), "b".into()),
             ("users".into(), "name".into())
@@ -884,25 +668,15 @@ fn set_operation_expands_leading_star_before_positional_merge() {
 #[test]
 fn set_operation_preserves_non_leading_star_contribution() {
     let sql = "SELECT id, * FROM users UNION ALL SELECT a, b, c, d FROM other";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 4);
+    assert_eq!(result.output.columns.len(), 4);
     assert_eq!(
-        concrete_sources(&result.columns.mappings[1]),
+        concrete_sources(&result.output.columns[1]),
         vec![("other".into(), "b".into()), ("users".into(), "id".into())]
     );
     assert_eq!(
-        concrete_sources(&result.columns.mappings[3]),
+        concrete_sources(&result.output.columns[3]),
         vec![
             ("other".into(), "d".into()),
             ("users".into(), "email".into())
@@ -914,21 +688,11 @@ fn set_operation_preserves_non_leading_star_contribution() {
 fn set_operation_branches_survive_cte_and_derived_boundaries() {
     let sql = "WITH combined AS (SELECT * FROM users UNION ALL SELECT a, b, c FROM other) \
                SELECT * FROM (SELECT * FROM combined) derived";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 3);
+    assert_eq!(result.output.columns.len(), 3);
     assert_eq!(
-        concrete_sources(&result.columns.mappings[1]),
+        concrete_sources(&result.output.columns[1]),
         vec![
             ("other".into(), "b".into()),
             ("users".into(), "name".into())
@@ -937,48 +701,33 @@ fn set_operation_branches_survive_cte_and_derived_boundaries() {
 }
 
 #[test]
-fn non_leading_star_in_right_set_branch_contributes_to_named_output() {
+fn source_free_left_branch_does_not_hide_star_source_of_right_branch() {
     let sql = "WITH lit AS (SELECT 1 AS col_a), \
                u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) \
                SELECT col_a FROM u";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
+    assert_eq!(output_name(&result.output.columns[0]), Some("col_a"));
+    // The literal branch contributes no source, so the lineage stays complete.
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { table, column }, ColumnOrigin::SourceFree { column: marker }]
-            if table.table == "ext_a" && column == "col_x" && marker == "col_a"
+        &result.output.columns[0].lineage,
+        Lineage::Complete(sources) if sources.len() == 1
     ));
+    assert_eq!(
+        concrete_sources(&result.output.columns[0]),
+        vec![("ext_a".into(), "col_x".into())]
+    );
 }
 
 #[test]
 fn named_lookup_through_set_operation_cte_keeps_all_branches() {
     let sql = "WITH combined AS (SELECT * FROM users UNION ALL SELECT a, b, c FROM other) \
                SELECT name FROM combined";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![
             ("other".into(), "b".into()),
             ("users".into(), "name".into())
@@ -990,111 +739,84 @@ fn named_lookup_through_set_operation_cte_keeps_all_branches() {
 fn named_lookup_through_projection_cte_and_derived_star_chain() {
     let sql = "WITH base AS (SELECT * FROM users), wrapped AS (SELECT * FROM base) \
                SELECT name FROM (SELECT * FROM wrapped) derived";
-    let result = analyze(
-        sql,
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+    let result = configured(sql, Dialect::Generic, Some(&SetOperationCatalog));
 
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("users".into(), "name".into())]
     );
 }
 
 #[test]
 fn named_lookup_through_unknown_projection_star_is_indeterminate() {
-    let result = analyze(
+    let result = configured(
         "WITH base AS (SELECT * FROM unknown) SELECT name FROM base",
-        AnalyzeOptions::default(),
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Generic,
+        None,
+    );
 
-    assert_eq!(result.columns.mappings.len(), 1);
-    assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::NamedWildcard { table, column }]
-            if table.table == "unknown" && column == "name"
-    ));
+    assert_eq!(result.output.columns.len(), 1);
+    assert!(matches!(&result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::NamedBehindStar { relation, column }]
+                if relation.name.value == "unknown" && column.value == "name")));
 }
 
 #[test]
 fn named_lookup_through_projection_preserves_inner_transform() {
-    let result = analyze(
+    let result = configured(
         "WITH aggregated AS (SELECT SUM(amount) AS total FROM orders) \
          SELECT total FROM aggregated",
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Generic,
+        Some(&SetOperationCatalog),
+    );
 
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("orders".into(), "amount".into())]
     );
     assert_eq!(
-        result.columns.mappings[0].transform,
-        dlin_sqllineage::TransformKind::Aggregation
+        result.output.columns[0].transform,
+        dlin_sqllineage::Transform::Aggregation
     );
 }
 
 #[test]
 fn named_lookup_through_projection_preserves_inner_expression_transform() {
-    let result = analyze(
+    let result = configured(
         "WITH transformed AS (SELECT amount + 1 AS adjusted FROM orders) \
          SELECT adjusted FROM transformed",
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("parse")
-    .into_iter()
-    .next()
-    .unwrap();
+        Dialect::Generic,
+        Some(&SetOperationCatalog),
+    );
 
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("orders".into(), "amount".into())]
     );
     assert_eq!(
-        result.columns.mappings[0].transform,
-        dlin_sqllineage::TransformKind::Expression
+        result.output.columns[0].transform,
+        dlin_sqllineage::Transform::Expression
     );
 }
 
 #[test]
 fn catalog_known_set_arity_mismatch_is_an_analysis_error() {
-    let result = analyze(
+    let result = configured(
         "SELECT * FROM users UNION ALL SELECT a, b, c, d FROM other",
-        AnalyzeOptions {
-            catalog: Some(Box::new(SetOperationCatalog)),
-            ..AnalyzeOptions::default()
-        },
+        Dialect::Generic,
+        Some(&SetOperationCatalog),
     );
-    let error = match result {
-        Ok(_) => panic!("catalog-known arity mismatch should not be truncated"),
-        Err(error) => error,
-    };
+    assert!(result.output.columns.is_empty());
     assert_eq!(
-        error.message,
-        "set operation arity mismatch: left has 3 columns, right has 4 columns"
+        result.diagnostics,
+        [Diagnostic {
+            severity: Severity::Error,
+            kind: DiagnosticKind::SetOperationArityMismatch { left: 3, right: 4 },
+            location: None,
+        }]
     );
 }

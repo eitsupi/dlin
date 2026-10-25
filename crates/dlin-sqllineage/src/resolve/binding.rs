@@ -344,6 +344,10 @@ fn table_has_column(
     {
         return Some(true);
     }
+    // TODO: The lowercase comparison disagrees with `Ident::column_key` for
+    // quoted catalog columns (for example Generic: unquoted `id` matches a
+    // catalog column quoted as `"id"` in a NATURAL join). Fix this when the
+    // resolver compares typed identifiers with the dialect's column rules.
     catalog.list_columns(table).map(|columns| {
         let wanted = name.to_lowercase();
         columns.iter().any(|column| column.to_lowercase() == wanted)

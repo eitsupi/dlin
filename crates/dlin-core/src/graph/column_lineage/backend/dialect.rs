@@ -125,6 +125,45 @@ impl DlinDialect {
         Ok(classification)
     }
 
+    pub(crate) fn to_engine_dialect(self) -> Result<sqllineage::Dialect, String> {
+        match self {
+            Self::Generic => Ok(sqllineage::Dialect::Generic),
+            Self::PostgreSQL => Ok(sqllineage::Dialect::PostgreSql),
+            Self::MySQL => Ok(sqllineage::Dialect::MySql),
+            Self::Hive => Ok(sqllineage::Dialect::Hive),
+            Self::Databricks => Ok(sqllineage::Dialect::Databricks),
+            Self::Snowflake => Ok(sqllineage::Dialect::Snowflake),
+            Self::BigQuery => Ok(sqllineage::Dialect::BigQuery),
+            Self::DuckDB => Ok(sqllineage::Dialect::DuckDb),
+            Self::SQLite => Ok(sqllineage::Dialect::SQLite),
+            Self::Spark => Ok(sqllineage::Dialect::Spark),
+            Self::Trino => Ok(sqllineage::Dialect::Trino),
+            Self::Redshift => Ok(sqllineage::Dialect::Redshift),
+            Self::TSQL => Ok(sqllineage::Dialect::MsSql),
+            Self::ClickHouse => Ok(sqllineage::Dialect::ClickHouse),
+            Self::Presto
+            | Self::Oracle
+            | Self::Athena
+            | Self::Teradata
+            | Self::Doris
+            | Self::StarRocks
+            | Self::Materialize
+            | Self::RisingWave
+            | Self::SingleStore
+            | Self::CockroachDB
+            | Self::TiDB
+            | Self::Druid
+            | Self::Solr
+            | Self::Tableau
+            | Self::Dune
+            | Self::Fabric
+            | Self::Drill
+            | Self::Dremio
+            | Self::Exasol
+            | Self::DataFusion => Err(format!("sqllineage does not support dialect '{self}'")),
+        }
+    }
+
     pub fn is_supported_by_column_lineage(self) -> bool {
         matches!(
             self,
@@ -184,47 +223,13 @@ impl DlinDialect {
         }
     }
 
-    #[cfg(feature = "column-lineage")]
+    #[cfg(test)]
     pub(crate) fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
-        match self {
-            Self::Generic => Ok(sqllineage::Dialect::Generic),
-            Self::PostgreSQL => Ok(sqllineage::Dialect::PostgreSql),
-            Self::MySQL => Ok(sqllineage::Dialect::MySql),
-            Self::Hive => Ok(sqllineage::Dialect::Hive),
-            Self::Databricks => Ok(sqllineage::Dialect::Databricks),
-            Self::Snowflake => Ok(sqllineage::Dialect::Snowflake),
-            Self::BigQuery => Ok(sqllineage::Dialect::BigQuery),
-            Self::DuckDB => Ok(sqllineage::Dialect::DuckDb),
-            Self::SQLite => Ok(sqllineage::Dialect::SQLite),
-            Self::Spark => Ok(sqllineage::Dialect::Spark),
-            Self::Trino => Ok(sqllineage::Dialect::Trino),
-            Self::Redshift => Ok(sqllineage::Dialect::Redshift),
-            Self::TSQL => Ok(sqllineage::Dialect::MsSql),
-            Self::ClickHouse => Ok(sqllineage::Dialect::ClickHouse),
-            Self::Presto
-            | Self::Oracle
-            | Self::Athena
-            | Self::Teradata
-            | Self::Doris
-            | Self::StarRocks
-            | Self::Materialize
-            | Self::RisingWave
-            | Self::SingleStore
-            | Self::CockroachDB
-            | Self::TiDB
-            | Self::Druid
-            | Self::Solr
-            | Self::Tableau
-            | Self::Dune
-            | Self::Fabric
-            | Self::Drill
-            | Self::Dremio
-            | Self::Exasol
-            | Self::DataFusion => Err(super::BackendError {
+        self.to_engine_dialect()
+            .map_err(|message| super::BackendError {
                 kind: super::BackendErrorKind::UnsupportedDialect,
-                message: format!("sqllineage does not support dialect '{self}'"),
-            }),
-        }
+                message,
+            })
     }
 }
 

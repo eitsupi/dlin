@@ -1,31 +1,42 @@
-use dlin_sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, analyze};
+use common::output_name;
+use dlin_sqllineage::{
+    Analyzer, Catalog, CatalogColumn, CatalogEntry, Dialect, Ident, Lineage, Relation,
+    StatementAnalysis, Unresolved,
+};
+use std::borrow::Cow;
+mod common;
 
-fn first_result(
-    sql: &str,
-    catalog: Option<Box<dyn CatalogProvider>>,
-) -> dlin_sqllineage::AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            catalog,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("analysis")
-    .into_iter()
-    .next()
-    .expect("one statement")
+fn first_result(sql: &str, catalog: Option<&dyn Catalog>) -> StatementAnalysis {
+    let analyzer = Analyzer::new(Dialect::Generic);
+    let analyzer = if let Some(catalog) = catalog {
+        analyzer.with_catalog(catalog)
+    } else {
+        analyzer
+    };
+    analyzer
+        .analyze(sql)
+        .expect("analysis")
+        .into_single()
+        .expect("one statement")
 }
 
 struct ExtCatalog;
 
-impl CatalogProvider for ExtCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        (table.table == "ext_a").then(|| vec!["col_x".into(), "col_y".into()])
-    }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
+impl Catalog for ExtCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        (relation.name.value == "ext_a").then(|| CatalogEntry {
+            relation: relation.clone(),
+            columns: Cow::Owned(
+                ["col_x", "col_y"]
+                    .into_iter()
+                    .map(|name| CatalogColumn {
+                        name: Ident::unquoted(name),
+                        data_type: None,
+                        fields: None,
+                    })
+                    .collect(),
+            ),
+        })
     }
 }
 
@@ -36,27 +47,38 @@ fn named_projection_through_unknown_star_keeps_requested_column_and_uncertainty(
         "SELECT id FROM (SELECT * FROM some_unknown_source) src",
     ] {
         let result = first_result(sql, None);
-        assert!(result.columns.has_unresolved_stars, "SQL: {sql}");
+        assert!(result.has_unresolved_stars, "SQL: {sql}");
+        assert!(
+            matches!(&result.output.shape, dlin_sqllineage::Shape::Closed),
+            "SQL: {sql}"
+        );
         assert!(matches!(
-            result.columns.mappings[0].sources.as_slice(),
-            [ColumnOrigin::NamedWildcard { table, column }]
-                if table.table == "some_unknown_source" && column == "id"
+            &result.output.columns[0].lineage,
+            Lineage::Partial { unresolved, .. }
+                if matches!(&unresolved[..], [Unresolved::NamedBehindStar { relation, column }]
+                    if relation.name.value == "some_unknown_source" && column.value == "id")
         ));
     }
 }
 
 #[test]
-fn nested_join_star_is_publicly_marked_even_when_output_is_from_base() {
+fn nested_join_star_does_not_open_a_closed_root_projection() {
     let result = first_result(
         "SELECT id FROM some_table JOIN (SELECT * FROM some_unknown_source) src ON 1=1",
         None,
     );
-    assert!(result.columns.has_unresolved_stars);
+    // The statement still depends on an unknown schema, but the root output
+    // is fully listed.
+    assert!(result.has_unresolved_stars);
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { table, column }]
-            if table.table == "some_table" && column == "id"
+        &result.output.shape,
+        dlin_sqllineage::Shape::Closed
     ));
+    assert!(
+        matches!(&result.output.columns[0].lineage, Lineage::Complete(sources)
+        if matches!(&sources[..], [source]
+            if source.relation.name.value == "some_table" && source.column.value == "id"))
+    );
 }
 
 #[test]
@@ -65,26 +87,29 @@ fn leading_unknown_star_does_not_publish_nonleading_only_set_names() {
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table UNION ALL SELECT id, fee FROM third_table",
         None,
     );
+    assert!(result.has_unresolved_stars);
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
     let names = result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.as_str())
+        .map(|mapping| output_name(mapping).unwrap_or(""))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["*", "id", "total"]);
+    assert_eq!(names, vec!["id", "total"]);
 }
 
 #[test]
-fn source_free_set_branch_is_retained_as_incomplete_lineage() {
+fn source_free_set_branch_contributes_no_source_and_keeps_lineage_complete() {
     let result = first_result(
         "WITH a AS (SELECT * FROM ext_a), u AS (SELECT 1 AS c1, 2 AS c2 UNION ALL SELECT a.col_x, a.col_y FROM a) SELECT c1 FROM u",
-        Some(Box::new(ExtCatalog)),
+        Some(&ExtCatalog),
     );
     assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [
-            ColumnOrigin::Concrete { table, column },
-            ColumnOrigin::SourceFree { column: marker }
-        ] if marker == "c1" && table.table == "ext_a" && column == "col_x"
+        &result.output.columns[0].lineage,
+        Lineage::Complete(sources) if matches!(&sources[..], [source]
+            if source.relation.name.value == "ext_a" && source.column.value == "col_x")
     ));
 }

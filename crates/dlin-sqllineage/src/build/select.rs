@@ -10,6 +10,7 @@ use crate::graph::scope::{
     Binding, JoinMerge, JoinMergeKind, MergedColumns, ScopeColumn, ScopeKind, VirtualColumn,
     VirtualColumnState,
 };
+use crate::types::SemanticError;
 
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
@@ -390,7 +391,7 @@ impl LineageBuilder {
             // would make a reference to its alias resolve to a column that
             // does not exist, so refuse it.
             TableFactor::UnpivotExpr { .. } => {
-                self.reject("UNPIVOT on an expression is not supported");
+                self.reject(SemanticError::UnpivotExpression);
             }
 
             TableFactor::TableFunction { .. }

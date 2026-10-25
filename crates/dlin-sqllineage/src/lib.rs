@@ -14,59 +14,56 @@
     clippy::match_wildcard_for_single_variants
 )]
 
-//! # dlin-sqllineage
-//!
-//! Extract table-level and column-level data lineage from SQL statements.
-//!
-//! Given a SQL string, `dlin-sqllineage` produces:
-//! - **Table-level lineage** — which tables are read (inputs) and written (output)
-//! - **Column-level lineage** — which source columns each output column derives from
-//!
-//! The crate is **schema-agnostic by default**. When a [`CatalogProvider`] is
-//! supplied, it resolves `SELECT *` and ambiguous unqualified columns.
-//!
-//! # Quick start
+//! Extract ordered table and column lineage with typed uncertainty.
 //!
 //! ```
-//! use dlin_sqllineage::{analyze, AnalyzeOptions};
+//! use dlin_sqllineage::{Analyzer, Dialect};
 //!
-//! let results = analyze(
-//!     "INSERT INTO summary SELECT user_id, SUM(score) AS total FROM events GROUP BY user_id",
-//!     AnalyzeOptions::default(),
-//! ).unwrap();
-//!
-//! let result = &results[0];
-//! assert_eq!(result.tables.inputs[0].table, "events");
-//! assert_eq!(result.tables.output.as_ref().unwrap().table, "summary");
-//! assert_eq!(result.columns.mappings.len(), 2);
+//! let statement = Analyzer::new(Dialect::Generic)
+//!     .analyze("SELECT id FROM events")?
+//!     .into_single()?;
+//! assert_eq!(statement.output.columns[0].ordinal, Some(0));
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! Syntax errors fail the input. Semantic errors are attached to the affected
+//! statement. JSON representations are for debugging and are not stable contracts.
 
+mod analyzer;
 mod build;
+mod catalog;
+mod convert;
+mod diagnostic;
 mod dialect;
 mod graph;
+mod ident;
+mod metadata;
+mod output;
 mod resolve;
-pub mod types;
+mod types;
 
-pub use types::*;
+pub use analyzer::{Analyzer, ParsedSql, parse};
+pub use catalog::*;
+pub use diagnostic::*;
+pub use ident::*;
+pub use output::*;
+pub use types::Dialect;
 
+#[cfg(test)]
+mod equivalence;
+
+#[cfg(test)]
 use sqlparser::parser::Parser;
 
-/// Analyze a SQL string and extract lineage for each statement.
-///
-/// Returns one [`AnalyzeResult`] per statement in the input. Statements
-/// that carry no lineage (DDL, GRANT, etc.) are included with
-/// [`StatementType::Other`] and empty lineage.
-///
-/// # Errors
-///
-/// Returns [`ParseError`] if the SQL string cannot be parsed or fails semantic
-/// validation during lineage analysis (for example, exact set-operation
-/// branches with different column counts), or if it uses a construct whose
-/// lineage is not modelled (pipe operators, `UNPIVOT` on an expression).
+/// Run the internal engine directly for migration correspondence tests.
+#[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
-pub fn analyze(sql: &str, opts: AnalyzeOptions) -> Result<Vec<AnalyzeResult>, ParseError> {
+pub(crate) fn legacy_analyze(
+    sql: &str,
+    opts: types::AnalyzeOptions,
+) -> Result<Vec<types::AnalyzeResult>, types::ParseError> {
     let dialect = opts.dialect.to_sqlparser_dialect();
-    let statements = Parser::parse_sql(&*dialect, sql).map_err(|e| ParseError {
+    let statements = Parser::parse_sql(&*dialect, sql).map_err(|e| types::ParseError {
         message: e.to_string(),
     })?;
 
@@ -76,7 +73,12 @@ pub fn analyze(sql: &str, opts: AnalyzeOptions) -> Result<Vec<AnalyzeResult>, Pa
         .map(|stmt| {
             let builder = build::LineageBuilder::new(opts.normalize_case, opts.dialect);
             let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
-            resolve::resolve(raw_graph, catalog.as_deref(), warnings, statement_type)
+            Ok(resolve::resolve(
+                raw_graph,
+                catalog.as_deref(),
+                warnings,
+                statement_type,
+            )?)
         })
         .collect()
 }

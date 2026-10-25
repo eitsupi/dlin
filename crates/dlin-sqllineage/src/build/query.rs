@@ -2,6 +2,7 @@ use sqlparser::ast::{Query, SetExpr};
 
 use crate::build::LineageBuilder;
 use crate::graph::scope::{Binding, OutputPlan, ScopeKind};
+use crate::types::SemanticError;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
@@ -9,7 +10,7 @@ impl LineageBuilder {
         // query after its body. Ignoring them would report the lineage of the
         // unpiped body as if it were the query's output, so refuse instead.
         if !query.pipe_operators.is_empty() {
-            self.reject("pipe operators are not supported");
+            self.reject(SemanticError::PipeOperators);
             return;
         }
 

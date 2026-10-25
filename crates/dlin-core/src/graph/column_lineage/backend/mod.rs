@@ -4,31 +4,38 @@
 pub mod catalog;
 pub mod dialect;
 pub mod sqllineage;
+#[cfg(test)]
 pub mod types;
 
 mod catalog_provider;
 
 #[allow(unused_imports)]
 pub use catalog::CatalogSnapshot;
+#[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use catalog_provider::SqllineageCatalogProvider;
+pub(crate) use catalog_provider::source_relation;
 #[allow(unused_imports)]
 pub use dialect::{DialectClassification, DlinDialect, REMOVED_DIALECTS};
+#[cfg(test)]
+pub(crate) use sqllineage::SqllineageBackend;
 #[allow(unused_imports)]
 pub use sqllineage::{
-    SqllineageBackend, check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json,
-    debug_trace_column_json,
+    check_sql_parses, debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
+#[cfg(test)]
 #[allow(unused_imports)]
 pub use types::*;
 
 /// Backend identities for the column-lineage dispatch layer.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendId {
     Sqllineage,
 }
 
 /// Uniform interface for lineages backends.
+#[cfg(test)]
 pub trait LineageBackend: Send + Sync {
     fn id(&self) -> BackendId;
     fn discover_output_columns(
@@ -39,10 +46,12 @@ pub trait LineageBackend: Send + Sync {
 }
 
 /// Concrete backend variants.
+#[cfg(test)]
 pub enum Backend {
     Sqllineage(SqllineageBackend),
 }
 
+#[cfg(test)]
 impl LineageBackend for Backend {
     fn id(&self) -> BackendId {
         match self {
@@ -69,35 +78,4 @@ impl LineageBackend for Backend {
 #[cfg(test)]
 pub(crate) fn backend_for_tests(_id: BackendId) -> Backend {
     Backend::Sqllineage(SqllineageBackend::new())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn sqlparser_version_matches_sqllineage() {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let Some(lock_path) = manifest_dir
-            .ancestors()
-            .map(|directory| directory.join("Cargo.lock"))
-            .find(|path| path.is_file())
-        else {
-            return;
-        };
-        let lock = std::fs::read_to_string(&lock_path)
-            .unwrap_or_else(|error| panic!("could not read {}: {error}", lock_path.display()));
-        let sqlparser_packages: Vec<&str> = lock
-            .split("[[package]]")
-            .filter(|block| {
-                block
-                    .lines()
-                    .any(|line| line.trim() == "name = \"sqlparser\"")
-            })
-            .collect();
-
-        assert_eq!(
-            sqlparser_packages.len(),
-            1,
-            "dlin and sqllineage must resolve one shared sqlparser package"
-        );
-    }
 }

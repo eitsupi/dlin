@@ -3,7 +3,7 @@ use std::fmt;
 
 /// A reference to a table, possibly multi-part (catalog.schema.table).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-pub struct TableRef {
+pub(crate) struct TableRef {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub table: String,
@@ -43,14 +43,14 @@ impl fmt::Display for TableRef {
 
 /// A reference to a column, optionally qualified with a table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct ColumnRef {
+pub(crate) struct ColumnRef {
     pub table: Option<TableRef>,
     pub column: String,
 }
 
 /// The type of SQL statement that was analyzed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum StatementType {
+pub(crate) enum StatementType {
     /// `SELECT` (no output table).
     Query,
     /// `INSERT INTO ... SELECT`.
@@ -69,7 +69,7 @@ pub enum StatementType {
 
 /// The complete result of analyzing a single SQL statement.
 #[derive(Debug, Clone, Serialize)]
-pub struct AnalyzeResult {
+pub(crate) struct AnalyzeResult {
     /// The kind of statement.
     pub statement_type: StatementType,
     /// Table-level lineage (inputs and output).
@@ -93,7 +93,7 @@ impl Default for AnalyzeResult {
 
 /// Table-level lineage: which tables are read and which is written.
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct TableLineage {
+pub(crate) struct TableLineage {
     /// Tables read by the statement (FROM, JOIN, USING, etc.).
     pub inputs: Vec<TableRef>,
     /// Table written by the statement (INSERT, UPDATE, MERGE target), if any.
@@ -102,7 +102,7 @@ pub struct TableLineage {
 
 /// Column-level lineage: a collection of column derivation mappings.
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct ColumnLineage {
+pub(crate) struct ColumnLineage {
     pub mappings: Vec<ColumnMapping>,
     /// Whether any `SELECT *` in the statement (including nested CTEs and
     /// derived tables) could not be expanded with the supplied catalog.
@@ -115,7 +115,7 @@ pub struct ColumnLineage {
 
 /// One output column and the source columns it derives from.
 #[derive(Debug, Clone, Serialize)]
-pub struct ColumnMapping {
+pub(crate) struct ColumnMapping {
     /// The output column.
     pub target: ColumnRef,
     /// Source columns contributing to this output.
@@ -126,8 +126,7 @@ pub struct ColumnMapping {
 
 /// Resolution state of a source column.
 #[derive(Debug, Clone, Serialize)]
-#[non_exhaustive]
-pub enum ColumnOrigin {
+pub(crate) enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
     Concrete { table: TableRef, column: String },
     /// Multiple candidate tables. A non-empty `candidates` list means genuine
@@ -154,7 +153,7 @@ pub enum ColumnOrigin {
 
 /// What kind of transformation produced an output column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum TransformKind {
+pub(crate) enum TransformKind {
     /// Direct column reference (`SELECT col`).
     Direct,
     /// Expression or window function (`SELECT a + b`, `SUM(x) OVER (...)`).
@@ -171,27 +170,28 @@ pub enum TransformKind {
 
 /// A warning produced during analysis.
 #[derive(Debug, Clone, Serialize)]
-pub struct Warning {
+pub(crate) struct Warning {
     pub kind: WarningKind,
     pub location: Option<SourceLocation>,
 }
 
 /// The kind of warning.
 #[derive(Debug, Clone, Serialize)]
-pub enum WarningKind {
+pub(crate) enum WarningKind {
     /// Cycle detected in lineage graph after back-edge removal.
     UnexpectedCycle,
 }
 
 /// Source location in the SQL string.
 #[derive(Debug, Clone, Serialize)]
-pub struct SourceLocation {
+pub(crate) struct SourceLocation {
     pub line: usize,
     pub column: usize,
 }
 
-/// Options for the [`crate::analyze`] function.
-pub struct AnalyzeOptions {
+/// Options for checking the internal engine result.
+#[cfg(test)]
+pub(crate) struct AnalyzeOptions {
     /// SQL dialect for parsing.
     pub dialect: Dialect,
     /// Optional catalog for resolving `SELECT *` and unqualified columns.
@@ -202,6 +202,7 @@ pub struct AnalyzeOptions {
     pub normalize_case: bool,
 }
 
+#[cfg(test)]
 impl Default for AnalyzeOptions {
     fn default() -> Self {
         Self {
@@ -213,25 +214,37 @@ impl Default for AnalyzeOptions {
 }
 
 /// Supported SQL dialects (maps to sqlparser dialects).
-#[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Dialect {
+    /// sqlparser's permissive generic dialect; the default.
     #[default]
     Generic,
+    /// ANSI SQL.
     Ansi,
+    /// PostgreSQL. Folds unquoted identifiers to lower case.
     PostgreSql,
+    /// MySQL.
     MySql,
+    /// Apache Hive.
     Hive,
+    /// Databricks SQL.
     Databricks,
+    /// Snowflake. Folds unquoted identifiers to upper case.
     Snowflake,
+    /// Google `BigQuery`.
     BigQuery,
+    /// `DuckDB`.
     DuckDb,
+    /// Amazon Redshift. Folds unquoted identifiers to lower case.
     Redshift,
     /// Trino syntax is handled by sqlparser's generic dialect because the
     /// pinned sqlparser release does not expose a dedicated Trino dialect.
     Trino,
+    /// Apache Spark SQL.
     Spark,
+    /// `ClickHouse`.
     ClickHouse,
+    /// SQLite.
     SQLite,
     /// Microsoft SQL Server / T-SQL.
     MsSql,
@@ -250,22 +263,58 @@ impl Dialect {
     }
 }
 
+/// A statement the engine cannot analyze because of what it contains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SemanticError {
+    /// The branches of a set operation have different, exactly known widths.
+    SetOperationArityMismatch { left: usize, right: usize },
+    /// A pipe operator reshapes the query result, which is not modelled.
+    PipeOperators,
+    /// `UNPIVOT` applied to an expression rather than a relation.
+    UnpivotExpression,
+}
+
+impl fmt::Display for SemanticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SetOperationArityMismatch { left, right } => write!(
+                f,
+                "set operation arity mismatch: left has {left} columns, right has {right} columns"
+            ),
+            Self::PipeOperators => f.write_str("pipe operators are not supported"),
+            Self::UnpivotExpression => f.write_str("UNPIVOT on an expression is not supported"),
+        }
+    }
+}
+
 /// Error returned when SQL parsing or semantic validation fails.
+#[cfg(test)]
 #[derive(Debug, Clone)]
-pub struct ParseError {
+pub(crate) struct ParseError {
     pub message: String,
 }
 
+#[cfg(test)]
+impl From<SemanticError> for ParseError {
+    fn from(error: SemanticError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SQL parse error: {}", self.message)
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ParseError {}
 
 /// Optional metadata source for resolving `SELECT *` and ambiguous columns.
-pub trait CatalogProvider {
+pub(crate) trait CatalogProvider {
     /// Return the column names of a table. Used to expand `SELECT *`.
     fn list_columns(&self, table: &TableRef) -> Option<Vec<String>>;
     /// Given a column name and candidate tables, return the owning table. This

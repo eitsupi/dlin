@@ -1,10 +1,14 @@
 use crate::parser::manifest::Manifest;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
+use super::backend::DlinDialect;
+use super::backend::sqllineage::{
+    analyze_parsed, lineage_failure, parse_sql, resolve_statement_output, statement_error,
+};
+#[cfg(test)]
 use super::backend::{
-    AnalysisSlot, Backend, BackendColumnOutcome, BackendSource, DlinDialect, LineageBackend,
-    LineageRequest, OutputColumnRequest, SqllineageBackend, normalize_column_outcomes,
-    require_single_lineage_statement,
+    AnalysisSlot, BackendColumnOutcome, BackendSource, OutputColumnRequest,
+    normalize_column_outcomes,
 };
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::schema;
@@ -268,48 +272,45 @@ fn compute_single_column_lineage(
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let backend = Backend::Sqllineage(SqllineageBackend::new());
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect, &backend);
-
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: column_name.to_string(),
-    }];
-    let duplicate_output_names = BTreeSet::new();
-    let request = LineageRequest {
-        sql: compiled_code,
-        dialect,
-        catalog: catalog.as_ref(),
-        outputs: &outputs,
-        duplicate_output_names: &duplicate_output_names,
+    #[cfg(test)]
+    let catalog = {
+        let backend = super::backend::backend_for_tests(super::backend::BackendId::Sqllineage);
+        schema::build_schema_from_manifest(manifest, node, dialect, &backend)
     };
-
-    let analysis = backend.analyze(&request).ok()?;
-    let statement = require_single_lineage_statement(analysis).ok()?;
-    let outcome = normalize_single_column_outcome(&outputs, statement.columns)?;
-
-    match outcome {
-        BackendColumnOutcome::Resolved(result) => Some((
-            result
-                .sources
-                .into_iter()
-                .map(|s| match s {
-                    BackendSource::Concrete { relation, column } => InternalColumnSource {
-                        relation,
-                        column,
-                        model_path: vec![],
-                    },
-                    other => {
-                        unreachable!("backend never produces this source variant: {:?}", other)
-                    }
-                })
-                .collect(),
-            result.transformation,
-        )),
-        BackendColumnOutcome::Failed(_) => None,
+    #[cfg(not(test))]
+    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+    let parsed = parse_sql(compiled_code, dialect).ok()?;
+    let statement = analyze_parsed(&parsed, dialect, catalog.as_ref())
+        .into_single()
+        .ok()?;
+    if statement_error(&statement).is_some() {
+        return None;
     }
+    let output = resolve_statement_output(&statement, column_name, false).ok()?;
+    if lineage_failure(&output.lineage).is_some() {
+        return None;
+    }
+    let sqllineage::Lineage::Complete(sources) = &output.lineage else {
+        return None;
+    };
+    Some((
+        sources
+            .iter()
+            .map(|source| InternalColumnSource {
+                relation: super::backend::source_relation(
+                    &source.relation,
+                    catalog.as_ref(),
+                    dialect,
+                ),
+                column: source.column.value.clone(),
+                model_path: vec![],
+            })
+            .collect(),
+        super::backend::sqllineage::transformation(output.transform),
+    ))
 }
 
+#[cfg(test)]
 fn normalize_single_column_outcome(
     outputs: &[OutputColumnRequest],
     outcomes: Vec<BackendColumnOutcome>,
