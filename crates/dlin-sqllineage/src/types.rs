@@ -216,22 +216,35 @@ impl Default for AnalyzeOptions {
 /// Supported SQL dialects (maps to sqlparser dialects).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Dialect {
+    /// sqlparser's permissive generic dialect; the default.
     #[default]
     Generic,
+    /// ANSI SQL.
     Ansi,
+    /// PostgreSQL. Folds unquoted identifiers to lower case.
     PostgreSql,
+    /// MySQL.
     MySql,
+    /// Apache Hive.
     Hive,
+    /// Databricks SQL.
     Databricks,
+    /// Snowflake. Folds unquoted identifiers to upper case.
     Snowflake,
+    /// Google BigQuery.
     BigQuery,
+    /// DuckDB.
     DuckDb,
+    /// Amazon Redshift. Folds unquoted identifiers to lower case.
     Redshift,
     /// Trino syntax is handled by sqlparser's generic dialect because the
     /// pinned sqlparser release does not expose a dedicated Trino dialect.
     Trino,
+    /// Apache Spark SQL.
     Spark,
+    /// ClickHouse.
     ClickHouse,
+    /// SQLite.
     SQLite,
     /// Microsoft SQL Server / T-SQL.
     MsSql,

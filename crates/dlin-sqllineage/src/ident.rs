@@ -30,8 +30,14 @@ impl Ident {
         }
     }
 
-    /// Return the comparison key after applying the dialect's folding rule.
-    /// Quoted identifiers always retain their exact spelling.
+    /// Return the key used to compare this identifier with another.
+    ///
+    /// Folding applies to unquoted identifiers only, and only in dialects whose
+    /// identifiers are case-insensitive by folding: Snowflake folds to upper
+    /// case, PostgreSQL and Redshift fold to lower case. Every other dialect
+    /// compares unquoted identifiers exactly as spelled, so `id` and `ID` have
+    /// different keys there. Quoted identifiers always retain their exact
+    /// spelling.
     pub fn key(&self, dialect: Dialect) -> Cow<'_, str> {
         if self.quote.is_some() {
             return Cow::Borrowed(&self.value);

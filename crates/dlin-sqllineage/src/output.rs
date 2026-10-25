@@ -106,7 +106,15 @@ pub struct Output {
 }
 
 impl Output {
-    /// Find output columns whose normalized name matches an unquoted name.
+    /// Find output columns whose name matches `name`, written as an unquoted
+    /// identifier.
+    ///
+    /// Names are compared by [`Ident::key`], so the match is case-insensitive
+    /// only where the dialect folds unquoted identifiers (Snowflake,
+    /// PostgreSQL, Redshift). In every other dialect it is exact: looking up
+    /// `id` does not find a column spelled `ID`. A quoted output name is only
+    /// found by its exact spelling. Duplicate output name diagnostics use the
+    /// same key.
     pub fn lookup(&self, name: &str, dialect: crate::types::Dialect) -> Lookup<'_> {
         let wanted_ident = Ident::unquoted(name);
         let wanted = wanted_ident.key(dialect);
@@ -151,6 +159,10 @@ pub struct UnexpandedStar {
     /// marker per source relation, each with `Some(relation)`.
     pub relation: Option<Relation>,
     /// Ordinal of the last known output column before this star.
+    ///
+    /// `None` means no earlier column has a known position: either the star
+    /// comes first, or an earlier unexpanded star already made later positions
+    /// unknown (as in `SELECT *, a, *`). The two cases are not distinguished.
     pub after_ordinal: Option<usize>,
     /// Known value dependencies and unresolved contributions for this projection.
     pub lineage: Lineage,
