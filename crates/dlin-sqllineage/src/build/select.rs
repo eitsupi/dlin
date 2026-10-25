@@ -7,7 +7,8 @@ use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
-    Binding, JoinMerge, MergedColumns, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState,
+    Binding, JoinMerge, JoinMergeKind, MergedColumns, ScopeColumn, ScopeKind, VirtualColumn,
+    VirtualColumnState,
 };
 
 impl LineageBuilder {
@@ -222,23 +223,23 @@ impl LineageBuilder {
     /// sides, so an unqualified reference to one of them is not reported as
     /// ambiguous between those relations.
     fn note_join_constraint(&mut self, join: &Join, left: Vec<String>, right: Vec<String>) {
-        let constraint = match &join.join_operator {
+        let (constraint, kind) = match &join.join_operator {
             JoinOperator::Join(constraint)
             | JoinOperator::Inner(constraint)
-            | JoinOperator::Left(constraint)
-            | JoinOperator::LeftOuter(constraint)
-            | JoinOperator::Right(constraint)
-            | JoinOperator::RightOuter(constraint)
-            | JoinOperator::FullOuter(constraint)
             | JoinOperator::CrossJoin(constraint)
+            | JoinOperator::StraightJoin(constraint) => (constraint, JoinMergeKind::Inner),
+            JoinOperator::FullOuter(constraint) => (constraint, JoinMergeKind::Full),
+            JoinOperator::Left(constraint)
+            | JoinOperator::LeftOuter(constraint)
             | JoinOperator::Semi(constraint)
             | JoinOperator::LeftSemi(constraint)
-            | JoinOperator::RightSemi(constraint)
             | JoinOperator::Anti(constraint)
             | JoinOperator::LeftAnti(constraint)
-            | JoinOperator::RightAnti(constraint)
-            | JoinOperator::StraightJoin(constraint)
-            | JoinOperator::AsOf { constraint, .. } => constraint,
+            | JoinOperator::AsOf { constraint, .. } => (constraint, JoinMergeKind::Left),
+            JoinOperator::Right(constraint)
+            | JoinOperator::RightOuter(constraint)
+            | JoinOperator::RightSemi(constraint)
+            | JoinOperator::RightAnti(constraint) => (constraint, JoinMergeKind::Right),
             JoinOperator::CrossApply
             | JoinOperator::OuterApply
             | JoinOperator::ArrayJoin
@@ -261,6 +262,7 @@ impl LineageBuilder {
                 left,
                 right,
                 columns,
+                kind,
             },
         );
     }

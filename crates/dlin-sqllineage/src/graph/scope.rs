@@ -75,6 +75,16 @@ pub(crate) struct JoinMerge {
     pub left: Vec<String>,
     pub right: Vec<String>,
     pub columns: MergedColumns,
+    pub kind: JoinMergeKind,
+}
+
+/// Which side supplies the value of a merged column.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum JoinMergeKind {
+    Inner,
+    Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone)]

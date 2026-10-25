@@ -10,7 +10,8 @@ use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{
-    Binding, JoinMerge, MergedColumns, OutputPlan, ScopeTree, VirtualColumnState, VirtualSourceId,
+    Binding, JoinMerge, JoinMergeKind, MergedColumns, OutputPlan, ScopeTree, VirtualColumnState,
+    VirtualSourceId,
 };
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
@@ -2538,6 +2539,9 @@ fn unqualified_choice(
     }
 
     let mut groups: Vec<usize> = (0..relations.len()).collect();
+    // Group membership resolves names; contributors track the value after
+    // each join, including the preserved side of an outer join.
+    let mut contributes = vec![true; relations.len()];
     for merge in merges {
         let natural = matches!(merge.columns, MergedColumns::Natural);
         let side_group = |side: &[String]| {
@@ -2554,6 +2558,15 @@ fn unqualified_choice(
         let (Some(left), Some(right)) = (left, right) else {
             continue;
         };
+        if left != right {
+            for (index, &group) in groups.iter().enumerate() {
+                if (group == left && matches!(merge.kind, JoinMergeKind::Right))
+                    || (group == right && matches!(merge.kind, JoinMergeKind::Left))
+                {
+                    contributes[index] = false;
+                }
+            }
+        }
         for group in &mut groups {
             if *group == right {
                 *group = left;
@@ -2578,7 +2591,7 @@ fn unqualified_choice(
         }
         return UnqualifiedChoice::Merged(
             (0..relations.len())
-                .filter(|&index| groups[index] == groups[first])
+                .filter(|&index| groups[index] == groups[first] && contributes[index])
                 .map(|index| relations[index].binding.clone())
                 .collect(),
         );
@@ -2589,7 +2602,9 @@ fn unqualified_choice(
         UnqualifiedChoice::Merged(
             relations
                 .iter()
-                .map(|relation| relation.binding.clone())
+                .enumerate()
+                .filter(|(index, _)| contributes[*index])
+                .map(|(_, relation)| relation.binding.clone())
                 .collect(),
         )
     } else {
@@ -2622,10 +2637,10 @@ fn binding_publishes(binding: &Binding, name: &str, graph: &RawGraph) -> bool {
 }
 
 /// Resolve an unqualified column that `USING`/`NATURAL` joins merge from
-/// several relations. The merged column takes its value from every relation in
-/// the merge group (equal for an inner join, the preserved side for an outer
-/// join, `COALESCE` for a full join), so each contributes: a physical table as
-/// itself, a CTE or derived table through its own origins and transform.
+/// several relations. Only the sides that supply its value contribute:
+/// both for inner/full joins, the preserved side for left/right joins.
+/// A physical table contributes itself, a CTE or derived table its origins
+/// and transform.
 /// Returns `None` for any other reference, which resolves to one relation.
 fn resolve_merged_column(
     node_id: NodeId,
