@@ -109,15 +109,18 @@ impl Output {
     /// Find output columns whose name matches `name`, written as an unquoted
     /// identifier.
     ///
-    /// Names are compared by [`Ident::key`], so the match is case-insensitive
-    /// only where the dialect folds unquoted identifiers (Snowflake,
-    /// PostgreSQL, Redshift). In every other dialect it is exact: looking up
-    /// `id` does not find a column spelled `ID`. A quoted output name is only
-    /// found by its exact spelling. Duplicate output name diagnostics use the
-    /// same key.
+    /// Names are compared by [`Ident::column_key`], which applies each
+    /// dialect's column-name rules. In `BigQuery`, `DuckDB`, MySQL, Hive,
+    /// Databricks, Spark, Trino, SQLite, SQL Server and Redshift the match is
+    /// case-insensitive whether or not the output name is quoted. In Snowflake,
+    /// PostgreSQL, Generic and ANSI the unquoted `name` is folded like an
+    /// unquoted identifier and a quoted output name matches only its folded
+    /// spelling (upper case for Snowflake, Generic and ANSI; lower case for
+    /// PostgreSQL). `ClickHouse` compares exactly. Duplicate output name
+    /// diagnostics use the same key.
     pub fn lookup(&self, name: &str, dialect: crate::types::Dialect) -> Lookup<'_> {
         let wanted_ident = Ident::unquoted(name);
-        let wanted = wanted_ident.key(dialect);
+        let wanted = wanted_ident.column_key(dialect);
         let matches: Vec<_> = self
             .columns
             .iter()
@@ -125,7 +128,7 @@ impl Output {
                 column
                     .name
                     .ident()
-                    .is_some_and(|ident| ident.key(dialect) == wanted)
+                    .is_some_and(|ident| ident.column_key(dialect) == wanted)
             })
             .collect();
 

@@ -72,7 +72,7 @@ fn relation_names_keep_source_spelling_and_expose_dialect_key() {
         })
     );
     assert_eq!(r.read[0].name.value, "SRC");
-    assert_eq!(r.read[0].name.key(Dialect::PostgreSql), "src");
+    assert_eq!(r.read[0].name.relation_key(Dialect::PostgreSql), "src");
 }
 
 #[test]

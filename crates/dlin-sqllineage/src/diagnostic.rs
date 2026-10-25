@@ -80,7 +80,8 @@ pub enum DiagnosticKind {
     /// warns; the diagnostic still tells callers that no select list was written.
     EmptyProjection,
     /// Multiple output columns share a name, compared by
-    /// [`Ident::key`](super::Ident::key) for the analyzer's dialect.
+    /// [`Ident::column_key`](super::Ident::column_key) for the analyzer's
+    /// dialect.
     DuplicateOutputName {
         /// Duplicated output name.
         name: super::Ident,

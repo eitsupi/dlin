@@ -348,7 +348,7 @@ fn assert_output_name(old: &str, new: &OutputName, dialect: Dialect, index: usiz
     let matches = if actual.quote.is_some() {
         actual.value == old
     } else {
-        Ident::unquoted(old).key(dialect) == actual.key(dialect)
+        Ident::unquoted(old).column_key(dialect) == actual.column_key(dialect)
     };
     assert!(
         matches,

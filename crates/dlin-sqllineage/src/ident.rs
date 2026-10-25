@@ -30,7 +30,46 @@ impl Ident {
         }
     }
 
-    /// Return the key used to compare this identifier with another.
+    /// Return the key used to compare this identifier with another column
+    /// name.
+    ///
+    /// The rule depends on the dialect:
+    ///
+    /// - Snowflake folds unquoted names to upper case; quoted names are exact.
+    /// - PostgreSQL folds unquoted names to lower case; quoted names are exact.
+    /// - Generic and ANSI follow the SQL standard: unquoted names fold to upper
+    ///   case, so they compare case-insensitively with each other and with a
+    ///   quoted name spelled in upper case; quoted names are otherwise exact.
+    /// - `BigQuery`, `DuckDB`, MySQL, Hive, Databricks, Spark, Trino, SQLite,
+    ///   SQL Server (default collation) and Redshift (default
+    ///   `enable_case_sensitive_identifier = false`) compare column names
+    ///   case-insensitively whether or not they are quoted. The key is the
+    ///   lower-cased spelling.
+    /// - `ClickHouse` compares column names exactly.
+    ///
+    /// Two column names are the same column exactly when their keys are equal.
+    /// Use [`Ident::relation_key`] for relation names, which follow different
+    /// rules.
+    pub fn column_key(&self, dialect: Dialect) -> Cow<'_, str> {
+        match dialect {
+            Dialect::Snowflake | Dialect::Generic | Dialect::Ansi => self.fold_unquoted_upper(),
+            Dialect::PostgreSql => self.fold_unquoted_lower(),
+            Dialect::BigQuery
+            | Dialect::DuckDb
+            | Dialect::MySql
+            | Dialect::Hive
+            | Dialect::Databricks
+            | Dialect::Spark
+            | Dialect::Trino
+            | Dialect::SQLite
+            | Dialect::MsSql
+            | Dialect::Redshift => Cow::Owned(self.value.to_lowercase()),
+            Dialect::ClickHouse => Cow::Borrowed(&self.value),
+        }
+    }
+
+    /// Return the key used to compare this identifier with another relation
+    /// name part (catalog, schema or table).
     ///
     /// Folding applies to unquoted identifiers only, and only in dialects whose
     /// identifiers are case-insensitive by folding: Snowflake folds to upper
@@ -38,14 +77,29 @@ impl Ident {
     /// compares unquoted identifiers exactly as spelled, so `id` and `ID` have
     /// different keys there. Quoted identifiers always retain their exact
     /// spelling.
-    pub fn key(&self, dialect: Dialect) -> Cow<'_, str> {
-        if self.quote.is_some() {
-            return Cow::Borrowed(&self.value);
-        }
+    ///
+    /// Column names use [`Ident::column_key`] instead.
+    pub fn relation_key(&self, dialect: Dialect) -> Cow<'_, str> {
         match dialect {
-            Dialect::Snowflake => Cow::Owned(self.value.to_uppercase()),
-            Dialect::PostgreSql | Dialect::Redshift => Cow::Owned(self.value.to_lowercase()),
+            Dialect::Snowflake => self.fold_unquoted_upper(),
+            Dialect::PostgreSql | Dialect::Redshift => self.fold_unquoted_lower(),
             _ => Cow::Borrowed(&self.value),
+        }
+    }
+
+    fn fold_unquoted_upper(&self) -> Cow<'_, str> {
+        if self.quote.is_some() {
+            Cow::Borrowed(&self.value)
+        } else {
+            Cow::Owned(self.value.to_uppercase())
+        }
+    }
+
+    fn fold_unquoted_lower(&self) -> Cow<'_, str> {
+        if self.quote.is_some() {
+            Cow::Borrowed(&self.value)
+        } else {
+            Cow::Owned(self.value.to_lowercase())
         }
     }
 }
@@ -78,17 +132,129 @@ pub struct Relation {
 mod tests {
     use super::*;
 
+    fn same_column(dialect: Dialect, a: &Ident, b: &Ident) -> bool {
+        a.column_key(dialect) == b.column_key(dialect)
+    }
+
     #[test]
-    fn key_uses_dialect_folding_only_for_unquoted_names() {
+    fn column_key_folds_unquoted_names_in_folding_dialects() {
         let name = Ident::unquoted("MiXeD");
-        assert_eq!(name.key(Dialect::Snowflake), "MIXED");
-        assert_eq!(name.key(Dialect::PostgreSql), "mixed");
-        assert_eq!(name.key(Dialect::Redshift), "mixed");
-        assert_eq!(name.key(Dialect::BigQuery), "MiXeD");
+        assert_eq!(name.column_key(Dialect::Snowflake), "MIXED");
+        assert_eq!(name.column_key(Dialect::PostgreSql), "mixed");
+        assert_eq!(name.column_key(Dialect::Generic), "MIXED");
+        assert_eq!(name.column_key(Dialect::Ansi), "MIXED");
+
+        let quoted = Ident::quoted("MiXeD", Quote::Double);
+        for dialect in [
+            Dialect::Snowflake,
+            Dialect::PostgreSql,
+            Dialect::Generic,
+            Dialect::Ansi,
+        ] {
+            assert_eq!(quoted.column_key(dialect), "MiXeD");
+        }
+    }
+
+    #[test]
+    fn standard_dialects_match_unquoted_with_upper_case_quoted() {
+        for dialect in [Dialect::Generic, Dialect::Ansi, Dialect::Snowflake] {
+            assert!(same_column(
+                dialect,
+                &Ident::unquoted("id"),
+                &Ident::quoted("ID", Quote::Double)
+            ));
+            assert!(same_column(
+                dialect,
+                &Ident::unquoted("id"),
+                &Ident::unquoted("ID")
+            ));
+            assert!(!same_column(
+                dialect,
+                &Ident::unquoted("id"),
+                &Ident::quoted("id", Quote::Double)
+            ));
+            assert!(!same_column(
+                dialect,
+                &Ident::quoted("id", Quote::Double),
+                &Ident::quoted("ID", Quote::Double)
+            ));
+        }
+    }
+
+    #[test]
+    fn postgres_matches_unquoted_with_lower_case_quoted() {
+        let dialect = Dialect::PostgreSql;
+        assert!(same_column(
+            dialect,
+            &Ident::unquoted("ID"),
+            &Ident::quoted("id", Quote::Double)
+        ));
+        assert!(!same_column(
+            dialect,
+            &Ident::unquoted("id"),
+            &Ident::quoted("ID", Quote::Double)
+        ));
+        assert!(!same_column(
+            dialect,
+            &Ident::quoted("id", Quote::Double),
+            &Ident::quoted("ID", Quote::Double)
+        ));
+    }
+
+    #[test]
+    fn column_names_are_case_insensitive_even_when_quoted() {
+        for dialect in [
+            Dialect::BigQuery,
+            Dialect::DuckDb,
+            Dialect::MySql,
+            Dialect::Hive,
+            Dialect::Databricks,
+            Dialect::Spark,
+            Dialect::Trino,
+            Dialect::SQLite,
+            Dialect::MsSql,
+            Dialect::Redshift,
+        ] {
+            let unquoted = Ident::unquoted("Foo");
+            let quoted = Ident::quoted("fOO", Quote::Backtick);
+            assert_eq!(unquoted.column_key(dialect), "foo", "{dialect:?}");
+            assert_eq!(quoted.column_key(dialect), "foo", "{dialect:?}");
+            assert!(same_column(dialect, &unquoted, &quoted), "{dialect:?}");
+            assert!(
+                !same_column(dialect, &unquoted, &Ident::unquoted("bar")),
+                "{dialect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_column_names_are_exact() {
+        let dialect = Dialect::ClickHouse;
+        assert_eq!(Ident::unquoted("Foo").column_key(dialect), "Foo");
+        assert_eq!(
+            Ident::quoted("Foo", Quote::Backtick).column_key(dialect),
+            "Foo"
+        );
+        assert!(!same_column(
+            dialect,
+            &Ident::unquoted("Foo"),
+            &Ident::unquoted("foo")
+        ));
+    }
+
+    #[test]
+    fn relation_key_uses_dialect_folding_only_for_unquoted_names() {
+        let name = Ident::unquoted("MiXeD");
+        assert_eq!(name.relation_key(Dialect::Snowflake), "MIXED");
+        assert_eq!(name.relation_key(Dialect::PostgreSql), "mixed");
+        assert_eq!(name.relation_key(Dialect::Redshift), "mixed");
+        assert_eq!(name.relation_key(Dialect::BigQuery), "MiXeD");
+        assert_eq!(name.relation_key(Dialect::Generic), "MiXeD");
+        assert_eq!(name.relation_key(Dialect::ClickHouse), "MiXeD");
 
         let quoted = Ident::quoted("MiXeD", Quote::Double);
         for dialect in Dialect::ALL {
-            assert_eq!(quoted.key(dialect), "MiXeD");
+            assert_eq!(quoted.relation_key(dialect), "MiXeD");
         }
     }
 }

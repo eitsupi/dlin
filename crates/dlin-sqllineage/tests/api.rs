@@ -697,3 +697,82 @@ fn physical_table_in_a_cte_definition_does_not_replace_outer_cte_candidates() {
             if candidates == &vec![Candidate::Cte(Ident::unquoted("c")), Candidate::Cte(Ident::unquoted("d"))]))
     );
 }
+
+fn analyze_one(dialect: Dialect, sql: &str) -> StatementAnalysis {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .unwrap()
+        .into_single()
+        .unwrap()
+}
+
+fn duplicate_output_names(result: &StatementAnalysis) -> Vec<&Ident> {
+    result
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.kind {
+            DiagnosticKind::DuplicateOutputName { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn bigquery_lookup_ignores_column_name_case() {
+    let result = analyze_one(Dialect::BigQuery, "SELECT 1 AS Foo");
+    assert!(matches!(
+        result.output.lookup("foo", Dialect::BigQuery),
+        Lookup::Found(column) if column.name == OutputName::Explicit(Ident::unquoted("Foo"))
+    ));
+    assert!(matches!(
+        result.output.lookup("FOO", Dialect::BigQuery),
+        Lookup::Found(_)
+    ));
+}
+
+#[test]
+fn bigquery_reports_output_names_differing_only_in_case_as_duplicates() {
+    let result = analyze_one(Dialect::BigQuery, "SELECT 1 AS Foo, 2 AS foo");
+    assert_eq!(duplicate_output_names(&result).len(), 1);
+    assert!(matches!(
+        result.output.lookup("foo", Dialect::BigQuery),
+        Lookup::Duplicate(columns) if columns.len() == 2
+    ));
+}
+
+#[test]
+fn quoted_output_names_are_case_insensitive_where_the_dialect_says_so() {
+    let result = analyze_one(Dialect::DuckDb, "SELECT 1 AS \"Foo\", 2 AS foo");
+    assert_eq!(duplicate_output_names(&result).len(), 1);
+    assert!(matches!(
+        result.output.lookup("FOO", Dialect::DuckDb),
+        Lookup::Duplicate(columns) if columns.len() == 2
+    ));
+}
+
+#[test]
+fn snowflake_keeps_quoted_lower_case_distinct_from_unquoted_names() {
+    let result = analyze_one(Dialect::Snowflake, "SELECT 1 AS \"id\", 2 AS ID");
+    assert!(duplicate_output_names(&result).is_empty());
+    assert!(matches!(
+        result.output.lookup("id", Dialect::Snowflake),
+        Lookup::Found(column) if column.name == OutputName::Explicit(Ident::unquoted("ID"))
+    ));
+
+    let folded = analyze_one(Dialect::Snowflake, "SELECT 1 AS \"ID\", 2 AS id");
+    assert_eq!(duplicate_output_names(&folded).len(), 1);
+}
+
+#[test]
+fn clickhouse_compares_output_names_exactly() {
+    let result = analyze_one(Dialect::ClickHouse, "SELECT 1 AS Foo, 2 AS foo");
+    assert!(duplicate_output_names(&result).is_empty());
+    assert!(matches!(
+        result.output.lookup("foo", Dialect::ClickHouse),
+        Lookup::Found(column) if column.name == OutputName::Explicit(Ident::unquoted("foo"))
+    ));
+    assert!(matches!(
+        result.output.lookup("FOO", Dialect::ClickHouse),
+        Lookup::Absent { .. }
+    ));
+}

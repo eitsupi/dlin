@@ -68,8 +68,8 @@ impl CatalogProvider for CatalogAdapter<'_> {
         let mut matching = candidates.iter().filter(|table| {
             self.entry(table).is_some_and(|entry| {
                 entry.columns.iter().any(|col| {
-                    col.name.key(self.dialect) == ident.key(self.dialect)
-                        || (matches!(self.dialect, Dialect::Generic | Dialect::BigQuery)
+                    col.name.column_key(self.dialect) == ident.column_key(self.dialect)
+                        || (matches!(self.dialect, Dialect::Generic)
                             && ident.quote.is_none()
                             && col.name.value.to_lowercase() == ident.value.to_lowercase())
                 })
@@ -252,7 +252,7 @@ fn convert_result(
     for column in &columns {
         if let OutputName::Explicit(id) | OutputName::Inferred(id) = &column.name {
             let group = names
-                .entry(id.key(dialect).into_owned())
+                .entry(id.column_key(dialect).into_owned())
                 .or_insert_with(|| (id.clone(), 0, Vec::new()));
             group.1 += 1;
             if let Some(ordinal) = column.ordinal {
