@@ -146,7 +146,8 @@ fn column_shared_by_two_derived_tables_is_ambiguous() {
 }
 
 /// `USING` merges the joined columns into one, so the unqualified name is
-/// legal SQL and not ambiguous. The leftmost relation is reported.
+/// legal SQL and not ambiguous. The merged column takes its value from both
+/// relations, so both are sources, in FROM order.
 #[test]
 fn using_join_column_is_not_ambiguous() {
     let result = stable(
@@ -155,11 +156,21 @@ fn using_join_column_is_not_ambiguous() {
         Dialect::Generic,
     );
     match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table, &TableRef::new("s1"));
-            assert_eq!(column, "x");
+        [
+            ColumnOrigin::Concrete {
+                table: first,
+                column: first_column,
+            },
+            ColumnOrigin::Concrete {
+                table: second,
+                column: second_column,
+            },
+        ] => {
+            assert_eq!(first, &TableRef::new("s1"));
+            assert_eq!(second, &TableRef::new("s2"));
+            assert_eq!((first_column.as_str(), second_column.as_str()), ("x", "x"));
         }
-        other => panic!("expected the leftmost USING source, got {other:?}"),
+        other => panic!("expected both USING sources, got {other:?}"),
     }
 }
 
@@ -170,10 +181,16 @@ fn natural_join_column_is_not_ambiguous() {
          SELECT x FROM a NATURAL JOIN b",
         Dialect::Generic,
     );
-    assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { .. }]
-    ));
+    match result.columns.mappings[0].sources.as_slice() {
+        [
+            ColumnOrigin::Concrete { table: first, .. },
+            ColumnOrigin::Concrete { table: second, .. },
+        ] => {
+            assert_eq!(first, &TableRef::new("s1"));
+            assert_eq!(second, &TableRef::new("s2"));
+        }
+        other => panic!("expected both NATURAL sources, got {other:?}"),
+    }
 }
 
 /// A column that only one CTE publishes still resolves through that CTE, even

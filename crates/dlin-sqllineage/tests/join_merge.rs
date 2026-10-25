@@ -47,15 +47,29 @@ fn assert_ambiguous(sql: &str, expected_candidates: &[&str]) {
     }
 }
 
-fn assert_concrete(sql: &str, expected_table: &str) {
-    let result = stable(sql);
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table, &TableRef::new(expected_table), "{sql}");
-            assert_eq!(column, "x", "{sql}");
-        }
-        other => panic!("expected Concrete {expected_table}.x for `{sql}`, got {other:?}"),
-    }
+/// The sources must be exactly `expected_tables`' `x` columns, in this order.
+fn assert_sources(sql: &str, expected_tables: &[&str]) {
+    assert_sources_in(&stable(sql), sql, expected_tables);
+}
+
+fn assert_sources_in(result: &AnalyzeResult, sql: &str, expected_tables: &[&str]) {
+    let actual: Vec<(&TableRef, &str)> = result.columns.mappings[0]
+        .sources
+        .iter()
+        .map(|source| match source {
+            ColumnOrigin::Concrete { table, column } => (table, column.as_str()),
+            other => panic!("expected Concrete for `{sql}`, got {other:?}"),
+        })
+        .collect();
+    let expected: Vec<TableRef> = names(expected_tables);
+    assert_eq!(
+        actual,
+        expected
+            .iter()
+            .map(|table| (table, "x"))
+            .collect::<Vec<_>>(),
+        "{sql}"
+    );
 }
 
 const THREE_CTES: &str = "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2), \
@@ -143,66 +157,66 @@ fn derived_tables_merged_by_using_do_not_cover_a_third_provider() {
 
 #[test]
 fn using_join_of_two_relations_is_not_ambiguous() {
-    assert_concrete(
+    assert_sources(
         "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM a JOIN b USING (x)",
-        "s1",
+        &["s1", "s2"],
     );
 }
 
 #[test]
 fn natural_join_of_two_relations_is_not_ambiguous() {
-    assert_concrete(
+    assert_sources(
         "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM a NATURAL JOIN b",
-        "s1",
+        &["s1", "s2"],
     );
 }
 
 #[test]
 fn chained_using_joins_merge_all_relations() {
-    assert_concrete(
+    assert_sources(
         &format!("{THREE_CTES} SELECT x FROM a JOIN b USING (x) JOIN c USING (x)"),
-        "s1",
+        &["s1", "s2", "s3"],
     );
 }
 
 #[test]
 fn chained_natural_joins_merge_all_relations() {
-    assert_concrete(
+    assert_sources(
         &format!("{THREE_CTES} SELECT x FROM a NATURAL JOIN b NATURAL JOIN c"),
-        "s1",
+        &["s1", "s2", "s3"],
     );
 }
 
 #[test]
 fn parenthesized_joins_merge_across_the_nesting() {
-    assert_concrete(
+    assert_sources(
         &format!("{THREE_CTES} SELECT x FROM a JOIN (b JOIN c USING (x)) USING (x)"),
-        "s1",
+        &["s1", "s2", "s3"],
     );
-    assert_concrete(
+    assert_sources(
         &format!("{THREE_CTES} SELECT x FROM (a JOIN b USING (x)) JOIN c USING (x)"),
-        "s1",
+        &["s1", "s2", "s3"],
     );
 }
 
 #[test]
 fn physical_table_joined_to_a_cte_by_using_is_not_ambiguous() {
-    assert_concrete(
+    assert_sources(
         "WITH a AS (SELECT x FROM s1) SELECT x FROM t JOIN a USING (x)",
-        "s1",
+        &["t", "s1"],
     );
-    assert_concrete(
+    assert_sources(
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x)",
-        "s1",
+        &["s1", "t"],
     );
 }
 
 #[test]
 fn physical_table_merged_with_two_ctes_by_using_chain_is_not_ambiguous() {
-    assert_concrete(
+    assert_sources(
         "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) \
          SELECT x FROM t JOIN a USING (x) JOIN b USING (x)",
-        "s1",
+        &["t", "s1", "s2"],
     );
 }
 
