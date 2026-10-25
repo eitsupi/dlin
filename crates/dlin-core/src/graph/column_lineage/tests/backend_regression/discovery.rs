@@ -314,31 +314,19 @@ fn sqllineage_discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
 
 #[test]
 fn sqllineage_discovery_drops_field_path_star_without_forged_output_name() {
-    let analyzed = sqllineage::analyze(
+    let parsed = sqllineage::parse(
         "SELECT base.event.* FROM source AS base",
-        sqllineage::AnalyzeOptions {
-            dialect: DlinDialect::BigQuery.to_sqllineage().unwrap(),
-            normalize_case: true,
-            ..sqllineage::AnalyzeOptions::default()
-        },
+        DlinDialect::BigQuery.to_engine_dialect().unwrap(),
     )
     .unwrap();
-    assert!(analyzed[0].columns.mappings.iter().any(|mapping| {
-        mapping.target.column == "*"
-            && mapping.sources.iter().any(|source| {
-                matches!(
-                    source,
-                    sqllineage::ColumnOrigin::Concrete { column, .. } if column == "event"
-                )
-            })
-            && mapping.sources.iter().any(|source| {
-                matches!(
-                    source,
-                    sqllineage::ColumnOrigin::Ambiguous { column, candidates }
-                        if column == "*" && candidates.is_empty()
-                )
-            })
-    }));
+    let analyzed = sqllineage::Analyzer::new(DlinDialect::BigQuery.to_engine_dialect().unwrap());
+    let statement = parsed.analyze(&analyzed).into_single().unwrap();
+    assert!(statement.output.columns.is_empty());
+    let sqllineage::Shape::Open { unexpanded } = &statement.output.shape else {
+        panic!("expression field-path star should leave the output shape open");
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert!(unexpanded[0].relation.is_none());
 
     let discovery = sqllineage_discovery_with_dialect(
         "SELECT base.event.* FROM source AS base",
@@ -402,22 +390,21 @@ fn sqllineage_discovery_matches_analyze_mapping_targets() {
 
     let discovery = sqllineage_discovery(sql, Some(&catalog)).unwrap();
     let discovered = discovered_names(&discovery);
-    let provider = SqllineageCatalogProvider::new(&catalog, DlinDialect::Generic);
-    let analyzed = sqllineage::analyze(
-        sql,
-        sqllineage::AnalyzeOptions {
-            dialect: DlinDialect::Generic.to_sqllineage().unwrap(),
-            catalog: Some(Box::new(provider)),
-            normalize_case: true,
-        },
-    )
-    .unwrap();
-    let analyzed_names: Vec<String> = analyzed[0]
+    let parsed = sqllineage::parse(sql, DlinDialect::Generic.to_engine_dialect().unwrap()).unwrap();
+    let catalog_adapter = SqllineageCatalogProvider::new(&catalog, DlinDialect::Generic);
+    let analyzer = sqllineage::Analyzer::new(DlinDialect::Generic.to_engine_dialect().unwrap())
+        .with_catalog(&catalog_adapter);
+    let analyzed = parsed.analyze(&analyzer);
+    let analyzed_names: Vec<String> = analyzed.statements[0]
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.clone())
-        .filter(|name| name != "*")
+        .filter_map(|column| match &column.name {
+            sqllineage::OutputName::Explicit(name) | sqllineage::OutputName::Inferred(name) => {
+                Some(name.value.clone())
+            }
+            sqllineage::OutputName::Anonymous => None,
+        })
         .collect();
 
     assert_eq!(discovered, analyzed_names);

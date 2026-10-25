@@ -102,7 +102,7 @@ pub(crate) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::mapping::{reset_scope_mapping_stats, scope_mapping_computations};
-    use crate::analyze;
+    use crate::legacy_analyze as analyze;
     use crate::types::{AnalyzeOptions, ColumnOrigin, Dialect};
 
     #[test]

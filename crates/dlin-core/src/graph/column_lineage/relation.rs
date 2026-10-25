@@ -115,6 +115,18 @@ pub(crate) struct RelationRef {
 }
 
 impl RelationRef {
+    pub(crate) fn from_identifiers(
+        catalog: Option<Identifier>,
+        schema: Option<Identifier>,
+        name: Identifier,
+    ) -> Self {
+        Self {
+            catalog,
+            schema,
+            name,
+        }
+    }
+
     pub(crate) fn from_manifest(catalog: Option<&str>, schema: Option<&str>, name: &str) -> Self {
         Self {
             catalog: catalog.map(Identifier::manifest),

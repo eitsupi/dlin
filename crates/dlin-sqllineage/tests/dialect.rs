@@ -1,4 +1,4 @@
-use dlin_sqllineage::{AnalyzeOptions, Dialect, StatementType, analyze};
+use dlin_sqllineage::{Analyzer, Dialect, StatementKind};
 
 #[test]
 fn all_public_dialects_parse_basic_queries() {
@@ -21,14 +21,9 @@ fn all_public_dialects_parse_basic_queries() {
     ];
 
     for dialect in dialects {
-        let result = analyze(
-            "SELECT 1",
-            AnalyzeOptions {
-                dialect,
-                ..AnalyzeOptions::default()
-            },
-        )
-        .expect("basic query should parse for every public dialect");
-        assert_eq!(result[0].statement_type, StatementType::Query);
+        let result = Analyzer::new(dialect)
+            .analyze("SELECT 1")
+            .expect("basic query should parse for every public dialect");
+        assert_eq!(result.statements[0].kind, StatementKind::Query);
     }
 }

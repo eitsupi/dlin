@@ -5,32 +5,34 @@
 //! tables, CTEs or derived tables.
 
 use dlin_sqllineage::{
-    AnalyzeOptions, AnalyzeResult, CatalogProvider, ColumnMapping, ColumnOrigin, Dialect, TableRef,
-    TransformKind, analyze,
+    Analyzer, Candidate, Catalog, CatalogColumn, CatalogEntry, Dialect, Ident, Lineage,
+    OutputColumn, Relation, StatementAnalysis, Transform, Unresolved,
 };
+use std::borrow::Cow;
 
 const RUNS: usize = 50;
 
 /// Columns of known tables; a table not listed is unknown.
 struct Columns(&'static [(&'static str, &'static [&'static str])]);
 
-impl CatalogProvider for Columns {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+impl Catalog for Columns {
+    fn lookup(&self, table: &Relation) -> Option<CatalogEntry<'_>> {
         self.0
             .iter()
-            .find(|(name, _)| *name == table.table)
-            .map(|(_, columns)| columns.iter().map(|column| (*column).to_string()).collect())
-    }
-
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        let owners: Vec<&TableRef> = candidates
-            .iter()
-            .filter(|candidate| {
-                self.list_columns(candidate)
-                    .is_some_and(|columns| columns.iter().any(|known| known == column))
+            .find(|(name, _)| *name == table.name.value)
+            .map(|(_, columns)| CatalogEntry {
+                relation: table.clone(),
+                columns: Cow::Owned(
+                    columns
+                        .iter()
+                        .map(|column| CatalogColumn {
+                            name: Ident::unquoted(*column),
+                            data_type: None,
+                            fields: None,
+                        })
+                        .collect(),
+                ),
             })
-            .collect();
-        (owners.len() == 1).then(|| owners[0].clone())
     }
 }
 
@@ -38,16 +40,18 @@ fn run_with_dialect(
     sql: &str,
     catalog: Option<&'static [(&'static str, &'static [&'static str])]>,
     dialect: Dialect,
-) -> Vec<AnalyzeResult> {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            catalog: catalog.map(|columns| Box::new(Columns(columns)) as Box<dyn CatalogProvider>),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+) -> Vec<StatementAnalysis> {
+    let analyzer = Analyzer::new(dialect);
+    let columns = catalog.map(Columns);
+    let analyzer = if let Some(catalog) = columns.as_ref() {
+        analyzer.with_catalog(catalog)
+    } else {
+        analyzer
+    };
+    analyzer
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+        .statements
 }
 
 /// Analyze `sql` repeatedly, require identical output every time, and return
@@ -55,7 +59,7 @@ fn run_with_dialect(
 fn mapping(
     sql: &str,
     catalog: Option<&'static [(&'static str, &'static [&'static str])]>,
-) -> ColumnMapping {
+) -> OutputColumn {
     mapping_with_dialect(sql, catalog, Dialect::Generic)
 }
 
@@ -63,7 +67,7 @@ fn mapping_with_dialect(
     sql: &str,
     catalog: Option<&'static [(&'static str, &'static [&'static str])]>,
     dialect: Dialect,
-) -> ColumnMapping {
+) -> OutputColumn {
     let first = run_with_dialect(sql, catalog, dialect);
     let expected = format!("{first:#?}");
     for attempt in 1..RUNS {
@@ -77,24 +81,40 @@ fn mapping_with_dialect(
         .into_iter()
         .next()
         .expect("one statement")
+        .output
         .columns
-        .mappings
         .into_iter()
         .next()
         .expect("one column")
 }
 
-fn show(origin: &ColumnOrigin) -> String {
-    match origin {
-        ColumnOrigin::Concrete { table, column } => format!("{}.{column}", table.table),
-        ColumnOrigin::Ambiguous { column, candidates } => {
-            let names: Vec<&str> = candidates
+fn show_lineage(column: &OutputColumn) -> Vec<String> {
+    match &column.lineage {
+        Lineage::Complete(known) => known
+            .iter()
+            .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
+            .collect(),
+        Lineage::Partial { known, unresolved } => {
+            let mut all: Vec<_> = known
                 .iter()
-                .map(|table| table.table.as_str())
+                .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
                 .collect();
-            format!("?{column}({})", names.join(","))
+            all.extend(unresolved.iter().map(|source| match source {
+                Unresolved::Ambiguous { column, candidates } => {
+                    let names: Vec<_> = candidates
+                        .iter()
+                        .map(|candidate| match candidate {
+                            Candidate::Relation(r) => r.name.value.as_str(),
+                            Candidate::Cte(id) | Candidate::Derived(Some(id)) => id.value.as_str(),
+                            Candidate::Derived(None) => "?",
+                        })
+                        .collect();
+                    format!("?{}({})", column.value, names.join(","))
+                }
+                other => panic!("unexpected unresolved lineage {other:?}"),
+            }));
+            all
         }
-        other => panic!("unexpected origin {other:?}"),
     }
 }
 
@@ -102,7 +122,7 @@ fn sources(
     sql: &str,
     catalog: Option<&'static [(&'static str, &'static [&'static str])]>,
 ) -> Vec<String> {
-    mapping(sql, catalog).sources.iter().map(show).collect()
+    show_lineage(&mapping(sql, catalog))
 }
 
 fn plain(sql: &str) -> Vec<String> {
@@ -110,11 +130,7 @@ fn plain(sql: &str) -> Vec<String> {
 }
 
 fn plain_with_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
-    mapping_with_dialect(sql, None, dialect)
-        .sources
-        .iter()
-        .map(show)
-        .collect()
+    show_lineage(&mapping_with_dialect(sql, None, dialect))
 }
 
 #[test]
@@ -284,11 +300,8 @@ fn qualified_reference_is_not_merged() {
 #[test]
 fn merged_column_inside_an_expression_lists_both() {
     let mapping = mapping("SELECT x + 1 AS y FROM t1 JOIN t2 USING (x)", None);
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["t1.x", "t2.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Expression);
+    assert_eq!(show_lineage(&mapping), ["t1.x", "t2.x"]);
+    assert_eq!(mapping.transform, Transform::Expression);
 }
 
 #[test]
@@ -471,7 +484,7 @@ fn table_and_cte_sources_follow_join_kind() {
             "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) \
              SELECT x FROM t1 JOIN a USING (x) JOIN t2 USING (x) JOIN b USING (x)"
         ),
-        ["t1.x", "s1.x", "t2.x", "s2.x"]
+        ["s1.x", "s2.x", "t1.x", "t2.x"]
     );
 }
 
@@ -522,21 +535,15 @@ fn aggregation_of_one_side_marks_the_merged_column() {
          SELECT x FROM a JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s1.v", "s2.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(show_lineage(&mapping), ["s1.v", "s2.x"]);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 
     let mapping = self::mapping(
         "WITH a AS (SELECT SUM(v) AS x FROM s1) SELECT x FROM t FULL JOIN a USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["t.x", "s1.v"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(show_lineage(&mapping), ["s1.v", "t.x"]);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 }
 
 #[test]
@@ -546,44 +553,32 @@ fn aggregation_propagates_only_from_a_contributing_side() {
          SELECT x FROM a LEFT JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s1.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Direct);
+    assert_eq!(show_lineage(&mapping), ["s1.x"]);
+    assert_eq!(mapping.transform, Transform::Direct);
 
     let mapping = self::mapping(
         "WITH a AS (SELECT SUM(v) AS x FROM s1), b AS (SELECT x FROM s2) \
          SELECT x FROM a LEFT JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s1.v"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(show_lineage(&mapping), ["s1.v"]);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 
     let mapping = self::mapping(
         "WITH a AS (SELECT SUM(v) AS x FROM s1), b AS (SELECT x FROM s2) \
          SELECT x FROM a RIGHT JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s2.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Direct);
+    assert_eq!(show_lineage(&mapping), ["s2.x"]);
+    assert_eq!(mapping.transform, Transform::Direct);
 
     let mapping = self::mapping(
         "WITH a AS (SELECT x FROM s1), b AS (SELECT SUM(v) AS x FROM s2) \
          SELECT x FROM a RIGHT JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s2.v"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(show_lineage(&mapping), ["s2.v"]);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 }
 
 #[test]
@@ -594,11 +589,8 @@ fn excluded_aggregation_does_not_return_when_a_later_full_join_adds_sources() {
          SELECT x FROM a JOIN b USING (x) RIGHT JOIN c USING (x) FULL JOIN d USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s3.x", "s4.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Direct);
+    assert_eq!(show_lineage(&mapping), ["s3.x", "s4.x"]);
+    assert_eq!(mapping.transform, Transform::Direct);
 }
 
 #[test]
@@ -609,15 +601,12 @@ fn transform_of_a_nested_cte_is_followed_through_the_merge() {
          SELECT x FROM a JOIN b USING (x)",
         None,
     );
-    assert_eq!(
-        mapping.sources.iter().map(show).collect::<Vec<_>>(),
-        ["s1.v", "s2.x"]
-    );
-    assert_eq!(mapping.transform, TransformKind::Aggregation);
+    assert_eq!(show_lineage(&mapping), ["s1.v", "s2.x"]);
+    assert_eq!(mapping.transform, Transform::Aggregation);
 }
 
 #[test]
 fn direct_columns_stay_direct() {
     let mapping = mapping("SELECT x FROM t1 JOIN t2 USING (x)", None);
-    assert_eq!(mapping.transform, TransformKind::Direct);
+    assert_eq!(mapping.transform, Transform::Direct);
 }

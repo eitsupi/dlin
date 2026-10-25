@@ -267,7 +267,6 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "serial_test",
- "sqlparser",
  "tempfile",
  "thiserror",
  "walkdir",
@@ -279,6 +278,7 @@ version = "0.2.6"
 dependencies = [
  "indexmap",
  "serde",
+ "serde_json",
  "sqlparser",
 ]
 

@@ -8,7 +8,7 @@ fn lateral_subquery_references_preceding_table() {
         SELECT t1.a, lat.b \
         FROM t1, LATERAL (SELECT b FROM t2 WHERE t2.id = t1.id) AS lat";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs;
+    let mut inputs = result.read;
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
 }
@@ -20,7 +20,7 @@ fn lateral_join_table_inputs() {
         FROM t1 \
         CROSS JOIN LATERAL (SELECT y FROM t2 WHERE t2.fk = t1.pk) AS l";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs;
+    let mut inputs = result.read;
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
 }

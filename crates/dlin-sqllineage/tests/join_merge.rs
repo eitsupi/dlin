@@ -3,23 +3,21 @@
 //! makes an unqualified reference a real choice, so the merge must not be
 //! treated as a property of the whole FROM clause.
 
-use dlin_sqllineage::{AnalyzeOptions, AnalyzeResult, ColumnOrigin, Dialect, TableRef, analyze};
+use common::known_sources;
+use dlin_sqllineage::{Analyzer, Candidate, Dialect, Lineage, StatementAnalysis, Unresolved};
+mod common;
 
 const RUNS: usize = 50;
 
-fn run(sql: &str) -> Vec<AnalyzeResult> {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect: Dialect::Generic,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+fn run(sql: &str) -> Vec<StatementAnalysis> {
+    Analyzer::new(Dialect::Generic)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{sql}: {err:?}"))
+        .statements
 }
 
 /// Analyze `sql` repeatedly and require identical output every time.
-fn stable(sql: &str) -> AnalyzeResult {
+fn stable(sql: &str) -> StatementAnalysis {
     let first = run(sql);
     let expected = format!("{first:#?}");
     for attempt in 1..RUNS {
@@ -32,44 +30,46 @@ fn stable(sql: &str) -> AnalyzeResult {
     first.into_iter().next().expect("one statement")
 }
 
-fn names(candidates: &[&str]) -> Vec<TableRef> {
-    candidates.iter().map(|name| TableRef::new(*name)).collect()
-}
-
 fn assert_ambiguous(sql: &str, expected_candidates: &[&str]) {
     let result = stable(sql);
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x", "{sql}");
-            assert_eq!(candidates, &names(expected_candidates), "{sql}");
-        }
-        other => panic!("expected Ambiguous for `{sql}`, got {other:?}"),
-    }
+    assert!(
+        matches!(&result.output.columns[0].lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+                if column.value == "x" && candidates.len() == expected_candidates.len()
+                    && expected_candidates.iter().all(|name| candidates.iter().any(|candidate| match candidate {
+                        Candidate::Cte(ident) | Candidate::Derived(Some(ident)) => ident.value == *name,
+                        Candidate::Relation(relation) => relation.name.value == *name,
+                        Candidate::Derived(None) => false,
+                    })))),
+        "expected the same ambiguous providers for `{sql}`: {:?}",
+        result.output.columns[0].lineage
+    );
 }
 
-/// The sources must be exactly `expected_tables`' `x` columns, in this order.
+/// The sources must be exactly `expected_tables`' `x` columns, sorted by source.
 fn assert_sources(sql: &str, expected_tables: &[&str]) {
     assert_sources_in(&stable(sql), sql, expected_tables);
 }
 
-fn assert_sources_in(result: &AnalyzeResult, sql: &str, expected_tables: &[&str]) {
-    let actual: Vec<(&TableRef, &str)> = result.columns.mappings[0]
-        .sources
+fn assert_sources_in(result: &StatementAnalysis, sql: &str, expected_tables: &[&str]) {
+    assert!(
+        matches!(&result.output.columns[0].lineage, Lineage::Complete(_)),
+        "expected complete lineage for `{sql}`: {:?}",
+        result.output.columns[0].lineage
+    );
+    let actual: Vec<_> = known_sources(&result.output.columns[0])
         .iter()
-        .map(|source| match source {
-            ColumnOrigin::Concrete { table, column } => (table, column.as_str()),
-            other => panic!("expected Concrete for `{sql}`, got {other:?}"),
+        .map(|source| {
+            (
+                source.relation.name.value.as_str(),
+                source.column.value.as_str(),
+            )
         })
         .collect();
-    let expected: Vec<TableRef> = names(expected_tables);
-    assert_eq!(
-        actual,
-        expected
-            .iter()
-            .map(|table| (table, "x"))
-            .collect::<Vec<_>>(),
-        "{sql}"
-    );
+    let mut expected: Vec<_> = expected_tables.iter().map(|table| (*table, "x")).collect();
+    expected.sort();
+    assert_eq!(actual, expected, "{sql}");
 }
 
 const THREE_CTES: &str = "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2), \
@@ -227,7 +227,7 @@ fn merged_join_columns_keep_the_transform_of_the_provider() {
          SELECT x FROM a JOIN b USING (x), (SELECT 1 AS y) d",
     );
     assert_eq!(
-        result.columns.mappings[0].transform,
-        dlin_sqllineage::TransformKind::Aggregation
+        result.output.columns[0].transform,
+        dlin_sqllineage::Transform::Aggregation
     );
 }

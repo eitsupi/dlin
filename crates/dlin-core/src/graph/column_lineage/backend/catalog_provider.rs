@@ -1,29 +1,138 @@
-use sqllineage::{CatalogProvider, TableRef};
+use std::borrow::Cow;
 
-use super::catalog::CatalogTable;
-use super::{CatalogSnapshot, DlinDialect};
-use crate::graph::column_lineage::relation::RelationRef;
+use super::catalog::CatalogSnapshot;
+use super::dialect::DlinDialect;
+use crate::graph::column_lineage::relation::{Identifier, RelationRef};
 
-/// sqllineage's `TableRef` has already lost quote metadata and lowercases identifiers before reaching this function. Generic and BigQuery therefore need the boundary-specific case-insensitive fallback to find mixed-case manifest relations.
-pub(crate) fn resolve_table_for_sqllineage<'a>(
+pub(crate) struct CatalogAdapter<'a> {
     snapshot: &'a CatalogSnapshot,
-    query: &RelationRef,
     dialect: DlinDialect,
-) -> Option<&'a CatalogTable> {
-    match dialect {
-        DlinDialect::Generic | DlinDialect::BigQuery => {
-            snapshot.resolve_table_exact_case_insensitive(query)
-        }
-        _ => snapshot.resolve_table_exact(query, dialect),
+}
+
+impl<'a> CatalogAdapter<'a> {
+    pub(crate) const fn new(snapshot: &'a CatalogSnapshot, dialect: DlinDialect) -> Self {
+        Self { snapshot, dialect }
     }
 }
 
-/// Adapts dlin's manifest catalog to sqllineage's catalog interface.
+impl sqllineage::Catalog for CatalogAdapter<'_> {
+    fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
+        let query = relation_ref_from_engine(relation);
+        let table = self
+            .snapshot
+            .resolve_table_exact(&query, self.dialect)
+            .or_else(|| {
+                let legacy_case_fold =
+                    matches!(self.dialect, DlinDialect::Generic | DlinDialect::BigQuery)
+                        && query
+                            .catalog()
+                            .into_iter()
+                            .chain(query.schema())
+                            .chain(std::iter::once(query.name()))
+                            .all(|part| {
+                                part.quote_style()
+                                    == crate::graph::column_lineage::relation::QuoteStyle::Unquoted
+                            });
+                legacy_case_fold
+                    .then(|| self.snapshot.resolve_table_exact_case_insensitive(&query))
+                    .flatten()
+            })?;
+        let columns = self
+            .snapshot
+            .unambiguous_columns_for_relation(&table.relation)
+            .filter(|columns| !columns.is_empty())?;
+        Some(sqllineage::CatalogEntry {
+            relation: relation_from_ref(&table.relation),
+            columns: Cow::Owned(
+                columns
+                    .iter()
+                    .map(|name| sqllineage::CatalogColumn {
+                        name: sqllineage::Ident::unquoted(name.clone()),
+                        data_type: None,
+                        fields: None,
+                    })
+                    .collect(),
+            ),
+        })
+    }
+}
+
+pub(crate) fn relation_ref_from_engine(relation: &sqllineage::Relation) -> RelationRef {
+    use crate::graph::column_lineage::relation::QuoteStyle;
+    use sqllineage::{Ident, Quote};
+
+    let component = |ident: &Ident| match ident.quote {
+        Some(Quote::Double | Quote::Bracket | Quote::Single) => {
+            Identifier::quoted(ident.value.clone(), QuoteStyle::Double)
+        }
+        Some(Quote::Backtick) => Identifier::quoted(ident.value.clone(), QuoteStyle::Backtick),
+        None => Identifier::unquoted(ident.value.clone()),
+    };
+    RelationRef::from_identifiers(
+        relation.catalog.as_ref().map(component),
+        relation.schema.as_ref().map(component),
+        component(&relation.name),
+    )
+}
+
+/// Keep dlin's source spelling stable while the engine retains SQL quote metadata.
+pub(crate) fn source_relation(
+    relation: &sqllineage::Relation,
+    catalog: Option<&CatalogSnapshot>,
+    dialect: DlinDialect,
+) -> RelationRef {
+    let query = relation_ref_from_engine(relation);
+    if let Some(table) = catalog.and_then(|catalog| {
+        catalog.resolve_table_exact(&query, dialect).or_else(|| {
+            matches!(dialect, DlinDialect::Generic | DlinDialect::BigQuery)
+                .then(|| catalog.resolve_table_exact_case_insensitive(&query))
+                .flatten()
+        })
+    }) {
+        return table.relation.clone();
+    }
+    let part = |ident: &sqllineage::Ident| {
+        if ident.quote.is_some() {
+            ident.value.clone()
+        } else {
+            ident.value.to_lowercase()
+        }
+    };
+    let catalog = relation.catalog.as_ref().map(part);
+    let schema = relation.schema.as_ref().map(part);
+    let name = part(&relation.name);
+    RelationRef::from_backend(catalog.as_deref(), schema.as_deref(), &name)
+}
+
+fn relation_from_ref(relation: &RelationRef) -> sqllineage::Relation {
+    use sqllineage::{Ident, Quote};
+    let ident = |part: &Identifier| match part.quote_style() {
+        crate::graph::column_lineage::relation::QuoteStyle::Double => {
+            Ident::quoted(part.value().to_owned(), Quote::Double)
+        }
+        crate::graph::column_lineage::relation::QuoteStyle::Backtick => {
+            Ident::quoted(part.value().to_owned(), Quote::Backtick)
+        }
+        crate::graph::column_lineage::relation::QuoteStyle::Unquoted
+        | crate::graph::column_lineage::relation::QuoteStyle::Unknown => {
+            Ident::unquoted(part.value().to_owned())
+        }
+    };
+    sqllineage::Relation {
+        catalog: relation.catalog().map(ident),
+        schema: relation.schema().map(ident),
+        name: ident(relation.name()),
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
 pub(crate) struct SqllineageCatalogProvider {
     snapshot: CatalogSnapshot,
     dialect: DlinDialect,
 }
 
+#[cfg(test)]
 impl SqllineageCatalogProvider {
     pub(crate) fn new(snapshot: &CatalogSnapshot, dialect: DlinDialect) -> Self {
         Self {
@@ -31,55 +140,60 @@ impl SqllineageCatalogProvider {
             dialect,
         }
     }
+}
 
-    fn columns_for(&self, table: &TableRef) -> Option<&[String]> {
+#[cfg(test)]
+impl sqllineage::Catalog for SqllineageCatalogProvider {
+    fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
+        let adapter = CatalogAdapter::new(&self.snapshot, self.dialect);
+        let entry = <CatalogAdapter<'_> as sqllineage::Catalog>::lookup(&adapter, relation)?;
+        Some(sqllineage::CatalogEntry {
+            relation: entry.relation,
+            columns: Cow::Owned(entry.columns.into_owned()),
+        })
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TableRef {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: String,
+}
+
+#[cfg(test)]
+impl SqllineageCatalogProvider {
+    pub(crate) fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
         let query = RelationRef::from_backend_lookup(
             table.catalog.as_deref(),
             table.schema.as_deref(),
             &table.table,
         );
-        let table = resolve_table_for_sqllineage(&self.snapshot, &query, self.dialect);
-        table
-            .and_then(|candidate| {
-                self.snapshot
-                    .unambiguous_columns_for_relation(&candidate.relation)
-            })
+        let found = match self.dialect {
+            DlinDialect::Generic | DlinDialect::BigQuery => {
+                self.snapshot.resolve_table_exact_case_insensitive(&query)
+            }
+            _ => self.snapshot.resolve_table_exact(&query, self.dialect),
+        }?;
+        self.snapshot
+            .unambiguous_columns_for_relation(&found.relation)
             .filter(|columns| !columns.is_empty())
-    }
-}
-
-/// Compare one relation name part. Every dialect folds case here, so the rule
-/// lives in a single place if a dialect ever needs its own.
-///
-/// The folding matches what sqllineage already did to the identifier on its way
-/// into a `TableRef`: `str::to_lowercase`, not an ASCII-only fold. An ASCII fold
-/// would miss a cased non-ASCII identifier that sqllineage had already
-/// lowercased, and the relation would silently look unknown.
-///
-/// `TableRef` carries no quote metadata, so Snowflake `foo` and `"foo"` are
-/// indistinguishable here. Matching is the deliberate choice over guessing at
-/// the original quoting.
-pub(crate) fn column_identifiers_match(left: &str, right: &str, _dialect: DlinDialect) -> bool {
-    left.to_lowercase() == right.to_lowercase()
-}
-
-impl CatalogProvider for SqllineageCatalogProvider {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        self.columns_for(table).map(<[String]>::to_vec)
+            .map(<[String]>::to_vec)
     }
 
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        let qualifying: Vec<&TableRef> = candidates
+    pub(crate) fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
+        let matching = candidates
             .iter()
             .filter(|candidate| {
-                self.columns_for(candidate).is_some_and(|columns| {
+                self.list_columns(candidate).is_some_and(|columns| {
                     columns
                         .iter()
-                        .any(|known| column_identifiers_match(known, column, self.dialect))
+                        .any(|known| known.to_lowercase() == column.to_lowercase())
                 })
             })
-            .collect();
-        (qualifying.len() == 1).then(|| qualifying[0].clone())
+            .collect::<Vec<_>>();
+        (matching.len() == 1).then(|| (*matching[0]).clone())
     }
 }
 

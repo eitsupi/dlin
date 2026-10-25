@@ -1,63 +1,54 @@
 //! Catalog star expansion keeps the projection order of the query.
 
-use dlin_sqllineage::{
-    AnalyzeOptions, AnalyzeResult, CatalogProvider, ColumnOrigin, Dialect, TableRef, analyze,
-};
+mod common;
+
+use common::{analyze_one_with, catalog_entry, output_name};
+use dlin_sqllineage::{CatalogEntry, Dialect, Lineage, Relation, StatementAnalysis};
 
 struct Catalog;
 
-impl CatalogProvider for Catalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        match table.table.as_str() {
-            "t" => Some(vec!["x".into(), "y".into()]),
-            "u" => Some(vec!["p".into(), "q".into()]),
+impl dlin_sqllineage::Catalog for Catalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        match relation.name.value.as_str() {
+            "t" => Some(catalog_entry(relation, &["x", "y"])),
+            "u" => Some(catalog_entry(relation, &["p", "q"])),
             _ => None,
         }
     }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
-    }
 }
 
-fn run(sql: &str, dialect: Dialect) -> AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            catalog: Some(Box::new(Catalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
-    .remove(0)
+fn run(sql: &str, dialect: Dialect) -> StatementAnalysis {
+    analyze_one_with(sql, dialect, Some(&Catalog))
 }
 
-fn targets(result: &AnalyzeResult) -> Vec<&str> {
+fn targets(result: &StatementAnalysis) -> Vec<&str> {
     result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.as_str())
+        .map(|mapping| output_name(mapping).unwrap())
         .collect()
 }
 
 /// `(target, source table, source column)` per mapping, for single-source
 /// concrete mappings.
-fn concrete(result: &AnalyzeResult) -> Vec<(String, String, String)> {
+fn concrete(result: &StatementAnalysis) -> Vec<(String, String, String)> {
     result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| match mapping.sources.as_slice() {
-            [ColumnOrigin::Concrete { table, column }] => (
-                mapping.target.column.clone(),
-                table.table.clone(),
-                column.clone(),
-            ),
+        .map(|mapping| match &mapping.lineage {
+            Lineage::Complete(sources) if sources.len() == 1 => {
+                let source = &sources[0];
+                (
+                    output_name(mapping).unwrap().to_string(),
+                    source.relation.name.value.clone(),
+                    source.column.value.clone(),
+                )
+            }
             other => panic!(
-                "expected one Concrete for {}, got {other:?}",
-                mapping.target.column
+                "expected one complete source for {:?}, got {other:?}",
+                mapping.name
             ),
         })
         .collect()
@@ -154,6 +145,6 @@ fn star_in_each_set_operation_branch_keeps_position() {
             dialect,
         );
         assert_eq!(targets(&result), ["a", "x", "y", "b"], "{dialect:?}");
-        assert_eq!(result.columns.mappings.len(), 4);
+        assert_eq!(result.output.columns.len(), 4);
     }
 }

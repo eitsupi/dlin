@@ -1,43 +1,21 @@
 //! The transform of an output column covers every hop between the column and
 //! its source relations, not only the last projection.
 
-use dlin_sqllineage::{
-    AnalyzeOptions, AnalyzeResult, ColumnMapping, ColumnOrigin, Dialect, TableRef, TransformKind,
-    analyze,
-};
+mod common;
 
-fn run(sql: &str, dialect: Dialect) -> AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
-    .remove(0)
+use common::{concrete_sources, find_mapping};
+use dlin_sqllineage::{Analyzer, Candidate, Dialect, Lineage, OutputColumn, Transform, Unresolved};
+
+fn run(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+        .into_single()
+        .unwrap()
 }
 
-fn mapping<'a>(result: &'a AnalyzeResult, target: &str) -> &'a ColumnMapping {
-    result
-        .columns
-        .mappings
-        .iter()
-        .find(|mapping| mapping.target.column == target)
-        .unwrap_or_else(|| panic!("no mapping for {target}"))
-}
-
-fn concrete(mapping: &ColumnMapping) -> Vec<(String, String)> {
-    let mut sources: Vec<_> = mapping
-        .sources
-        .iter()
-        .map(|source| match source {
-            ColumnOrigin::Concrete { table, column } => (table.table.clone(), column.clone()),
-            other => panic!("expected Concrete, got {other:?}"),
-        })
-        .collect();
-    sources.sort();
-    sources
+fn mapping<'a>(result: &'a dlin_sqllineage::StatementAnalysis, target: &str) -> &'a OutputColumn {
+    find_mapping(&result.output.columns, target)
 }
 
 fn pair(table: &str, column: &str) -> (String, String) {
@@ -61,12 +39,8 @@ fn aggregate_in_a_derived_table_is_seen_through_the_outer_reference() {
         ] {
             let result = run(sql, dialect);
             let m = mapping(&result, "c");
-            assert_eq!(
-                m.transform,
-                TransformKind::Aggregation,
-                "{dialect:?}: {sql}"
-            );
-            assert_eq!(concrete(m), [pair("t", "x")], "{dialect:?}: {sql}");
+            assert_eq!(m.transform, Transform::Aggregation, "{dialect:?}: {sql}");
+            assert_eq!(concrete_sources(m), [pair("t", "x")], "{dialect:?}: {sql}");
         }
     }
 }
@@ -80,12 +54,11 @@ fn source_free_aggregate_is_still_an_aggregation_after_a_hop() {
         ] {
             let result = run(sql, dialect);
             let m = mapping(&result, "c");
-            assert_eq!(
-                m.transform,
-                TransformKind::Aggregation,
+            assert_eq!(m.transform, Transform::Aggregation, "{dialect:?}: {sql}");
+            assert!(
+                matches!(&m.lineage, Lineage::Complete(sources) if sources.is_empty()),
                 "{dialect:?}: {sql}"
             );
-            assert!(m.sources.is_empty(), "{dialect:?}: {sql}");
         }
     }
 }
@@ -100,8 +73,8 @@ fn star_and_named_selection_classify_alike() {
         "SELECT * FROM (SELECT COUNT(*) AS c FROM t) d",
         Dialect::Generic,
     );
-    assert_eq!(mapping(&named, "c").transform, TransformKind::Aggregation);
-    assert_eq!(mapping(&star, "c").transform, TransformKind::Aggregation);
+    assert_eq!(mapping(&named, "c").transform, Transform::Aggregation);
+    assert_eq!(mapping(&star, "c").transform, Transform::Aggregation);
 }
 
 #[test]
@@ -114,14 +87,14 @@ fn transform_survives_several_hops() {
         Dialect::Generic,
     );
     let m = mapping(&result, "s");
-    assert_eq!(m.transform, TransformKind::Aggregation);
-    assert_eq!(concrete(m), [pair("t", "x")]);
+    assert_eq!(m.transform, Transform::Aggregation);
+    assert_eq!(concrete_sources(m), [pair("t", "x")]);
 
     let result = run(
         "SELECT s FROM (SELECT s FROM (SELECT SUM(x) AS s FROM t) d1) d2",
         Dialect::Generic,
     );
-    assert_eq!(mapping(&result, "s").transform, TransformKind::Aggregation);
+    assert_eq!(mapping(&result, "s").transform, Transform::Aggregation);
 }
 
 #[test]
@@ -131,19 +104,19 @@ fn strongest_transform_along_the_chain_wins() {
         "WITH a AS (SELECT x + 1 AS s FROM t), b AS (SELECT MAX(s) AS s FROM a) SELECT s FROM b",
         Dialect::Generic,
     );
-    assert_eq!(mapping(&result, "s").transform, TransformKind::Aggregation);
+    assert_eq!(mapping(&result, "s").transform, Transform::Aggregation);
     // aggregate upstream, expression downstream
     let result = run(
         "WITH a AS (SELECT SUM(x) AS s FROM t), b AS (SELECT s + 1 AS s FROM a) SELECT s FROM b",
         Dialect::Generic,
     );
-    assert_eq!(mapping(&result, "s").transform, TransformKind::Aggregation);
+    assert_eq!(mapping(&result, "s").transform, Transform::Aggregation);
     // conditional upstream, plain reference downstream
     let result = run(
         "WITH a AS (SELECT CASE WHEN x > 1 THEN y END AS s FROM t) SELECT s FROM a",
         Dialect::Generic,
     );
-    assert_eq!(mapping(&result, "s").transform, TransformKind::Conditional);
+    assert_eq!(mapping(&result, "s").transform, Transform::Conditional);
 }
 
 #[test]
@@ -153,8 +126,8 @@ fn plain_pass_through_stays_direct() {
         Dialect::Generic,
     );
     let m = mapping(&result, "s");
-    assert_eq!(m.transform, TransformKind::Direct);
-    assert_eq!(concrete(m), [pair("t", "x")]);
+    assert_eq!(m.transform, Transform::Direct);
+    assert_eq!(concrete_sources(m), [pair("t", "x")]);
 }
 
 /// An unqualified reference in a scope with more than one relation reaches
@@ -177,7 +150,7 @@ fn unqualified_reference_in_a_join_is_classified_like_the_qualified_one() {
             let right = run(qualified, dialect);
             assert_eq!(
                 mapping(&left, "s").transform,
-                TransformKind::Aggregation,
+                Transform::Aggregation,
                 "{dialect:?}: {unqualified}"
             );
             assert_eq!(
@@ -186,8 +159,8 @@ fn unqualified_reference_in_a_join_is_classified_like_the_qualified_one() {
                 "{dialect:?}: {unqualified}"
             );
             assert_eq!(
-                concrete(mapping(&left, "s")),
-                concrete(mapping(&right, "s")),
+                concrete_sources(mapping(&left, "s")),
+                concrete_sources(mapping(&right, "s")),
                 "{dialect:?}: {unqualified}"
             );
         }
@@ -201,8 +174,8 @@ fn unqualified_source_free_aggregate_in_a_join_is_an_aggregation() {
         Dialect::Generic,
     );
     let m = mapping(&result, "c");
-    assert_eq!(m.transform, TransformKind::Aggregation);
-    assert!(m.sources.is_empty());
+    assert_eq!(m.transform, Transform::Aggregation);
+    assert!(matches!(&m.lineage, Lineage::Complete(sources) if sources.is_empty()));
 }
 
 #[test]
@@ -214,7 +187,7 @@ fn unqualified_reference_in_a_join_keeps_every_set_operation_branch() {
             dialect,
         );
         assert_eq!(
-            concrete(mapping(&result, "s")),
+            concrete_sources(mapping(&result, "s")),
             [pair("t", "x"), pair("u2", "y")],
             "{dialect:?}"
         );
@@ -227,11 +200,11 @@ fn unqualified_reference_between_two_providers_is_still_ambiguous() {
         "SELECT s FROM (SELECT SUM(x) AS s FROM t) d1 JOIN (SELECT COUNT(y) AS s FROM u) d2 ON true",
         Dialect::Generic,
     );
-    match mapping(&result, "s").sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "s");
-            assert_eq!(candidates, &[TableRef::new("d1"), TableRef::new("d2")]);
-        }
-        other => panic!("expected Ambiguous, got {other:?}"),
-    }
+    assert!(matches!(
+        &mapping(&result, "s").lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+                if column.value == "s" && candidates.len() == 2
+                    && candidates.iter().all(|candidate| matches!(candidate, Candidate::Derived(Some(_)))))
+    ));
 }

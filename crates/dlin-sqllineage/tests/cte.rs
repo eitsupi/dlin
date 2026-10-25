@@ -1,17 +1,17 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use dlin_sqllineage::{ColumnMapping, ColumnOrigin, TableRef, TransformKind};
+use common::{output_name, unresolved};
+use dlin_sqllineage::{
+    Analyzer, Dialect, Ident, Lineage, OutputColumn, Relation, Shape, Transform, Unresolved,
+};
 
-fn has_wildcard_from(mapping: &ColumnMapping, table_name: &str) -> bool {
-    mapping.sources.iter().any(|source| {
-        match source {
-        ColumnOrigin::Wildcard { table } => table.table == table_name,
-        ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(|source| {
-            matches!(source, ColumnOrigin::Wildcard { table } if table.table == table_name)
-        }),
+fn has_wildcard_from(column: &OutputColumn, table_name: &str) -> bool {
+    unresolved(column).iter().any(|source| match source {
+        Unresolved::BehindStar { relation } | Unresolved::NamedBehindStar { relation, .. } => {
+            relation.name.value == table_name
+        }
         _ => false,
-    }
     })
 }
 
@@ -19,25 +19,23 @@ fn has_wildcard_from(mapping: &ColumnMapping, table_name: &str) -> bool {
 fn single_cte() {
     let sql = "WITH cte AS (SELECT a FROM t) SELECT a FROM cte";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    assert_eq!(result.tables.output, None);
-    assert_eq!(result.columns.mappings.len(), 1);
-    let m = find_mapping(&result.columns.mappings, "a");
+    assert_eq!(result.read, vec![table("t")]);
+    assert_eq!(result.written, None);
+    assert_eq!(result.output.columns.len(), 1);
+    let m = find_mapping(&result.output.columns, "a");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
-    assert_eq!(m.transform, TransformKind::Direct);
+    assert_eq!(m.transform, Transform::Direct);
 }
 
 #[test]
 fn missing_column_from_cte_has_empty_ambiguous_candidates() {
     let sql = "WITH cte AS (SELECT present FROM source) SELECT missing FROM cte";
     let result = analyze_one(sql);
-    let m = find_mapping(&result.columns.mappings, "missing");
-    match &m.sources[0] {
-        ColumnOrigin::Ambiguous { column, candidates } => {
-            assert_eq!(column, "missing");
-            assert!(candidates.is_empty());
-        }
-        other => panic!("expected Ambiguous, got {other:?}"),
+    let m = find_mapping(&result.output.columns, "missing");
+    match &m.lineage {
+        Lineage::Partial { unresolved, .. } => assert!(matches!(&unresolved[..],
+                [Unresolved::Unbound { column }] if column.value == "missing")),
+        other => panic!("expected partial lineage, got {other:?}"),
     }
 }
 
@@ -45,9 +43,9 @@ fn missing_column_from_cte_has_empty_ambiguous_candidates() {
 fn cte_chain() {
     let sql = "WITH a AS (SELECT x FROM t), b AS (SELECT x FROM a) SELECT x FROM b";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    assert_eq!(result.columns.mappings.len(), 1);
-    let m = find_mapping(&result.columns.mappings, "x");
+    assert_eq!(result.read, vec![table("t")]);
+    assert_eq!(result.output.columns.len(), 1);
+    let m = find_mapping(&result.output.columns, "x");
     assert_eq!(concrete_sources(m), vec![("t".into(), "x".into())]);
 }
 
@@ -55,14 +53,14 @@ fn cte_chain() {
 fn cte_multiple_refs() {
     let sql = "WITH cte AS (SELECT a FROM t) SELECT c1.a AS a1, c2.a AS a2 FROM cte c1, cte c2";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.read, vec![table("t")]);
+    assert_eq!(result.output.columns.len(), 2);
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "a1")),
+        concrete_sources(find_mapping(&result.output.columns, "a1")),
         vec![("t".into(), "a".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "a2")),
+        concrete_sources(find_mapping(&result.output.columns, "a2")),
         vec![("t".into(), "a".into())]
     );
 }
@@ -73,10 +71,10 @@ fn cte_shadowing() {
         WITH x AS (SELECT a FROM t1) \
         SELECT b FROM (WITH x AS (SELECT b FROM t2) SELECT b FROM x) sub";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs.clone();
+    let mut inputs = result.read.clone();
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
-    let m = find_mapping(&result.columns.mappings, "b");
+    let m = find_mapping(&result.output.columns, "b");
     assert_eq!(concrete_sources(m), vec![("t2".into(), "b".into())]);
 }
 
@@ -89,30 +87,14 @@ fn recursive_cte_base_case() {
             SELECT a FROM cte\
         ) SELECT a FROM cte";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.read, vec![table("t")]);
+    assert_eq!(result.output.columns.len(), 1);
 
-    let m = &result.columns.mappings[0];
-    assert_eq!(m.target.column, "a");
-    match &m.sources[0] {
-        ColumnOrigin::Recursive { base_sources } => {
-            assert!(!base_sources.is_empty());
-            assert!(base_sources.iter().all(|source| {
-                !matches!(
-                    source,
-                    ColumnOrigin::Concrete { table, .. } if table.table == "cte"
-                )
-            }));
-            match &base_sources[0] {
-                ColumnOrigin::Concrete { table, column } => {
-                    assert_eq!(table.table, "t");
-                    assert_eq!(column, "a");
-                }
-                other => panic!("expected Concrete in base_sources, got: {other:?}"),
-            }
-        }
-        other => panic!("expected Recursive origin, got: {other:?}"),
-    }
+    let m = &result.output.columns[0];
+    assert_eq!(output_name(m), Some("a"));
+    assert!(matches!(&m.lineage, Lineage::Partial { known, unresolved }
+        if known.iter().any(|source| source.relation.name.value == "t" && source.column.value == "a")
+            && unresolved.iter().any(|source| matches!(source, Unresolved::Recursive))));
 }
 
 #[test]
@@ -126,9 +108,9 @@ fn recursive_cte_no_cycle_warning() {
     let result = analyze_one(sql);
     assert!(
         !result
-            .warnings
+            .diagnostics
             .iter()
-            .any(|w| matches!(w.kind, dlin_sqllineage::WarningKind::UnexpectedCycle)),
+            .any(|d| matches!(d.kind, dlin_sqllineage::DiagnosticKind::UnexpectedCycle)),
         "topological sort should succeed after back-edge removal"
     );
 }
@@ -137,8 +119,8 @@ fn recursive_cte_no_cycle_warning() {
 fn derived_table() {
     let sql = "SELECT x FROM (SELECT a AS x FROM t) sub";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    let m = find_mapping(&result.columns.mappings, "x");
+    assert_eq!(result.read, vec![table("t")]);
+    let m = find_mapping(&result.output.columns, "x");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
 }
 
@@ -146,10 +128,10 @@ fn derived_table() {
 fn scalar_subquery_table_input() {
     let sql = "SELECT a, (SELECT MAX(b) FROM t2) AS m FROM t1";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs.clone();
+    let mut inputs = result.read.clone();
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
-    let m_a = find_mapping(&result.columns.mappings, "a");
+    let m_a = find_mapping(&result.output.columns, "a");
     assert_eq!(concrete_sources(m_a), vec![("t1".into(), "a".into())]);
 }
 
@@ -157,7 +139,7 @@ fn scalar_subquery_table_input() {
 fn correlated_subquery_table_input() {
     let sql = "SELECT a, (SELECT MAX(b) FROM t2 WHERE t2.id = t1.id) AS mb FROM t1";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs.clone();
+    let mut inputs = result.read.clone();
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
 }
@@ -166,17 +148,17 @@ fn correlated_subquery_table_input() {
 fn union_all_columns() {
     let sql = "SELECT a, b FROM t1 UNION ALL SELECT c, d FROM t2";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs.clone();
+    let mut inputs = result.read.clone();
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
-    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.output.columns.len(), 2);
 
-    let m_a = find_mapping(&result.columns.mappings, "a");
+    let m_a = find_mapping(&result.output.columns, "a");
     assert_eq!(
         concrete_sources(m_a),
         vec![("t1".into(), "a".into()), ("t2".into(), "c".into())]
     );
-    let m_b = find_mapping(&result.columns.mappings, "b");
+    let m_b = find_mapping(&result.output.columns, "b");
     assert_eq!(
         concrete_sources(m_b),
         vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
@@ -188,15 +170,15 @@ fn union_keeps_left_names_and_merges_explicit_columns_positionally() {
     let sql = "SELECT a AS left_name, b AS second_name FROM t1 \
                UNION ALL SELECT c AS right_name, d AS other_name FROM t2";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 2);
-    assert_eq!(result.columns.mappings[0].target.column, "left_name");
-    assert_eq!(result.columns.mappings[1].target.column, "second_name");
+    assert_eq!(result.output.columns.len(), 2);
+    assert_eq!(output_name(&result.output.columns[0]), Some("left_name"));
+    assert_eq!(output_name(&result.output.columns[1]), Some("second_name"));
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("t1".into(), "a".into()), ("t2".into(), "c".into())]
     );
     assert_eq!(
-        concrete_sources(&result.columns.mappings[1]),
+        concrete_sources(&result.output.columns[1]),
         vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
     );
 }
@@ -207,10 +189,10 @@ fn nested_union_preserves_outer_left_names_and_all_branch_sources() {
                UNION ALL SELECT b AS second_name FROM t2 \
                UNION ALL SELECT c AS third_name FROM t3";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 1);
-    assert_eq!(result.columns.mappings[0].target.column, "first_name");
+    assert_eq!(result.output.columns.len(), 1);
+    assert_eq!(output_name(&result.output.columns[0]), Some("first_name"));
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![
             ("t1".into(), "a".into()),
             ("t2".into(), "b".into()),
@@ -223,65 +205,46 @@ fn nested_union_preserves_outer_left_names_and_all_branch_sources() {
 fn union_transform_prefers_aggregation_across_branches() {
     let sql = "SELECT SUM(a) AS value FROM t1 UNION ALL SELECT b AS other_value FROM t2";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 1);
-    assert_eq!(result.columns.mappings[0].target.column, "value");
+    assert_eq!(result.output.columns.len(), 1);
+    assert_eq!(output_name(&result.output.columns[0]), Some("value"));
     assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
+        concrete_sources(&result.output.columns[0]),
         vec![("t1".into(), "a".into()), ("t2".into(), "b".into())]
     );
-    assert_eq!(
-        result.columns.mappings[0].transform,
-        TransformKind::Aggregation
-    );
+    assert_eq!(result.output.columns[0].transform, Transform::Aggregation);
 }
 
 #[test]
 fn unknown_leading_star_is_preserved_without_catalog() {
     let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT a, b FROM known");
-    assert_eq!(result.columns.mappings.len(), 3);
-    match &result.columns.mappings[0].sources[0] {
-        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "unknown_left"),
-        other => panic!("expected wildcard, got {other:?}"),
-    }
-    assert!(has_wildcard_from(
-        &result.columns.mappings[1],
-        "unknown_left"
-    ));
-    assert!(has_wildcard_from(
-        &result.columns.mappings[2],
-        "unknown_left"
-    ));
+    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
+        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_left"))));
+    assert!(
+        result
+            .output
+            .columns
+            .iter()
+            .any(|column| has_wildcard_from(column, "unknown_left"))
+    );
 }
 
 #[test]
 fn unknown_non_leading_star_does_not_drop_known_branch_columns() {
     let result = analyze_one("SELECT id, * FROM unknown_left UNION ALL SELECT a, b, c FROM known");
-    assert_eq!(result.columns.mappings.len(), 4);
-    assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { .. }, ColumnOrigin::Concrete { .. }]
-    ));
-    match &result.columns.mappings[1].sources[0] {
-        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "unknown_left"),
-        other => panic!("expected wildcard, got {other:?}"),
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
+    for name in ["b", "c"] {
+        let column = find_mapping(&result.output.columns, name);
+        assert_eq!(column.ordinal, None);
+        assert!(has_wildcard_from(column, "unknown_left"));
     }
-    assert!(has_wildcard_from(
-        &result.columns.mappings[2],
-        "unknown_left"
-    ));
-    assert!(has_wildcard_from(
-        &result.columns.mappings[3],
-        "unknown_left"
-    ));
-    assert_eq!(result.columns.mappings[2].target.column, "b");
-    assert_eq!(result.columns.mappings[3].target.column, "c");
 }
 
 #[test]
 fn unknown_right_star_marks_known_left_tail_as_unresolved() {
     let result = analyze_one("SELECT a, b, c FROM known UNION ALL SELECT * FROM unknown_right");
-    assert_eq!(result.columns.mappings.len(), 4);
-    for mapping in &result.columns.mappings[..3] {
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
+    assert_eq!(result.output.columns.len(), 3);
+    for mapping in &result.output.columns {
         assert!(has_wildcard_from(mapping, "unknown_right"));
     }
 }
@@ -289,23 +252,9 @@ fn unknown_right_star_marks_known_left_tail_as_unresolved() {
 #[test]
 fn unknown_stars_on_both_set_branches_are_both_retained() {
     let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT * FROM unknown_right");
-    assert_eq!(result.columns.mappings.len(), 2);
-    for (mapping, table_name) in result
-        .columns
-        .mappings
-        .iter()
-        .zip(["unknown_left", "unknown_right"])
-    {
-        assert!(has_wildcard_from(mapping, table_name));
-        assert!(has_wildcard_from(
-            mapping,
-            if table_name == "unknown_left" {
-                "unknown_right"
-            } else {
-                "unknown_left"
-            }
-        ));
-    }
+    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
+        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_left"))
+            && unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "unknown_right"))));
 }
 
 #[test]
@@ -313,21 +262,13 @@ fn nested_unknown_set_keeps_every_branch_mapping() {
     let result = analyze_one(
         "SELECT * FROM unknown_left UNION ALL SELECT a FROM known UNION ALL SELECT * FROM unknown_right",
     );
-    assert_eq!(result.columns.mappings.len(), 3);
-    assert!(matches!(
-        result.columns.mappings[0].sources[0],
-        ColumnOrigin::Wildcard { .. }
-    ));
-    assert!(matches!(
-        result.columns.mappings[2].sources[0],
-        ColumnOrigin::Wildcard { .. }
-    ));
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
     assert!(has_wildcard_from(
-        &result.columns.mappings[1],
+        find_mapping(&result.output.columns, "a"),
         "unknown_left"
     ));
     assert!(has_wildcard_from(
-        &result.columns.mappings[1],
+        find_mapping(&result.output.columns, "a"),
         "unknown_right"
     ));
 }
@@ -339,28 +280,30 @@ fn leading_unknown_star_hides_nonleading_only_set_names() {
          UNION ALL SELECT id, amt AS total FROM known_table \
          UNION ALL SELECT id, fee FROM third_table",
     );
+    assert!(matches!(&result.output.shape, Shape::Open { .. }));
     let names = result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.as_str())
+        .map(|mapping| output_name(mapping).unwrap_or(""))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["*", "id", "total"]);
+    assert_eq!(names, vec!["id", "total"]);
 }
 
 #[test]
 fn exact_set_arity_mismatch_is_an_analysis_error() {
-    let result = dlin_sqllineage::analyze(
-        "SELECT a FROM t1 UNION ALL SELECT b, c FROM t2",
-        dlin_sqllineage::AnalyzeOptions::default(),
-    );
-    let error = match result {
-        Ok(_) => panic!("exact arity mismatch should not be truncated"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.message,
-        "set operation arity mismatch: left has 1 columns, right has 2 columns"
+    let result = Analyzer::new(Dialect::Generic)
+        .analyze("SELECT a FROM t1 UNION ALL SELECT b, c FROM t2")
+        .unwrap();
+    assert!(result.statements[0].output.columns.is_empty());
+    assert!(
+        result.statements[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| matches!(
+                diagnostic.kind,
+                dlin_sqllineage::DiagnosticKind::SetOperationArityMismatch { left: 1, right: 2 }
+            ))
     );
 }
 
@@ -370,10 +313,10 @@ fn union_inside_cte() {
         WITH cte AS (SELECT a FROM t1 UNION ALL SELECT b FROM t2) \
         SELECT a FROM cte";
     let result = analyze_one(sql);
-    let mut inputs = result.tables.inputs.clone();
+    let mut inputs = result.read.clone();
     inputs.sort();
     assert_eq!(inputs, vec![table("t1"), table("t2")]);
-    let m = find_mapping(&result.columns.mappings, "a");
+    let m = find_mapping(&result.output.columns, "a");
     assert_eq!(
         concrete_sources(m),
         vec![("t1".into(), "a".into()), ("t2".into(), "b".into())]
@@ -389,28 +332,28 @@ fn select_star_from_derived_table() {
         )";
     let result = analyze_one(sql);
     assert_eq!(
-        result.tables.inputs,
-        vec![TableRef {
-            catalog: Some("core".into()),
-            schema: Some("cos_dw".into()),
-            table: "some_table".into(),
+        result.read,
+        vec![Relation {
+            catalog: Some(Ident::unquoted("core")),
+            schema: Some(Ident::unquoted("cos_dw")),
+            name: Ident::unquoted("some_table"),
         }]
     );
-    assert_eq!(result.columns.mappings.len(), 3);
-    let m = find_mapping(&result.columns.mappings, "base_date");
+    assert_eq!(result.output.columns.len(), 3);
+    let m = find_mapping(&result.output.columns, "base_date");
     assert_eq!(
         concrete_sources(m),
         vec![("some_table".into(), "base_date".into())]
     );
-    assert_eq!(m.transform, TransformKind::Direct);
+    assert_eq!(m.transform, Transform::Direct);
 
-    let m = find_mapping(&result.columns.mappings, "money_code");
+    let m = find_mapping(&result.output.columns, "money_code");
     assert_eq!(
         concrete_sources(m),
         vec![("some_table".into(), "money_code".into())]
     );
 
-    let m = find_mapping(&result.columns.mappings, "action_type_code");
+    let m = find_mapping(&result.output.columns, "action_type_code");
     assert_eq!(
         concrete_sources(m),
         vec![("some_table".into(), "action_type_code".into())]
@@ -421,11 +364,11 @@ fn select_star_from_derived_table() {
 fn select_star_from_cte() {
     let sql = "WITH cte AS (SELECT a, b FROM t) SELECT * FROM cte";
     let result = analyze_one(sql);
-    assert_eq!(result.tables.inputs, vec![table("t")]);
-    assert_eq!(result.columns.mappings.len(), 2);
-    let m = find_mapping(&result.columns.mappings, "a");
+    assert_eq!(result.read, vec![table("t")]);
+    assert_eq!(result.output.columns.len(), 2);
+    let m = find_mapping(&result.output.columns, "a");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
-    let m = find_mapping(&result.columns.mappings, "b");
+    let m = find_mapping(&result.output.columns, "b");
     assert_eq!(concrete_sources(m), vec![("t".into(), "b".into())]);
 }
 
@@ -435,7 +378,7 @@ fn cte_join_unqualified_column() {
         WITH cte AS (SELECT a FROM t1) \
         SELECT a FROM cte JOIN t2 ON cte.id = t2.id";
     let result = analyze_one(sql);
-    let m = find_mapping(&result.columns.mappings, "a");
+    let m = find_mapping(&result.output.columns, "a");
     // "a" should come from CTE (which traces to t1.a), not from t2
     assert_eq!(concrete_sources(m), vec![("t1".into(), "a".into())]);
 }
@@ -444,10 +387,10 @@ fn cte_join_unqualified_column() {
 fn qualified_wildcard_on_cte() {
     let sql = "WITH cte AS (SELECT a, b FROM t) SELECT cte.* FROM cte";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 2);
-    let m = find_mapping(&result.columns.mappings, "a");
+    assert_eq!(result.output.columns.len(), 2);
+    let m = find_mapping(&result.output.columns, "a");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
-    let m = find_mapping(&result.columns.mappings, "b");
+    let m = find_mapping(&result.output.columns, "b");
     assert_eq!(concrete_sources(m), vec![("t".into(), "b".into())]);
 }
 
@@ -455,8 +398,8 @@ fn qualified_wildcard_on_cte() {
 fn nested_select_star_derived() {
     let sql = "SELECT * FROM (SELECT * FROM (SELECT a FROM t) inner_q) outer_q";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 1);
-    let m = find_mapping(&result.columns.mappings, "a");
+    assert_eq!(result.output.columns.len(), 1);
+    let m = find_mapping(&result.output.columns, "a");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
 }
 
@@ -464,7 +407,7 @@ fn nested_select_star_derived() {
 fn cte_chain_select_star() {
     let sql = "WITH a AS (SELECT x FROM t), b AS (SELECT * FROM a) SELECT * FROM b";
     let result = analyze_one(sql);
-    assert_eq!(result.columns.mappings.len(), 1);
-    let m = find_mapping(&result.columns.mappings, "x");
+    assert_eq!(result.output.columns.len(), 1);
+    let m = find_mapping(&result.output.columns, "x");
     assert_eq!(concrete_sources(m), vec![("t".into(), "x".into())]);
 }

@@ -95,11 +95,7 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
     let backend = backend_for_tests(BackendId::Sqllineage);
     let duplicate_output_names = BTreeSet::new();
 
-    for (column, expected_sources) in [
-        ("b", vec![("t", "b"), ("t", "b")]),
-        ("a", vec![("t", "a"), ("t", "a")]),
-    ]
-    .into_iter()
+    for (column, expected_sources) in [("b", vec![("t", "b")]), ("a", vec![("t", "a")])].into_iter()
     {
         let outputs = [OutputColumnRequest {
             slot: AnalysisSlot(0),

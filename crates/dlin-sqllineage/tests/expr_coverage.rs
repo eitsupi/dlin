@@ -1,99 +1,94 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping};
+use common::{analyze_one_with, catalog_entry};
 use dlin_sqllineage::{
-    AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, TransformKind, analyze,
+    Analyzer, Catalog, CatalogEntry, Dialect, Lineage, Relation, Transform, Unresolved,
 };
 
-fn analyze_with_dialect(sql: &str, dialect: Dialect) -> dlin_sqllineage::AnalyzeResult {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("SQL should parse")
-    .into_iter()
-    .next()
-    .unwrap_or_default()
+fn analyze_with_dialect(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .expect("SQL should parse")
+        .into_single()
+        .unwrap()
 }
 
 #[test]
 fn extract_year() {
     let result = analyze_one("SELECT EXTRACT(YEAR FROM hire_date) AS yr FROM t");
-    let m = find_mapping(&result.columns.mappings, "yr");
+    let m = find_mapping(&result.output.columns, "yr");
     assert_eq!(concrete_sources(m), vec![("t".into(), "hire_date".into())]);
-    assert_eq!(m.transform, TransformKind::Expression);
+    assert_eq!(m.transform, Transform::Expression);
 }
 
 #[test]
 fn ceil_expr() {
     let result = analyze_one("SELECT CEIL(price) AS p FROM t");
-    let m = find_mapping(&result.columns.mappings, "p");
+    let m = find_mapping(&result.output.columns, "p");
     assert_eq!(concrete_sources(m), vec![("t".into(), "price".into())]);
 }
 
 #[test]
 fn floor_expr() {
     let result = analyze_one("SELECT FLOOR(price) AS p FROM t");
-    let m = find_mapping(&result.columns.mappings, "p");
+    let m = find_mapping(&result.output.columns, "p");
     assert_eq!(concrete_sources(m), vec![("t".into(), "price".into())]);
 }
 
 #[test]
 fn substring_expr() {
     let result = analyze_one("SELECT SUBSTRING(name FROM 1 FOR 3) AS sub FROM t");
-    let m = find_mapping(&result.columns.mappings, "sub");
+    let m = find_mapping(&result.output.columns, "sub");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn trim_expr() {
     let result = analyze_one("SELECT TRIM(name) AS n FROM t");
-    let m = find_mapping(&result.columns.mappings, "n");
+    let m = find_mapping(&result.output.columns, "n");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn position_expr() {
     let result = analyze_one("SELECT POSITION('x' IN name) AS pos FROM t");
-    let m = find_mapping(&result.columns.mappings, "pos");
+    let m = find_mapping(&result.output.columns, "pos");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn overlay_expr() {
     let result = analyze_one("SELECT OVERLAY(name PLACING 'X' FROM 1 FOR 1) AS o FROM t");
-    let m = find_mapping(&result.columns.mappings, "o");
+    let m = find_mapping(&result.output.columns, "o");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn at_time_zone() {
     let result = analyze_one("SELECT ts AT TIME ZONE 'UTC' AS utc FROM t");
-    let m = find_mapping(&result.columns.mappings, "utc");
+    let m = find_mapping(&result.output.columns, "utc");
     assert_eq!(concrete_sources(m), vec![("t".into(), "ts".into())]);
 }
 
 #[test]
 fn collate_expr() {
     let result = analyze_one("SELECT name COLLATE \"en_US\" AS n FROM t");
-    let m = find_mapping(&result.columns.mappings, "n");
+    let m = find_mapping(&result.output.columns, "n");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn is_true_expr() {
     let result = analyze_one("SELECT active IS TRUE AS flag FROM t");
-    let m = find_mapping(&result.columns.mappings, "flag");
+    let m = find_mapping(&result.output.columns, "flag");
     assert_eq!(concrete_sources(m), vec![("t".into(), "active".into())]);
 }
 
 #[test]
 fn is_distinct_from() {
     let result = analyze_one("SELECT a IS DISTINCT FROM b AS diff FROM t");
-    let m = find_mapping(&result.columns.mappings, "diff");
+    let m = find_mapping(&result.output.columns, "diff");
     assert_eq!(
         concrete_sources(m),
         vec![("t".into(), "a".into()), ("t".into(), "b".into())]
@@ -103,14 +98,14 @@ fn is_distinct_from() {
 #[test]
 fn like_expr() {
     let result = analyze_one("SELECT name LIKE '%test%' AS matched FROM t");
-    let m = find_mapping(&result.columns.mappings, "matched");
+    let m = find_mapping(&result.output.columns, "matched");
     assert_eq!(concrete_sources(m), vec![("t".into(), "name".into())]);
 }
 
 #[test]
 fn array_expr() {
     let result = analyze_one("SELECT ARRAY[a, b] AS arr FROM t");
-    let m = find_mapping(&result.columns.mappings, "arr");
+    let m = find_mapping(&result.output.columns, "arr");
     assert_eq!(
         concrete_sources(m),
         vec![("t".into(), "a".into()), ("t".into(), "b".into())]
@@ -120,14 +115,14 @@ fn array_expr() {
 #[test]
 fn json_access() {
     let result = analyze_one("SELECT data->>'key' AS val FROM t");
-    let m = find_mapping(&result.columns.mappings, "val");
+    let m = find_mapping(&result.output.columns, "val");
     assert_eq!(concrete_sources(m), vec![("t".into(), "data".into())]);
 }
 
 #[test]
 fn qualified_compound_field_access_uses_binding_column() {
     let result = analyze_one("SELECT base.items_array[1] AS item FROM actual_table AS base");
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(m),
         vec![("actual_table".into(), "items_array".into())]
@@ -137,7 +132,7 @@ fn qualified_compound_field_access_uses_binding_column() {
 #[test]
 fn compound_field_access_retains_column_dependent_index() {
     let result = analyze_one("SELECT base.items_array[idx] AS item FROM actual_table AS base");
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(m),
         vec![
@@ -150,7 +145,7 @@ fn compound_field_access_retains_column_dependent_index() {
 #[test]
 fn nested_qualified_compound_field_access_keeps_top_level_column() {
     let result = analyze_one("SELECT base.payload.items[1] AS item FROM actual_table AS base");
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(m),
         vec![("actual_table".into(), "payload".into())]
@@ -162,7 +157,7 @@ fn cte_compound_field_access_uses_cte_binding_column() {
     let result = analyze_one(
         "WITH base AS (SELECT items_array FROM actual_table) SELECT base.items_array[1] AS item FROM base",
     );
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(m),
         vec![("actual_table".into(), "items_array".into())]
@@ -172,23 +167,18 @@ fn cte_compound_field_access_uses_cte_binding_column() {
 #[test]
 fn unqualified_compound_field_access_uses_top_level_column() {
     let result = analyze_one("SELECT payload.items[1] AS item FROM t");
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(concrete_sources(m), vec![("t".into(), "payload".into())]);
 }
 
 #[test]
 fn compound_identifier_without_visible_binding_keeps_qualified_relation_fallback() {
     let result = analyze_one("SELECT orders.id AS id");
-    let m = find_mapping(&result.columns.mappings, "id");
-    match m.sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table.catalog, None);
-            assert_eq!(table.schema, None);
-            assert_eq!(table.table, "orders");
-            assert_eq!(column, "id");
-        }
-        other => panic!("expected structured orders.id source, got {other:?}"),
-    }
+    let m = find_mapping(&result.output.columns, "id");
+    assert!(matches!(&m.lineage, Lineage::Complete(sources)
+        if matches!(&sources[..], [source]
+            if source.relation.catalog.is_none() && source.relation.schema.is_none()
+                && source.relation.name.value == "orders" && source.column.value == "id")));
 }
 
 #[test]
@@ -203,21 +193,12 @@ fn compound_identifier_without_visible_binding_preserves_relation_parts() {
         ),
     ] {
         let result = analyze_one(sql);
-        let m = find_mapping(&result.columns.mappings, "id");
-        match m.sources.as_slice() {
-            [
-                ColumnOrigin::Concrete {
-                    table: source_table,
-                    column,
-                },
-            ] => {
-                assert_eq!(source_table.catalog.as_deref(), catalog);
-                assert_eq!(source_table.schema.as_deref(), schema);
-                assert_eq!(source_table.table, table);
-                assert_eq!(column, "id");
-            }
-            other => panic!("expected structured relation source, got {other:?}"),
-        }
+        let m = find_mapping(&result.output.columns, "id");
+        assert!(matches!(&m.lineage, Lineage::Complete(sources)
+            if matches!(&sources[..], [source]
+                if source.relation.catalog.as_ref().map(|id| id.value.as_str()) == catalog
+                    && source.relation.schema.as_ref().map(|id| id.value.as_str()) == schema
+                    && source.relation.name.value == table && source.column.value == "id")));
     }
 }
 
@@ -227,7 +208,7 @@ fn bigquery_offset_compound_field_access_uses_binding_column() {
         "SELECT base.items_array[OFFSET(0)] AS item FROM actual_table AS base",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "item");
+    let m = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(m),
         vec![("actual_table".into(), "items_array".into())]
@@ -240,7 +221,7 @@ fn qualified_struct_field_access_uses_binding_column() {
         "SELECT agg.event.qualified_field AS field FROM upstream_model AS agg",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "field");
+    let m = find_mapping(&result.output.columns, "field");
     assert_eq!(
         concrete_sources(m),
         vec![("upstream_model".into(), "event".into())]
@@ -254,11 +235,11 @@ fn bigquery_date_trunc_week_modifier_is_syntax_only() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "monday_start")),
+        concrete_sources(find_mapping(&result.output.columns, "monday_start")),
         vec![("events".into(), "event_date".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "sunday_start")),
+        concrete_sources(find_mapping(&result.output.columns, "sunday_start")),
         vec![("events".into(), "event_date".into())]
     );
 }
@@ -269,7 +250,7 @@ fn unqualified_struct_field_access_uses_top_level_column() {
         "SELECT event.bare_field AS field FROM upstream_model",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "field");
+    let m = find_mapping(&result.output.columns, "field");
     assert_eq!(
         concrete_sources(m),
         vec![("upstream_model".into(), "event".into())]
@@ -283,7 +264,7 @@ fn bigquery_date_diff_isoweek_keeps_only_date_values() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "days")),
+        concrete_sources(find_mapping(&result.output.columns, "days")),
         vec![
             ("events".into(), "event_date".into()),
             ("events".into(), "other_date".into()),
@@ -296,7 +277,7 @@ fn cte_struct_field_access_uses_cte_binding_column() {
     let result = analyze_one(
         "WITH upstream AS (SELECT event FROM source) SELECT upstream.event.field AS value FROM upstream",
     );
-    let m = find_mapping(&result.columns.mappings, "value");
+    let m = find_mapping(&result.output.columns, "value");
     assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
 }
 
@@ -305,7 +286,7 @@ fn derived_struct_field_access_uses_derived_binding_column() {
     let result = analyze_one(
         "SELECT derived.event.field AS value FROM (SELECT event FROM source) AS derived",
     );
-    let m = find_mapping(&result.columns.mappings, "value");
+    let m = find_mapping(&result.output.columns, "value");
     assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
 }
 
@@ -313,19 +294,21 @@ fn derived_struct_field_access_uses_derived_binding_column() {
 fn physical_relation_prefix_struct_field_access_uses_table_parts() {
     let result =
         analyze_one("SELECT catalog.schema.source.event.field AS value FROM catalog.schema.source");
-    let m = find_mapping(&result.columns.mappings, "value");
+    let m = find_mapping(&result.output.columns, "value");
     assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
-    assert_eq!(result.tables.inputs[0].catalog.as_deref(), Some("catalog"));
-    assert_eq!(result.tables.inputs[0].schema.as_deref(), Some("schema"));
-    match m.sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table.catalog.as_deref(), Some("catalog"));
-            assert_eq!(table.schema.as_deref(), Some("schema"));
-            assert_eq!(table.table, "source");
-            assert_eq!(column, "event");
-        }
-        other => panic!("expected concrete physical relation source, got {other:?}"),
-    }
+    assert_eq!(
+        result.read[0].catalog.as_ref().map(|id| id.value.as_str()),
+        Some("catalog")
+    );
+    assert_eq!(
+        result.read[0].schema.as_ref().map(|id| id.value.as_str()),
+        Some("schema")
+    );
+    assert!(matches!(&m.lineage, Lineage::Complete(sources)
+        if matches!(&sources[..], [source]
+            if source.relation.catalog.as_ref().is_some_and(|id| id.value == "catalog")
+                && source.relation.schema.as_ref().is_some_and(|id| id.value == "schema")
+                && source.relation.name.value == "source" && source.column.value == "event")));
 }
 
 #[test]
@@ -334,22 +317,17 @@ fn quoted_single_component_relation_name_keeps_embedded_dot() {
         "SELECT \"orders.v2\".payload.field AS value FROM \"orders.v2\"",
         Dialect::PostgreSql,
     );
-    let m = find_mapping(&result.columns.mappings, "value");
-    match m.sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table.catalog, None);
-            assert_eq!(table.schema, None);
-            assert_eq!(table.table, "orders.v2");
-            assert_eq!(column, "payload");
-        }
-        other => panic!("expected quoted relation source, got {other:?}"),
-    }
+    let m = find_mapping(&result.output.columns, "value");
+    assert!(matches!(&m.lineage, Lineage::Complete(sources)
+        if matches!(&sources[..], [source]
+            if source.relation.catalog.is_none() && source.relation.schema.is_none()
+                && source.relation.name.value == "orders.v2" && source.column.value == "payload")));
 }
 
 #[test]
 fn qualified_struct_field_access_keeps_normal_alias_column_resolution() {
     let result = analyze_one("SELECT source.user_id AS value FROM source");
-    let m = find_mapping(&result.columns.mappings, "value");
+    let m = find_mapping(&result.output.columns, "value");
     assert_eq!(
         concrete_sources(m),
         vec![("source".into(), "user_id".into())]
@@ -361,7 +339,7 @@ fn generic_date_trunc_keeps_date_part_identifiers() {
     let result =
         analyze_one("SELECT DATE_TRUNC(event_date, WEEK(MONDAY)) AS week_start FROM events");
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "week_start")),
+        concrete_sources(find_mapping(&result.output.columns, "week_start")),
         vec![
             ("events".into(), "MONDAY".into()),
             ("events".into(), "event_date".into()),
@@ -374,85 +352,56 @@ fn unqualified_struct_field_access_keeps_binding_ambiguity() {
     let result = analyze_one(
         "SELECT event.field AS value FROM first_source JOIN second_source ON first_source.id = second_source.id",
     );
-    let m = find_mapping(&result.columns.mappings, "value");
+    let m = find_mapping(&result.output.columns, "value");
     assert!(matches!(
-        m.sources.as_slice(),
-        [ColumnOrigin::Ambiguous { column, candidates }] if column == "event" && candidates.len() == 2
+        &m.lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+                if column.value == "event" && candidates.len() == 2)
     ));
 }
 
 struct UnqualifiedStructCatalog;
 
-impl CatalogProvider for UnqualifiedStructCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        match table.table.as_str() {
-            "first_source" => Some(vec!["event".into()]),
-            "second_source" => Some(vec!["other".into()]),
+impl Catalog for UnqualifiedStructCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        match relation.name.value.as_str() {
+            "first_source" => Some(catalog_entry(relation, &["event"])),
+            "second_source" => Some(catalog_entry(relation, &["other"])),
             _ => None,
         }
-    }
-
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        (column == "event")
-            .then(|| {
-                candidates
-                    .iter()
-                    .find(|table| table.table == "first_source")
-                    .cloned()
-            })
-            .flatten()
     }
 }
 
 #[test]
 fn unqualified_struct_field_access_uses_catalog_owner_for_ambiguous_root() {
-    let result = analyze(
+    let result = analyze_one_with(
         "SELECT event.field AS value FROM first_source JOIN second_source ON first_source.id = second_source.id",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            catalog: Some(Box::new(UnqualifiedStructCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("SQL should parse")
-    .remove(0);
-    let m = find_mapping(&result.columns.mappings, "value");
-    match m.sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table.table, "first_source");
-            assert_eq!(column, "event");
-        }
-        other => panic!("expected catalog-resolved source, got {other:?}"),
-    }
+        Dialect::BigQuery,
+        Some(&UnqualifiedStructCatalog),
+    );
+    let m = find_mapping(&result.output.columns, "value");
+    assert!(matches!(&m.lineage, Lineage::Complete(sources)
+        if matches!(&sources[..], [source]
+            if source.relation.name.value == "first_source" && source.column.value == "event")));
 }
 
 struct RowValueCatalog;
 
-impl CatalogProvider for RowValueCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        (table.table == "source_table").then(|| vec!["source".into()])
-    }
-
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        (column == "source")
-            .then(|| candidates.first().cloned())
-            .flatten()
+impl Catalog for RowValueCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        (relation.name.value == "source_table").then(|| catalog_entry(relation, &["source"]))
     }
 }
 
 #[test]
 fn bigquery_row_value_alias_prefers_catalog_column_with_same_name() {
-    let result = analyze(
+    let result = analyze_one_with(
         "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
-        AnalyzeOptions {
-            dialect: Dialect::BigQuery,
-            catalog: Some(Box::new(RowValueCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("SQL should parse")
-    .remove(0);
-    let m = find_mapping(&result.columns.mappings, "event");
+        Dialect::BigQuery,
+        Some(&RowValueCatalog),
+    );
+    let m = find_mapping(&result.output.columns, "event");
     assert_eq!(
         concrete_sources(m),
         vec![("source_table".into(), "source".into())]
@@ -465,7 +414,7 @@ fn bigquery_row_value_alias_prefers_cte_output_column_with_same_name() {
         "WITH source AS (SELECT source_table AS source FROM base) SELECT ARRAY_AGG(source) AS event FROM source",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "event");
+    let m = find_mapping(&result.output.columns, "event");
     assert_eq!(
         concrete_sources(m),
         vec![("base".into(), "source_table".into())]
@@ -479,11 +428,11 @@ fn bigquery_date_trunc_isoyear_and_timezone_data_are_classified() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "year_start")),
+        concrete_sources(find_mapping(&result.output.columns, "year_start")),
         vec![("events".into(), "event_date".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "ts_day")),
+        concrete_sources(find_mapping(&result.output.columns, "ts_day")),
         vec![
             ("events".into(), "event_ts".into()),
             ("events".into(), "tz_name".into()),
@@ -497,7 +446,7 @@ fn bigquery_row_value_alias_prefers_derived_output_column_with_same_name() {
         "SELECT ARRAY_AGG(source) AS event FROM (SELECT source_table AS source FROM base) AS source",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "event");
+    let m = find_mapping(&result.output.columns, "event");
     assert_eq!(
         concrete_sources(m),
         vec![("base".into(), "source_table".into())]
@@ -511,7 +460,7 @@ fn bigquery_date_trunc_three_argument_form_is_not_a_timezone_signature() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "day_start")),
+        concrete_sources(find_mapping(&result.output.columns, "day_start")),
         vec![
             ("events".into(), "DAY".into()),
             ("events".into(), "event_date".into()),
@@ -526,11 +475,11 @@ fn bigquery_row_value_relation_alias_is_not_a_column() {
         "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
         Dialect::BigQuery,
     );
-    let m = find_mapping(&result.columns.mappings, "event");
+    let m = find_mapping(&result.output.columns, "event");
     assert!(matches!(
-        m.sources.as_slice(),
-        [ColumnOrigin::Ambiguous { column, candidates }]
-            if column == "source" && candidates.is_empty()
+        &m.lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::RowValue { alias }] if alias.value == "source")
     ));
 }
 
@@ -540,18 +489,18 @@ fn postgresql_row_value_relation_alias_is_not_a_column() {
         "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
         Dialect::PostgreSql,
     );
-    let m = find_mapping(&result.columns.mappings, "event");
+    let m = find_mapping(&result.output.columns, "event");
     assert!(matches!(
-        m.sources.as_slice(),
-        [ColumnOrigin::Ambiguous { column, candidates }]
-            if column == "source" && candidates.is_empty()
+        &m.lineage,
+        Lineage::Partial { unresolved, .. }
+            if matches!(&unresolved[..], [Unresolved::RowValue { alias }] if alias.value == "source")
     ));
 }
 
 #[test]
 fn generic_row_value_relation_alias_preserves_existing_behavior() {
     let result = analyze_one("SELECT ARRAY_AGG(source) AS event FROM source_table AS source");
-    let m = find_mapping(&result.columns.mappings, "event");
+    let m = find_mapping(&result.output.columns, "event");
     assert_eq!(
         concrete_sources(m),
         vec![("source_table".into(), "source".into())]
@@ -565,7 +514,7 @@ fn bigquery_date_part_position_can_still_be_a_data_expression() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "week_start")),
+        concrete_sources(find_mapping(&result.output.columns, "week_start")),
         vec![("events".into(), "WEEK".into())]
     );
 }
@@ -577,11 +526,11 @@ fn bigquery_last_day_has_optional_static_part() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "month_end")),
+        concrete_sources(find_mapping(&result.output.columns, "month_end")),
         vec![("events".into(), "event_date".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "day_end")),
+        concrete_sources(find_mapping(&result.output.columns, "day_end")),
         vec![("events".into(), "event_date".into())]
     );
 }
@@ -593,7 +542,7 @@ fn unknown_udf_keeps_all_arguments() {
         Dialect::BigQuery,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "udf_value")),
+        concrete_sources(find_mapping(&result.output.columns, "udf_value")),
         vec![
             ("events".into(), "ISOYEAR".into()),
             ("events".into(), "event_date".into()),
@@ -608,18 +557,18 @@ fn snowflake_date_part_signatures_skip_only_static_parts() {
         Dialect::Snowflake,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        concrete_sources(find_mapping(&result.output.columns, "added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_date".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "year_value")),
+        concrete_sources(find_mapping(&result.output.columns, "year_value")),
         vec![("events".into(), "event_date".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        concrete_sources(find_mapping(&result.output.columns, "truncated")),
         vec![
             ("events".into(), "dynamic_part".into()),
             ("events".into(), "event_date".into()),
@@ -634,7 +583,7 @@ fn mysql_and_databricks_date_part_signatures_are_dialect_scoped() {
         Dialect::MySql,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&mysql.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&mysql.output.columns, "elapsed")),
         vec![
             ("events".into(), "end_date".into()),
             ("events".into(), "start_date".into()),
@@ -646,7 +595,7 @@ fn mysql_and_databricks_date_part_signatures_are_dialect_scoped() {
         Dialect::Databricks,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&databricks.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&databricks.output.columns, "elapsed")),
         vec![
             ("events".into(), "end_date".into()),
             ("events".into(), "start_date".into()),
@@ -661,14 +610,14 @@ fn mysql_date_part_aliases_are_limited_to_legal_timestamp_units() {
         Dialect::MySql,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "aliased")),
+        concrete_sources(find_mapping(&result.output.columns, "aliased")),
         vec![
             ("events".into(), "end_date".into()),
             ("events".into(), "start_date".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "composite")),
+        concrete_sources(find_mapping(&result.output.columns, "composite")),
         vec![
             ("events".into(), "DAY_SECOND".into()),
             ("events".into(), "end_date".into()),
@@ -684,14 +633,14 @@ fn databricks_add_and_diff_have_distinct_date_part_grammars() {
         Dialect::Databricks,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        concrete_sources(find_mapping(&result.output.columns, "added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&result.output.columns, "elapsed")),
         vec![
             ("events".into(), "DAYOFYEAR".into()),
             ("events".into(), "end_ts".into()),
@@ -707,29 +656,29 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
         Dialect::Redshift,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        concrete_sources(find_mapping(&result.output.columns, "added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&result.output.columns, "elapsed")),
         vec![
             ("events".into(), "end_ts".into()),
             ("events".into(), "start_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "weekday_value")),
+        concrete_sources(find_mapping(&result.output.columns, "weekday_value")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "pg_weekday_value")),
+        concrete_sources(find_mapping(&result.output.columns, "pg_weekday_value")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "dayofyear_unknown")),
+        concrete_sources(find_mapping(&result.output.columns, "dayofyear_unknown")),
         vec![
             ("events".into(), "dayofyear".into()),
             ("events".into(), "event_ts".into()),
@@ -737,7 +686,7 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
     );
     for output in ["minute_alias", "week_alias", "month_alias"] {
         assert_eq!(
-            concrete_sources(find_mapping(&result.columns.mappings, output)),
+            concrete_sources(find_mapping(&result.output.columns, output)),
             vec![
                 ("events".into(), "amount".into()),
                 ("events".into(), "event_ts".into()),
@@ -745,7 +694,7 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
         );
     }
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "sqlserver_month")),
+        concrete_sources(find_mapping(&result.output.columns, "sqlserver_month")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
@@ -753,7 +702,7 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "sqlserver_week")),
+        concrete_sources(find_mapping(&result.output.columns, "sqlserver_week")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
@@ -761,7 +710,7 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "dynamic_added")),
+        concrete_sources(find_mapping(&result.output.columns, "dynamic_added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "dynamic_part".into()),
@@ -769,7 +718,7 @@ fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        concrete_sources(find_mapping(&result.output.columns, "truncated")),
         vec![("events".into(), "event_ts".into())]
     );
 }
@@ -781,68 +730,65 @@ fn mssql_temporal_profiles_keep_family_specific_date_parts() {
         Dialect::MsSql,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        concrete_sources(find_mapping(&result.output.columns, "added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&result.output.columns, "elapsed")),
         vec![
             ("events".into(), "end_ts".into()),
             ("events".into(), "start_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "big_elapsed")),
+        concrete_sources(find_mapping(&result.output.columns, "big_elapsed")),
         vec![
             ("events".into(), "end_ts".into()),
             ("events".into(), "start_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "offset_value")),
+        concrete_sources(find_mapping(&result.output.columns, "offset_value")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "iso_name")),
+        concrete_sources(find_mapping(&result.output.columns, "iso_name")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        concrete_sources(find_mapping(&result.output.columns, "truncated")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "weekday_truncated")),
+        concrete_sources(find_mapping(&result.output.columns, "weekday_truncated")),
         vec![
             ("events".into(), "event_ts".into()),
             ("events".into(), "weekday".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "bucketed")),
+        concrete_sources(find_mapping(&result.output.columns, "bucketed")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(
-            &result.columns.mappings,
-            "bucketed_with_origin"
-        )),
+        concrete_sources(find_mapping(&result.output.columns, "bucketed_with_origin")),
         vec![
             ("events".into(), "event_ts".into()),
             ("events".into(), "origin_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "bucket_microsecond")),
+        concrete_sources(find_mapping(&result.output.columns, "bucket_microsecond")),
         vec![
             ("events".into(), "event_ts".into()),
             ("events".into(), "mcs".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "dynamic_added")),
+        concrete_sources(find_mapping(&result.output.columns, "dynamic_added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "dynamic_part".into()),
@@ -850,7 +796,7 @@ fn mssql_temporal_profiles_keep_family_specific_date_parts() {
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "unknown_added")),
+        concrete_sources(find_mapping(&result.output.columns, "unknown_added")),
         vec![
             ("events".into(), "amount".into()),
             ("events".into(), "event_ts".into()),
@@ -866,18 +812,18 @@ fn spark_temporal_functions_use_generic_value_fallback() {
         Dialect::Spark,
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        concrete_sources(find_mapping(&result.output.columns, "truncated")),
         vec![("events".into(), "event_ts".into())]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        concrete_sources(find_mapping(&result.output.columns, "elapsed")),
         vec![
             ("events".into(), "end_ts".into()),
             ("events".into(), "start_ts".into()),
         ]
     );
     assert_eq!(
-        concrete_sources(find_mapping(&result.columns.mappings, "nonstandard")),
+        concrete_sources(find_mapping(&result.output.columns, "nonstandard")),
         vec![
             ("events".into(), "DAY".into()),
             ("events".into(), "end_ts".into()),

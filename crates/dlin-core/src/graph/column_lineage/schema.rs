@@ -1,25 +1,41 @@
 use std::collections::{HashMap, HashSet};
 
-use super::backend::{
-    DlinDialect, LineageBackend, OutputDiscoveryRequest, catalog::CatalogSnapshot,
-};
+use super::backend::{DlinDialect, catalog::CatalogSnapshot};
 use super::relation::RelationRef;
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
+#[cfg(not(test))]
 pub(super) fn build_schema_from_manifest(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
     dialect: DlinDialect,
-    backend: &dyn LineageBackend,
+) -> Option<CatalogSnapshot> {
+    build_schema(manifest, node, dialect)
+}
+
+#[cfg(test)]
+pub(super) fn build_schema_from_manifest(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+    dialect: DlinDialect,
+    _backend: &dyn super::backend::LineageBackend,
+) -> Option<CatalogSnapshot> {
+    build_schema(manifest, node, dialect)
+}
+
+fn build_schema(
+    manifest: &Manifest,
+    node: &crate::parser::manifest::ManifestNode,
+    dialect: DlinDialect,
 ) -> Option<CatalogSnapshot> {
     let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
 
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            let col_names = resolve_node_columns(dep_node, manifest, dialect, backend);
+            let col_names = resolve_node_columns(dep_node, manifest, dialect);
             if !col_names.is_empty() {
                 has_entries |= register_model_relation(
                     &mut schema,
@@ -57,7 +73,6 @@ fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
     manifest: &Manifest,
     dialect: DlinDialect,
-    backend: &dyn LineageBackend,
 ) -> Vec<String> {
     let yaml_cols: HashSet<String> = dep_node.columns.keys().cloned().collect();
     let inferred_cols: HashSet<String> = dep_node
@@ -65,12 +80,7 @@ fn resolve_node_columns(
         .as_ref()
         .map(|code| {
             let schema = build_yaml_schema_for_node(manifest, dep_node);
-            let request = OutputDiscoveryRequest {
-                sql: code,
-                dialect,
-                catalog: schema.as_ref(),
-            };
-            super::discover_named_output_columns(backend, &request)
+            super::discover_named_output_columns(code, dialect, schema.as_ref())
         })
         .unwrap_or_default()
         .into_iter()

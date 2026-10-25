@@ -4,23 +4,23 @@
 //! changed from run to run. Every hash map is built with its own random seed,
 //! so repeating the analysis inside one process exposes the problem.
 
-use dlin_sqllineage::{AnalyzeOptions, AnalyzeResult, ColumnOrigin, Dialect, TableRef, analyze};
+use common::{output_name, table};
+use dlin_sqllineage::{
+    Analyzer, Candidate, Dialect, Lineage, Relation, StatementAnalysis, Unresolved,
+};
+mod common;
 
 const RUNS: usize = 50;
 
-fn run(sql: &str, dialect: Dialect) -> Vec<AnalyzeResult> {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
-    .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+fn run(sql: &str, dialect: Dialect) -> Vec<StatementAnalysis> {
+    Analyzer::new(dialect)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+        .statements
 }
 
 /// Analyze `sql` repeatedly and require byte-identical output every time.
-fn stable(sql: &str, dialect: Dialect) -> AnalyzeResult {
+fn stable(sql: &str, dialect: Dialect) -> StatementAnalysis {
     let first = run(sql, dialect);
     let expected = format!("{first:#?}");
     for attempt in 1..RUNS {
@@ -33,21 +33,37 @@ fn stable(sql: &str, dialect: Dialect) -> AnalyzeResult {
     first.into_iter().next().expect("one statement")
 }
 
-fn tables(names: &[&str]) -> Vec<TableRef> {
-    names.iter().map(|name| TableRef::new(*name)).collect()
+fn tables(names: &[&str]) -> Vec<Relation> {
+    names.iter().map(|name| table(name)).collect()
 }
 
-fn wildcard_tables(result: &AnalyzeResult) -> Vec<TableRef> {
-    result
-        .columns
-        .mappings
-        .iter()
-        .flat_map(|mapping| mapping.sources.iter())
-        .map(|source| match source {
-            ColumnOrigin::Wildcard { table } => table.clone(),
-            other => panic!("expected Wildcard, got {other:?}"),
-        })
-        .collect()
+fn wildcard_tables(result: &StatementAnalysis) -> Vec<Relation> {
+    match &result.output.shape {
+        dlin_sqllineage::Shape::Open { unexpanded } => unexpanded
+            .iter()
+            .filter_map(|star| star.relation.clone())
+            .collect(),
+        dlin_sqllineage::Shape::Closed => Vec::new(),
+    }
+}
+
+fn assert_ambiguous(result: &StatementAnalysis, names: &[&str]) {
+    assert!(matches!(&result.output.columns[0].lineage,
+    Lineage::Partial { unresolved, .. }
+        if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+            if column.value == "x" && candidates.len() == names.len()
+                && names.iter().all(|name| candidates.iter().any(|candidate| match candidate {
+                    Candidate::Relation(r) => r.name.value == *name,
+                    Candidate::Cte(id) | Candidate::Derived(Some(id)) => id.value == *name,
+                    Candidate::Derived(None) => false,
+                })))));
+}
+
+fn assert_complete_sources(result: &StatementAnalysis, expected: &[(&str, &str)]) {
+    assert!(
+        matches!(&result.output.columns[0].lineage, Lineage::Complete(sources)
+        if sources.iter().map(|source| (source.relation.name.value.as_str(), source.column.value.as_str())).collect::<Vec<_>>() == expected)
+    );
 }
 
 #[test]
@@ -75,12 +91,13 @@ fn lateral_join_output_is_stable() {
         Dialect::Generic,
     );
     let targets: Vec<_> = result
+        .output
         .columns
-        .mappings
         .iter()
-        .map(|mapping| mapping.target.column.as_str())
+        .map(|column| output_name(column))
         .collect();
-    assert_eq!(targets, ["*", "b"]);
+    assert_eq!(targets, [Some("b")]);
+    assert!(result.output.columns[0].ordinal.is_none());
 }
 
 #[test]
@@ -89,9 +106,16 @@ fn unnest_join_output_is_stable() {
         "SELECT x, y FROM t, UNNEST(t.arr) AS u(x), UNNEST(t.arr2) AS v(y)",
         Dialect::DuckDb,
     );
-    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.output.columns.len(), 2);
     let result = stable("SELECT * FROM t, UNNEST(t.arr) AS u(x)", Dialect::DuckDb);
-    assert_eq!(result.columns.mappings.len(), 2);
+    assert!(matches!(
+        &result.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+    assert!(result.output.columns.is_empty());
+    assert!(
+        matches!(&result.output.shape, dlin_sqllineage::Shape::Open { unexpanded } if unexpanded.len() == 2)
+    );
 }
 
 #[test]
@@ -101,13 +125,7 @@ fn ambiguous_candidates_follow_from_clause_order() {
             "SELECT x FROM t1 JOIN t2 ON t1.id = t2.id JOIN t3 ON t1.id = t3.id",
             dialect,
         );
-        match result.columns.mappings[0].sources.as_slice() {
-            [ColumnOrigin::Ambiguous { column, candidates }] => {
-                assert_eq!(column, "x");
-                assert_eq!(candidates, &tables(&["t1", "t2", "t3"]), "{dialect:?}");
-            }
-            other => panic!("expected Ambiguous, got {other:?}"),
-        }
+        assert_ambiguous(&result, &["t1", "t2", "t3"]);
     }
 }
 
@@ -121,13 +139,7 @@ fn column_shared_by_two_ctes_is_ambiguous() {
          SELECT x FROM a JOIN b ON a.x = b.x",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x");
-            assert_eq!(candidates, &tables(&["a", "b"]));
-        }
-        other => panic!("expected Ambiguous between the CTEs, got {other:?}"),
-    }
+    assert_ambiguous(&result, &["a", "b"]);
 }
 
 #[test]
@@ -136,13 +148,7 @@ fn column_shared_by_two_derived_tables_is_ambiguous() {
         "SELECT x FROM (SELECT x FROM s1) d1 JOIN (SELECT x FROM s2) d2 ON d1.x = d2.x",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x");
-            assert_eq!(candidates, &tables(&["d1", "d2"]));
-        }
-        other => panic!("expected Ambiguous between the derived tables, got {other:?}"),
-    }
+    assert_ambiguous(&result, &["d1", "d2"]);
 }
 
 /// `USING` merges the joined columns into one, so the unqualified name is
@@ -155,23 +161,7 @@ fn using_join_column_is_not_ambiguous() {
          SELECT x FROM a JOIN b USING (x)",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [
-            ColumnOrigin::Concrete {
-                table: first,
-                column: first_column,
-            },
-            ColumnOrigin::Concrete {
-                table: second,
-                column: second_column,
-            },
-        ] => {
-            assert_eq!(first, &TableRef::new("s1"));
-            assert_eq!(second, &TableRef::new("s2"));
-            assert_eq!((first_column.as_str(), second_column.as_str()), ("x", "x"));
-        }
-        other => panic!("expected both USING sources, got {other:?}"),
-    }
+    assert_complete_sources(&result, &[("s1", "x"), ("s2", "x")]);
 }
 
 #[test]
@@ -181,16 +171,7 @@ fn natural_join_column_is_not_ambiguous() {
          SELECT x FROM a NATURAL JOIN b",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [
-            ColumnOrigin::Concrete { table: first, .. },
-            ColumnOrigin::Concrete { table: second, .. },
-        ] => {
-            assert_eq!(first, &TableRef::new("s1"));
-            assert_eq!(second, &TableRef::new("s2"));
-        }
-        other => panic!("expected both NATURAL sources, got {other:?}"),
-    }
+    assert_complete_sources(&result, &[("s1", "x"), ("s2", "x")]);
 }
 
 /// A column that only one CTE publishes still resolves through that CTE, even
@@ -201,13 +182,7 @@ fn single_cte_provider_still_wins_over_tables() {
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t2 ON a.id = t2.id",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Concrete { table, column }] => {
-            assert_eq!(table, &TableRef::new("s1"));
-            assert_eq!(column, "x");
-        }
-        other => panic!("expected Concrete s1.x, got {other:?}"),
-    }
+    assert_complete_sources(&result, &[("s1", "x")]);
 }
 
 /// Each alias is a separate relation, even when both read the same CTE.
@@ -217,13 +192,7 @@ fn self_join_of_one_cte_is_ambiguous() {
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a AS a1 JOIN a AS a2 ON a1.x = a2.x",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x");
-            assert_eq!(candidates, &tables(&["a1", "a2"]));
-        }
-        other => panic!("expected Ambiguous between the CTE aliases, got {other:?}"),
-    }
+    assert_ambiguous(&result, &["a1", "a2"]);
 }
 
 #[test]
@@ -242,15 +211,7 @@ fn self_join_of_one_cte_merges_using_and_natural_columns() {
             &format!("WITH a AS (SELECT x FROM s1) SELECT x FROM a AS a1 {join}"),
             Dialect::Generic,
         );
-        match result.columns.mappings[0].sources.as_slice() {
-            [ColumnOrigin::Concrete { table, column }] => {
-                assert_eq!(table, &TableRef::new("s1"), "{join}");
-                assert_eq!(column, "x", "{join}");
-            }
-            other => {
-                panic!("expected one source after merging the aliases for {join}, got {other:?}")
-            }
-        }
+        assert_complete_sources(&result, &[("s1", "x")]);
     }
 }
 
@@ -261,11 +222,5 @@ fn self_join_alias_outside_a_merge_keeps_the_column_ambiguous() {
          SELECT x FROM a AS a1 LEFT JOIN a AS a2 USING (x), a AS a3",
         Dialect::Generic,
     );
-    match result.columns.mappings[0].sources.as_slice() {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x");
-            assert_eq!(candidates, &tables(&["a1", "a2", "a3"]));
-        }
-        other => panic!("expected Ambiguous with the alias outside the merge, got {other:?}"),
-    }
+    assert_ambiguous(&result, &["a1", "a2", "a3"]);
 }

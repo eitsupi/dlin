@@ -9,30 +9,25 @@ mod common;
 
 use common::{concrete_sources, find_mapping};
 use dlin_sqllineage::{
-    AnalyzeOptions, AnalyzeResult, CatalogProvider, ColumnMapping, ColumnOrigin, Dialect,
-    StatementType, TableRef, TransformKind, analyze,
+    Analysis, Analyzer, Candidate, Catalog, CatalogColumn, CatalogEntry, DiagnosticKind, Dialect,
+    Ident, Lineage, Relation, Severity, Shape, StatementAnalysis, StatementKind, Transform,
+    Unresolved,
 };
+use std::borrow::Cow;
 
-fn run(sql: &str, dialect: Dialect) -> Result<Vec<AnalyzeResult>, dlin_sqllineage::ParseError> {
-    analyze(
-        sql,
-        AnalyzeOptions {
-            dialect,
-            ..AnalyzeOptions::default()
-        },
-    )
+fn run(sql: &str, dialect: Dialect) -> Result<Analysis, dlin_sqllineage::ParseError> {
+    Analyzer::new(dialect).analyze(sql)
 }
 
-fn lineage(sql: &str, dialect: Dialect) -> AnalyzeResult {
+fn lineage(sql: &str, dialect: Dialect) -> StatementAnalysis {
     run(sql, dialect)
         .unwrap_or_else(|e| panic!("{dialect:?}: `{sql}` should analyze: {e}"))
-        .into_iter()
-        .next()
+        .into_single()
         .expect("one statement")
 }
 
-fn sources(result: &AnalyzeResult, column: &str) -> Vec<(String, String)> {
-    concrete_sources(find_mapping(&result.columns.mappings, column))
+fn sources(result: &StatementAnalysis, column: &str) -> Vec<(String, String)> {
+    concrete_sources(find_mapping(&result.output.columns, column))
 }
 
 fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -44,12 +39,11 @@ fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
     v
 }
 
-fn input_names(result: &AnalyzeResult) -> Vec<String> {
+fn input_names(result: &StatementAnalysis) -> Vec<String> {
     let mut v: Vec<String> = result
-        .tables
-        .inputs
+        .read
         .iter()
-        .map(|t| t.table.clone())
+        .map(|relation| relation.name.value.clone())
         .collect();
     v.sort();
     v
@@ -65,15 +59,15 @@ const NESTED_JOIN_SQL: &str = "SELECT a.x AS ax, b.y AS bv, c.z AS cz \
 const BARE_JOIN_CHAIN_SQL: &str = "SELECT a.x AS ax, b.y AS bv, c.z AS cz \
      FROM a JOIN b JOIN c ON c.id = a.id";
 
-fn assert_three_way_join(result: &AnalyzeResult) {
+fn assert_three_way_join(result: &StatementAnalysis) {
     assert_eq!(input_names(result), vec!["a", "b", "c"]);
     assert_eq!(sources(result, "ax"), pairs(&[("a", "x")]));
     assert_eq!(sources(result, "bv"), pairs(&[("b", "y")]));
     assert_eq!(sources(result, "cz"), pairs(&[("c", "z")]));
     for column in ["ax", "bv", "cz"] {
         assert_eq!(
-            find_mapping(&result.columns.mappings, column).transform,
-            TransformKind::Direct
+            find_mapping(&result.output.columns, column).transform,
+            Transform::Direct
         );
     }
 }
@@ -130,34 +124,38 @@ fn postgres_right_deep_join_resolves_aliases() {
 
 struct AbcCatalog;
 
-impl CatalogProvider for AbcCatalog {
-    fn list_columns(&self, _table: &TableRef) -> Option<Vec<String>> {
-        None
-    }
-
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
-        let owner = match column {
-            "x" => "a",
-            "y" => "b",
-            "z" => "c",
+impl Catalog for AbcCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        let valid = match relation.name.value.as_str() {
+            "a" => vec!["x", "id"],
+            "b" => vec!["y", "id"],
+            "c" => vec!["z", "id"],
             _ => return None,
         };
-        candidates.iter().find(|t| t.table == owner).cloned()
+        let columns = valid
+            .iter()
+            .map(|name| CatalogColumn {
+                name: Ident::unquoted(*name),
+                data_type: None,
+                fields: None,
+            })
+            .collect();
+        Some(CatalogEntry {
+            relation: relation.clone(),
+            columns: Cow::Owned(columns),
+        })
     }
 }
 
 #[test]
 fn postgres_right_deep_join_unqualified_columns_use_catalog() {
-    let result = analyze(
-        "SELECT x, y, z FROM a JOIN b JOIN c ON b.id = c.id ON a.id = b.id",
-        AnalyzeOptions {
-            dialect: Dialect::PostgreSql,
-            catalog: Some(Box::new(AbcCatalog)),
-            ..AnalyzeOptions::default()
-        },
-    )
-    .expect("analyze")
-    .remove(0);
+    let catalog = AbcCatalog;
+    let result = Analyzer::new(Dialect::PostgreSql)
+        .with_catalog(&catalog)
+        .analyze("SELECT x, y, z FROM a JOIN b JOIN c ON b.id = c.id ON a.id = b.id")
+        .expect("analyze")
+        .into_single()
+        .expect("one statement");
     assert_eq!(sources(&result, "x"), pairs(&[("a", "x")]));
     assert_eq!(sources(&result, "y"), pairs(&[("b", "y")]));
     assert_eq!(sources(&result, "z"), pairs(&[("c", "z")]));
@@ -169,15 +167,27 @@ fn postgres_unqualified_column_over_nested_join_is_ambiguous_without_catalog() {
         "SELECT x FROM a JOIN b JOIN c ON b.id = c.id ON a.id = b.id",
         Dialect::PostgreSql,
     );
-    let mapping = find_mapping(&result.columns.mappings, "x");
-    match &mapping.sources[..] {
-        [ColumnOrigin::Ambiguous { column, candidates }] => {
-            assert_eq!(column, "x");
-            let mut names: Vec<_> = candidates.iter().map(|t| t.table.as_str()).collect();
-            names.sort_unstable();
-            assert_eq!(names, vec!["a", "b", "c"]);
-        }
-        other => panic!("expected an ambiguous origin over a, b and c, got {other:?}"),
+    let mapping = find_mapping(&result.output.columns, "x");
+    match &mapping.lineage {
+        Lineage::Partial { unresolved, .. } => match unresolved.as_slice() {
+            [Unresolved::Ambiguous { column, candidates }] => {
+                assert_eq!(column.value, "x");
+                let mut names: Vec<_> = candidates
+                    .iter()
+                    .map(|candidate| match candidate {
+                        Candidate::Relation(relation) => relation.name.value.as_str(),
+                        Candidate::Cte(name) => name.value.as_str(),
+                        Candidate::Derived(name) => name
+                            .as_ref()
+                            .map_or("<derived>", |name| name.value.as_str()),
+                    })
+                    .collect();
+                names.sort_unstable();
+                assert_eq!(names, vec!["a", "b", "c"]);
+            }
+            other => panic!("expected an ambiguous origin over a, b and c, got {other:?}"),
+        },
+        other => panic!("expected partial lineage, got {other:?}"),
     }
 }
 
@@ -196,8 +206,8 @@ fn sqlite_regexp_match_glob_operands_are_sources() {
     assert_eq!(sources(&result, "g"), pairs(&[("t", "e"), ("t", "f")]));
     for column in ["r", "m", "g"] {
         assert_eq!(
-            find_mapping(&result.columns.mappings, column).transform,
-            TransformKind::Expression
+            find_mapping(&result.output.columns, column).transform,
+            Transform::Expression
         );
     }
 }
@@ -226,7 +236,7 @@ fn sqlite_glob_in_where_does_not_become_a_source() {
         Dialect::SQLite,
     );
     assert_eq!(input_names(&result), vec!["t"]);
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(sources(&result, "a"), pairs(&[("t", "a")]));
 }
 
@@ -279,8 +289,8 @@ fn is_distinct_from_with_boolean_operators_keeps_every_operand() {
             "{dialect:?}"
         );
         assert_eq!(
-            find_mapping(&result.columns.mappings, "r3").transform,
-            TransformKind::Conditional,
+            find_mapping(&result.output.columns, "r3").transform,
+            Transform::Conditional,
             "{dialect:?}"
         );
     }
@@ -294,8 +304,8 @@ fn is_distinct_from_with_arithmetic_operands() {
     );
     assert_eq!(sources(&result, "r"), pairs(&[("t", "a"), ("t", "b")]));
     assert_eq!(
-        find_mapping(&result.columns.mappings, "r").transform,
-        TransformKind::Expression
+        find_mapping(&result.output.columns, "r").transform,
+        Transform::Expression
     );
 }
 
@@ -307,7 +317,7 @@ fn is_distinct_from_in_where_and_join_conditions_adds_no_sources() {
         Dialect::PostgreSql,
     );
     assert_eq!(input_names(&result), vec!["t1", "t2"]);
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(sources(&result, "a"), pairs(&[("t1", "a")]));
 }
 
@@ -324,8 +334,8 @@ fn mysql_div_precedence_keeps_every_operand() {
             "{column}"
         );
         assert_eq!(
-            find_mapping(&result.columns.mappings, column).transform,
-            TransformKind::Expression,
+            find_mapping(&result.output.columns, column).transform,
+            Transform::Expression,
             "{column}"
         );
     }
@@ -361,15 +371,15 @@ fn is_json_predicate_operand_is_a_source() {
         pairs(&[("t", "body"), ("t", "id")])
     );
     assert_eq!(
-        find_mapping(&result.columns.mappings, "ok").transform,
-        TransformKind::Expression
+        find_mapping(&result.output.columns, "ok").transform,
+        Transform::Expression
     );
 }
 
 #[test]
 fn is_json_in_where_adds_no_sources() {
     let result = lineage("SELECT a FROM t WHERE b IS JSON", Dialect::PostgreSql);
-    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.output.columns.len(), 1);
     assert_eq!(sources(&result, "a"), pairs(&[("t", "a")]));
 }
 
@@ -406,7 +416,7 @@ fn unparenthesized_in_operand_is_a_source() {
             continue;
         };
         assert_eq!(
-            sources(&results[0], "m"),
+            sources(&results.statements[0], "m"),
             pairs(&[("t", "a"), ("t", "b")]),
             "{dialect:?}"
         );
@@ -430,11 +440,18 @@ fn redshift_unpivot_expression_is_rejected() {
         "SELECT t.id AS id FROM t, UNPIVOT t.attrs AS v AT k",
         "SELECT v FROM t, UNPIVOT t.attrs AS v AT k",
     ] {
-        let err = run(sql, Dialect::Redshift).expect_err("UNPIVOT expression must be rejected");
+        let result = lineage(sql, Dialect::Redshift);
+        assert!(result.output.columns.is_empty(), "{sql}");
         assert!(
-            err.message
-                .contains("UNPIVOT on an expression is not supported"),
-            "unexpected error: {err}"
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error
+                    && diagnostic.kind
+                        == DiagnosticKind::UnsupportedSyntax {
+                            what: "UNPIVOT on an expression",
+                        }
+            }),
+            "{sql}: {:?}",
+            result.diagnostics
         );
     }
 }
@@ -444,11 +461,10 @@ fn from_first_query_without_select_list_is_a_star() {
     for dialect in [Dialect::BigQuery, Dialect::DuckDb, Dialect::Databricks] {
         let result = lineage("FROM t", dialect);
         assert_eq!(input_names(&result), vec!["t"], "{dialect:?}");
-        let mapping = find_mapping(&result.columns.mappings, "*");
         assert!(
-            matches!(&mapping.sources[..], [ColumnOrigin::Wildcard { table }] if table.table == "t"),
-            "{dialect:?}: expected a wildcard on t, got {:?}",
-            mapping.sources
+            matches!(&result.output.shape, Shape::Open { unexpanded } if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "t"))),
+            "{dialect:?}: expected an unexpanded wildcard on t, got {:?}",
+            result.output.shape
         );
     }
 }
@@ -479,8 +495,8 @@ fn aggregate_inline_where_clause_is_not_a_source() {
         );
         assert_eq!(sources(&result, "s"), pairs(&[("t", "x")]), "{dialect:?}");
         assert_eq!(
-            find_mapping(&result.columns.mappings, "s").transform,
-            TransformKind::Aggregation,
+            find_mapping(&result.output.columns, "s").transform,
+            Transform::Aggregation,
             "{dialect:?}"
         );
         assert_eq!(sources(&result, "arr"), pairs(&[("t", "y")]), "{dialect:?}");
@@ -509,7 +525,7 @@ fn merge_do_nothing_clause_contributes_no_lineage() {
              WHEN MATCHED THEN DO NOTHING",
             dialect,
         );
-        assert_eq!(result.statement_type, StatementType::Merge, "{dialect:?}");
+        assert_eq!(result.kind, StatementKind::Merge, "{dialect:?}");
         assert_eq!(
             sources(&result, "id"),
             pairs(&[("source", "id")]),
@@ -530,12 +546,11 @@ fn merge_update_wildcard_is_an_unexpanded_star_without_catalog() {
          WHEN MATCHED THEN UPDATE SET *",
         Dialect::Databricks,
     );
-    assert_eq!(result.statement_type, StatementType::Merge);
-    assert_eq!(result.tables.output, Some(TableRef::new("target")));
+    assert_eq!(result.kind, StatementKind::Merge);
+    assert_eq!(result.written, Some(common::table("target")));
     assert_eq!(input_names(&result), vec!["source"]);
-    let mapping = find_mapping(&result.columns.mappings, "*");
-    assert_wildcard_on_source(mapping);
-    assert!(result.columns.has_unresolved_stars);
+    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
+        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))));
 }
 
 #[test]
@@ -545,9 +560,9 @@ fn merge_insert_wildcard_is_an_unexpanded_star_without_catalog() {
          WHEN NOT MATCHED THEN INSERT *",
         Dialect::Databricks,
     );
-    assert_eq!(result.statement_type, StatementType::Merge);
-    let mapping = find_mapping(&result.columns.mappings, "*");
-    assert_wildcard_on_source(mapping);
+    assert_eq!(result.kind, StatementKind::Merge);
+    assert!(matches!(&result.output.shape, Shape::Open { unexpanded }
+        if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))));
 }
 
 #[test]
@@ -557,31 +572,34 @@ fn merge_insert_row_is_an_unexpanded_star_without_catalog() {
          WHEN NOT MATCHED THEN INSERT ROW",
         Dialect::BigQuery,
     );
-    assert_eq!(result.statement_type, StatementType::Merge);
-    assert_eq!(result.tables.output, Some(TableRef::new("target")));
+    assert_eq!(result.kind, StatementKind::Merge);
+    assert_eq!(result.written, Some(common::table("target")));
     assert_eq!(input_names(&result), vec!["source"]);
-    let mapping = find_mapping(&result.columns.mappings, "*");
-    assert_wildcard_on_source(mapping);
-    assert!(result.columns.has_unresolved_stars);
-}
-
-fn assert_wildcard_on_source(mapping: &ColumnMapping) {
     assert!(
-        matches!(&mapping.sources[..], [ColumnOrigin::Wildcard { table }] if table.table == "source"),
-        "expected a wildcard on source, got {:?}",
-        mapping.sources
+        matches!(&result.output.shape, Shape::Open { unexpanded }
+            if unexpanded.iter().any(|star| star.relation.as_ref().is_some_and(|r| r.name.value == "source"))),
+        "expected an unexpanded wildcard on source, got {:?}",
+        result.output.shape
     );
 }
 
 struct SourceCatalog;
 
-impl CatalogProvider for SourceCatalog {
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-        (table.table == "source").then(|| vec!["id".into(), "val".into()])
-    }
-
-    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
-        None
+impl Catalog for SourceCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        (relation.name.value == "source").then(|| CatalogEntry {
+            relation: relation.clone(),
+            columns: Cow::Owned(
+                ["id", "val"]
+                    .into_iter()
+                    .map(|name| CatalogColumn {
+                        name: Ident::unquoted(name),
+                        data_type: None,
+                        fields: None,
+                    })
+                    .collect(),
+            ),
+        })
     }
 }
 
@@ -596,16 +614,13 @@ fn merge_wildcards_expand_from_catalog() {
         let sql = format!(
             "MERGE INTO target t USING source s ON t.id = s.id WHEN {clause} THEN {action}"
         );
-        let result = analyze(
-            &sql,
-            AnalyzeOptions {
-                dialect,
-                catalog: Some(Box::new(SourceCatalog)),
-                ..AnalyzeOptions::default()
-            },
-        )
-        .expect("analyze")
-        .remove(0);
+        let catalog = SourceCatalog;
+        let result = Analyzer::new(dialect)
+            .with_catalog(&catalog)
+            .analyze(&sql)
+            .expect("analyze")
+            .into_single()
+            .expect("one statement");
         assert_eq!(
             sources(&result, "id"),
             pairs(&[("source", "id")]),
@@ -616,10 +631,7 @@ fn merge_wildcards_expand_from_catalog() {
             pairs(&[("source", "val")]),
             "{dialect:?}: {action}"
         );
-        assert!(
-            !result.columns.has_unresolved_stars,
-            "{dialect:?}: {action}"
-        );
+        assert_eq!(result.output.shape, Shape::Closed, "{dialect:?}: {action}");
     }
 }
 
@@ -628,13 +640,19 @@ fn merge_wildcards_expand_from_catalog() {
 // ---------------------------------------------------------------------------
 
 fn assert_pipe_rejected(sql: &str, dialect: Dialect) {
-    match run(sql, dialect) {
-        Ok(results) => panic!("{dialect:?}: `{sql}` should be rejected, got {results:?}"),
-        Err(err) => assert!(
-            err.message.contains("pipe operators are not supported"),
-            "{dialect:?}: `{sql}` failed with an unrelated error: {err}"
-        ),
-    }
+    let result = lineage(sql, dialect);
+    assert!(result.output.columns.is_empty(), "{dialect:?}: `{sql}`");
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == Severity::Error
+                && diagnostic.kind
+                    == DiagnosticKind::UnsupportedSyntax {
+                        what: "pipe operators",
+                    }
+        }),
+        "{dialect:?}: `{sql}` diagnostics: {:?}",
+        result.diagnostics
+    );
 }
 
 #[test]
