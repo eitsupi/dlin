@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::graph::RawGraph;
 use crate::graph::node::{RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
-use crate::types::{CatalogProvider, ParseError, TableRef};
+use crate::types::{CatalogProvider, SemanticError, TableRef};
 
 /// Inspect the complete graph rather than only the root projection. A star
 /// under a JOIN/CTE/derived-table boundary is still an unresolved schema
@@ -25,12 +25,10 @@ pub(super) fn graph_has_unresolved_stars(
     })
 }
 
-const SET_ARITY_ERROR_PREFIX: &str = "set operation arity mismatch";
-
 pub(super) fn validate_set_arities(
     graph: &RawGraph,
     catalog: Option<&dyn CatalogProvider>,
-) -> Result<(), ParseError> {
+) -> Result<(), SemanticError> {
     let mut active = HashSet::new();
     let _ = scope_arity(ScopeTree::root(), graph, catalog, &mut active)?;
     Ok(())
@@ -43,7 +41,7 @@ fn scope_arity(
     graph: &RawGraph,
     catalog: Option<&dyn CatalogProvider>,
     active: &mut HashSet<usize>,
-) -> Result<Option<usize>, ParseError> {
+) -> Result<Option<usize>, SemanticError> {
     if !active.insert(scope) {
         return Ok(None);
     }
@@ -74,11 +72,7 @@ fn scope_arity(
             let right_width = scope_arity(right, graph, catalog, active)?;
             match (left_width, right_width) {
                 (Some(left), Some(right)) if left != right => {
-                    return Err(ParseError {
-                        message: format!(
-                            "{SET_ARITY_ERROR_PREFIX}: left has {left} columns, right has {right} columns"
-                        ),
-                    });
+                    return Err(SemanticError::SetOperationArityMismatch { left, right });
                 }
                 (Some(width), Some(_)) => Some(width),
                 _ => None,

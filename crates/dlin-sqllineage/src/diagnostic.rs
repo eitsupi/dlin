@@ -74,7 +74,10 @@ pub enum DiagnosticKind {
     },
     /// A cycle was detected in the lineage graph.
     UnexpectedCycle,
-    /// The statement has an empty projection.
+    /// A query has an empty projection list.
+    ///
+    /// A bare `FROM t` in dialects that allow it is read as `SELECT *` and only
+    /// warns; the diagnostic still tells callers that no select list was written.
     EmptyProjection,
     /// Multiple output columns share a normalized name.
     DuplicateOutputName {

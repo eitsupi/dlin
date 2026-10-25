@@ -6,7 +6,7 @@ pub(crate) mod statement;
 
 use crate::graph::RawGraph;
 use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
-use crate::types::{Dialect, ParseError, StatementType, Warning};
+use crate::types::{Dialect, SemanticError, StatementType, Warning};
 use sqlparser::ast::Statement;
 
 pub(crate) struct LineageBuilder {
@@ -19,7 +19,7 @@ pub(crate) struct LineageBuilder {
     pub(crate) dialect: Dialect,
     /// First unsupported construct met while walking the statement. Once set,
     /// the walk stops adding to the graph and `build` reports the error.
-    pub(crate) error: Option<ParseError>,
+    pub(crate) error: Option<SemanticError>,
 }
 
 impl LineageBuilder {
@@ -41,7 +41,7 @@ impl LineageBuilder {
     pub fn build(
         mut self,
         stmt: &Statement,
-    ) -> Result<(RawGraph, Vec<Warning>, StatementType), ParseError> {
+    ) -> Result<(RawGraph, Vec<Warning>, StatementType), SemanticError> {
         let st = self.visit_statement(stmt);
         if let Some(error) = self.error {
             return Err(error);
@@ -51,11 +51,9 @@ impl LineageBuilder {
     }
 
     /// Record an unsupported construct. Only the first one is kept.
-    pub(crate) fn reject(&mut self, message: impl Into<String>) {
+    pub(crate) fn reject(&mut self, error: SemanticError) {
         if self.error.is_none() {
-            self.error = Some(ParseError {
-                message: message.into(),
-            });
+            self.error = Some(error);
         }
     }
 

@@ -332,6 +332,56 @@ fn duplicate_names_and_empty_projection_have_diagnostics() {
 }
 
 #[test]
+fn bare_from_first_query_is_read_as_select_star_with_a_warning() {
+    let result = Analyzer::new(Dialect::DuckDb)
+        .analyze("FROM t")
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert_eq!(
+        result.diagnostics,
+        [Diagnostic {
+            severity: Severity::Warning,
+            kind: DiagnosticKind::EmptyProjection,
+            location: None,
+        }]
+    );
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("a bare FROM is a star over its relation");
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].relation.as_ref().unwrap().name.value, "t");
+
+    let selected = Analyzer::new(Dialect::DuckDb)
+        .analyze("FROM t SELECT a")
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert!(selected.diagnostics.is_empty());
+}
+
+#[test]
+fn empty_projection_is_reported_next_to_a_semantic_error() {
+    let result = one("SELECT FROM t UNION ALL SELECT a, b FROM u");
+    assert!(result.output.columns.is_empty());
+    let kinds = result
+        .diagnostics
+        .iter()
+        .map(|d| (d.severity, d.kind.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            (
+                Severity::Error,
+                DiagnosticKind::SetOperationArityMismatch { left: 0, right: 2 }
+            ),
+            (Severity::Warning, DiagnosticKind::EmptyProjection),
+        ]
+    );
+}
+
+#[test]
 fn write_targets_keep_quotes_and_original_spelling() {
     for sql in [
         "INSERT INTO \"Schema\".\"Target\" SELECT id FROM src",

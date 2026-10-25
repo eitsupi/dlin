@@ -250,18 +250,54 @@ impl Dialect {
     }
 }
 
+/// A statement the engine cannot analyze because of what it contains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SemanticError {
+    /// The branches of a set operation have different, exactly known widths.
+    SetOperationArityMismatch { left: usize, right: usize },
+    /// A pipe operator reshapes the query result, which is not modelled.
+    PipeOperators,
+    /// `UNPIVOT` applied to an expression rather than a relation.
+    UnpivotExpression,
+}
+
+impl fmt::Display for SemanticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SetOperationArityMismatch { left, right } => write!(
+                f,
+                "set operation arity mismatch: left has {left} columns, right has {right} columns"
+            ),
+            Self::PipeOperators => f.write_str("pipe operators are not supported"),
+            Self::UnpivotExpression => f.write_str("UNPIVOT on an expression is not supported"),
+        }
+    }
+}
+
 /// Error returned when SQL parsing or semantic validation fails.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct ParseError {
     pub message: String,
 }
 
+#[cfg(test)]
+impl From<SemanticError> for ParseError {
+    fn from(error: SemanticError) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SQL parse error: {}", self.message)
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ParseError {}
 
 /// Optional metadata source for resolving `SELECT *` and ambiguous columns.

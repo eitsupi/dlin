@@ -73,7 +73,12 @@ pub(crate) fn legacy_analyze(
         .map(|stmt| {
             let builder = build::LineageBuilder::new(opts.normalize_case, opts.dialect);
             let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
-            resolve::resolve(raw_graph, catalog.as_deref(), warnings, statement_type)
+            Ok(resolve::resolve(
+                raw_graph,
+                catalog.as_deref(),
+                warnings,
+                statement_type,
+            )?)
         })
         .collect()
 }

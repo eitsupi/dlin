@@ -12,7 +12,7 @@ use mapping::{ScopeMappingCache, resolve_scope_mappings};
 use crate::graph::RawGraph;
 use crate::graph::scope::ScopeTree;
 use crate::types::{
-    AnalyzeResult, CatalogProvider, ColumnLineage, ColumnOrigin, ParseError, StatementType,
+    AnalyzeResult, CatalogProvider, ColumnLineage, ColumnOrigin, SemanticError, StatementType,
     Warning, WarningKind,
 };
 
@@ -23,7 +23,7 @@ pub(crate) fn resolve(
     catalog: Option<&dyn CatalogProvider>,
     mut warnings: Vec<Warning>,
     statement_type: StatementType,
-) -> Result<AnalyzeResult, ParseError> {
+) -> Result<AnalyzeResult, SemanticError> {
     graph.tables.inputs.sort();
     graph.tables.inputs.dedup();
 

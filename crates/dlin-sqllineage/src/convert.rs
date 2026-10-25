@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use sqlparser::ast::{Query, SetExpr, Statement, Visit, Visitor};
+use sqlparser::ast::{Query, SelectFlavor, SetExpr, Statement, Visit, Visitor};
 use std::ops::ControlFlow;
 
 use super::metadata::StatementMetadata;
@@ -15,7 +15,7 @@ use crate::graph::{
     node::RawNode,
     scope::{Binding, ScopeTree},
 };
-use crate::types::{self as old, CatalogProvider};
+use crate::types::{self as old, CatalogProvider, SemanticError};
 
 pub(super) struct CatalogAdapter<'a> {
     catalog: &'a dyn Catalog,
@@ -93,10 +93,17 @@ pub(super) fn analyze_statement(
     });
     let provider = adapter.as_ref().map(|a| a as &dyn CatalogProvider);
     let builder = LineageBuilder::new(true, dialect);
+    let empty = empty_projection_diagnostic(statement, dialect);
     let (graph, warnings, kind) = match builder.build(statement) {
         Ok(result) => result,
         Err(error) => {
-            return semantic_failure(statement_kind(statement), None, Vec::new(), &error.message);
+            return semantic_failure(
+                statement_kind(statement),
+                None,
+                Vec::new(),
+                &error,
+                empty.into_iter().collect(),
+            );
         }
     };
     let row_values = row_value_outputs(&graph);
@@ -113,25 +120,22 @@ pub(super) fn analyze_statement(
         .collect();
     let result = match crate::resolve::resolve(graph, provider, warnings, kind.clone()) {
         Ok(result) => result,
-        Err(error) => return semantic_failure(convert_kind(&kind), written, read, &error.message),
+        Err(error) => {
+            return semantic_failure(
+                convert_kind(&kind),
+                written,
+                read,
+                &error,
+                empty.into_iter().collect(),
+            );
+        }
     };
     let mut converted = convert_result(&result, &metadata, adapter.as_ref(), &row_values, dialect);
-    let mut empty = EmptyProjection(false);
-    let _ = statement.visit(&mut empty);
-    if empty.0 {
-        let severity = if matches!(dialect, Dialect::Generic | Dialect::PostgreSql) {
-            Severity::Warning
-        } else {
-            Severity::Error
-        };
-        if severity == Severity::Error {
+    if let Some(diagnostic) = empty {
+        if diagnostic.severity == Severity::Error {
             converted.output.columns.clear();
         }
-        converted.diagnostics.push(Diagnostic {
-            severity,
-            kind: DiagnosticKind::EmptyProjection,
-            location: None,
-        });
+        converted.diagnostics.push(diagnostic);
     }
     converted
 }
@@ -497,31 +501,33 @@ fn semantic_failure(
     kind: StatementKind,
     written: Option<Relation>,
     mut read: Vec<Relation>,
-    message: &str,
+    error: &SemanticError,
+    mut diagnostics: Vec<Diagnostic>,
 ) -> StatementAnalysis {
-    let diagnostic =
-        if let Some(arity) = message.strip_prefix("set operation arity mismatch: left has ") {
-            let (left, right) = arity
-                .split_once(" columns, right has ")
-                .expect("engine arity format");
+    let diagnostic = match error {
+        SemanticError::SetOperationArityMismatch { left, right } => {
             DiagnosticKind::SetOperationArityMismatch {
-                left: left.parse().expect("engine arity"),
-                right: right
-                    .trim_end_matches(" columns")
-                    .parse()
-                    .expect("engine arity"),
+                left: *left,
+                right: *right,
             }
-        } else {
-            DiagnosticKind::UnsupportedSyntax {
-                what: if message.starts_with("pipe operators") {
-                    "pipe operators"
-                } else {
-                    "UNPIVOT on an expression"
-                },
-            }
-        };
+        }
+        SemanticError::PipeOperators => DiagnosticKind::UnsupportedSyntax {
+            what: "pipe operators",
+        },
+        SemanticError::UnpivotExpression => DiagnosticKind::UnsupportedSyntax {
+            what: "UNPIVOT on an expression",
+        },
+    };
     read.sort();
     read.dedup();
+    diagnostics.insert(
+        0,
+        Diagnostic {
+            severity: Severity::Error,
+            kind: diagnostic,
+            location: None,
+        },
+    );
     StatementAnalysis {
         kind,
         written,
@@ -531,11 +537,7 @@ fn semantic_failure(
             shape: Shape::Closed,
         },
         has_unresolved_stars: false,
-        diagnostics: vec![Diagnostic {
-            severity: Severity::Error,
-            kind: diagnostic,
-            location: None,
-        }],
+        diagnostics,
     }
 }
 
@@ -582,21 +584,53 @@ fn plain_relation(table: &old::TableRef) -> Relation {
     }
 }
 
-struct EmptyProjection(bool);
-impl Visitor for EmptyProjection {
-    type Break = ();
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
-        fn is_empty(body: &SetExpr) -> bool {
-            match body {
-                SetExpr::Select(select) => {
-                    select.projection.is_empty()
-                        && select.flavor != sqlparser::ast::SelectFlavor::FromFirstNoSelect
-                }
-                SetExpr::SetOperation { left, right, .. } => is_empty(left) || is_empty(right),
-                _ => false,
-            }
-        }
-        self.0 |= is_empty(&query.body);
-        ControlFlow::Continue(())
+/// Report a query whose projection list is empty.
+///
+/// A bare `FROM t` (as in `DuckDB` and `ClickHouse`) is read as `SELECT *`, so it
+/// only warns. Any other empty list is an error, except in dialects whose
+/// parsers accept it as a harmless `SELECT` with nothing selected.
+fn empty_projection_diagnostic(statement: &Statement, dialect: Dialect) -> Option<Diagnostic> {
+    #[derive(Default)]
+    struct Empty {
+        bare_select: bool,
+        bare_from: bool,
     }
+    impl Visitor for Empty {
+        type Break = ();
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+            fn walk(body: &SetExpr, found: &mut Empty) {
+                match body {
+                    SetExpr::Select(select) if select.projection.is_empty() => {
+                        if select.flavor == SelectFlavor::FromFirstNoSelect {
+                            found.bare_from = true;
+                        } else {
+                            found.bare_select = true;
+                        }
+                    }
+                    SetExpr::SetOperation { left, right, .. } => {
+                        walk(left, found);
+                        walk(right, found);
+                    }
+                    _ => {}
+                }
+            }
+            walk(&query.body, self);
+            ControlFlow::Continue(())
+        }
+    }
+    let mut found = Empty::default();
+    let _ = statement.visit(&mut found);
+    let severity =
+        if found.bare_select && !matches!(dialect, Dialect::Generic | Dialect::PostgreSql) {
+            Severity::Error
+        } else if found.bare_select || found.bare_from {
+            Severity::Warning
+        } else {
+            return None;
+        };
+    Some(Diagnostic {
+        severity,
+        kind: DiagnosticKind::EmptyProjection,
+        location: None,
+    })
 }
