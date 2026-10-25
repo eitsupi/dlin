@@ -398,18 +398,21 @@ fn like_escape_expression_is_a_source() {
 
 #[test]
 fn unparenthesized_in_operand_is_a_source() {
-    // Only dialects that accept a bare `IN` operand parse this; the others
-    // reject it, which is equally acceptable for lineage.
+    // Only ClickHouse accepts a bare `IN` operand; the other dialects reject
+    // it at parse time. Pin the exact set so the test cannot pass vacuously.
+    let mut accepted = Vec::new();
     for dialect in [Dialect::Snowflake, Dialect::DuckDb, Dialect::ClickHouse] {
-        if let Ok(results) = run("SELECT a IN b AS m FROM t", dialect) {
-            let result = &results[0];
-            assert_eq!(
-                sources(result, "m"),
-                pairs(&[("t", "a"), ("t", "b")]),
-                "{dialect:?}"
-            );
-        }
+        let Ok(results) = run("SELECT a IN b AS m FROM t", dialect) else {
+            continue;
+        };
+        assert_eq!(
+            sources(&results[0], "m"),
+            pairs(&[("t", "a"), ("t", "b")]),
+            "{dialect:?}"
+        );
+        accepted.push(format!("{dialect:?}"));
     }
+    assert_eq!(accepted, vec!["ClickHouse"]);
 }
 
 #[test]
@@ -500,18 +503,23 @@ fn aggregate_filter_clause_is_not_a_source() {
 #[test]
 fn merge_do_nothing_clause_contributes_no_lineage() {
     for dialect in [Dialect::PostgreSql, Dialect::Snowflake, Dialect::MsSql] {
-        let Ok(results) = run(
+        let result = lineage(
             "MERGE INTO target t USING source s ON t.id = s.id \
              WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v) \
              WHEN MATCHED THEN DO NOTHING",
             dialect,
-        ) else {
-            continue;
-        };
-        let result = &results[0];
+        );
         assert_eq!(result.statement_type, StatementType::Merge, "{dialect:?}");
-        assert_eq!(sources(result, "id"), pairs(&[("source", "id")]));
-        assert_eq!(sources(result, "v"), pairs(&[("source", "v")]));
+        assert_eq!(
+            sources(&result, "id"),
+            pairs(&[("source", "id")]),
+            "{dialect:?}"
+        );
+        assert_eq!(
+            sources(&result, "v"),
+            pairs(&[("source", "v")]),
+            "{dialect:?}"
+        );
     }
 }
 
@@ -542,6 +550,21 @@ fn merge_insert_wildcard_is_an_unexpanded_star_without_catalog() {
     assert_wildcard_on_source(mapping);
 }
 
+#[test]
+fn merge_insert_row_is_an_unexpanded_star_without_catalog() {
+    let result = lineage(
+        "MERGE INTO target t USING source s ON t.id = s.id \
+         WHEN NOT MATCHED THEN INSERT ROW",
+        Dialect::BigQuery,
+    );
+    assert_eq!(result.statement_type, StatementType::Merge);
+    assert_eq!(result.tables.output, Some(TableRef::new("target")));
+    assert_eq!(input_names(&result), vec!["source"]);
+    let mapping = find_mapping(&result.columns.mappings, "*");
+    assert_wildcard_on_source(mapping);
+    assert!(result.columns.has_unresolved_stars);
+}
+
 fn assert_wildcard_on_source(mapping: &ColumnMapping) {
     assert!(
         matches!(&mapping.sources[..], [ColumnOrigin::Wildcard { table }] if table.table == "source"),
@@ -564,18 +587,19 @@ impl CatalogProvider for SourceCatalog {
 
 #[test]
 fn merge_wildcards_expand_from_catalog() {
-    for action in ["UPDATE SET *", "INSERT *"] {
-        let kind = if action.starts_with("UPDATE") {
-            "MATCHED"
-        } else {
-            "NOT MATCHED"
-        };
-        let sql =
-            format!("MERGE INTO target t USING source s ON t.id = s.id WHEN {kind} THEN {action}");
+    // `INSERT ROW` is BigQuery syntax; Databricks rejects it.
+    for (dialect, clause, action) in [
+        (Dialect::Databricks, "MATCHED", "UPDATE SET *"),
+        (Dialect::Databricks, "NOT MATCHED", "INSERT *"),
+        (Dialect::BigQuery, "NOT MATCHED", "INSERT ROW"),
+    ] {
+        let sql = format!(
+            "MERGE INTO target t USING source s ON t.id = s.id WHEN {clause} THEN {action}"
+        );
         let result = analyze(
             &sql,
             AnalyzeOptions {
-                dialect: Dialect::Databricks,
+                dialect,
                 catalog: Some(Box::new(SourceCatalog)),
                 ..AnalyzeOptions::default()
             },
@@ -585,14 +609,17 @@ fn merge_wildcards_expand_from_catalog() {
         assert_eq!(
             sources(&result, "id"),
             pairs(&[("source", "id")]),
-            "{action}"
+            "{dialect:?}: {action}"
         );
         assert_eq!(
             sources(&result, "val"),
             pairs(&[("source", "val")]),
-            "{action}"
+            "{dialect:?}: {action}"
         );
-        assert!(!result.columns.has_unresolved_stars, "{action}");
+        assert!(
+            !result.columns.has_unresolved_stars,
+            "{dialect:?}: {action}"
+        );
     }
 }
 
