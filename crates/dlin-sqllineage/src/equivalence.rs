@@ -240,6 +240,94 @@ fn assert_statement_equivalent(
             sql,
         );
     }
+    assert_unexpanded_stars_equivalent(old, new, dialect, sql);
+}
+
+/// One expected or actual unexpanded star: relation, position, known sources
+/// and unresolved origins.
+type StarKey = (Option<String>, Option<usize>, Vec<String>, Vec<String>);
+
+/// Legacy star mappings correspond to the unexpanded stars of the output
+/// shape: one entry per relation behind the star (or one without a relation),
+/// positioned after the last known output column and unknown once any star
+/// has been seen.
+fn assert_unexpanded_stars_equivalent(
+    old: &AnalyzeResult,
+    new: &StatementAnalysis,
+    dialect: Dialect,
+    sql: &str,
+) {
+    let mut expected: Vec<StarKey> = Vec::new();
+    let mut columns_before = 0usize;
+    let mut seen_star = false;
+    for mapping in &old.columns.mappings {
+        if !is_actual_wildcard_sentinel(mapping) {
+            columns_before += 1;
+            continue;
+        }
+        let after_ordinal = if seen_star || columns_before == 0 {
+            None
+        } else {
+            Some(columns_before - 1)
+        };
+        seen_star = true;
+        let mut relations = Vec::new();
+        legacy_star_relations(&mapping.sources, &mut relations);
+        if relations.is_empty() {
+            relations.push(None);
+        }
+        let (known, mut unresolved) = expected_lineage(&mapping.sources);
+        // The legacy marker for "the star expands to unknown columns" is an
+        // unbound column named `*`; the public result names it explicitly.
+        for item in &mut unresolved {
+            if item == "unbound:*" {
+                *item = "unsupported:star expansion".to_owned();
+            }
+        }
+        unresolved.sort();
+        for relation in relations {
+            expected.push((
+                legacy_relation_key_option(relation),
+                after_ordinal,
+                known.clone(),
+                unresolved.clone(),
+            ));
+        }
+    }
+    let actual: Vec<StarKey> = match &new.output.shape {
+        Shape::Open { unexpanded } => unexpanded
+            .iter()
+            .map(|star| {
+                let (known, unresolved) = actual_lineage(&star.lineage);
+                (
+                    relation_key_option(star.relation.as_ref()),
+                    star.after_ordinal,
+                    known,
+                    unresolved,
+                )
+            })
+            .collect(),
+        Shape::Closed => Vec::new(),
+    };
+    assert_eq!(
+        expected, actual,
+        "unexpanded stars differ for {dialect:?}: {sql}"
+    );
+}
+
+fn legacy_star_relations<'a>(
+    origins: &'a [ColumnOrigin],
+    relations: &mut Vec<Option<&'a TableRef>>,
+) {
+    for origin in origins {
+        match origin {
+            ColumnOrigin::Wildcard { table } => relations.push(Some(table)),
+            ColumnOrigin::Recursive { base_sources } => {
+                legacy_star_relations(base_sources, relations);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn assert_output_name(old: &str, new: &OutputName, dialect: Dialect, index: usize, sql: &str) {
