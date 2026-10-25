@@ -1,6 +1,6 @@
 use sqlparser::ast::{
-    Expr, ObjectName, Select, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
-    TableFactor, TableWithJoins, WildcardAdditionalOptions,
+    Expr, Join, JoinConstraint, JoinOperator, ObjectName, Select, SelectFlavor, SelectItem,
+    SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins, WildcardAdditionalOptions,
 };
 
 use crate::build::LineageBuilder;
@@ -199,7 +199,47 @@ impl LineageBuilder {
             self.visit_table_factor(&table_with_joins.relation);
             for join in &table_with_joins.joins {
                 self.visit_table_factor(&join.relation);
+                self.note_join_constraint(join);
             }
+        }
+    }
+
+    /// Record the columns a join merges, so an unqualified reference to one of
+    /// them is not reported as ambiguous between the joined relations.
+    fn note_join_constraint(&mut self, join: &Join) {
+        let constraint = match &join.join_operator {
+            JoinOperator::Join(constraint)
+            | JoinOperator::Inner(constraint)
+            | JoinOperator::Left(constraint)
+            | JoinOperator::LeftOuter(constraint)
+            | JoinOperator::Right(constraint)
+            | JoinOperator::RightOuter(constraint)
+            | JoinOperator::FullOuter(constraint)
+            | JoinOperator::CrossJoin(constraint)
+            | JoinOperator::Semi(constraint)
+            | JoinOperator::LeftSemi(constraint)
+            | JoinOperator::RightSemi(constraint)
+            | JoinOperator::Anti(constraint)
+            | JoinOperator::LeftAnti(constraint)
+            | JoinOperator::RightAnti(constraint)
+            | JoinOperator::StraightJoin(constraint)
+            | JoinOperator::AsOf { constraint, .. } => constraint,
+            JoinOperator::CrossApply
+            | JoinOperator::OuterApply
+            | JoinOperator::ArrayJoin
+            | JoinOperator::LeftArrayJoin
+            | JoinOperator::InnerArrayJoin => return,
+        };
+        match constraint {
+            JoinConstraint::Using(columns) => {
+                for column in columns {
+                    for name in self.object_name_parts(column) {
+                        self.graph.scopes.add_using_column(self.current_scope, name);
+                    }
+                }
+            }
+            JoinConstraint::Natural => self.graph.scopes.mark_natural_join(self.current_scope),
+            JoinConstraint::On(_) | JoinConstraint::None => {}
         }
     }
 
@@ -259,6 +299,7 @@ impl LineageBuilder {
                 self.visit_table_factor(&table_with_joins.relation);
                 for join in &table_with_joins.joins {
                     self.visit_table_factor(&join.relation);
+                    self.note_join_constraint(join);
                 }
                 let _ = alias;
             }

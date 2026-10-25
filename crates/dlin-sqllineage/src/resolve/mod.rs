@@ -2369,6 +2369,7 @@ fn resolve_unqualified(
     resolve_from_bindings(
         name,
         &effective_bindings(scope, graph),
+        graph.scopes.is_merged_column(scope, name),
         graph,
         resolved,
         incoming,
@@ -2382,6 +2383,7 @@ fn resolve_unqualified(
 fn resolve_from_bindings(
     name: &str,
     bindings: &[(String, Binding)],
+    merged_by_join: bool,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
@@ -2415,7 +2417,10 @@ fn resolve_from_bindings(
         })
     } else {
         let mut table_candidates = Vec::new();
-        for (_, binding) in bindings {
+        // CTEs and derived tables that publish the column, in FROM order. A
+        // relation joined under several aliases is one provider.
+        let mut providers: Vec<(&str, usize)> = Vec::new();
+        for (binding_name, binding) in bindings {
             match binding {
                 Binding::Cte(s) | Binding::DerivedTable(s) => {
                     if graph
@@ -2423,22 +2428,39 @@ fn resolve_from_bindings(
                         .output_columns(*s)
                         .iter()
                         .any(|c| c.name == name)
+                        && !providers.iter().any(|(_, scope)| scope == s)
                     {
-                        return resolve_through_scope(
-                            name,
-                            *s,
-                            graph,
-                            resolved,
-                            incoming,
-                            visited,
-                            catalog,
-                            mapping_cache,
-                        );
+                        providers.push((binding_name, *s));
                     }
                 }
                 Binding::Table(t) => table_candidates.push(t.clone()),
                 Binding::VirtualSource(_) => {}
             }
+        }
+        // Two relations offering the same name make an unqualified reference
+        // a real choice, unless a join merges that column into one.
+        if providers.len() > 1 && !merged_by_join {
+            return Some(ColumnOrigin::Ambiguous {
+                column: name.to_string(),
+                candidates: providers
+                    .iter()
+                    .map(|(binding_name, _)| TableRef::new(*binding_name))
+                    .collect(),
+            });
+        }
+        // A provider outranks physical tables, whose columns are unknown
+        // without a catalog. Among merged providers the leftmost is reported.
+        if let Some(&(_, provider)) = providers.first() {
+            return resolve_through_scope(
+                name,
+                provider,
+                graph,
+                resolved,
+                incoming,
+                visited,
+                catalog,
+                mapping_cache,
+            );
         }
         if table_candidates.len() == 1 {
             Some(ColumnOrigin::Concrete {

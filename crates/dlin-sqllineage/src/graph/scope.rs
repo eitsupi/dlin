@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use indexmap::IndexMap;
 
 use crate::graph::node::NodeId;
 use crate::types::TableRef;
@@ -35,7 +37,15 @@ pub(crate) struct ScopeTree {
 
 struct Scope {
     parent: Option<ScopeId>,
-    bindings: HashMap<String, Binding>,
+    /// Relations introduced by this scope's FROM clause, in source order.
+    /// Iteration order is observable (star expansion, ambiguity candidates),
+    /// so it must not depend on hashing.
+    bindings: IndexMap<String, Binding>,
+    /// Column names merged by a `JOIN ... USING (...)` in this scope. Such a
+    /// name denotes one column of the join result, not one per relation.
+    using_columns: HashSet<String>,
+    /// Whether a `NATURAL JOIN` merges an unknown set of columns.
+    natural_join: bool,
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
@@ -83,7 +93,9 @@ impl ScopeTree {
         Self {
             scopes: vec![Scope {
                 parent: None,
-                bindings: HashMap::new(),
+                bindings: IndexMap::new(),
+                using_columns: HashSet::new(),
+                natural_join: false,
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
@@ -100,7 +112,9 @@ impl ScopeTree {
         let id = self.scopes.len();
         self.scopes.push(Scope {
             parent: Some(parent),
-            bindings: HashMap::new(),
+            bindings: IndexMap::new(),
+            using_columns: HashSet::new(),
+            natural_join: false,
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
@@ -115,6 +129,30 @@ impl ScopeTree {
 
     pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
         self.scopes[scope].bindings.insert(name, binding);
+    }
+
+    pub fn add_using_column(&mut self, scope: ScopeId, name: String) {
+        self.scopes[scope].using_columns.insert(name);
+    }
+
+    pub fn mark_natural_join(&mut self, scope: ScopeId) {
+        self.scopes[scope].natural_join = true;
+    }
+
+    /// Whether a join in the scope that supplies unqualified names merges
+    /// `name`, so that a column of that name shared by several relations is
+    /// not ambiguous. A `NATURAL JOIN` merges columns the engine cannot see,
+    /// so it is treated as merging every name.
+    pub fn is_merged_column(&self, scope: ScopeId, name: &str) -> bool {
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            let s = &self.scopes[id];
+            if !s.bindings.is_empty() {
+                return s.natural_join || s.using_columns.contains(name);
+            }
+            current = s.parent;
+        }
+        false
     }
 
     pub fn add_virtual_source(
