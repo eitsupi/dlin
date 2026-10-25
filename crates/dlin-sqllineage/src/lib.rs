@@ -61,7 +61,8 @@ use sqlparser::parser::Parser;
 ///
 /// Returns [`ParseError`] if the SQL string cannot be parsed or fails semantic
 /// validation during lineage analysis (for example, exact set-operation
-/// branches with different column counts).
+/// branches with different column counts), or if it uses a construct whose
+/// lineage is not modelled (pipe operators, `UNPIVOT` on an expression).
 #[allow(clippy::needless_pass_by_value)]
 pub fn analyze(sql: &str, opts: AnalyzeOptions) -> Result<Vec<AnalyzeResult>, ParseError> {
     let dialect = opts.dialect.to_sqlparser_dialect();
@@ -74,7 +75,7 @@ pub fn analyze(sql: &str, opts: AnalyzeOptions) -> Result<Vec<AnalyzeResult>, Pa
         .iter()
         .map(|stmt| {
             let builder = build::LineageBuilder::new(opts.normalize_case, opts.dialect);
-            let (raw_graph, warnings, statement_type) = builder.build(stmt);
+            let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
             resolve::resolve(raw_graph, catalog.as_deref(), warnings, statement_type)
         })
         .collect()

@@ -1,6 +1,6 @@
 use sqlparser::ast::{
-    Expr, ObjectName, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor,
-    TableWithJoins, WildcardAdditionalOptions,
+    Expr, ObjectName, Select, SelectFlavor, SelectItem, SelectItemQualifiedWildcardKind,
+    TableFactor, TableWithJoins, WildcardAdditionalOptions,
 };
 
 use crate::build::LineageBuilder;
@@ -12,7 +12,12 @@ impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
     pub(crate) fn visit_select(&mut self, select: &Select) {
         self.visit_from(&select.from);
-        self.visit_projection(&select.projection);
+        if select.flavor == SelectFlavor::FromFirstNoSelect && select.projection.is_empty() {
+            // `FROM t` without a SELECT list is shorthand for `SELECT * FROM t`.
+            self.visit_projection(&[SelectItem::Wildcard(WildcardAdditionalOptions::default())]);
+        } else {
+            self.visit_projection(&select.projection);
+        }
         if let Some(selection) = &select.selection {
             self.scan_expr_for_tables(selection);
         }
@@ -317,6 +322,14 @@ impl LineageBuilder {
                     .scopes
                     .add_virtual_source(self.current_scope, columns);
                 self.add_binding(alias.name.value.clone(), Binding::VirtualSource(virtual_id));
+            }
+
+            // The unpivoted value is derived from the expression, not from a
+            // physical column of any relation in scope. Ignoring the factor
+            // would make a reference to its alias resolve to a column that
+            // does not exist, so refuse it.
+            TableFactor::UnpivotExpr { .. } => {
+                self.reject("UNPIVOT on an expression is not supported");
             }
 
             TableFactor::TableFunction { .. }
