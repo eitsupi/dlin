@@ -210,15 +210,62 @@ fn single_cte_provider_still_wins_over_tables() {
     }
 }
 
-/// Joining one CTE twice does not create a second provider.
+/// Each alias is a separate relation, even when both read the same CTE.
 #[test]
-fn self_join_of_one_cte_resolves_through_it() {
+fn self_join_of_one_cte_is_ambiguous() {
     let result = stable(
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a AS a1 JOIN a AS a2 ON a1.x = a2.x",
         Dialect::Generic,
     );
-    assert!(matches!(
-        result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Concrete { .. }]
-    ));
+    match result.columns.mappings[0].sources.as_slice() {
+        [ColumnOrigin::Ambiguous { column, candidates }] => {
+            assert_eq!(column, "x");
+            assert_eq!(candidates, &tables(&["a1", "a2"]));
+        }
+        other => panic!("expected Ambiguous between the CTE aliases, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_join_of_one_cte_merges_using_and_natural_columns() {
+    for join in [
+        "JOIN a AS a2 USING (x)",
+        "LEFT JOIN a AS a2 USING (x)",
+        "RIGHT JOIN a AS a2 USING (x)",
+        "FULL JOIN a AS a2 USING (x)",
+        "NATURAL JOIN a AS a2",
+        "NATURAL LEFT JOIN a AS a2",
+        "NATURAL RIGHT JOIN a AS a2",
+        "NATURAL FULL JOIN a AS a2",
+    ] {
+        let result = stable(
+            &format!("WITH a AS (SELECT x FROM s1) SELECT x FROM a AS a1 {join}"),
+            Dialect::Generic,
+        );
+        match result.columns.mappings[0].sources.as_slice() {
+            [ColumnOrigin::Concrete { table, column }] => {
+                assert_eq!(table, &TableRef::new("s1"), "{join}");
+                assert_eq!(column, "x", "{join}");
+            }
+            other => {
+                panic!("expected one source after merging the aliases for {join}, got {other:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn self_join_alias_outside_a_merge_keeps_the_column_ambiguous() {
+    let result = stable(
+        "WITH a AS (SELECT x FROM s1) \
+         SELECT x FROM a AS a1 LEFT JOIN a AS a2 USING (x), a AS a3",
+        Dialect::Generic,
+    );
+    match result.columns.mappings[0].sources.as_slice() {
+        [ColumnOrigin::Ambiguous { column, candidates }] => {
+            assert_eq!(column, "x");
+            assert_eq!(candidates, &tables(&["a1", "a2", "a3"]));
+        }
+        other => panic!("expected Ambiguous with the alias outside the merge, got {other:?}"),
+    }
 }

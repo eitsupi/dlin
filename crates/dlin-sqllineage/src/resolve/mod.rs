@@ -2412,8 +2412,7 @@ enum UnqualifiedChoice {
     /// physical candidates (empty when only CTEs or derived tables compete);
     /// a catalog may still single one out.
     Ambiguous(Vec<TableRef>),
-    /// A single column. The bindings supply it in FROM order: one relation,
-    /// or several that `USING`/`NATURAL` joins merge into one column.
+    /// A single column. Its contributing bindings are in FROM order.
     Merged(Vec<Binding>),
 }
 
@@ -2421,8 +2420,8 @@ enum UnqualifiedChoice {
 struct ColumnRelation<'a> {
     name: &'a str,
     binding: &'a Binding,
-    /// The CTE/derived-table scope, `None` for a physical table. A CTE joined
-    /// under several aliases is one relation.
+    /// The CTE/derived-table scope, `None` for a physical table. Aliases of
+    /// the same scope are separate relations for name resolution.
     scope: Option<usize>,
 }
 
@@ -2501,21 +2500,13 @@ fn unqualified_choice(
                 if !binding_publishes(binding, name, graph) {
                     continue;
                 }
-                let index = if let Some(index) = relations
-                    .iter()
-                    .position(|relation| relation.scope == Some(*provider))
-                {
-                    index
-                } else {
-                    relations.push(ColumnRelation {
-                        name: binding_name,
-                        binding,
-                        scope: Some(*provider),
-                    });
-                    known_to_have.push(true);
-                    relations.len() - 1
-                };
-                relation_of.insert(binding_name, index);
+                relations.push(ColumnRelation {
+                    name: binding_name,
+                    binding,
+                    scope: Some(*provider),
+                });
+                known_to_have.push(true);
+                relation_of.insert(binding_name, relations.len() - 1);
             }
             Binding::Table(table) => {
                 let has_column = if consult_catalog {
