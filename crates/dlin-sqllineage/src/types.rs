@@ -231,9 +231,9 @@ pub enum Dialect {
     Databricks,
     /// Snowflake. Folds unquoted identifiers to upper case.
     Snowflake,
-    /// Google BigQuery.
+    /// Google `BigQuery`.
     BigQuery,
-    /// DuckDB.
+    /// `DuckDB`.
     DuckDb,
     /// Amazon Redshift. Folds unquoted identifiers to lower case.
     Redshift,
@@ -242,7 +242,7 @@ pub enum Dialect {
     Trino,
     /// Apache Spark SQL.
     Spark,
-    /// ClickHouse.
+    /// `ClickHouse`.
     ClickHouse,
     /// SQLite.
     SQLite,
