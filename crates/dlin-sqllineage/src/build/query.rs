@@ -5,6 +5,14 @@ use crate::graph::scope::{Binding, OutputPlan, ScopeKind};
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
+        // Pipe operators (`FROM t |> SELECT a`) reshape the result of the
+        // query after its body. Ignoring them would report the lineage of the
+        // unpiped body as if it were the query's output, so refuse instead.
+        if !query.pipe_operators.is_empty() {
+            self.reject("pipe operators are not supported");
+            return;
+        }
+
         let has_ctes = query.with.is_some();
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {

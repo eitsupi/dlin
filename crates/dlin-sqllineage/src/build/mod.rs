@@ -6,7 +6,7 @@ pub(crate) mod statement;
 
 use crate::graph::RawGraph;
 use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
-use crate::types::{Dialect, StatementType, Warning};
+use crate::types::{Dialect, ParseError, StatementType, Warning};
 use sqlparser::ast::Statement;
 
 pub(crate) struct LineageBuilder {
@@ -17,6 +17,9 @@ pub(crate) struct LineageBuilder {
     pub(crate) normalize_case: bool,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
+    /// First unsupported construct met while walking the statement. Once set,
+    /// the walk stops adding to the graph and `build` reports the error.
+    pub(crate) error: Option<ParseError>,
 }
 
 impl LineageBuilder {
@@ -31,13 +34,29 @@ impl LineageBuilder {
             normalize_case,
             inner_statement_type: None,
             dialect,
+            error: None,
         }
     }
 
-    pub fn build(mut self, stmt: &Statement) -> (RawGraph, Vec<Warning>, StatementType) {
+    pub fn build(
+        mut self,
+        stmt: &Statement,
+    ) -> Result<(RawGraph, Vec<Warning>, StatementType), ParseError> {
         let st = self.visit_statement(stmt);
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         let final_type = self.inner_statement_type.unwrap_or(st);
-        (self.graph, self.warnings, final_type)
+        Ok((self.graph, self.warnings, final_type))
+    }
+
+    /// Record an unsupported construct. Only the first one is kept.
+    pub(crate) fn reject(&mut self, message: impl Into<String>) {
+        if self.error.is_none() {
+            self.error = Some(ParseError {
+                message: message.into(),
+            });
+        }
     }
 
     pub(crate) fn push_scope(&mut self, kind: ScopeKind) -> ScopeId {

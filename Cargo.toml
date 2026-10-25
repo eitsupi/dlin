@@ -26,7 +26,7 @@ rayon = "1"
 globset = "0.4"
 # Shared with crates/dlin-sqllineage so the lockfile holds a single sqlparser;
 # see `sqlparser_version_matches_sqllineage` in dlin-core.
-sqlparser = { version = "0.62", features = ["serde", "visitor"] }
+sqlparser = { version = "0.63", features = ["serde", "visitor"] }
 path-slash = "0.2.1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"

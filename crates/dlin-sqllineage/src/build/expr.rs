@@ -58,6 +58,7 @@ impl LineageBuilder {
             | Expr::IsUnknown(expr)
             | Expr::IsNotUnknown(expr)
             | Expr::IsNormalized { expr, .. }
+            | Expr::IsJson { expr, .. }
             | Expr::Collate { expr, .. }
             | Expr::Convert { expr, .. }
             | Expr::Ceil { expr, .. }
@@ -134,22 +135,35 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::BinaryOp { left, right, .. }
-            | Expr::Like {
-                expr: left,
-                pattern: right,
+            // The escape character is an arbitrary expression, so it is
+            // collected like the pattern itself.
+            Expr::Like {
+                expr,
+                pattern,
+                escape_char,
                 ..
             }
             | Expr::ILike {
-                expr: left,
-                pattern: right,
+                expr,
+                pattern,
+                escape_char,
                 ..
             }
             | Expr::SimilarTo {
-                expr: left,
-                pattern: right,
+                expr,
+                pattern,
+                escape_char,
                 ..
+            } => {
+                let mut v = self.collect_ancestors(expr);
+                v.extend(self.collect_ancestors(pattern));
+                if let Some(escape) = escape_char {
+                    v.extend(self.collect_ancestors(escape));
+                }
+                v
             }
+
+            Expr::BinaryOp { left, right, .. }
             | Expr::RLike {
                 expr: left,
                 pattern: right,
