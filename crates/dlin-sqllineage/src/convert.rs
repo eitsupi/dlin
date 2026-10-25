@@ -67,12 +67,10 @@ impl CatalogProvider for CatalogAdapter<'_> {
         };
         let mut matching = candidates.iter().filter(|table| {
             self.entry(table).is_some_and(|entry| {
-                entry.columns.iter().any(|col| {
-                    col.name.column_key(self.dialect) == ident.column_key(self.dialect)
-                        || (matches!(self.dialect, Dialect::Generic)
-                            && ident.quote.is_none()
-                            && col.name.value.to_lowercase() == ident.value.to_lowercase())
-                })
+                entry
+                    .columns
+                    .iter()
+                    .any(|col| col.name.column_key(self.dialect) == ident.column_key(self.dialect))
             })
         });
         let only = matching.next()?;

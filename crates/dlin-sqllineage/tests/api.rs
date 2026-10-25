@@ -550,6 +550,34 @@ fn catalog_never_uses_an_unrelated_quote_context_to_choose_a_source() {
 }
 
 #[test]
+fn generic_catalog_matching_follows_column_key_rules() {
+    let catalog = QuoteContextCatalog;
+    let analyzer = Analyzer::new(Dialect::Generic).with_catalog(&catalog);
+    let unquoted = analyzer
+        .analyze("SELECT id FROM a CROSS JOIN b")
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert!(
+        matches!(&unquoted.output.columns[0].lineage, Lineage::Complete(sources)
+        if sources.len() == 1
+            && sources[0].relation.name.value == "b"
+            && sources[0].column == Ident::unquoted("id"))
+    );
+    let quoted = analyzer
+        .analyze("SELECT \"id\" FROM a CROSS JOIN b")
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert!(
+        matches!(&quoted.output.columns[0].lineage, Lineage::Complete(sources)
+        if sources.len() == 1
+            && sources[0].relation.name.value == "a"
+            && sources[0].column == Ident::quoted("id", Quote::Double))
+    );
+}
+
+#[test]
 fn physical_source_quote_survives_cte_and_derived_output_references() {
     for sql in [
         "WITH c AS (SELECT \"id\" FROM t) SELECT id FROM c",
