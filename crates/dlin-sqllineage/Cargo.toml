@@ -12,6 +12,7 @@ categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
 sqlparser = { workspace = true }
+indexmap = { workspace = true }
 serde = { workspace = true }
 
 [lints]

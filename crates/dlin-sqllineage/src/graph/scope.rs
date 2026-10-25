@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use indexmap::IndexMap;
 
 use crate::graph::node::NodeId;
 use crate::types::TableRef;
@@ -35,11 +37,54 @@ pub(crate) struct ScopeTree {
 
 struct Scope {
     parent: Option<ScopeId>,
-    bindings: HashMap<String, Binding>,
+    /// Relations introduced by this scope's FROM clause, in source order.
+    /// Iteration order is observable (star expansion, ambiguity candidates),
+    /// so it must not depend on hashing.
+    bindings: IndexMap<String, Binding>,
+    /// Every physical relation added to this scope, including ones whose
+    /// binding name was later taken by another relation (`s.t` and `o.t`
+    /// share the name `t`). Multi-part qualifiers are matched against these.
+    relations: Vec<TableRef>,
+    /// Binding names in the order they were added, including names that a
+    /// later relation took over. A join reads the slice added while its
+    /// operands were visited to learn which relations it combines.
+    binding_log: Vec<String>,
+    /// Joins in this scope that merge columns, in source order.
+    join_merges: Vec<JoinMerge>,
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
     virtual_sources: Vec<VirtualSource>,
+}
+
+/// The columns a join merges into one column of its result.
+#[derive(Debug, Clone)]
+pub(crate) enum MergedColumns {
+    /// `USING (...)`: the listed names.
+    Using(Vec<String>),
+    /// `NATURAL`: every name both sides publish.
+    Natural,
+}
+
+/// A `USING` or `NATURAL` join. Each side lists the binding names of the
+/// relations it combines (several for an earlier join or a parenthesized
+/// join), so a merged column can be attributed to exactly those relations
+/// rather than to the whole scope.
+#[derive(Debug, Clone)]
+pub(crate) struct JoinMerge {
+    pub left: Vec<String>,
+    pub right: Vec<String>,
+    pub columns: MergedColumns,
+    pub kind: JoinMergeKind,
+}
+
+/// Which side supplies the value of a merged column.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum JoinMergeKind {
+    Inner,
+    Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +128,10 @@ impl ScopeTree {
         Self {
             scopes: vec![Scope {
                 parent: None,
-                bindings: HashMap::new(),
+                bindings: IndexMap::new(),
+                relations: Vec::new(),
+                binding_log: Vec::new(),
+                join_merges: Vec::new(),
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
@@ -100,7 +148,10 @@ impl ScopeTree {
         let id = self.scopes.len();
         self.scopes.push(Scope {
             parent: Some(parent),
-            bindings: HashMap::new(),
+            bindings: IndexMap::new(),
+            relations: Vec::new(),
+            binding_log: Vec::new(),
+            join_merges: Vec::new(),
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
@@ -114,7 +165,41 @@ impl ScopeTree {
     }
 
     pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
+        self.scopes[scope].binding_log.push(name.clone());
+        if let Binding::Table(table) = &binding {
+            self.scopes[scope].relations.push(table.clone());
+        }
         self.scopes[scope].bindings.insert(name, binding);
+    }
+
+    /// Number of bindings added to `scope` so far; pass it to
+    /// [`Self::bindings_added_since`] to learn what a FROM item introduced.
+    pub fn binding_mark(&self, scope: ScopeId) -> usize {
+        self.scopes[scope].binding_log.len()
+    }
+
+    /// Binding names added to `scope` since `mark`, in the order added.
+    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<String> {
+        self.scopes[scope].binding_log[mark..].to_vec()
+    }
+
+    pub fn add_join_merge(&mut self, scope: ScopeId, merge: JoinMerge) {
+        self.scopes[scope].join_merges.push(merge);
+    }
+
+    /// Joins that merge columns among the relations an unqualified name is
+    /// looked up in: those of the nearest scope with a FROM clause, in source
+    /// order.
+    pub fn join_merges(&self, scope: ScopeId) -> &[JoinMerge] {
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            let s = &self.scopes[id];
+            if !s.bindings.is_empty() {
+                return &s.join_merges;
+            }
+            current = s.parent;
+        }
+        &[]
     }
 
     pub fn add_virtual_source(
@@ -145,6 +230,18 @@ impl ScopeTree {
             return Some(b);
         }
         s.parent.and_then(|p| self.lookup(p, name))
+    }
+
+    /// Physical relations visible from `scope`, nearest scope first and in
+    /// FROM order within a scope.
+    pub fn visible_relations(&self, scope: ScopeId) -> Vec<&TableRef> {
+        let mut result = Vec::new();
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            result.extend(self.scopes[id].relations.iter());
+            current = self.scopes[id].parent;
+        }
+        result
     }
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {

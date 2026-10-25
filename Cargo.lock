@@ -277,6 +277,7 @@ dependencies = [
 name = "dlin-sqllineage"
 version = "0.2.6"
 dependencies = [
+ "indexmap",
  "serde",
  "sqlparser",
 ]
