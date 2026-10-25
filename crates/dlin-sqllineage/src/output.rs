@@ -289,6 +289,10 @@ pub enum Transform {
     /// Direct column reference.
     Direct,
     /// Cast or type conversion.
+    ///
+    /// Reserved: the engine does not classify casts yet, so this is never
+    /// produced. A cast reports the transform of the expression it wraps
+    /// (`Direct` for a cast of a plain column).
     Cast,
     /// General expression.
     Expression,

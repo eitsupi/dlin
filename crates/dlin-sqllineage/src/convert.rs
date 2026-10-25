@@ -17,6 +17,9 @@ use crate::graph::{
 };
 use crate::types::{self as old, CatalogProvider, SemanticError};
 
+/// TODO: Translates the new `Catalog` into the legacy `CatalogProvider`, so
+/// `list_columns` returns plain strings and column quoting is lost. Remove this
+/// when the resolver uses `Catalog` directly.
 pub(super) struct CatalogAdapter<'a> {
     catalog: &'a dyn Catalog,
     dialect: Dialect,
@@ -138,6 +141,9 @@ pub(super) fn analyze_statement(
     converted
 }
 
+// TODO: Rebuilds the new types from legacy results, including the `"*"` and
+// `"?column?"` sentinel strings. Remove this when the resolver produces
+// `StatementAnalysis` directly.
 fn convert_result(
     result: &old::AnalyzeResult,
     metadata: &StatementMetadata,

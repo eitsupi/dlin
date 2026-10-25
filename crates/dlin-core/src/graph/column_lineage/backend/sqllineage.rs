@@ -225,6 +225,9 @@ pub(crate) fn resolve_statement_output<'a>(
             ),
         });
     }
+    // TODO: Names are matched with `to_lowercase()` instead of `Output::lookup`
+    // to keep dlin output unchanged. Move to the dialect's column rules and keep
+    // dlin-specific compatibility handling separate.
     let wanted = name.to_lowercase();
     let matches = statement
         .output

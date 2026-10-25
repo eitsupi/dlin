@@ -12,6 +12,11 @@ use super::{Candidate, Ident, OutputName, Quote, Relation};
 use projection::query_output;
 
 /// Immutable spelling and output-shape data collected from one parsed statement.
+///
+/// TODO: Quoting is collected from every occurrence of a name in the statement,
+/// not per reference, because the engine does not carry quoting. When
+/// occurrences disagree, catalog resolution gives up. Replace this once the
+/// engine keeps typed identifiers per reference.
 pub(super) struct StatementMetadata {
     relations: Vec<Relation>,
     relation_aliases: Vec<(String, Relation)>,
@@ -81,6 +86,9 @@ impl StatementMetadata {
     /// context. Relation and alias identifiers are intentionally omitted.
     /// With no matching occurrence, retain the normalized unquoted spelling;
     /// conflicting occurrence contexts return `None`.
+    ///
+    /// TODO: Occurrences are merged by name, not per reference; see
+    /// `StatementMetadata`.
     pub(super) fn lookup_ident(&self, name: &str) -> Option<Ident> {
         let mut candidates = self
             .columns
