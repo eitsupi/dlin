@@ -24,9 +24,8 @@ indexmap = "2"
 minijinja = "2"
 rayon = "1"
 globset = "0.4"
-sqllineage = { git = "https://github.com/funcpp/sqllineage.git", rev = "b010d8083c60aee977055ea36f8a6807c1d51c62", default-features = false }
-# Must stay in lockstep with the sqlparser version sqllineage depends on; see
-# `sqlparser_version_matches_sqllineage` in dlin-core.
+# Shared with crates/dlin-sqllineage so the lockfile holds a single sqlparser;
+# see `sqlparser_version_matches_sqllineage` in dlin-core.
 sqlparser = { version = "0.62", features = ["serde", "visitor"] }
 path-slash = "0.2.1"
 clap = { version = "4", features = ["derive", "env"] }
@@ -40,6 +39,7 @@ serial_test = "4.0.1"
 
 # internal
 dlin-core = { version = "0.2.6", path = "crates/dlin-core" }
+sqllineage = { package = "dlin-sqllineage", version = "0.2.6", path = "crates/dlin-sqllineage" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }

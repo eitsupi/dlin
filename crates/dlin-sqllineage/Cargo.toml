@@ -1,0 +1,18 @@
+[package]
+name = "dlin-sqllineage"
+version.workspace = true
+edition.workspace = true
+description = "Column-level SQL lineage engine used by dlin, forked from sqllineage"
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["sql", "lineage", "dbt"]
+categories = ["development-tools", "parser-implementations"]
+
+[dependencies]
+sqlparser = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
