@@ -50,6 +50,9 @@ pub use output::*;
 pub use types::Dialect;
 
 #[cfg(test)]
+mod equivalence;
+
+#[cfg(test)]
 use sqlparser::parser::Parser;
 
 /// Run the internal engine directly for migration correspondence tests.
