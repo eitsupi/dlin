@@ -1691,7 +1691,7 @@ fn resolve_named_scope_reference(
         _ => None,
     }
     .or_else(|| qualifier.and_then(|qualifier| graph.scopes.lookup(scope, qualifier).cloned()))
-    .or_else(|| find_single_binding(scope, graph));
+    .or_else(|| find_unqualified_binding(name, scope, graph));
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
     };
@@ -2316,7 +2316,7 @@ fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize
                         .as_deref()
                         .and_then(|qual| graph.scopes.lookup(*scope, qual).cloned())
                 })
-                .or_else(|| find_single_binding(*scope, graph));
+                .or_else(|| find_unqualified_binding(name, *scope, graph));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -2334,7 +2334,7 @@ fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize
         } => {
             let binding = binding
                 .clone()
-                .or_else(|| find_single_binding(*scope, graph));
+                .or_else(|| find_unqualified_binding(name, *scope, graph));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -2349,13 +2349,57 @@ fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize
     }
 }
 
-fn find_single_binding(scope: usize, graph: &RawGraph) -> Option<Binding> {
+/// The relation an unqualified column reference is read from: the only
+/// relation in scope, or else the CTE/derived table that is the only (or, for
+/// a merged join column, the leftmost) one publishing the name. This is the
+/// relation `resolve_from_bindings` resolves through, so a reference is
+/// followed the same way whether or not other relations share the scope.
+fn find_unqualified_binding(name: &str, scope: usize, graph: &RawGraph) -> Option<Binding> {
     let bindings = effective_bindings(scope, graph);
     if bindings.len() == 1 {
-        Some(bindings[0].1.clone())
-    } else {
-        None
+        return Some(bindings[0].1.clone());
     }
+    let providers = column_providers(name, &bindings, graph);
+    if providers.len() > 1 && !graph.scopes.is_merged_column(scope, name) {
+        return None;
+    }
+    providers.first().map(|provider| provider.binding.clone())
+}
+
+/// A CTE or derived table in a FROM clause that publishes a column.
+struct ColumnProvider<'a> {
+    name: &'a str,
+    binding: &'a Binding,
+    scope: usize,
+}
+
+/// CTEs and derived tables that publish `name`, in FROM order. A relation
+/// joined under several aliases is one provider.
+fn column_providers<'a>(
+    name: &str,
+    bindings: &'a [(String, Binding)],
+    graph: &RawGraph,
+) -> Vec<ColumnProvider<'a>> {
+    let mut providers: Vec<ColumnProvider<'a>> = Vec::new();
+    for (binding_name, binding) in bindings {
+        let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
+            continue;
+        };
+        if graph
+            .scopes
+            .output_columns(*scope)
+            .iter()
+            .any(|column| column.name == name)
+            && !providers.iter().any(|provider| provider.scope == *scope)
+        {
+            providers.push(ColumnProvider {
+                name: binding_name,
+                binding,
+                scope: *scope,
+            });
+        }
+    }
+    providers
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2419,27 +2463,14 @@ fn resolve_from_bindings(
             candidates: Vec::new(),
         })
     } else {
-        let mut table_candidates = Vec::new();
-        // CTEs and derived tables that publish the column, in FROM order. A
-        // relation joined under several aliases is one provider.
-        let mut providers: Vec<(&str, usize)> = Vec::new();
-        for (binding_name, binding) in bindings {
-            match binding {
-                Binding::Cte(s) | Binding::DerivedTable(s) => {
-                    if graph
-                        .scopes
-                        .output_columns(*s)
-                        .iter()
-                        .any(|c| c.name == name)
-                        && !providers.iter().any(|(_, scope)| scope == s)
-                    {
-                        providers.push((binding_name, *s));
-                    }
-                }
-                Binding::Table(t) => table_candidates.push(t.clone()),
-                Binding::VirtualSource(_) => {}
-            }
-        }
+        let table_candidates: Vec<TableRef> = bindings
+            .iter()
+            .filter_map(|(_, binding)| match binding {
+                Binding::Table(table) => Some(table.clone()),
+                _ => None,
+            })
+            .collect();
+        let providers = column_providers(name, bindings, graph);
         // Two relations offering the same name make an unqualified reference
         // a real choice, unless a join merges that column into one.
         if providers.len() > 1 && !merged_by_join {
@@ -2447,16 +2478,16 @@ fn resolve_from_bindings(
                 column: name.to_string(),
                 candidates: providers
                     .iter()
-                    .map(|(binding_name, _)| TableRef::new(*binding_name))
+                    .map(|provider| TableRef::new(provider.name))
                     .collect(),
             });
         }
         // A provider outranks physical tables, whose columns are unknown
         // without a catalog. Among merged providers the leftmost is reported.
-        if let Some(&(_, provider)) = providers.first() {
+        if let Some(provider) = providers.first() {
             return resolve_through_scope(
                 name,
-                provider,
+                provider.scope,
                 graph,
                 resolved,
                 incoming,
