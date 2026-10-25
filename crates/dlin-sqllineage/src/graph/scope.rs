@@ -41,6 +41,10 @@ struct Scope {
     /// Iteration order is observable (star expansion, ambiguity candidates),
     /// so it must not depend on hashing.
     bindings: IndexMap<String, Binding>,
+    /// Every physical relation added to this scope, including ones whose
+    /// binding name was later taken by another relation (`s.t` and `o.t`
+    /// share the name `t`). Multi-part qualifiers are matched against these.
+    relations: Vec<TableRef>,
     /// Column names merged by a `JOIN ... USING (...)` in this scope. Such a
     /// name denotes one column of the join result, not one per relation.
     using_columns: HashSet<String>,
@@ -94,6 +98,7 @@ impl ScopeTree {
             scopes: vec![Scope {
                 parent: None,
                 bindings: IndexMap::new(),
+                relations: Vec::new(),
                 using_columns: HashSet::new(),
                 natural_join: false,
                 anonymous_derived: Vec::new(),
@@ -113,6 +118,7 @@ impl ScopeTree {
         self.scopes.push(Scope {
             parent: Some(parent),
             bindings: IndexMap::new(),
+            relations: Vec::new(),
             using_columns: HashSet::new(),
             natural_join: false,
             anonymous_derived: Vec::new(),
@@ -128,6 +134,9 @@ impl ScopeTree {
     }
 
     pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
+        if let Binding::Table(table) = &binding {
+            self.scopes[scope].relations.push(table.clone());
+        }
         self.scopes[scope].bindings.insert(name, binding);
     }
 
@@ -183,6 +192,18 @@ impl ScopeTree {
             return Some(b);
         }
         s.parent.and_then(|p| self.lookup(p, name))
+    }
+
+    /// Physical relations visible from `scope`, nearest scope first and in
+    /// FROM order within a scope.
+    pub fn visible_relations(&self, scope: ScopeId) -> Vec<&TableRef> {
+        let mut result = Vec::new();
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            result.extend(self.scopes[id].relations.iter());
+            current = self.scopes[id].parent;
+        }
+        result
     }
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {

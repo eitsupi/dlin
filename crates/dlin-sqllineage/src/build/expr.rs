@@ -506,12 +506,15 @@ impl LineageBuilder {
                 return Some((prefix_len, binding.clone()));
             }
 
-            visible.iter().find_map(|(_, binding)| {
-                let Binding::Table(table) = binding else {
-                    return None;
-                };
-                (table_parts(table) == prefix).then(|| (prefix_len, binding.clone()))
-            })
+            // A relation whose name was reused by a later FROM item (`s.t`
+            // and `o.t` both bind `t`) is no longer in `visible`, but its
+            // full name still identifies it.
+            self.graph
+                .scopes
+                .visible_relations(self.current_scope)
+                .into_iter()
+                .find(|table| table_parts(table) == prefix)
+                .map(|table| (prefix_len, Binding::Table(table.clone())))
         })
     }
 

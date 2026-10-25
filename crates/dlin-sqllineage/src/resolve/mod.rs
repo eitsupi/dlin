@@ -2121,10 +2121,13 @@ fn resolve_node(
                     catalog,
                     mapping_cache,
                 )
-            } else if let Some(qual) = qualifier {
-                Some(ColumnOrigin::Concrete {
-                    table: TableRef::new(qual.as_str()),
+            } else if qualifier.is_some() {
+                // The qualifier names no relation in scope. Building a table
+                // out of its text would present a guess as a confident
+                // source, so the reference stays unresolved.
+                Some(ColumnOrigin::Ambiguous {
                     column: name.clone(),
+                    candidates: Vec::new(),
                 })
             } else {
                 resolve_unqualified(
