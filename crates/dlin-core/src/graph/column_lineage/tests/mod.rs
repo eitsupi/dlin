@@ -953,4 +953,5 @@ mod core_star;
 mod core_star_chain;
 mod core_util;
 mod impact;
+mod production_output;
 mod regression_fixtures;

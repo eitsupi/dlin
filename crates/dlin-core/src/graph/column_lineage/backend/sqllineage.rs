@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use sqllineage::{Analyzer, Dialect, Lineage, OutputName, Shape, Transform, Unresolved, parse};
+use sqllineage::{Analyzer, Dialect, Lineage, OutputName, Transform, Unresolved, parse};
 
 use super::catalog::CatalogSnapshot;
 use super::catalog_provider::CatalogAdapter;
@@ -105,9 +105,7 @@ pub fn debug_trace_column_json(
         .output
         .columns
         .iter()
-        .filter(|output| {
-            output_column_name(output).is_some_and(|name| name.to_lowercase() == wanted)
-        })
+        .filter(|output| output_column_name(output).to_lowercase() == wanted)
         .collect::<Vec<_>>();
     if matches.is_empty() {
         return Err(format!("lineage error: no mapping for column '{column}'"));
@@ -132,10 +130,7 @@ pub(crate) fn output_names(
     let mut seen = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
     for column in &analysis.output.columns {
-        let name = match &column.name {
-            OutputName::Explicit(ident) | OutputName::Inferred(ident) => ident.value.clone(),
-            OutputName::Anonymous => continue,
-        };
+        let name = output_column_name(column).to_string();
         if !seen.insert(name.clone()) {
             duplicates.insert(name.clone());
         }
@@ -144,111 +139,122 @@ pub(crate) fn output_names(
     (names, duplicates)
 }
 
+/// Name under which an unnamed output expression is listed. Columns without a
+/// name keep the placeholder that dlin has always reported for them.
+const ANONYMOUS_COLUMN: &str = "?column?";
+
+/// Message for a statement-level failure that rejects the whole model, or
+/// `None` when the statement may still be traced.
+///
+/// An empty projection is checked first, ahead of any semantic error. Other
+/// findings (duplicate output names, lineage cycles) never reject a statement.
 pub(crate) fn statement_error(statement: &sqllineage::StatementAnalysis) -> Option<String> {
-    use sqllineage::{DiagnosticKind, Severity};
+    use sqllineage::DiagnosticKind;
+    if statement
+        .diagnostics
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.kind, DiagnosticKind::EmptyProjection))
+    {
+        return Some("dlin found a SELECT with an empty projection".to_string());
+    }
+    semantic_error(statement)
+}
+
+/// Message for an analysis error that is not an empty projection.
+fn semantic_error(statement: &sqllineage::StatementAnalysis) -> Option<String> {
+    use sqllineage::DiagnosticKind;
     statement
         .diagnostics
         .iter()
-        .find(|diagnostic| {
-            diagnostic.severity == Severity::Error
-                || matches!(diagnostic.kind, DiagnosticKind::EmptyProjection)
+        .find_map(|diagnostic| match &diagnostic.kind {
+            DiagnosticKind::SetOperationArityMismatch { left, right } => Some(format!(
+                "SQL parse error: set operation arity mismatch: left has {left} columns, \
+                 right has {right} columns"
+            )),
+            DiagnosticKind::UnsupportedSyntax { what } => Some(match *what {
+                "pipe operators" => "SQL parse error: pipe operators are not supported".to_string(),
+                other => format!("SQL parse error: {other} is not supported"),
+            }),
+            DiagnosticKind::EmptyProjection
+            | DiagnosticKind::UnexpectedCycle
+            | DiagnosticKind::DuplicateOutputName { .. } => None,
         })
-        .map(|diagnostic| format!("SQL analysis reported {}", diagnostic.kind.code()))
 }
 
-pub(crate) fn resolve_output_column<'a>(
-    output: &'a sqllineage::Output,
-    name: &str,
-    dialect: DlinDialect,
-) -> Result<&'a sqllineage::OutputColumn, OutputFailure> {
-    resolve_output_column_with_duplicate_hint(output, name, dialect, false)
+/// Message for the first failure that rejects the whole input: an empty
+/// projection in any statement, otherwise the first semantic error.
+pub(crate) fn analysis_error(analysis: &sqllineage::Analysis) -> Option<String> {
+    analysis
+        .statements
+        .iter()
+        .find(|statement| {
+            statement
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d.kind, sqllineage::DiagnosticKind::EmptyProjection))
+        })
+        .and_then(statement_error)
+        .or_else(|| analysis.statements.iter().find_map(semantic_error))
 }
 
-pub(crate) fn resolve_statement_output<'a>(
-    statement: &'a sqllineage::StatementAnalysis,
-    name: &str,
-    dialect: DlinDialect,
-    duplicate_hint: bool,
-) -> Result<&'a sqllineage::OutputColumn, OutputFailure> {
-    let result = if duplicate_hint {
-        resolve_output_column_with_duplicate_hint(&statement.output, name, dialect, true)
-    } else {
-        resolve_output_column(&statement.output, name, dialect)
-    };
-    match result {
-        Err(failure)
-            if failure.kind == OutputFailureKind::NotFound && statement.has_unresolved_stars =>
-        {
-            Err(OutputFailure {
-                kind: OutputFailureKind::Indeterminate,
-                message: format!(
-                    "cannot match output '{name}' because an unexpanded SELECT * leaves the output columns unknown"
-                ),
-            })
+/// Output names a model exposes, or nothing unless the input is exactly one
+/// lineage-carrying statement that analyzed without a semantic error.
+pub(crate) fn discovered_output_names(analysis: &sqllineage::Analysis) -> Vec<String> {
+    match analysis.statements.as_slice() {
+        [statement] if statement.kind.carries_lineage() && semantic_error(statement).is_none() => {
+            output_names(statement).0
         }
-        other => other,
+        _ => Vec::new(),
     }
 }
 
-pub(crate) fn resolve_output_column_with_duplicate_hint<'a>(
-    output: &'a sqllineage::Output,
+/// Find the output column a dlin column name refers to.
+///
+/// `duplicate_hint` is set when the caller already knows the name is used by
+/// more than one output.
+pub(crate) fn resolve_statement_output<'a>(
+    statement: &'a sqllineage::StatementAnalysis,
     name: &str,
-    dialect: DlinDialect,
     duplicate_hint: bool,
 ) -> Result<&'a sqllineage::OutputColumn, OutputFailure> {
     if duplicate_hint {
         return Err(OutputFailure {
             kind: OutputFailureKind::Ambiguous,
-            message: format!("output name is duplicated: '{name}'"),
+            message: format!(
+                "cannot resolve output '{name}' because the output name is duplicated"
+            ),
         });
     }
-    let engine_dialect = engine_dialect(dialect).map_err(|message| OutputFailure {
-        kind: OutputFailureKind::NotFound,
-        message,
-    })?;
-    let matches = output
+    let wanted = name.to_lowercase();
+    let matches = statement
+        .output
         .columns
         .iter()
-        .filter(|column| {
-            output_column_name(column)
-                .is_some_and(|value| value.to_lowercase() == name.to_lowercase())
-        })
+        .filter(|column| output_column_name(column).to_lowercase() == wanted)
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [column] => Ok(column),
-        [_, _, ..] => Err(OutputFailure {
-            kind: OutputFailureKind::Ambiguous,
-            message: format!("output name is duplicated: '{name}'"),
+        [] if statement.has_unresolved_stars => Err(OutputFailure {
+            kind: OutputFailureKind::Indeterminate,
+            message: format!(
+                "cannot match output '{name}' because an unexpanded SELECT * leaves the output columns unknown"
+            ),
         }),
-        [] => {
-            let hidden = matches!(
-                output.lookup(name, engine_dialect),
-                sqllineage::Lookup::Absent {
-                    may_hide_behind_star: true
-                }
-            ) || matches!(output.shape, Shape::Open { .. });
-            Err(OutputFailure {
-                kind: if hidden {
-                    OutputFailureKind::Indeterminate
-                } else {
-                    OutputFailureKind::NotFound
-                },
-                message: if hidden {
-                    format!(
-                        "cannot match output '{name}': unexpanded SELECT * leaves the output columns unknown"
-                    )
-                } else {
-                    format!("cannot match output '{name}': no sqllineage mapping")
-                },
-            })
-        }
+        [] => Err(OutputFailure {
+            kind: OutputFailureKind::NotFound,
+            message: format!("no sqllineage mapping for output '{name}'"),
+        }),
+        _ => Err(OutputFailure {
+            kind: OutputFailureKind::Ambiguous,
+            message: format!("more than one sqllineage mapping matches output '{name}'"),
+        }),
     }
 }
 
-fn output_column_name(column: &sqllineage::OutputColumn) -> Option<&str> {
+fn output_column_name(column: &sqllineage::OutputColumn) -> &str {
     match &column.name {
-        OutputName::Explicit(name) | OutputName::Inferred(name) => Some(&name.value),
-        OutputName::Anonymous => None,
+        OutputName::Explicit(name) | OutputName::Inferred(name) => &name.value,
+        OutputName::Anonymous => ANONYMOUS_COLUMN,
     }
 }
 
@@ -256,7 +262,13 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
     let Lineage::Partial { unresolved, .. } = lineage else {
         return None;
     };
-    let (kind, message) = match unresolved.first() {
+    // A recursive origin is reported as such even when its base case also has
+    // unresolved parts: the recursion is what makes the column untraceable.
+    let first = unresolved
+        .iter()
+        .find(|item| matches!(item, Unresolved::Recursive))
+        .or_else(|| unresolved.first());
+    let (kind, message) = match first {
         Some(Unresolved::Ambiguous { column, candidates }) => {
             let candidates = candidates
                 .iter()
@@ -279,7 +291,7 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
             OutputFailureKind::Indeterminate,
             format!(
                 "column origin remains wildcard for table '{}'",
-                super::relation_ref_from_engine(relation).render()
+                relation_display(relation)
             ),
         ),
         Some(Unresolved::NamedBehindStar { relation, column }) => (
@@ -287,20 +299,18 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
             format!(
                 "column '{}' remains behind an unexpanded wildcard for table '{}'",
                 column.value,
-                super::relation_ref_from_engine(relation).render()
+                relation_display(relation)
             ),
         ),
-        Some(Unresolved::Unbound { column }) => (
+        // A row value alias was reported as an unbound column before it had
+        // its own variant; keep that wording.
+        Some(Unresolved::Unbound { column }) | Some(Unresolved::RowValue { alias: column }) => (
             OutputFailureKind::Indeterminate,
             format!("column '{}' has no visible binding", column.value),
         ),
         Some(Unresolved::Recursive) => (
             OutputFailureKind::Indeterminate,
             "column origin is recursive and cannot be represented by dlin".to_string(),
-        ),
-        Some(Unresolved::RowValue { alias }) => (
-            OutputFailureKind::Indeterminate,
-            format!("column origin is row value alias '{}'", alias.value),
         ),
         Some(Unresolved::Unsupported { what }) => (
             OutputFailureKind::Indeterminate,
@@ -314,13 +324,34 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
     Some(OutputFailure { kind, message })
 }
 
+/// Render one identifier the way relation names appeared in messages before
+/// the engine kept SQL spelling: unquoted names are lower-cased, quoted names
+/// keep their spelling, and quotes are not shown.
+fn identifier_display(ident: &sqllineage::Ident) -> String {
+    if ident.quote.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_lowercase()
+    }
+}
+
+fn relation_display(relation: &sqllineage::Relation) -> String {
+    relation
+        .catalog
+        .iter()
+        .chain(relation.schema.iter())
+        .chain(std::iter::once(&relation.name))
+        .map(identifier_display)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn candidate_name(candidate: &sqllineage::Candidate) -> String {
     match candidate {
-        sqllineage::Candidate::Relation(relation) => {
-            super::relation_ref_from_engine(relation).render()
+        sqllineage::Candidate::Relation(relation) => relation_display(relation),
+        sqllineage::Candidate::Cte(name) | sqllineage::Candidate::Derived(Some(name)) => {
+            identifier_display(name)
         }
-        sqllineage::Candidate::Cte(name) => name.value.clone(),
-        sqllineage::Candidate::Derived(Some(name)) => name.value.clone(),
         sqllineage::Candidate::Derived(None) => "<derived>".to_string(),
     }
 }
@@ -392,17 +423,17 @@ impl super::LineageBackend for SqllineageBackend {
     ) -> Result<super::BackendAnalysis, super::BackendError> {
         let analysis = analyze_sql(request.sql, request.dialect, request.catalog)
             .map_err(|message| legacy_error(request.dialect, message))?;
+        if let Some(message) = analysis_error(&analysis) {
+            return Err(super::BackendError {
+                kind: super::BackendErrorKind::Parse,
+                message,
+            });
+        }
         let statements = analysis
             .statements
             .into_iter()
             .enumerate()
             .map(|(statement_ordinal, statement)| {
-                if let Some(message) = statement_error(&statement) {
-                    return Err(super::BackendError {
-                        kind: super::BackendErrorKind::Parse,
-                        message,
-                    });
-                }
                 let open = has_open_shape(&statement);
                 let columns = request
                     .outputs
@@ -415,7 +446,6 @@ impl super::LineageBackend for SqllineageBackend {
                         let column = match resolve_statement_output(
                             &statement,
                             &request_output.name,
-                            request.dialect,
                             request
                                 .duplicate_output_names
                                 .contains(&request_output.name),
@@ -447,20 +477,20 @@ impl super::LineageBackend for SqllineageBackend {
                         })
                     })
                     .collect();
-                Ok(super::BackendStatementResult {
+                super::BackendStatementResult {
                     statement_ordinal,
                     lineage_bearing: statement.kind.carries_lineage(),
                     completeness: super::AnalysisCompleteness::Complete,
                     has_unresolved_stars: open,
                     columns,
-                })
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         Ok(super::BackendAnalysis { statements })
     }
 }
 
-fn legacy_single_error(error: sqllineage::SingleStatementError) -> String {
+pub(crate) fn legacy_single_error(error: sqllineage::SingleStatementError) -> String {
     match error {
         sqllineage::SingleStatementError::NoStatements => {
             "no statements in analysis result".to_string()

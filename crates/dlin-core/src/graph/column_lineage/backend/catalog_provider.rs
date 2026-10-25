@@ -46,7 +46,7 @@ impl sqllineage::Catalog for CatalogAdapter<'_> {
     }
 }
 
-pub(crate) fn relation_ref_from_engine(relation: &sqllineage::Relation) -> RelationRef {
+fn relation_ref_from_engine(relation: &sqllineage::Relation) -> RelationRef {
     use crate::graph::column_lineage::relation::QuoteStyle;
     use sqllineage::{Ident, Quote};
 

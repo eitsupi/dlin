@@ -12,8 +12,8 @@ mod tests;
 mod types;
 
 use backend::sqllineage::{
-    OutputFailureKind, analyze_parsed, analyze_sql, lineage_failure, output_names, parse_sql,
-    resolve_statement_output, statement_error,
+    OutputFailureKind, analysis_error, analyze_parsed, analyze_sql, discovered_output_names,
+    legacy_single_error, lineage_failure, parse_sql, resolve_statement_output,
 };
 pub use backend::{
     CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
@@ -43,13 +43,7 @@ fn discover_named_output_columns(
     let Ok(analysis) = analyze_sql(sql, dialect, catalog) else {
         return HashSet::new();
     };
-    let Ok(statement) = analysis.into_single() else {
-        return HashSet::new();
-    };
-    if !statement.kind.carries_lineage() {
-        return HashSet::new();
-    }
-    output_names(&statement).0.into_iter().collect()
+    discovered_output_names(&analysis).into_iter().collect()
 }
 
 fn output_failure_state(kind: OutputFailureKind) -> &'static str {
@@ -301,20 +295,9 @@ pub(super) fn compute_column_lineage_internal(
     let yaml_schema = build_yaml_schema_for_node(manifest, node);
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
     let discovered = if yaml_schema.as_ref() == catalog.as_ref() {
-        analyzed
-            .statements
-            .first()
-            .filter(|statement| statement.kind.carries_lineage())
-            .map(|statement| output_names(statement).0)
-            .unwrap_or_default()
+        discovered_output_names(&analyzed)
     } else {
-        let discovery = analyze_parsed(&parsed, dialect, yaml_schema.as_ref());
-        discovery
-            .statements
-            .first()
-            .filter(|statement| statement.kind.carries_lineage())
-            .map(|statement| output_names(statement).0)
-            .unwrap_or_default()
+        discovered_output_names(&analyze_parsed(&parsed, dialect, yaml_schema.as_ref()))
     };
     let mut names: HashSet<String> = node.columns.keys().cloned().collect();
     names.extend(discovered);
@@ -326,26 +309,26 @@ pub(super) fn compute_column_lineage_internal(
     }
 
     let total = column_names.len();
+    if let Some(detail) = analysis_error(&analyzed) {
+        return parse_failure(display_name, total, detail);
+    }
     let statement = match analyzed.into_single() {
         Ok(statement) => statement,
-        Err(error) => return parse_failure(display_name, total, error.to_string()),
+        Err(error) => return parse_failure(display_name, total, legacy_single_error(error)),
     };
     if !statement.kind.carries_lineage() {
         return parse_failure(
             display_name,
             total,
-            "statement does not carry column lineage".to_string(),
+            "statement is not lineage-bearing".to_string(),
         );
-    }
-    if let Some(detail) = statement_error(&statement) {
-        return parse_failure(display_name, total, detail);
     }
 
     let has_star_columns = statement.has_unresolved_stars;
     let mut columns = Vec::new();
     let mut errors = Vec::new();
     for col_name in &column_names {
-        match resolve_statement_output(&statement, col_name, dialect, false) {
+        match resolve_statement_output(&statement, col_name, false) {
             Ok(output) => {
                 if let Some(failure) = lineage_failure(&output.lineage) {
                     let state = output_failure_state(failure.kind);

@@ -286,7 +286,7 @@ fn compute_single_column_lineage(
     if statement_error(&statement).is_some() {
         return None;
     }
-    let output = resolve_statement_output(&statement, column_name, dialect, false).ok()?;
+    let output = resolve_statement_output(&statement, column_name, false).ok()?;
     if lineage_failure(&output.lineage).is_some() {
         return None;
     }

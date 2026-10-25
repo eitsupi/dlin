@@ -14,7 +14,6 @@ pub use catalog::CatalogSnapshot;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use catalog_provider::SqllineageCatalogProvider;
-pub(crate) use catalog_provider::relation_ref_from_engine;
 pub(crate) use catalog_provider::source_relation;
 #[allow(unused_imports)]
 pub use dialect::{DialectClassification, DlinDialect, REMOVED_DIALECTS};
