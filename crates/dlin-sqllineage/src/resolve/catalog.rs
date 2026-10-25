@@ -16,16 +16,16 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
         }
     }
 
-    let mut expanded = Vec::new();
-    let mut to_remove = Vec::new();
-
-    for (idx, mapping) in mappings.iter().enumerate() {
+    // Rebuild the list so that every expansion takes the position of the
+    // wildcard it replaces; appending would move all expanded columns behind
+    // the columns that were written after the star.
+    let mut result = Vec::with_capacity(mappings.len());
+    for mapping in mappings.drain(..) {
         if let [ColumnOrigin::Wildcard { table }] = mapping.sources.as_slice()
             && let Some(columns) = catalog.list_columns(table)
         {
-            to_remove.push(idx);
             for col_name in columns {
-                expanded.push(ColumnMapping {
+                result.push(ColumnMapping {
                     target: ColumnRef {
                         table: mapping.target.table.clone(),
                         column: col_name.clone(),
@@ -37,11 +37,92 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
                     transform: TransformKind::Direct,
                 });
             }
+        } else {
+            result.push(mapping);
+        }
+    }
+    *mappings = result;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_catalog;
+    use crate::types::{
+        CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
+    };
+
+    struct Columns;
+
+    impl CatalogProvider for Columns {
+        fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+            match table.table.as_str() {
+                "t" => Some(vec!["x".into(), "y".into()]),
+                "u" => Some(vec!["p".into()]),
+                _ => None,
+            }
+        }
+
+        fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+            None
         }
     }
 
-    for &idx in to_remove.iter().rev() {
-        mappings.remove(idx);
+    fn named(name: &str) -> ColumnMapping {
+        ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: name.into(),
+            },
+            sources: vec![ColumnOrigin::Concrete {
+                table: TableRef::new("src"),
+                column: name.into(),
+            }],
+            transform: TransformKind::Direct,
+        }
     }
-    mappings.extend(expanded);
+
+    fn star(table: &str) -> ColumnMapping {
+        ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: "*".into(),
+            },
+            sources: vec![ColumnOrigin::Wildcard {
+                table: TableRef::new(table),
+            }],
+            transform: TransformKind::Direct,
+        }
+    }
+
+    fn targets(mappings: &[ColumnMapping]) -> Vec<&str> {
+        mappings
+            .iter()
+            .map(|mapping| mapping.target.column.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn expanded_star_replaces_the_wildcard_in_place() {
+        let mut mappings = vec![named("a"), star("t"), named("b")];
+        apply_catalog(&mut mappings, &Columns);
+        assert_eq!(targets(&mappings), ["a", "x", "y", "b"]);
+    }
+
+    #[test]
+    fn several_stars_are_each_expanded_in_place() {
+        let mut mappings = vec![star("t"), named("a"), star("u"), named("b"), star("t")];
+        apply_catalog(&mut mappings, &Columns);
+        assert_eq!(targets(&mappings), ["x", "y", "a", "p", "b", "x", "y"]);
+    }
+
+    #[test]
+    fn star_without_catalog_columns_is_kept_where_it_was() {
+        let mut mappings = vec![named("a"), star("unknown"), star("t"), named("b")];
+        apply_catalog(&mut mappings, &Columns);
+        assert_eq!(targets(&mappings), ["a", "*", "x", "y", "b"]);
+        assert!(matches!(
+            mappings[1].sources.as_slice(),
+            [ColumnOrigin::Wildcard { table }] if table.table == "unknown"
+        ));
+    }
 }
