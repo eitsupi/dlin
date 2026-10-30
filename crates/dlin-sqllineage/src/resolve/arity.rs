@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use crate::graph::RawGraph;
 use crate::graph::node::{RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
+use crate::keys::ident_parts_equal;
 use crate::types::{CatalogProvider, SemanticError, TableRef};
 use crate::{Dialect, Ident};
 
@@ -278,14 +279,6 @@ fn excluded_matches_name_with_context(
 
 pub(super) fn same_column_name(left: &Ident, right: &Ident, dialect: Dialect) -> bool {
     left.column_key(dialect) == right.column_key(dialect)
-}
-
-fn ident_parts_equal(left: &[Ident], right: &[Ident], dialect: Dialect) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(l, r)| l.relation_key(dialect) == r.relation_key(dialect))
 }
 
 pub(super) fn ilike_matches(pattern: &str, value: &str) -> bool {

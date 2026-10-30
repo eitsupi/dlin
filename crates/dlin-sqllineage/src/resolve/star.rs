@@ -16,6 +16,7 @@ use super::mapping::{
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan};
+use crate::keys::ident_parts_equal;
 use crate::types::{
     CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
 };
@@ -298,14 +299,6 @@ fn apply_star_options(
         }
     }
     mappings.extend(retained);
-}
-
-fn ident_parts_equal(left: &[Ident], right: &[Ident], dialect: Dialect) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| left.relation_key(dialect) == right.relation_key(dialect))
 }
 
 #[allow(clippy::too_many_arguments)]

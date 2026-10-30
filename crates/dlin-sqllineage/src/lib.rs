@@ -37,6 +37,7 @@ mod diagnostic;
 mod dialect;
 mod graph;
 mod ident;
+mod keys;
 mod metadata;
 mod output;
 mod resolve;
