@@ -372,6 +372,17 @@ pub fn cases() -> Vec<Case> {
         Dialect::BigQuery,
         vec![col(0, u("value"), vec![source(relation("t"), u("fOO"))])],
     ));
+    // x reads fOO and y reads Foo, both of which reach the output; the unused
+    // CTE column also spelled Foo must not decide which spelling is kept.
+    cases.push(
+        Case::new(
+            "bigquery_unused_cte_column_spelling_shared_with_used_column",
+            "WITH c AS (SELECT Foo AS unused, fOO AS x, Foo AS y FROM t) SELECT x + y AS value FROM c",
+            Dialect::BigQuery,
+            vec![col(0, u("value"), vec![source(relation("t"), u("fOO"))])],
+        )
+        .known_failure(complete(vec![source(relation("t"), u("Foo"))]), "The spelling of a source column shared by an unused CTE column and a used one is taken from the later reference instead of the first one reaching the output."),
+    );
     cases
 }
 
