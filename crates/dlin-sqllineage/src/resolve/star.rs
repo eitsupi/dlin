@@ -120,7 +120,7 @@ pub(super) fn expand_star(
                 }
             }
             if !sources.iter().any(
-                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*"),
+                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none()),
             ) {
                 sources.push(ColumnOrigin::Ambiguous {
                     column: Ident::unquoted("*"),

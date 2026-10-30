@@ -198,3 +198,36 @@ fn repeated_stars_do_not_copy_an_equivalent_alias_quote() {
     );
     assert!(!result.has_unresolved_stars);
 }
+
+#[test]
+fn quoted_star_is_a_named_column_in_set_operations() {
+    for sql in [
+        "SELECT \"*\" UNION SELECT id FROM t",
+        "SELECT \"*\" UNION ALL SELECT id FROM t",
+    ] {
+        let result = Analyzer::new(Dialect::Generic)
+            .analyze(sql)
+            .unwrap()
+            .into_single()
+            .unwrap();
+        assert_eq!(result.output.columns.len(), 1, "{sql}");
+        assert_eq!(
+            result.output.columns[0].name,
+            OutputName::Explicit(quoted("*")),
+            "{sql}"
+        );
+        assert_eq!(result.output.columns[0].ordinal, Some(0), "{sql}");
+        assert_eq!(
+            result.output.columns[0].lineage,
+            Lineage::Partial {
+                known: vec![source(Ident::unquoted("t"), Ident::unquoted("id"))],
+                unresolved: vec![dlin_sqllineage::Unresolved::Unbound {
+                    column: quoted("*")
+                }],
+            },
+            "{sql}"
+        );
+        assert_eq!(result.output.shape, dlin_sqllineage::Shape::Closed, "{sql}");
+        assert!(!result.has_unresolved_stars, "{sql}");
+    }
+}
