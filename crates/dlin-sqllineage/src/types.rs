@@ -68,6 +68,9 @@ pub(crate) struct AnalyzeResult {
     pub tables: TableLineage,
     /// Column-level lineage mappings.
     pub columns: ColumnLineage,
+    /// Resolved references in SQL source order, before output traversal.
+    #[serde(skip)]
+    pub source_order: Vec<ColumnOrigin>,
     /// Warnings encountered during analysis.
     pub warnings: Vec<Warning>,
 }
@@ -78,6 +81,7 @@ impl Default for AnalyzeResult {
             statement_type: StatementType::Other,
             tables: TableLineage::default(),
             columns: ColumnLineage::default(),
+            source_order: Vec::new(),
             warnings: Vec::new(),
         }
     }

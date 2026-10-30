@@ -14,6 +14,7 @@ pub(crate) struct LineageBuilder {
     pub(crate) current_scope: ScopeId,
     pub(crate) recursive_cte_name: Option<crate::Ident>,
     pub(crate) warnings: Vec<Warning>,
+    pub(crate) input_positions: Vec<(u64, u64)>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
     /// First unsupported construct met while walking the statement. Once set,
@@ -30,6 +31,7 @@ impl LineageBuilder {
             current_scope: root,
             recursive_cte_name: None,
             warnings: Vec::new(),
+            input_positions: Vec::new(),
             inner_statement_type: None,
             dialect,
             error: None,
@@ -44,6 +46,13 @@ impl LineageBuilder {
         if let Some(error) = self.error {
             return Err(error);
         }
+        let mut inputs: Vec<_> = self
+            .input_positions
+            .into_iter()
+            .zip(std::mem::take(&mut self.graph.tables.inputs))
+            .collect();
+        inputs.sort_by_key(|(position, _)| *position);
+        self.graph.tables.inputs = inputs.into_iter().map(|(_, table)| table).collect();
         let final_type = self.inner_statement_type.unwrap_or(st);
         Ok((self.graph, self.warnings, final_type))
     }

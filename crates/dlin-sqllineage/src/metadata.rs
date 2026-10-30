@@ -1,5 +1,6 @@
 //! Output categories and lexical candidate kinds retained until direct result generation.
 
+use crate::keys::{candidate_key, sort_dedup_by_key};
 use crate::types::TableRef;
 use crate::{Candidate, Dialect, Ident, OutputName, Relation};
 use sqlparser::ast::{self, ObjectName, Query, Statement, TableFactor, Visit, Visitor};
@@ -31,6 +32,10 @@ struct OutputSlot {
 }
 
 impl StatementMetadata {
+    pub(super) fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
     pub(super) fn new(statement: &Statement, dialect: Dialect) -> Self {
         let mut providers = ProviderCollector {
             dialect,
@@ -92,8 +97,9 @@ impl StatementMetadata {
             })
             .cloned()
             .collect::<Vec<_>>();
-        candidates.sort();
-        candidates.dedup();
+        sort_dedup_by_key(&mut candidates, |candidate| {
+            candidate_key(candidate, self.dialect)
+        });
         if candidates.is_empty() {
             let physical = self
                 .relations
@@ -113,8 +119,9 @@ impl StatementMetadata {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            providers.sort();
-            providers.dedup();
+            sort_dedup_by_key(&mut providers, |candidate| {
+                candidate_key(candidate, self.dialect)
+            });
             match (physical, providers.as_slice()) {
                 (false, [provider]) => candidates.push(provider.clone()),
                 _ => candidates.push(Candidate::Relation(relation)),

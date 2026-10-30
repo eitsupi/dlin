@@ -12,6 +12,7 @@ use scope::{ScopeId, ScopeTree};
 pub(crate) struct RawGraph {
     pub dialect: Dialect,
     pub nodes: Vec<RawNode>,
+    pub reference_positions: Vec<Option<(u64, u64)>>,
     pub edges: Vec<RawEdge>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
@@ -22,6 +23,7 @@ impl RawGraph {
         Self {
             dialect,
             nodes: Vec::new(),
+            reference_positions: Vec::new(),
             edges: Vec::new(),
             scopes: ScopeTree::new(dialect),
             tables: TableLineage::default(),
@@ -31,6 +33,7 @@ impl RawGraph {
     pub fn add_node(&mut self, node: RawNode) -> NodeId {
         let id = self.nodes.len();
         self.nodes.push(node);
+        self.reference_positions.push(None);
         id
     }
 

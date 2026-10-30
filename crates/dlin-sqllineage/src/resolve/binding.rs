@@ -638,7 +638,8 @@ pub(super) fn resolve_merged_column(
             Binding::VirtualSource(_) => continue,
         };
         for origin in origins {
-            // Two relations often reach the same underlying column.
+            // Two relations often reach the same underlying column. Distinct
+            // spellings stay apart; the final key normalization picks among them.
             if !sources.iter().any(|seen| same_origin(seen, &origin)) {
                 sources.push(origin);
             }

@@ -15,6 +15,7 @@ use crate::graph::{
     node::RawNode,
     scope::{Binding, ScopeTree},
 };
+use crate::keys::{candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key};
 use crate::types::{self as old, CatalogProvider, SemanticError};
 
 /// TODO: Remove this bridge when the resolver uses `Catalog` directly.
@@ -80,9 +81,16 @@ pub(super) fn analyze_statement(
                 Vec::new(),
                 &error,
                 empty.into_iter().collect(),
+                dialect,
             );
         }
     };
+    let read_order: Vec<_> = graph
+        .tables
+        .inputs
+        .iter()
+        .flat_map(|table| canonical_relations(table, catalog))
+        .collect();
     let row_values = row_value_outputs(&graph);
     let written = graph
         .tables
@@ -104,10 +112,18 @@ pub(super) fn analyze_statement(
                 read,
                 &error,
                 empty.into_iter().collect(),
+                dialect,
             );
         }
     };
-    let mut converted = convert_result(&result, &metadata, catalog, &row_values, dialect);
+    let mut converted = convert_result(
+        &result,
+        &metadata,
+        catalog,
+        &row_values,
+        dialect,
+        &read_order,
+    );
     if let Some(diagnostic) = empty {
         if diagnostic.severity == Severity::Error {
             converted.output.columns.clear();
@@ -126,7 +142,24 @@ fn convert_result(
     catalog: Option<&CatalogAdapter<'_>>,
     row_values: &BTreeMap<Ident, Vec<Ident>>,
     dialect: Dialect,
+    read_order: &[Relation],
 ) -> StatementAnalysis {
+    let source_order: Vec<_> = result
+        .source_order
+        .iter()
+        .filter_map(|origin| {
+            if let old::ColumnOrigin::Concrete { table, column } = origin {
+                Some(SourceColumn {
+                    relation: catalog
+                        .and_then(|adapter| adapter.entry(table))
+                        .map_or_else(|| plain_relation(table), |entry| entry.relation),
+                    column: column.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut columns = Vec::new();
     let mut unexpanded = Vec::new();
     let mut position = Some(0);
@@ -160,7 +193,7 @@ fn convert_result(
                     };
                 }
             }
-            let lineage = normalize_lineage(known, unresolved);
+            let lineage = normalize_lineage(known, unresolved, dialect, read_order, &source_order);
             let mut relations = Vec::new();
             star_relations(&mapping.sources, &mut relations);
             if relations.is_empty() {
@@ -198,9 +231,7 @@ fn convert_result(
                 &mut unresolved,
             );
         }
-        known.sort();
-        known.dedup();
-        let lineage = normalize_lineage(known, unresolved);
+        let lineage = normalize_lineage(known, unresolved, dialect, read_order, &source_order);
         columns.push(OutputColumn {
             ordinal: position,
             name,
@@ -249,14 +280,8 @@ fn convert_result(
     } else {
         Shape::Open { unexpanded }
     };
-    let mut read: Vec<_> = result
-        .tables
-        .inputs
-        .iter()
-        .flat_map(|t| canonical_relations(t, catalog))
-        .collect();
-    read.sort();
-    read.dedup();
+    let mut read = read_order.to_vec();
+    sort_dedup_by_key(&mut read, |relation| relation_key(relation, dialect));
     StatementAnalysis {
         kind: convert_kind(&result.statement_type),
         written: result
@@ -283,12 +308,39 @@ fn canonical_relations(
     ]
 }
 
-fn normalize_lineage(mut known: Vec<SourceColumn>, unresolved: Vec<Unresolved>) -> Lineage {
-    known.sort();
-    known.dedup();
+fn normalize_lineage(
+    mut known: Vec<SourceColumn>,
+    unresolved: Vec<Unresolved>,
+    dialect: Dialect,
+    read_order: &[Relation],
+    source_order: &[SourceColumn],
+) -> Lineage {
+    // Relation spelling follows FROM order; column spelling follows its first
+    // reference, independently of which alias supplied that reference.
+    for source in &mut known {
+        retain_first_relation_spelling(&mut source.relation, read_order, dialect);
+    }
+    known.sort_by_cached_key(|source| {
+        (
+            source_key(source, dialect),
+            source_order
+                .iter()
+                .position(|reference| {
+                    reference.column == source.column
+                        && relation_key(&reference.relation, dialect)
+                            == relation_key(&source.relation, dialect)
+                })
+                .unwrap_or(usize::MAX),
+        )
+    });
+    known.dedup_by(|later, earlier| source_key(later, dialect) == source_key(earlier, dialect));
     let mut unique = Vec::new();
-    for item in unresolved {
-        if !unique.contains(&item) {
+    for mut item in unresolved {
+        normalize_unresolved(&mut item, read_order, dialect);
+        if !unique
+            .iter()
+            .any(|seen| unresolved_key(seen, dialect) == unresolved_key(&item, dialect))
+        {
             unique.push(item);
         }
     }
@@ -299,6 +351,36 @@ fn normalize_lineage(mut known: Vec<SourceColumn>, unresolved: Vec<Unresolved>) 
             known,
             unresolved: unique,
         }
+    }
+}
+
+fn retain_first_relation_spelling(
+    relation: &mut Relation,
+    read_order: &[Relation],
+    dialect: Dialect,
+) {
+    if let Some(first) = read_order
+        .iter()
+        .find(|first| relation_key(first, dialect) == relation_key(relation, dialect))
+    {
+        relation.clone_from(first);
+    }
+}
+
+fn normalize_unresolved(unresolved: &mut Unresolved, read_order: &[Relation], dialect: Dialect) {
+    match unresolved {
+        Unresolved::BehindStar { relation } | Unresolved::NamedBehindStar { relation, .. } => {
+            retain_first_relation_spelling(relation, read_order, dialect);
+        }
+        Unresolved::Ambiguous { candidates, .. } => {
+            for candidate in candidates.iter_mut() {
+                if let crate::Candidate::Relation(relation) = candidate {
+                    retain_first_relation_spelling(relation, read_order, dialect);
+                }
+            }
+            sort_dedup_by_key(candidates, |candidate| candidate_key(candidate, dialect));
+        }
+        _ => {}
     }
 }
 
@@ -339,8 +421,9 @@ fn lift_origin(
                     .iter()
                     .flat_map(|table| metadata.candidates_for_output(output_index, column, table))
                     .collect();
-                candidates.sort();
-                candidates.dedup();
+                sort_dedup_by_key(&mut candidates, |candidate| {
+                    candidate_key(candidate, metadata.dialect())
+                });
                 unresolved.push(Unresolved::Ambiguous {
                     column: column_ident,
                     candidates,
@@ -445,6 +528,7 @@ fn semantic_failure(
     mut read: Vec<Relation>,
     error: &SemanticError,
     mut diagnostics: Vec<Diagnostic>,
+    dialect: Dialect,
 ) -> StatementAnalysis {
     let diagnostic = match error {
         SemanticError::SetOperationArityMismatch { left, right } => {
@@ -460,8 +544,7 @@ fn semantic_failure(
             what: "UNPIVOT on an expression",
         },
     };
-    read.sort();
-    read.dedup();
+    sort_dedup_by_key(&mut read, |relation| relation_key(relation, dialect));
     diagnostics.insert(
         0,
         Diagnostic {

@@ -285,6 +285,19 @@ impl LineageBuilder {
 
                 if !is_self_ref && !is_cte_ref {
                     self.graph.tables.inputs.push(table_ref.clone());
+                    self.input_positions.push(
+                        name.0.iter().find_map(|part| part.as_ident()).map_or(
+                            (u64::MAX, u64::MAX),
+                            |ident| {
+                                let start = ident.span.start;
+                                if start.line == 0 {
+                                    (u64::MAX, u64::MAX)
+                                } else {
+                                    (start.line, start.column)
+                                }
+                            },
+                        ),
+                    );
                 }
 
                 let alias_name = alias
