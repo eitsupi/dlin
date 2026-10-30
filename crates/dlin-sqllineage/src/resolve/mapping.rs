@@ -8,6 +8,7 @@ use super::catalog;
 use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::star::expand_star;
 
+use crate::Ident;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
@@ -22,7 +23,7 @@ pub(super) fn wildcard_mapping(
     ColumnMapping {
         target: ColumnRef {
             table: output_table.cloned(),
-            column: "*".to_string(),
+            column: Ident::unquoted("*"),
         },
         sources: vec![ColumnOrigin::Wildcard {
             table: source_table,
@@ -94,7 +95,7 @@ pub(super) fn known_empty_dependency(node_id: NodeId, graph: &RawGraph) -> bool 
         .virtual_source(*source)
         .columns
         .iter()
-        .find(|column| column.name == *name)
+        .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
     else {
         return false;
     };
@@ -310,13 +311,13 @@ pub(super) fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
     mappings.iter().any(|mapping| {
         // A named output that happens to flow through an unresolved star has
         // a known ordinal/name and must not act as a variable-width barrier.
-        mapping.target.column == "*"
+        mapping.target.column.value == "*" && mapping.target.column.quote.is_none()
             && mapping.sources.iter().any(|source| match source {
                 ColumnOrigin::Wildcard { .. } => true,
-                ColumnOrigin::Ambiguous { column, .. } if column == "*" => true,
+                ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none() => true,
                 ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(|source| {
                     matches!(source, ColumnOrigin::Wildcard { .. })
-                        || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*")
+                        || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none())
                 }),
                 _ => false,
             })
@@ -397,7 +398,7 @@ pub(super) fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> 
         for source in &mapping.sources {
             match source {
                 ColumnOrigin::Wildcard { .. } => sources.push(source.clone()),
-                ColumnOrigin::Ambiguous { column, .. } if column == "*" => {
+                ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none() => {
                     sources.push(source.clone());
                 }
                 ColumnOrigin::Recursive { base_sources } => sources.extend(
@@ -405,7 +406,7 @@ pub(super) fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> 
                         .iter()
                         .filter(|source| {
                             matches!(source, ColumnOrigin::Wildcard { .. })
-                                || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*")
+                                || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none())
                         })
                         .cloned(),
                 ),
@@ -446,5 +447,46 @@ pub(super) fn merge_transform(left: &TransformKind, right: &TransformKind) -> Tr
         TransformKind::Unknown
     } else {
         TransformKind::Direct
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mappings_have_unknown_shape, wildcard_sources};
+    use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
+    use crate::{Ident, Quote};
+
+    #[test]
+    fn quoted_star_origins_are_not_wildcards_even_inside_recursive_sources() {
+        for recursive in [false, true] {
+            for quoted in [false, true] {
+                let name = if quoted {
+                    Ident::quoted("*", Quote::Double)
+                } else {
+                    Ident::unquoted("*")
+                };
+                let origin = ColumnOrigin::Ambiguous {
+                    column: name.clone(),
+                    candidates: vec![],
+                };
+                let origin = if recursive {
+                    ColumnOrigin::Recursive {
+                        base_sources: vec![origin],
+                    }
+                } else {
+                    origin
+                };
+                let mappings = [ColumnMapping {
+                    target: ColumnRef {
+                        table: None,
+                        column: name,
+                    },
+                    sources: vec![origin],
+                    transform: TransformKind::Direct,
+                }];
+                assert_eq!(mappings_have_unknown_shape(&mappings), !quoted);
+                assert_eq!(wildcard_sources(&mappings).is_empty(), quoted);
+            }
+        }
     }
 }

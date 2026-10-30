@@ -59,7 +59,8 @@ pub struct StatementAnalysis {
     pub kind: StatementKind,
     /// Relation written by this statement, if any.
     pub written: Option<Relation>,
-    /// Relations read by this statement, sorted by [`Relation::cmp`] and deduplicated.
+    /// Relations read by this statement, sorted and deduplicated by the dialect's
+    /// relation keys. Equal keys retain the first FROM occurrence's spelling.
     pub read: Vec<Relation>,
     /// Ordered output columns and their lineage.
     pub output: Output,
@@ -207,12 +208,15 @@ impl OutputName {
 /// Completeness of an output column's source lineage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Lineage {
-    /// All contributing sources are known, sorted by [`SourceColumn::cmp`] and deduplicated.
+    /// All contributing sources are known, sorted and deduplicated by the dialect's
+    /// relation and column keys. Relation spelling follows the first FROM
+    /// occurrence; column spelling follows the first resolved reference in the
+    /// statement, in SQL order.
     /// An empty list represents source-free output.
     Complete(Vec<SourceColumn>),
     /// Known sources coexist with one or more unresolved contributions.
     Partial {
-        /// Proven sources, sorted by [`SourceColumn::cmp`] and deduplicated.
+        /// Proven sources, sorted and deduplicated by the same keys as `Complete`.
         known: Vec<SourceColumn>,
         /// Contributions that could not be proven.
         unresolved: Vec<Unresolved>,
@@ -222,7 +226,8 @@ pub enum Lineage {
 /// A source relation and column known to contribute to an output.
 ///
 /// Source lists in lineage results are sorted deterministically and contain no
-/// duplicate entries.
+/// duplicate SQL keys. Identifier spelling and quote style are preserved; the
+/// derived Rust ordering and equality remain structural.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SourceColumn {
     /// Source relation.
@@ -250,7 +255,8 @@ pub enum Unresolved {
     Ambiguous {
         /// Column name.
         column: Ident,
-        /// Possible sources, sorted by [`Candidate::cmp`] and deduplicated.
+        /// Possible sources, sorted by candidate kind and the dialect's relation
+        /// keys, with equal keys retaining the first FROM occurrence's spelling.
         candidates: Vec<Candidate>,
     },
     /// A column could not be bound to a relation in scope.

@@ -3,6 +3,7 @@ use sqlparser::ast::{
     SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins, WildcardAdditionalOptions,
 };
 
+use crate::Ident;
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
@@ -50,7 +51,7 @@ impl LineageBuilder {
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
-                    let name = alias.value.clone();
+                    let name = Ident::from_ast(alias);
                     let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
@@ -67,7 +68,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     for alias in aliases {
-                        let name = alias.value.clone();
+                        let name = Ident::from_ast(alias);
                         let output = self.graph.add_output(name.clone(), kind.clone());
                         for &anc in &ancestors {
                             self.graph.add_edge(anc, output, kind.clone());
@@ -91,7 +92,7 @@ impl LineageBuilder {
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
-                            name: "*".to_string(),
+                            name: Ident::unquoted("*"),
                             node_id: star,
                         },
                     );
@@ -99,7 +100,7 @@ impl LineageBuilder {
                 SelectItem::QualifiedWildcard(kind, options) => {
                     let base = match kind {
                         SelectItemQualifiedWildcardKind::ObjectName(obj_name) => {
-                            StarBase::Qualified(self.object_name_parts(obj_name))
+                            StarBase::Qualified(Self::object_name_parts(obj_name))
                         }
                         SelectItemQualifiedWildcardKind::Expr(expr) => {
                             StarBase::Expr(self.collect_ancestors(expr))
@@ -110,7 +111,7 @@ impl LineageBuilder {
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
-                            name: "*".to_string(),
+                            name: Ident::unquoted("*"),
                             node_id: star,
                         },
                     );
@@ -119,12 +120,12 @@ impl LineageBuilder {
         }
     }
 
-    fn object_name_parts(&self, name: &ObjectName) -> Vec<String> {
+    fn object_name_parts(name: &ObjectName) -> Vec<Ident> {
         name.0
             .iter()
             .map(|part| {
                 part.as_ident()
-                    .map_or_else(|| part.to_string(), |ident| self.normalize_ident(ident))
+                    .map_or_else(|| Ident::unquoted(part.to_string()), Ident::from_ast)
             })
             .collect()
     }
@@ -142,27 +143,27 @@ impl LineageBuilder {
             result.exclude.extend(match exclude {
                 sqlparser::ast::ExcludeSelectItem::Single(name) => {
                     vec![StarColumnName {
-                        parts: self.object_name_parts(name),
+                        parts: Self::object_name_parts(name),
                     }]
                 }
                 sqlparser::ast::ExcludeSelectItem::Multiple(names) => names
                     .iter()
                     .map(|name| StarColumnName {
-                        parts: self.object_name_parts(name),
+                        parts: Self::object_name_parts(name),
                     })
                     .collect(),
             });
         }
         if let Some(except) = &options.opt_except {
             result.exclude.push(StarColumnName {
-                parts: vec![self.normalize_ident(&except.first_element)],
+                parts: vec![Ident::from_ast(&except.first_element)],
             });
             result.exclude.extend(
                 except
                     .additional_elements
                     .iter()
                     .map(|ident| StarColumnName {
-                        parts: vec![self.normalize_ident(ident)],
+                        parts: vec![Ident::from_ast(ident)],
                     }),
             );
         }
@@ -171,17 +172,16 @@ impl LineageBuilder {
                 sqlparser::ast::RenameSelectItem::Single(entry) => vec![entry],
                 sqlparser::ast::RenameSelectItem::Multiple(entries) => entries.iter().collect(),
             };
-            result.rename.extend(entries.into_iter().map(|entry| {
-                (
-                    self.normalize_ident(&entry.ident),
-                    self.normalize_ident(&entry.alias),
-                )
-            }));
+            result.rename.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| (Ident::from_ast(&entry.ident), Ident::from_ast(&entry.alias))),
+            );
         }
         if let Some(replace) = &options.opt_replace {
             for element in &replace.items {
                 let node_id = self.graph.add_output(
-                    "?wildcard-replace".to_string(),
+                    Ident::unquoted("?wildcard-replace"),
                     determine_edge_kind(&element.expr),
                 );
                 for ancestor in self.collect_ancestors(&element.expr) {
@@ -189,7 +189,7 @@ impl LineageBuilder {
                         .add_edge(ancestor, node_id, determine_edge_kind(&element.expr));
                 }
                 result.replace.push(StarReplacement {
-                    column: self.normalize_ident(&element.column_name),
+                    column: Ident::from_ast(&element.column_name),
                     node_id,
                 });
             }
@@ -223,7 +223,7 @@ impl LineageBuilder {
     /// Record the columns a join merges between the relations on its two
     /// sides, so an unqualified reference to one of them is not reported as
     /// ambiguous between those relations.
-    fn note_join_constraint(&mut self, join: &Join, left: Vec<String>, right: Vec<String>) {
+    fn note_join_constraint(&mut self, join: &Join, left: Vec<Ident>, right: Vec<Ident>) {
         let (constraint, kind) = match &join.join_operator {
             JoinOperator::Join(constraint)
             | JoinOperator::Inner(constraint)
@@ -248,12 +248,9 @@ impl LineageBuilder {
             | JoinOperator::InnerArrayJoin => return,
         };
         let columns = match constraint {
-            JoinConstraint::Using(columns) => MergedColumns::Using(
-                columns
-                    .iter()
-                    .flat_map(|column| self.object_name_parts(column))
-                    .collect(),
-            ),
+            JoinConstraint::Using(columns) => {
+                MergedColumns::Using(columns.iter().flat_map(Self::object_name_parts).collect())
+            }
             JoinConstraint::Natural => MergedColumns::Natural,
             JoinConstraint::On(_) | JoinConstraint::None => return,
         };
@@ -272,9 +269,11 @@ impl LineageBuilder {
     pub(crate) fn visit_table_factor(&mut self, factor: &TableFactor) {
         match factor {
             TableFactor::Table { name, alias, .. } => {
-                let table_ref = self.table_ref_from_object_name(name);
+                let table_ref = Self::table_ref_from_object_name(name);
 
-                let is_self_ref = self.recursive_cte_name.as_deref() == Some(&*table_ref.table);
+                let is_self_ref = self.recursive_cte_name.as_ref().is_some_and(|name| {
+                    name.relation_key(self.dialect) == table_ref.table.relation_key(self.dialect)
+                });
 
                 let existing = self
                     .graph
@@ -286,11 +285,24 @@ impl LineageBuilder {
 
                 if !is_self_ref && !is_cte_ref {
                     self.graph.tables.inputs.push(table_ref.clone());
+                    self.input_positions.push(
+                        name.0.iter().find_map(|part| part.as_ident()).map_or(
+                            (u64::MAX, u64::MAX),
+                            |ident| {
+                                let start = ident.span.start;
+                                if start.line == 0 {
+                                    (u64::MAX, u64::MAX)
+                                } else {
+                                    (start.line, start.column)
+                                }
+                            },
+                        ),
+                    );
                 }
 
                 let alias_name = alias
                     .as_ref()
-                    .map_or_else(|| table_ref.table.clone(), |a| a.name.value.clone());
+                    .map_or_else(|| table_ref.table.clone(), |a| Ident::from_ast(&a.name));
 
                 if is_cte_ref {
                     // Always add CTE/DerivedTable binding to current scope
@@ -309,7 +321,10 @@ impl LineageBuilder {
                 self.pop_scope();
 
                 if let Some(a) = alias {
-                    self.add_binding(a.name.value.clone(), Binding::DerivedTable(derived_scope));
+                    self.add_binding(
+                        Ident::from_ast(&a.name),
+                        Binding::DerivedTable(derived_scope),
+                    );
                 } else {
                     self.graph
                         .scopes
@@ -350,8 +365,8 @@ impl LineageBuilder {
                 );
                 for (index, deps) in dependencies.into_iter().enumerate() {
                     let name = alias.columns.get(index).map_or_else(
-                        || alias.name.value.clone(),
-                        |column| column.name.value.clone(),
+                        || Ident::from_ast(&alias.name),
+                        |column| Ident::from_ast(&column.name),
                     );
                     columns.push(VirtualColumn {
                         name,
@@ -367,13 +382,13 @@ impl LineageBuilder {
                     columns.push(VirtualColumn {
                         name: with_offset_alias
                             .as_ref()
-                            .map_or_else(|| "offset".to_string(), |ident| ident.value.clone()),
+                            .map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
                         dependencies: Vec::new(),
                         state: VirtualColumnState::KnownEmpty,
                     });
                 } else if *with_ordinality {
                     columns.push(VirtualColumn {
-                        name: "ordinality".to_string(),
+                        name: Ident::unquoted("ordinality"),
                         dependencies: Vec::new(),
                         state: VirtualColumnState::KnownEmpty,
                     });
@@ -383,7 +398,10 @@ impl LineageBuilder {
                     .graph
                     .scopes
                     .add_virtual_source(self.current_scope, columns);
-                self.add_binding(alias.name.value.clone(), Binding::VirtualSource(virtual_id));
+                self.add_binding(
+                    Ident::from_ast(&alias.name),
+                    Binding::VirtualSource(virtual_id),
+                );
             }
 
             // The unpivoted value is derived from the expression, not from a
@@ -408,14 +426,14 @@ impl LineageBuilder {
 }
 
 /// Infer a column name from an expression.
-fn infer_column_name(expr: &Expr) -> String {
+fn infer_column_name(expr: &Expr) -> Ident {
     match expr {
-        Expr::Identifier(ident) => ident.value.clone(),
-        Expr::CompoundIdentifier(parts) => {
-            parts.last().map(|p| p.value.clone()).unwrap_or_default()
-        }
-        Expr::Function(func) => func.name.to_string(),
+        Expr::Identifier(ident) => Ident::from_ast(ident),
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .map_or_else(|| Ident::unquoted(""), Ident::from_ast),
+        Expr::Function(func) => Ident::unquoted(func.name.to_string()),
         Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
-        _ => "?column?".to_string(),
+        _ => Ident::unquoted("?column?"),
     }
 }

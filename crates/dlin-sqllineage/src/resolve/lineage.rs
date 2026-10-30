@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use super::arity::same_column_name;
 use super::binding::{
     derive_transform, find_cte_redirect, find_unqualified_binding, find_virtual_sources_for_column,
-    resolve_merged_column, resolve_node,
+    lookup_virtual_binding, resolve_merged_column, resolve_node,
 };
 use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
@@ -13,6 +13,7 @@ use super::star::{
     table_matches_qualifier,
 };
 
+use crate::Ident;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
@@ -268,17 +269,12 @@ fn resolve_virtual_reference(
             binding
                 .clone()
                 .or_else(|| {
-                    qualifier
-                        .as_deref()
-                        .and_then(|qualifier| graph.scopes.lookup(*scope, qualifier).cloned())
+                    qualifier.as_deref().and_then(|parts| match parts {
+                        [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                        _ => None,
+                    })
                 })
-                .or_else(|| {
-                    graph
-                        .scopes
-                        .lookup(*scope, name)
-                        .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
-                        .cloned()
-                }),
+                .or_else(|| lookup_virtual_binding(*scope, name, graph)),
             *scope,
         ),
         RawNode::Unqualified {
@@ -287,13 +283,9 @@ fn resolve_virtual_reference(
             binding,
         } => (
             name,
-            binding.clone().or_else(|| {
-                graph
-                    .scopes
-                    .lookup(*scope, name)
-                    .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
-                    .cloned()
-            }),
+            binding
+                .clone()
+                .or_else(|| lookup_virtual_binding(*scope, name, graph)),
             *scope,
         ),
         _ => return None,
@@ -329,7 +321,7 @@ fn resolve_virtual_reference(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_virtual_column_sources(
-    name: &str,
+    name: &Ident,
     source: VirtualSourceId,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -342,7 +334,7 @@ fn resolve_virtual_column_sources(
         .virtual_source(source)
         .columns
         .iter()
-        .find(|column| column.name == name)?;
+        .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
     let mut origins = Vec::new();
     for &dependency in &column.dependencies {
         let (dependency_origins, _, _) = collect_leaf_origins(
@@ -372,7 +364,7 @@ fn resolve_virtual_column_sources(
 }
 
 pub(super) fn virtual_column_origin(
-    name: &str,
+    name: &Ident,
     source: VirtualSourceId,
     graph: &RawGraph,
 ) -> Option<ColumnOrigin> {
@@ -381,7 +373,7 @@ pub(super) fn virtual_column_origin(
         .virtual_source(source)
         .columns
         .iter()
-        .find(|column| column.name == name)?;
+        .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
     match column.state {
         VirtualColumnState::KnownEmpty => None,
         VirtualColumnState::Unknown => Some(ColumnOrigin::Ambiguous {
@@ -423,7 +415,12 @@ fn resolve_named_scope_reference(
         } => Some(binding.clone()),
         _ => None,
     }
-    .or_else(|| qualifier.and_then(|qualifier| graph.scopes.lookup(scope, qualifier).cloned()))
+    .or_else(|| {
+        qualifier.and_then(|parts| match parts.as_slice() {
+            [qualifier] => graph.scopes.lookup(scope, qualifier).cloned(),
+            _ => None,
+        })
+    })
     .or_else(|| find_unqualified_binding(name, scope, graph, catalog));
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
@@ -443,7 +440,7 @@ fn resolve_named_scope_reference(
 /// `target_scope`, with the transform that scope applies to it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn named_scope_sources(
-    name: &str,
+    name: &Ident,
     target_scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -459,10 +456,9 @@ pub(super) fn named_scope_sources(
         catalog,
         mapping_cache,
     );
-    if let Some(mapping) = mappings
-        .iter()
-        .find(|mapping| mapping.target.column == name)
-    {
+    if let Some(mapping) = mappings.iter().find(|mapping| {
+        mapping.target.column.column_key(graph.dialect) == name.column_key(graph.dialect)
+    }) {
         let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
         return Some((sources, has_back, mapping.transform.clone()));
     }
@@ -471,7 +467,7 @@ pub(super) fn named_scope_sources(
             StarNameDecision::Denied | StarNameDecision::Ambiguous => {
                 return Some((
                     vec![ColumnOrigin::Ambiguous {
-                        column: name.to_string(),
+                        column: name.clone(),
                         candidates: Vec::new(),
                     }],
                     false,
@@ -491,7 +487,7 @@ pub(super) fn named_scope_sources(
                 return Some((sources, has_back, transform));
             }
             StarNameDecision::Renamed(old) => old,
-            StarNameDecision::Allowed => name.to_string(),
+            StarNameDecision::Allowed => name.clone(),
         };
     let wildcard_sources = named_wildcard_sources_for_scope(
         target_scope,
@@ -508,7 +504,7 @@ pub(super) fn named_scope_sources(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn named_wildcard_sources_for_scope(
     scope: usize,
-    column: &str,
+    column: &Ident,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
@@ -527,13 +523,14 @@ pub(super) fn named_wildcard_sources_for_scope(
                 else {
                     continue;
                 };
-                let source_column = match star_name_decision(options, column, Some(base)) {
-                    StarNameDecision::Allowed => column.to_string(),
-                    StarNameDecision::Renamed(old) => old,
-                    StarNameDecision::Denied
-                    | StarNameDecision::Replaced(_)
-                    | StarNameDecision::Ambiguous => continue,
-                };
+                let source_column =
+                    match star_name_decision(options, column, Some(base), graph.dialect) {
+                        StarNameDecision::Allowed => column.clone(),
+                        StarNameDecision::Renamed(old) => old,
+                        StarNameDecision::Denied
+                        | StarNameDecision::Replaced(_)
+                        | StarNameDecision::Ambiguous => continue,
+                    };
                 let mut expanded = Vec::new();
                 expand_star(
                     base,
@@ -597,7 +594,7 @@ pub(super) fn named_wildcard_sources_for_scope(
                 )
             {
                 sources.push(ColumnOrigin::Ambiguous {
-                    column: column.to_string(),
+                    column: column.clone(),
                     candidates: Vec::new(),
                 });
             } else {
@@ -610,7 +607,7 @@ pub(super) fn named_wildcard_sources_for_scope(
 
 pub(super) fn named_wildcard_sources_for_star(
     mappings: &[ColumnMapping],
-    column: &str,
+    column: &Ident,
     options: &StarOptions,
     base: &StarBase,
     scope: usize,
@@ -631,7 +628,7 @@ pub(super) fn named_wildcard_sources_for_star(
                     } else {
                         sources.push(ColumnOrigin::NamedWildcard {
                             table: table.clone(),
-                            column: column.to_string(),
+                            column: column.clone(),
                         });
                     }
                 }
@@ -648,7 +645,7 @@ pub(super) fn named_wildcard_sources_for_star(
                             } else {
                                 sources.push(ColumnOrigin::NamedWildcard {
                                     table: table.clone(),
-                                    column: column.to_string(),
+                                    column: column.clone(),
                                 });
                             }
                         }
@@ -660,7 +657,7 @@ pub(super) fn named_wildcard_sources_for_star(
     }
     if sources.is_empty() && wildcard_seen && denied {
         sources.push(ColumnOrigin::Ambiguous {
-            column: column.to_string(),
+            column: column.clone(),
             candidates: Vec::new(),
         });
     }
@@ -669,7 +666,7 @@ pub(super) fn named_wildcard_sources_for_star(
 
 fn excluded_matches_source(
     excluded: &StarColumnName,
-    column: &str,
+    column: &Ident,
     source: &ColumnOrigin,
     base: &StarBase,
     scope: usize,
@@ -678,28 +675,33 @@ fn excluded_matches_source(
     let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
         return false;
     };
-    if !same_column_name(column, excluded_column) {
+    if !same_column_name(column, excluded_column, graph.dialect) {
         return false;
     }
     if qualifier.is_empty() {
         return true;
     }
     if let StarBase::Qualified(parts) = base
-        && parts == qualifier
+        && parts.len() == qualifier.len()
+        && parts
+            .iter()
+            .zip(qualifier)
+            .all(|(a, b)| a.relation_key(graph.dialect) == b.relation_key(graph.dialect))
     {
         return true;
     }
     if qualifier.len() == 1
         && relation_from_origin(source).is_some_and(|table| {
             graph.scopes.visible_bindings(scope).iter().any(|(name, binding)| {
-                name == &qualifier[0]
+                name.relation_key(graph.dialect) == qualifier[0].relation_key(graph.dialect)
                     && matches!(binding, Binding::Table(binding_table) if binding_table == table)
             })
         })
     {
         return true;
     }
-    relation_from_origin(source).is_some_and(|table| table_matches_qualifier(table, qualifier))
+    relation_from_origin(source)
+        .is_some_and(|table| table_matches_qualifier(table, qualifier, graph.dialect))
 }
 
 fn relation_from_origin(source: &ColumnOrigin) -> Option<&TableRef> {

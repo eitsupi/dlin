@@ -24,13 +24,15 @@ pub(crate) fn resolve(
     mut warnings: Vec<Warning>,
     statement_type: StatementType,
 ) -> Result<AnalyzeResult, SemanticError> {
-    graph.tables.inputs.sort();
-    graph.tables.inputs.dedup();
+    crate::keys::sort_dedup_by_key(&mut graph.tables.inputs, |table| {
+        crate::keys::table_key(table, graph.dialect)
+    });
 
     if graph.nodes.is_empty() {
         return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
+            source_order: Vec::new(),
             columns: ColumnLineage {
                 mappings: Vec::new(),
                 has_unresolved_stars: false,
@@ -47,6 +49,7 @@ pub(crate) fn resolve(
         return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
+            source_order: Vec::new(),
             columns: ColumnLineage {
                 mappings: Vec::new(),
                 has_unresolved_stars: false,
@@ -88,9 +91,27 @@ pub(crate) fn resolve(
         mapping.target.table.clone_from(&output_table);
     }
 
+    let mut source_order: Vec<_> = resolved
+        .into_iter()
+        .enumerate()
+        .filter_map(|(node, origin)| {
+            origin.map(|origin| {
+                (
+                    graph.reference_positions[node].unwrap_or((u64::MAX, u64::MAX)),
+                    node,
+                    origin,
+                )
+            })
+        })
+        .collect();
+    source_order.sort_by_key(|(position, node, _)| (*position, *node));
     Ok(AnalyzeResult {
         statement_type,
         tables: graph.tables,
+        source_order: source_order
+            .into_iter()
+            .map(|(_, _, origin)| origin)
+            .collect(),
         columns: ColumnLineage {
             mappings,
             has_unresolved_stars,
@@ -141,7 +162,8 @@ mod tests {
                 matches!(
                     source,
                     ColumnOrigin::Concrete { table, column }
-                        if table.table == "external_table" && column == "id"
+                        if table.table == crate::Ident::unquoted("external_table")
+                            && column == &crate::Ident::unquoted("id")
                 )
             })
         }));

@@ -54,15 +54,22 @@ mod tests {
     struct Columns;
 
     impl CatalogProvider for Columns {
-        fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
-            match table.table.as_str() {
-                "t" => Some(vec!["x".into(), "y".into()]),
-                "u" => Some(vec!["p".into()]),
+        fn list_columns(&self, table: &TableRef) -> Option<Vec<crate::Ident>> {
+            match table.table.value.as_str() {
+                "t" => Some(vec![
+                    crate::Ident::unquoted("x"),
+                    crate::Ident::unquoted("y"),
+                ]),
+                "u" => Some(vec![crate::Ident::unquoted("p")]),
                 _ => None,
             }
         }
 
-        fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        fn resolve_column(
+            &self,
+            _column: &crate::Ident,
+            _candidates: &[TableRef],
+        ) -> Option<TableRef> {
             None
         }
     }
@@ -71,11 +78,11 @@ mod tests {
         ColumnMapping {
             target: ColumnRef {
                 table: None,
-                column: name.into(),
+                column: crate::Ident::unquoted(name),
             },
             sources: vec![ColumnOrigin::Concrete {
                 table: TableRef::new("src"),
-                column: name.into(),
+                column: crate::Ident::unquoted(name),
             }],
             transform: TransformKind::Direct,
         }
@@ -85,7 +92,7 @@ mod tests {
         ColumnMapping {
             target: ColumnRef {
                 table: None,
-                column: "*".into(),
+                column: crate::Ident::unquoted("*"),
             },
             sources: vec![ColumnOrigin::Wildcard {
                 table: TableRef::new(table),
@@ -97,7 +104,7 @@ mod tests {
     fn targets(mappings: &[ColumnMapping]) -> Vec<&str> {
         mappings
             .iter()
-            .map(|mapping| mapping.target.column.as_str())
+            .map(|mapping| mapping.target.column.value.as_str())
             .collect()
     }
 
@@ -122,7 +129,7 @@ mod tests {
         assert_eq!(targets(&mappings), ["a", "*", "x", "y", "b"]);
         assert!(matches!(
             mappings[1].sources.as_slice(),
-            [ColumnOrigin::Wildcard { table }] if table.table == "unknown"
+            [ColumnOrigin::Wildcard { table }] if table.table == crate::Ident::unquoted("unknown")
         ));
     }
 }
