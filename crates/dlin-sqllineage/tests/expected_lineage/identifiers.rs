@@ -25,7 +25,7 @@ pub fn cases() -> Vec<Case> {
                 u("ID"),
             )
             .catalog(catalog.clone())
-            .known_failure("Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
+            .known_failure(complete(vec![source(relation("b"), u("id"))]), "Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
         );
         cases.push(
             resolved(
@@ -67,7 +67,7 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![q("ID")]),
             (relation("b"), vec![u("id")]),
         ])
-        .known_failure("Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
+        .known_failure(complete(vec![source(relation("b"), u("ID"))]), "Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
     );
     cases.push(
         resolved(
@@ -135,7 +135,7 @@ pub fn cases() -> Vec<Case> {
                 canonical.clone(),
             )
             .catalog(catalog.clone())
-            .known_failure("Catalog-resolved source columns lose the catalog's canonical spelling and quoting."),
+            .known_failure(complete(vec![source(relation("a"), u("mixed"))]), "Catalog-resolved source columns lose the catalog's canonical spelling and quoting."),
         );
         cases.push(
             resolved(
@@ -166,7 +166,7 @@ pub fn cases() -> Vec<Case> {
                 (relation("a"), vec![Ident::quoted("MiXeD", quote)]),
                 (relation("b"), vec![u("other")]),
             ])
-            .known_failure("Catalog-resolved source columns retain the quoted reference spelling instead of the catalog spelling."),
+            .known_failure(complete(vec![source(relation("a"), Ident::quoted("mIxEd", quote))]), "Catalog-resolved source columns retain the quoted reference spelling instead of the catalog spelling."),
         );
     }
 
@@ -213,7 +213,13 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![q("id")]),
             (relation("b"), vec![u("ID")]),
         ])
-        .known_failure("Statement-wide quote collection lets an unrelated unquoted WHERE reference make the quoted projection ambiguous."),
+        .known_failure(dlin_sqllineage::Lineage::Partial {
+            known: vec![],
+            unresolved: vec![Unresolved::Ambiguous {
+                column: q("id"),
+                candidates: vec![Candidate::Relation(relation("a")), Candidate::Relation(relation("b"))],
+            }],
+        }, "Statement-wide quote collection lets an unrelated unquoted WHERE reference make the quoted projection ambiguous."),
         resolved(
             "generic_natural_join_does_not_merge_distinct_column_keys",
             "SELECT id FROM a NATURAL JOIN b",
@@ -226,7 +232,7 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![q("id")]),
             (relation("b"), vec![u("ID")]),
         ])
-        .known_failure("NATURAL membership conflates quoted lowercase with unquoted uppercase, and catalog source spelling is not canonicalized."),
+        .known_failure(complete(vec![source(relation("a"), u("id")), source(relation("b"), u("id"))]), "NATURAL membership conflates quoted lowercase with unquoted uppercase, and catalog source spelling is not canonicalized."),
         resolved(
             "generic_natural_membership_without_spelling_difference",
             "SELECT ID FROM a NATURAL JOIN b",
@@ -239,7 +245,7 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![q("id")]),
             (relation("b"), vec![u("ID")]),
         ])
-        .known_failure("NATURAL column membership conflates the distinct quoted lowercase and unquoted uppercase column keys."),
+        .known_failure(complete(vec![source(relation("a"), u("ID")), source(relation("b"), u("ID"))]), "NATURAL column membership conflates the distinct quoted lowercase and unquoted uppercase column keys."),
         resolved(
             "qualified_column_is_not_its_table_name",
             "SELECT T.id FROM T",
@@ -248,7 +254,7 @@ pub fn cases() -> Vec<Case> {
             relation("T"),
             u("id"),
         )
-        .known_failure("A qualified reference matching its table name is reconstructed with source column T instead of id."),
+        .known_failure(complete(vec![source(relation("T"), u("T"))]), "A qualified reference matching its table name is reconstructed with source column T instead of id."),
         resolved(
             "catalog_unquoted_canonical_column_spelling",
             "SELECT amount FROM invoices",
@@ -258,7 +264,7 @@ pub fn cases() -> Vec<Case> {
             u("AMOUNT"),
         )
         .catalog(vec![(relation("invoices"), vec![u("AMOUNT")])])
-        .known_failure("Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
+        .known_failure(complete(vec![source(relation("invoices"), u("amount"))]), "Catalog-resolved source columns retain the reference spelling instead of the catalog spelling."),
         resolved(
             "catalog_disambiguates_unqualified_column",
             "SELECT id FROM a CROSS JOIN b",

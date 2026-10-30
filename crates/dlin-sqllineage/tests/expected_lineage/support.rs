@@ -1,9 +1,8 @@
 use std::borrow::Cow;
 
 use dlin_sqllineage::{
-    Analyzer, Catalog, CatalogColumn, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Ident,
-    Lineage, OutputName, Quote, Relation, Severity, Shape, SourceColumn, StatementAnalysis,
-    Unresolved,
+    Analyzer, Catalog, CatalogColumn, CatalogEntry, Diagnostic, Dialect, Ident, Lineage,
+    OutputName, Quote, Relation, Severity, Shape, SourceColumn, StatementAnalysis, Unresolved,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,7 +17,7 @@ struct ExpectedOutput {
     columns: Vec<ExpectedColumn>,
     shape: Shape,
     diagnostics: Vec<Diagnostic>,
-    has_unresolved_stars: Option<bool>,
+    has_unresolved_stars: bool,
 }
 
 pub struct Case {
@@ -33,10 +32,12 @@ pub struct Case {
 enum KnownFailure {
     Lineage {
         index: usize,
+        current: Lineage,
         reason: String,
     },
     MergedStar {
-        sides: Vec<SourceColumn>,
+        columns: Vec<ExpectedColumn>,
+        diagnostics: Vec<Diagnostic>,
         reason: String,
     },
 }
@@ -60,7 +61,7 @@ impl Case {
                 columns,
                 shape: Shape::Closed,
                 diagnostics: vec![],
-                has_unresolved_stars: None,
+                has_unresolved_stars: false,
             },
             known_failure: None,
         }
@@ -95,25 +96,32 @@ impl Case {
     }
 
     pub fn unresolved_stars(mut self, expected: bool) -> Self {
-        self.expected.has_unresolved_stars = Some(expected);
+        self.expected.has_unresolved_stars = expected;
         self
     }
 
-    pub fn known_failure(self, reason: &str) -> Self {
-        self.known_failure_at(0, reason)
+    pub fn known_failure(self, current: Lineage, reason: &str) -> Self {
+        self.known_failure_at(0, current, reason)
     }
 
-    pub fn known_failure_at(mut self, index: usize, reason: &str) -> Self {
+    pub fn known_failure_at(mut self, index: usize, current: Lineage, reason: &str) -> Self {
         self.known_failure = Some(KnownFailure::Lineage {
             index,
+            current,
             reason: reason.into(),
         });
         self
     }
 
-    pub fn merged_star_failure(mut self, sides: Vec<SourceColumn>, reason: &str) -> Self {
+    pub fn merged_star_failure(
+        mut self,
+        columns: Vec<ExpectedColumn>,
+        diagnostics: Vec<Diagnostic>,
+        reason: &str,
+    ) -> Self {
         self.known_failure = Some(KnownFailure::MergedStar {
-            sides,
+            columns,
+            diagnostics,
             reason: reason.into(),
         });
         self
@@ -163,20 +171,21 @@ impl Case {
             Some(KnownFailure::Lineage { index, .. }) if *index >= self.expected.columns.len() => {
                 return Err("setup error: known failure column index is out of bounds".into());
             }
-            Some(KnownFailure::MergedStar { sides, .. }) => {
-                let Some(first) = self.expected.columns.first() else {
-                    return Err("setup error: merged star needs an expected key".into());
-                };
-                if sides.len() < 2
-                    || !matches!(first.name, OutputName::Explicit(_))
-                    || self.expected.columns[1..]
-                        .iter()
-                        .any(|column| column.name == first.name)
-                    || self.expected.shape != Shape::Closed
-                    || !self.expected.diagnostics.is_empty()
-                {
-                    return Err("setup error: merged star expects one named key, closed shape, and no diagnostics".into());
-                }
+            Some(KnownFailure::Lineage { index, current, .. })
+                if current == &self.expected.columns[*index].lineage =>
+            {
+                return Err(
+                    "setup error: recorded failure must differ from correct lineage".into(),
+                );
+            }
+            Some(KnownFailure::MergedStar {
+                columns,
+                diagnostics,
+                ..
+            }) if columns == &self.expected.columns
+                && diagnostics == &self.expected.diagnostics =>
+            {
+                return Err("setup error: recorded failure must differ from correct output".into());
             }
             _ => {}
         }
@@ -214,31 +223,47 @@ impl Case {
                 .collect(),
             shape: actual.output.shape.clone(),
             diagnostics: actual.diagnostics.clone(),
-            has_unresolved_stars: self
-                .expected
-                .has_unresolved_stars
-                .map(|_| actual.has_unresolved_stars),
+            has_unresolved_stars: actual.has_unresolved_stars,
         };
         match &self.known_failure {
             None if actual == self.expected => Ok(()),
             None => Err(self.mismatch(&actual)),
-            Some(KnownFailure::Lineage { index, reason }) => {
-                let Some(column) = actual.columns.get(*index) else {
-                    return Err(self.mismatch(&actual));
-                };
-                if column.lineage == self.expected.columns[*index].lineage {
+            Some(KnownFailure::Lineage {
+                index,
+                current,
+                reason,
+            }) => {
+                if actual
+                    .columns
+                    .get(*index)
+                    .is_some_and(|column| column.lineage == self.expected.columns[*index].lineage)
+                {
                     return Err(Self::remove_flag(reason));
                 }
-                let mut checked = actual.clone();
-                checked.columns[*index].lineage = self.expected.columns[*index].lineage.clone();
-                if checked == self.expected {
+                let mut recorded = self.expected.clone();
+                recorded.columns[*index].lineage = current.clone();
+                if actual == recorded {
                     Ok(())
                 } else {
                     Err(self.mismatch(&actual))
                 }
             }
-            Some(KnownFailure::MergedStar { sides, reason }) => {
-                self.compare_merged_star(&actual, sides, reason)
+            Some(KnownFailure::MergedStar {
+                columns,
+                diagnostics,
+                reason,
+            }) => {
+                if actual == self.expected {
+                    return Err(Self::remove_flag(reason));
+                }
+                let mut recorded = self.expected.clone();
+                recorded.columns = columns.clone();
+                recorded.diagnostics = diagnostics.clone();
+                if actual == recorded {
+                    Ok(())
+                } else {
+                    Err(self.mismatch(&actual))
+                }
             }
         }
     }
@@ -252,59 +277,6 @@ impl Case {
             "expectation mismatch for SQL {:?}\nexpected: {:#?}\nactual: {actual:#?}",
             self.sql, self.expected
         )
-    }
-
-    fn compare_merged_star(
-        &self,
-        actual: &ExpectedOutput,
-        sides: &[SourceColumn],
-        reason: &str,
-    ) -> Result<(), String> {
-        let key = &self.expected.columns[0].name;
-        let key_positions: Vec<_> = actual
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(index, column)| (&column.name == key).then_some(index))
-            .collect();
-        if key_positions.len() < 2 {
-            return Err(Self::remove_flag(reason));
-        }
-        let key_lineages_match = key_positions.len() == sides.len()
-            && key_positions.iter().zip(sides).all(|(index, side)| {
-                actual.columns[*index].lineage == Lineage::Complete(vec![side.clone()])
-            });
-        let diagnostics_allowed = actual.diagnostics.iter().all(|diagnostic| {
-            matches!(&diagnostic.kind, DiagnosticKind::DuplicateOutputName { name, ordinals }
-                if diagnostic.severity == Severity::Warning
-                    && key == &OutputName::Explicit(name.clone())
-                    && ordinals.iter().all(|index| key_positions.contains(index)))
-        });
-        let non_keys: Vec<_> = actual
-            .columns
-            .iter()
-            .filter(|column| &column.name != key)
-            .map(|column| (&column.name, &column.lineage))
-            .collect();
-        let expected_non_keys: Vec<_> = self.expected.columns[1..]
-            .iter()
-            .map(|column| (&column.name, &column.lineage))
-            .collect();
-        if key_lineages_match
-            && actual.shape == Shape::Closed
-            && actual.has_unresolved_stars == self.expected.has_unresolved_stars
-            && diagnostics_allowed
-            && actual
-                .columns
-                .iter()
-                .enumerate()
-                .all(|(index, column)| column.ordinal == Some(index))
-            && non_keys == expected_non_keys
-        {
-            Ok(())
-        } else {
-            Err(self.mismatch(actual))
-        }
     }
 }
 
@@ -426,6 +398,14 @@ pub fn partial_col(
     }
 }
 
+pub fn duplicate_name(name: Ident, ordinals: Vec<usize>) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Warning,
+        kind: dlin_sqllineage::DiagnosticKind::DuplicateOutputName { name, ordinals },
+        location: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,14 +455,17 @@ mod tests {
 
     #[test]
     fn known_failure_requires_a_mismatch() {
-        let case = case().known_failure("demonstration mismatch");
+        let case = case().known_failure(
+            complete(vec![source(relation("t"), u("wrong"))]),
+            "demonstration mismatch",
+        );
         assert!(
             case.compare(&statement())
                 .unwrap_err()
                 .contains("remove the known_failure flag")
         );
         let mut actual = statement();
-        actual.output.columns[0].lineage = complete(vec![source(relation("t"), u("x"))]);
+        actual.output.columns[0].lineage = complete(vec![source(relation("t"), u("wrong"))]);
         assert!(case.compare(&actual).is_ok());
     }
 
@@ -493,8 +476,52 @@ mod tests {
     }
 
     #[test]
+    fn lineage_failure_rejects_a_different_incorrect_lineage() {
+        let case = case().known_failure(
+            complete(vec![source(relation("t"), u("wrong"))]),
+            "wrong source",
+        );
+        let mut actual = wrong_lineage();
+        actual.output.columns[0].lineage = complete(vec![source(relation("t"), u("another"))]);
+        assert!(
+            case.compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+        actual.output.columns[0].lineage = Lineage::Partial {
+            known: vec![],
+            unresolved: vec![Unresolved::NamedBehindStar {
+                relation: relation("t"),
+                column: u("wrong"),
+            }],
+        };
+        assert!(
+            case.compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+    }
+
+    #[test]
+    fn unresolved_stars_is_checked_by_default_and_when_explicit() {
+        let mut actual = statement();
+        actual.has_unresolved_stars = true;
+        assert!(
+            case()
+                .compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+        assert!(case().unresolved_stars(true).compare(&actual).is_ok());
+        assert!(case().unresolved_stars(true).compare(&statement()).is_err());
+    }
+
+    #[test]
     fn lineage_failure_rejects_unrelated_changes() {
-        let case = case().unresolved_stars(false).known_failure("wrong source");
+        let case = case().known_failure(
+            complete(vec![source(relation("t"), u("wrong"))]),
+            "wrong source",
+        );
         let changes: &[fn(&mut StatementAnalysis)] = &[
             |actual| actual.output.columns[0].name = OutputName::Explicit(u("other")),
             |actual| actual.output.columns[0].ordinal = Some(9),
@@ -527,7 +554,10 @@ mod tests {
         actual.output.columns[0].name = OutputName::Explicit(u("wrong_label"));
         assert!(
             case()
-                .known_failure("wrong source")
+                .known_failure(
+                    complete(vec![source(relation("t"), u("wrong"))]),
+                    "wrong source"
+                )
                 .compare(&actual)
                 .unwrap_err()
                 .contains("remove the known_failure flag")
@@ -538,7 +568,11 @@ mod tests {
     fn selected_column_failure_preserves_other_columns() {
         let mut case = case();
         case.expected.columns.push(col(1, u("second"), vec![]));
-        let case = case.known_failure_at(1, "second source");
+        let case = case.known_failure_at(
+            1,
+            complete(vec![source(relation("t"), u("wrong"))]),
+            "second source",
+        );
         let mut actual = statement();
         let mut second = actual.output.columns[0].clone();
         second.ordinal = Some(1);
@@ -550,7 +584,11 @@ mod tests {
         assert!(case.compare(&actual).is_err());
         assert!(
             Case::new("invalid index", "SELECT 1", Dialect::Generic, vec![])
-                .known_failure_at(1, "missing column")
+                .known_failure_at(
+                    1,
+                    complete(vec![source(relation("t"), u("wrong"))]),
+                    "missing column"
+                )
                 .run()
                 .unwrap_err()
                 .contains("setup error")
@@ -586,9 +624,20 @@ mod tests {
         .unresolved_stars(false)
         .merged_star_failure(
             vec![
-                source(relation("a"), u("id")),
-                source(relation("b"), u("id")),
+                col(0, u("id"), vec![source(relation("a"), u("id"))]),
+                col(
+                    1,
+                    u("left_value"),
+                    vec![source(relation("a"), u("left_value"))],
+                ),
+                col(2, u("id"), vec![source(relation("b"), u("id"))]),
+                col(
+                    3,
+                    u("right_value"),
+                    vec![source(relation("b"), u("right_value"))],
+                ),
             ],
+            vec![duplicate_name(u("id"), vec![0, 2])],
             "duplicate merged key",
         )
     }
@@ -617,22 +666,14 @@ mod tests {
             transform: dlin_sqllineage::Transform::Direct,
         })
         .collect();
+        actual.diagnostics = vec![duplicate_name(u("id"), vec![0, 2])];
         actual
     }
 
     #[test]
-    fn merged_star_failure_allows_only_duplicate_key_and_its_diagnostic() {
+    fn merged_star_failure_requires_exact_recorded_columns_and_diagnostics() {
         let case = merged_case();
-        let mut actual = duplicated_key();
-        assert!(case.compare(&actual).is_ok());
-        actual.diagnostics.push(Diagnostic {
-            severity: Severity::Warning,
-            kind: DiagnosticKind::DuplicateOutputName {
-                name: u("id"),
-                ordinals: vec![0, 2],
-            },
-            location: None,
-        });
+        let actual = duplicated_key();
         assert!(case.compare(&actual).is_ok());
         let changes: &[fn(&mut StatementAnalysis)] = &[
             |actual| actual.output.columns[0].lineage = complete(vec![]),
@@ -640,6 +681,7 @@ mod tests {
             |actual| actual.output.columns[1].name = OutputName::Explicit(u("wrong")),
             |actual| actual.output.columns[1].lineage = complete(vec![]),
             |actual| actual.output.columns[1].ordinal = Some(9),
+            |actual| actual.output.columns[0].ordinal = None,
             |actual| {
                 actual.output.columns.swap(1, 3);
                 for (index, column) in actual.output.columns.iter_mut().enumerate() {
@@ -674,7 +716,44 @@ mod tests {
     }
 
     #[test]
-    fn fixed_star_bug_requires_flag_removal_despite_other_mismatches() {
+    fn merged_star_rejects_key_reordering_even_with_updated_ordinals_and_warning() {
+        let mut actual = duplicated_key();
+        // Keep each side's key lineage and the non-key order intact. The old
+        // matcher accepted this movement of keys within the projection.
+        actual.output.columns.swap(0, 1);
+        actual.output.columns.swap(2, 3);
+        for (index, column) in actual.output.columns.iter_mut().enumerate() {
+            column.ordinal = Some(index);
+        }
+        actual.diagnostics = vec![duplicate_name(u("id"), vec![1, 3])];
+        assert!(
+            merged_case()
+                .compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+    }
+
+    #[test]
+    fn merged_star_rejects_missing_or_changed_duplicate_warning() {
+        let case = merged_case();
+        let mut actual = duplicated_key();
+        actual.diagnostics.clear();
+        assert!(
+            case.compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+        actual.diagnostics = vec![duplicate_name(u("id"), vec![0])];
+        assert!(
+            case.compare(&actual)
+                .unwrap_err()
+                .contains("expectation mismatch")
+        );
+    }
+
+    #[test]
+    fn merged_star_requires_recorded_failure_or_correct_output() {
         let mut actual = duplicated_key();
         actual.output.columns.remove(2);
         actual.output.columns[1].name = OutputName::Explicit(u("wrong"));
@@ -682,7 +761,7 @@ mod tests {
             merged_case()
                 .compare(&actual)
                 .unwrap_err()
-                .contains("remove the known_failure flag")
+                .contains("expectation mismatch")
         );
         let case = merged_case();
         let mut fixed = statement();
@@ -697,6 +776,7 @@ mod tests {
                 transform: dlin_sqllineage::Transform::Direct,
             })
             .collect();
+        fixed.diagnostics.clear();
         assert!(
             case.compare(&fixed)
                 .unwrap_err()
@@ -734,7 +814,10 @@ mod tests {
             ("", "statement setup error"),
             ("SELECT 1; SELECT 2", "statement setup error"),
         ] {
-            let mut case = case().known_failure("demonstration mismatch");
+            let mut case = case().known_failure(
+                complete(vec![source(relation("t"), u("wrong"))]),
+                "demonstration mismatch",
+            );
             case.sql = sql.into();
             assert!(case.run().unwrap_err().contains(expected_error));
         }
@@ -742,7 +825,10 @@ mod tests {
 
     #[test]
     fn known_failure_does_not_hide_semantic_errors() {
-        let mut case = case().known_failure("demonstration mismatch");
+        let mut case = case().known_failure(
+            complete(vec![source(relation("t"), u("wrong"))]),
+            "demonstration mismatch",
+        );
         case.sql = "SELECT a FROM t UNION ALL SELECT a, b FROM u".into();
         assert!(case.run().unwrap_err().contains("semantic error"));
         let mut actual = statement();
@@ -763,7 +849,7 @@ mod tests {
         for reason in ["", "two\nlines"] {
             assert!(
                 case()
-                    .known_failure(reason)
+                    .known_failure(complete(vec![source(relation("t"), u("wrong"))]), reason)
                     .run()
                     .unwrap_err()
                     .contains("setup error")
@@ -772,7 +858,10 @@ mod tests {
         assert!(
             case()
                 .catalog(vec![(relation("t"), vec![]), (relation("t"), vec![])])
-                .known_failure("duplicate fixture")
+                .known_failure(
+                    complete(vec![source(relation("t"), u("wrong"))]),
+                    "duplicate fixture"
+                )
                 .run()
                 .unwrap_err()
                 .contains("setup error")

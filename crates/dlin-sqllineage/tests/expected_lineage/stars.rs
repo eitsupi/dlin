@@ -2,7 +2,9 @@ use dlin_sqllineage::{
     Diagnostic, DiagnosticKind, Dialect, Lineage, Severity, Shape, UnexpandedStar, Unresolved,
 };
 
-use super::support::{Case, ExpectedColumn, col, partial_col, q, relation, source, u};
+use super::support::{
+    Case, ExpectedColumn, col, duplicate_name, partial_col, q, relation, source, u,
+};
 
 fn open_star(table: &str, after_ordinal: Option<usize>) -> Shape {
     Shape::Open {
@@ -35,7 +37,8 @@ pub fn cases() -> Vec<Case> {
             Dialect::Generic,
             vec![col(0, u("chosen"), vec![source(relation("t"), u("id"))])],
         )
-        .shape(open_star("t", Some(0))),
+        .shape(open_star("t", Some(0)))
+        .unresolved_stars(true),
         Case::new(
             "explicit_source_column_before_catalog_star",
             "SELECT t.value AS chosen, t.* FROM t",
@@ -125,21 +128,24 @@ pub fn cases() -> Vec<Case> {
             Dialect::Generic,
             vec![],
         )
-        .shape(open_star("t", None)),
+        .shape(open_star("t", None))
+        .unresolved_stars(true),
         Case::new(
             "qualified_star_without_catalog",
             "SELECT x.* FROM t AS x",
             Dialect::Generic,
             vec![],
         )
-        .shape(open_star("t", None)),
+        .shape(open_star("t", None))
+        .unresolved_stars(true),
         Case::new(
             "open_star_between_literals",
             "SELECT 1 AS prefix, t.*, 2 AS tail FROM t",
             Dialect::Generic,
             vec![col(0, u("prefix"), vec![]), unknown_tail],
         )
-        .shape(open_star("t", Some(0))),
+        .shape(open_star("t", Some(0)))
+        .unresolved_stars(true),
         Case::new(
             "catalog_star_uses_declared_order",
             "SELECT * FROM t",
@@ -299,7 +305,13 @@ pub fn cases() -> Vec<Case> {
                 (relation("b"), vec![u("id"), u("right_value")]),
             ])
             .merged_star_failure(
-                sides,
+                vec![
+                    physical(0, "a", "id"),
+                    physical(1, "a", "left_value"),
+                    physical(2, "b", "id"),
+                    physical(3, "b", "right_value"),
+                ],
+                vec![duplicate_name(u("id"), vec![0, 2])],
                 "Unqualified stars duplicate USING/NATURAL merged columns instead of expanding one merged output.",
             ),
         );

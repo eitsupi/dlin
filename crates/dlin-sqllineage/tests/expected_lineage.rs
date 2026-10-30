@@ -5,7 +5,11 @@
 //! output names retain the projection's spelling. Predicate-only references do
 //! not contribute value lineage. Add a one-line known_failure reason for an
 //! engine defect, retaining the correct expectation; remove it when the runner
-//! reports that the expectation now matches. Do not copy engine output here.
+//! reports that the expectation now matches. Correct expectations must never be
+//! copied from engine output. Known failures separately record the current wrong
+//! lineage (or merged-star columns and diagnostics), which may be copied from
+//! engine output; any change to that recorded failure also fails the case.
+//! Every case checks has_unresolved_stars, defaulting to false.
 
 #[path = "expected_lineage/identifiers.rs"]
 mod identifiers;

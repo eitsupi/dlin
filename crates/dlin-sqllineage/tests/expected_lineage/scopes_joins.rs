@@ -37,32 +37,32 @@ pub fn cases() -> Vec<Case> {
             "scalar_subquery_value_only",
             "SELECT (SELECT b.amount FROM b WHERE b.id = 1) AS value FROM a",
             &[("value", "b", "amount")],
-        ).known_failure("Scalar subquery value dependencies are dropped instead of tracing the projected column."),
+        ).known_failure(complete(vec![]), "Scalar subquery value dependencies are dropped instead of tracing the projected column."),
         scope(
             "scalar_subquery_and_outer_projection",
             "SELECT a.id, (SELECT b.amount FROM b) AS value FROM a",
             &[("id", "a", "id"), ("value", "b", "amount")],
-        ).known_failure_at(1, "Scalar subquery value dependencies are dropped while the outer projection retains its sources."),
+        ).known_failure_at(1, complete(vec![]), "Scalar subquery value dependencies are dropped while the outer projection retains its sources."),
         scope(
             "correlated_predicate_is_not_value_lineage",
             "SELECT (SELECT b.amount FROM b WHERE b.id = a.id) AS value FROM a",
             &[("value", "b", "amount")],
-        ).known_failure("A correlated scalar subquery loses its projected value source."),
+        ).known_failure(complete(vec![]), "A correlated scalar subquery loses its projected value source."),
         scope(
             "correlated_outer_value_is_a_source",
             "SELECT (SELECT a.amount FROM b WHERE b.id = a.id) AS value FROM a",
             &[("value", "a", "amount")],
-        ).known_failure("A scalar subquery projecting an outer-scope column loses that value dependency."),
+        ).known_failure(complete(vec![]), "A scalar subquery projecting an outer-scope column loses that value dependency."),
         scope(
             "inner_alias_shadows_outer_alias",
             "SELECT (SELECT x.amount FROM b x) AS value FROM a x",
             &[("value", "b", "amount")],
-        ).known_failure("A scalar subquery loses the value dependency bound to its shadowing local alias."),
+        ).known_failure(complete(vec![]), "A scalar subquery loses the value dependency bound to its shadowing local alias."),
         scope(
             "shadowed_alias_does_not_escape_subquery",
             "SELECT x.id, (SELECT x.amount FROM b x) AS value FROM a x",
             &[("id", "a", "id"), ("value", "b", "amount")],
-        ).known_failure_at(1, "A scalar subquery loses its local-alias value dependency while the outer alias still resolves."),
+        ).known_failure_at(1, complete(vec![]), "A scalar subquery loses its local-alias value dependency while the outer alias still resolves."),
         scope(
             "cte_used_twice_traces_physical_source",
             "WITH c AS (SELECT id FROM a) SELECT l.id AS left_id, r.id AS right_id FROM c l JOIN c r ON l.id = r.id",
@@ -217,9 +217,20 @@ pub fn cases() -> Vec<Case> {
             ])
             .merged_star_failure(
                 vec![
-                    source(relation("a"), u("id")),
-                    source(relation("b"), u("id")),
+                    col(
+                        0,
+                        u("left_value"),
+                        vec![source(relation("a"), u("left_value"))],
+                    ),
+                    col(1, u("id"), vec![source(relation("a"), u("id"))]),
+                    col(
+                        2,
+                        u("right_value"),
+                        vec![source(relation("b"), u("right_value"))],
+                    ),
+                    col(3, u("id"), vec![source(relation("b"), u("id"))]),
                 ],
+                vec![duplicate_name(u("id"), vec![1, 3])],
                 "Star expansion repeats the merged join key instead of emitting it once.",
             ),
         );
