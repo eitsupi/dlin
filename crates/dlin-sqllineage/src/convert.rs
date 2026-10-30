@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sqlparser::ast::{Query, SelectFlavor, SetExpr, Statement, Visit, Visitor};
 use std::ops::ControlFlow;
@@ -15,7 +15,9 @@ use crate::graph::{
     node::RawNode,
     scope::{Binding, ScopeTree},
 };
-use crate::keys::{candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key};
+use crate::keys::{
+    RelationKey, candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key,
+};
 use crate::types::{self as old, CatalogProvider, SemanticError};
 
 /// TODO: Remove this bridge when the resolver uses `Catalog` directly.
@@ -160,6 +162,7 @@ fn convert_result(
             }
         })
         .collect();
+    let reference_positions = first_references(&source_order, dialect);
     let mut columns = Vec::new();
     let mut unexpanded = Vec::new();
     let mut position = Some(0);
@@ -193,7 +196,8 @@ fn convert_result(
                     };
                 }
             }
-            let lineage = normalize_lineage(known, unresolved, dialect, read_order, &source_order);
+            let lineage =
+                normalize_lineage(known, unresolved, dialect, read_order, &reference_positions);
             let mut relations = Vec::new();
             star_relations(&mapping.sources, &mut relations);
             if relations.is_empty() {
@@ -231,7 +235,8 @@ fn convert_result(
                 &mut unresolved,
             );
         }
-        let lineage = normalize_lineage(known, unresolved, dialect, read_order, &source_order);
+        let lineage =
+            normalize_lineage(known, unresolved, dialect, read_order, &reference_positions);
         columns.push(OutputColumn {
             ordinal: position,
             name,
@@ -308,28 +313,45 @@ fn canonical_relations(
     ]
 }
 
+/// Position of the first resolved reference to each column, keyed by the
+/// relation's dialect key and the column's exact spelling.
+type FirstReferences = HashMap<(RelationKey, Ident), usize>;
+
+fn first_references(source_order: &[SourceColumn], dialect: Dialect) -> FirstReferences {
+    let mut positions = HashMap::with_capacity(source_order.len());
+    for (index, reference) in source_order.iter().enumerate() {
+        positions
+            .entry((
+                relation_key(&reference.relation, dialect),
+                reference.column.clone(),
+            ))
+            .or_insert(index);
+    }
+    positions
+}
+
 fn normalize_lineage(
     mut known: Vec<SourceColumn>,
     unresolved: Vec<Unresolved>,
     dialect: Dialect,
     read_order: &[Relation],
-    source_order: &[SourceColumn],
+    first_references: &FirstReferences,
 ) -> Lineage {
-    // Relation spelling follows FROM order; column spelling follows its first
-    // reference, independently of which alias supplied that reference.
+    // Relation spelling follows FROM order; column spelling follows the first
+    // resolved reference in the statement, independently of which alias
+    // supplied that reference.
     for source in &mut known {
         retain_first_relation_spelling(&mut source.relation, read_order, dialect);
     }
     known.sort_by_cached_key(|source| {
         (
             source_key(source, dialect),
-            source_order
-                .iter()
-                .position(|reference| {
-                    reference.column == source.column
-                        && relation_key(&reference.relation, dialect)
-                            == relation_key(&source.relation, dialect)
-                })
+            first_references
+                .get(&(
+                    relation_key(&source.relation, dialect),
+                    source.column.clone(),
+                ))
+                .copied()
                 .unwrap_or(usize::MAX),
         )
     });

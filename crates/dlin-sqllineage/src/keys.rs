@@ -3,7 +3,7 @@
 use crate::types::TableRef;
 use crate::{Candidate, Dialect, Ident, Relation, SourceColumn, Unresolved};
 
-type RelationKey = (Option<String>, Option<String>, String);
+pub(crate) type RelationKey = (Option<String>, Option<String>, String);
 
 fn parts_key(
     catalog: Option<&Ident>,
