@@ -213,13 +213,7 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![q("id")]),
             (relation("b"), vec![u("ID")]),
         ])
-        .known_failure(dlin_sqllineage::Lineage::Partial {
-            known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
-                column: q("id"),
-                candidates: vec![Candidate::Relation(relation("a")), Candidate::Relation(relation("b"))],
-            }],
-        }, "Statement-wide quote collection lets an unrelated unquoted WHERE reference make the quoted projection ambiguous."),
+        ,
         resolved(
             "generic_natural_join_does_not_merge_distinct_column_keys",
             "SELECT id FROM a NATURAL JOIN b",
@@ -254,7 +248,7 @@ pub fn cases() -> Vec<Case> {
             relation("T"),
             u("id"),
         )
-        .known_failure(complete(vec![source(relation("T"), u("T"))]), "A qualified reference matching its table name is reconstructed with source column T instead of id."),
+        ,
         resolved(
             "catalog_unquoted_canonical_column_spelling",
             "SELECT amount FROM invoices",

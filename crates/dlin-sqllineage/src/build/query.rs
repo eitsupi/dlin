@@ -20,7 +20,7 @@ impl LineageBuilder {
                 let cte_scope = self.push_scope(ScopeKind::Cte);
 
                 if with.recursive {
-                    self.recursive_cte_name = Some(cte.alias.name.value.clone());
+                    self.recursive_cte_name = Some(crate::Ident::from_ast(&cte.alias.name));
                 }
 
                 self.visit_query(&cte.query);
@@ -28,7 +28,10 @@ impl LineageBuilder {
                 self.recursive_cte_name = None;
                 self.pop_scope();
 
-                self.add_binding(cte.alias.name.value.clone(), Binding::Cte(cte_scope));
+                self.add_binding(
+                    crate::Ident::from_ast(&cte.alias.name),
+                    Binding::Cte(cte_scope),
+                );
             }
         }
 
@@ -67,7 +70,7 @@ impl LineageBuilder {
             SetExpr::SetOperation { left, right, .. } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(left);
-                let left_outputs: Vec<(String, crate::graph::node::NodeId)> = self
+                let left_outputs: Vec<(crate::Ident, crate::graph::node::NodeId)> = self
                     .graph
                     .scopes
                     .output_columns(left_scope)

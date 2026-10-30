@@ -71,7 +71,7 @@ pub(crate) fn legacy_analyze(
     statements
         .iter()
         .map(|stmt| {
-            let builder = build::LineageBuilder::new(opts.normalize_case, opts.dialect);
+            let builder = build::LineageBuilder::new(opts.dialect);
             let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
             Ok(resolve::resolve(
                 raw_graph,

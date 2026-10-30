@@ -1,5 +1,6 @@
 use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
 
+use crate::Ident;
 use crate::build::LineageBuilder;
 use crate::build::function_semantics::{self, ArgumentSemantic};
 use crate::graph::edge::EdgeKind;
@@ -11,11 +12,8 @@ impl LineageBuilder {
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
         match expr {
             Expr::Identifier(ident) => {
-                let binding = self
-                    .graph
-                    .scopes
-                    .lookup(self.current_scope, &ident.value)
-                    .cloned();
+                let name = Ident::from_ast(ident);
+                let binding = self.graph.scopes.lookup(self.current_scope, &name).cloned();
                 if binding.as_ref().is_some_and(|binding| {
                     self.dialect.supports_relation_alias_row_value()
                         && matches!(
@@ -24,18 +22,16 @@ impl LineageBuilder {
                         )
                 }) {
                     return vec![self.graph.add_row_value_candidate(
-                        ident.value.clone(),
+                        name,
                         self.current_scope,
                         binding,
                     )];
                 }
                 let binding =
                     binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
-                let node = self.graph.add_unqualified_with_binding(
-                    ident.value.clone(),
-                    self.current_scope,
-                    binding,
-                );
+                let node =
+                    self.graph
+                        .add_unqualified_with_binding(name, self.current_scope, binding);
                 vec![node]
             }
 
@@ -375,17 +371,17 @@ impl LineageBuilder {
                 if self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &binding_name.value)
+                    .lookup(self.current_scope, &Ident::from_ast(binding_name))
                     .is_some() =>
             {
                 let binding = self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &binding_name.value)
+                    .lookup(self.current_scope, &Ident::from_ast(binding_name))
                     .cloned();
                 vec![self.add_bound_field_ancestor(
-                    binding_name.value.clone(),
-                    field.value.clone(),
+                    vec![Ident::from_ast(binding_name)],
+                    Ident::from_ast(field),
                     binding,
                 )]
             }
@@ -393,12 +389,12 @@ impl LineageBuilder {
                 let binding = self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &column.value)
+                    .lookup(self.current_scope, &Ident::from_ast(column))
                     .cloned();
                 let binding =
                     binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
                 vec![self.graph.add_unqualified_with_binding(
-                    column.value.clone(),
+                    Ident::from_ast(column),
                     self.current_scope,
                     binding,
                 )]
@@ -424,12 +420,8 @@ impl LineageBuilder {
         parts: &[sqlparser::ast::Ident],
     ) -> Vec<NodeId> {
         if let Some((prefix_len, binding)) = self.find_compound_binding(parts) {
-            let qualifier = parts[..prefix_len]
-                .iter()
-                .map(|part| part.value.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            let column = parts[prefix_len].value.clone();
+            let qualifier = parts[..prefix_len].iter().map(Ident::from_ast).collect();
+            let column = Ident::from_ast(&parts[prefix_len]);
             return vec![self.add_bound_field_ancestor(qualifier, column, Some(binding))];
         }
 
@@ -448,19 +440,23 @@ impl LineageBuilder {
             let relation_parts = &parts[..parts.len() - 1];
             let qualifier = parts[..parts.len() - 1]
                 .iter()
-                .map(|part| part.value.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
+                .map(Ident::from_ast)
+                .collect();
             let binding = match relation_parts {
-                [table] => Some(Binding::Table(TableRef::new(table.value.clone()))),
-                [schema, table] => Some(Binding::Table(TableRef::with_schema(
-                    schema.value.clone(),
-                    table.value.clone(),
-                ))),
+                [table] => Some(Binding::Table(TableRef {
+                    catalog: None,
+                    schema: None,
+                    table: Ident::from_ast(table),
+                })),
+                [schema, table] => Some(Binding::Table(TableRef {
+                    catalog: None,
+                    schema: Some(Ident::from_ast(schema)),
+                    table: Ident::from_ast(table),
+                })),
                 [catalog, schema, table] => Some(Binding::Table(TableRef {
-                    catalog: Some(catalog.value.clone()),
-                    schema: Some(schema.value.clone()),
-                    table: table.value.clone(),
+                    catalog: Some(Ident::from_ast(catalog)),
+                    schema: Some(Ident::from_ast(schema)),
+                    table: Ident::from_ast(table),
                 })),
                 // Keep the legacy display-only fallback for an unsupported
                 // number of relation components.  Standard SQL relation
@@ -470,7 +466,7 @@ impl LineageBuilder {
                 _ => None,
             };
             return vec![self.graph.add_ref_with_binding(
-                parts[parts.len() - 1].value.clone(),
+                Ident::from_ast(&parts[parts.len() - 1]),
                 Some(qualifier),
                 self.current_scope,
                 binding,
@@ -480,7 +476,7 @@ impl LineageBuilder {
         // No relation prefix was found: `struct.field` is an unqualified
         // top-level column followed by a nested field path.  Only the
         // top-level column can be represented by the public ColumnOrigin API.
-        let column = parts[0].value.clone();
+        let column = Ident::from_ast(&parts[0]);
         let binding = self
             .graph
             .scopes
@@ -504,13 +500,15 @@ impl LineageBuilder {
         (1..parts.len()).rev().find_map(|prefix_len| {
             let prefix = parts[..prefix_len]
                 .iter()
-                .map(|part| part.value.as_str())
+                .map(Ident::from_ast)
                 .collect::<Vec<_>>();
 
             // Aliases are single identifiers and therefore only match the
             // first component of a compound identifier.
             if prefix_len == 1
-                && let Some((_, binding)) = visible.iter().find(|(name, _)| name == prefix[0])
+                && let Some((_, binding)) = visible.iter().find(|(name, _)| {
+                    name.relation_key(self.dialect) == prefix[0].relation_key(self.dialect)
+                })
             {
                 return Some((prefix_len, binding.clone()));
             }
@@ -522,15 +520,21 @@ impl LineageBuilder {
                 .scopes
                 .visible_relations(self.current_scope)
                 .into_iter()
-                .find(|table| table_parts(table) == prefix)
+                .find(|table| {
+                    let candidate = table_parts(table);
+                    candidate.len() == prefix.len()
+                        && candidate.iter().zip(&prefix).all(|(a, b)| {
+                            a.relation_key(self.dialect) == b.relation_key(self.dialect)
+                        })
+                })
                 .map(|table| (prefix_len, Binding::Table(table.clone())))
         })
     }
 
     fn add_bound_field_ancestor(
         &mut self,
-        qualifier: String,
-        column: String,
+        qualifier: Vec<Ident>,
+        column: Ident,
         binding: Option<Binding>,
     ) -> NodeId {
         self.graph
@@ -561,15 +565,15 @@ impl LineageBuilder {
     }
 }
 
-fn table_parts(table: &TableRef) -> Vec<&str> {
+fn table_parts(table: &TableRef) -> Vec<&Ident> {
     let mut parts = Vec::with_capacity(3);
     if let Some(catalog) = &table.catalog {
-        parts.push(catalog.as_str());
+        parts.push(catalog);
     }
     if let Some(schema) = &table.schema {
-        parts.push(schema.as_str());
+        parts.push(schema);
     }
-    parts.push(table.table.as_str());
+    parts.push(&table.table);
     parts
 }
 

@@ -12,9 +12,8 @@ use sqlparser::ast::Statement;
 pub(crate) struct LineageBuilder {
     pub(crate) graph: RawGraph,
     pub(crate) current_scope: ScopeId,
-    pub(crate) recursive_cte_name: Option<String>,
+    pub(crate) recursive_cte_name: Option<crate::Ident>,
     pub(crate) warnings: Vec<Warning>,
-    pub(crate) normalize_case: bool,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
     /// First unsupported construct met while walking the statement. Once set,
@@ -23,15 +22,14 @@ pub(crate) struct LineageBuilder {
 }
 
 impl LineageBuilder {
-    pub fn new(normalize_case: bool, dialect: Dialect) -> Self {
-        let graph = RawGraph::new();
+    pub fn new(dialect: Dialect) -> Self {
+        let graph = RawGraph::new(dialect);
         let root = ScopeTree::root();
         Self {
             graph,
             current_scope: root,
             recursive_cte_name: None,
             warnings: Vec::new(),
-            normalize_case,
             inner_statement_type: None,
             dialect,
             error: None,
@@ -69,7 +67,7 @@ impl LineageBuilder {
         }
     }
 
-    pub(crate) fn add_binding(&mut self, name: String, binding: Binding) {
+    pub(crate) fn add_binding(&mut self, name: crate::Ident, binding: Binding) {
         self.graph
             .scopes
             .add_binding(self.current_scope, name, binding);

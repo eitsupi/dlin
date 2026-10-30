@@ -1,12 +1,13 @@
+use crate::Ident;
 use serde::Serialize;
 use std::fmt;
 
 /// A reference to a table, possibly multi-part (catalog.schema.table).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub(crate) struct TableRef {
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    pub table: String,
+    pub catalog: Option<Ident>,
+    pub schema: Option<Ident>,
+    pub table: Ident,
 }
 
 impl TableRef {
@@ -15,16 +16,7 @@ impl TableRef {
         Self {
             catalog: None,
             schema: None,
-            table: table.into(),
-        }
-    }
-
-    /// Create a table reference with schema and table name.
-    pub fn with_schema(schema: impl Into<String>, table: impl Into<String>) -> Self {
-        Self {
-            catalog: None,
-            schema: Some(schema.into()),
-            table: table.into(),
+            table: Ident::unquoted(table),
         }
     }
 }
@@ -32,12 +24,12 @@ impl TableRef {
 impl fmt::Display for TableRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(c) = &self.catalog {
-            write!(f, "{c}.")?;
+            write!(f, "{}.", c.value)?;
         }
         if let Some(s) = &self.schema {
-            write!(f, "{s}.")?;
+            write!(f, "{}.", s.value)?;
         }
-        write!(f, "{}", self.table)
+        write!(f, "{}", self.table.value)
     }
 }
 
@@ -45,7 +37,7 @@ impl fmt::Display for TableRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub(crate) struct ColumnRef {
     pub table: Option<TableRef>,
-    pub column: String,
+    pub column: Ident,
 }
 
 /// The type of SQL statement that was analyzed.
@@ -128,13 +120,13 @@ pub(crate) struct ColumnMapping {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
-    Concrete { table: TableRef, column: String },
+    Concrete { table: TableRef, column: Ident },
     /// Multiple candidate tables. A non-empty `candidates` list means genuine
     /// ambiguity between known tables and can be disambiguated by a catalog.
     /// An empty list means the column could not be resolved to any known table;
     /// catalog refinement is not attempted.
     Ambiguous {
-        column: String,
+        column: Ident,
         candidates: Vec<TableRef>,
     },
     /// `SELECT *` or `table.*`; catalog needed to expand.
@@ -142,11 +134,11 @@ pub(crate) enum ColumnOrigin {
     /// A named output was selected through an unexpanded star in a CTE or
     /// derived table. The table is known, but the physical column cannot be
     /// asserted to be concrete without schema metadata.
-    NamedWildcard { table: TableRef, column: String },
+    NamedWildcard { table: TableRef, column: Ident },
     /// One side of a set operation contributes no column source (for example,
     /// a literal projection). Kept alongside the other branch's origins so a
     /// consumer cannot mistake partial lineage for complete lineage.
-    SourceFree { column: String },
+    SourceFree { column: Ident },
     /// Derived via recursive CTE; base case sources only.
     Recursive { base_sources: Vec<ColumnOrigin> },
 }
@@ -196,10 +188,6 @@ pub(crate) struct AnalyzeOptions {
     pub dialect: Dialect,
     /// Optional catalog for resolving `SELECT *` and unqualified columns.
     pub catalog: Option<Box<dyn CatalogProvider>>,
-    /// Normalize unquoted identifiers to lowercase (default: `true`).
-    ///
-    /// Quoted identifiers (e.g., `"MyTable"`) always preserve their case.
-    pub normalize_case: bool,
 }
 
 #[cfg(test)]
@@ -208,7 +196,6 @@ impl Default for AnalyzeOptions {
         Self {
             dialect: Dialect::Generic,
             catalog: None,
-            normalize_case: true,
         }
     }
 }
@@ -316,8 +303,8 @@ impl std::error::Error for ParseError {}
 /// Optional metadata source for resolving `SELECT *` and ambiguous columns.
 pub(crate) trait CatalogProvider {
     /// Return the column names of a table. Used to expand `SELECT *`.
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>>;
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<Ident>>;
     /// Given a column name and candidate tables, return the owning table. This
     /// is only called with a non-empty candidate slice.
-    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef>;
+    fn resolve_column(&self, column: &Ident, candidates: &[TableRef]) -> Option<TableRef>;
 }

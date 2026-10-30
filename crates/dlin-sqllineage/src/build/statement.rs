@@ -1,10 +1,9 @@
-use sqlparser::ast::{self, AssignmentTarget, FunctionArguments, Ident, MergeAction, Statement};
-
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarOptions};
 use crate::graph::scope::ScopeColumn;
 use crate::types::{StatementType, TableRef};
+use sqlparser::ast::{self, AssignmentTarget, FunctionArguments, MergeAction, Statement};
 
 impl LineageBuilder {
     pub(crate) fn visit_statement(&mut self, stmt: &Statement) -> StatementType {
@@ -15,7 +14,7 @@ impl LineageBuilder {
             }
 
             Statement::Insert(insert) => {
-                self.graph.tables.output = Some(self.table_ref_from_table_object(&insert.table));
+                self.graph.tables.output = Some(Self::table_ref_from_table_object(&insert.table));
                 if let Some(ref source) = insert.source {
                     self.visit_query(source);
                 }
@@ -24,7 +23,7 @@ impl LineageBuilder {
 
             Statement::CreateTable(ct) => {
                 if let Some(ref query) = ct.query {
-                    self.graph.tables.output = Some(self.table_ref_from_object_name(&ct.name));
+                    self.graph.tables.output = Some(Self::table_ref_from_object_name(&ct.name));
                     self.visit_query(query);
                     StatementType::CreateTable
                 } else {
@@ -33,7 +32,7 @@ impl LineageBuilder {
             }
 
             Statement::Update(update) => {
-                if let Some(tref) = self.table_ref_from_table_factor(&update.table.relation) {
+                if let Some(tref) = Self::table_ref_from_table_factor(&update.table.relation) {
                     self.graph.tables.output = Some(tref);
                 }
                 for join in &update.table.joins {
@@ -76,7 +75,7 @@ impl LineageBuilder {
                 };
                 if let Some(tref) = from_tables
                     .first()
-                    .and_then(|f| self.table_ref_from_table_factor(&f.relation))
+                    .and_then(|f| Self::table_ref_from_table_factor(&f.relation))
                 {
                     self.graph.tables.output = Some(tref);
                 }
@@ -90,7 +89,7 @@ impl LineageBuilder {
             }
 
             Statement::Merge(merge) => {
-                if let Some(tref) = self.table_ref_from_table_factor(&merge.table) {
+                if let Some(tref) = Self::table_ref_from_table_factor(&merge.table) {
                     self.graph.tables.output = Some(tref);
                 }
                 self.visit_table_factor(&merge.source);
@@ -124,22 +123,22 @@ impl LineageBuilder {
                                 self.add_merge_source_star();
                             }
                             ast::MergeInsertKind::Values(values) => {
-                                let col_names: Vec<String> = ins
+                                let col_names: Vec<crate::Ident> = ins
                                     .columns
                                     .iter()
                                     .map(|c| {
-                                        c.0.last()
-                                            .and_then(|p| p.as_ident())
-                                            .map(|i| i.value.clone())
-                                            .unwrap_or_default()
+                                        c.0.last().and_then(|p| p.as_ident()).map_or_else(
+                                            || crate::Ident::unquoted(""),
+                                            crate::Ident::from_ast,
+                                        )
                                     })
                                     .collect();
                                 for row in &values.rows {
                                     for (i, expr) in row.iter().enumerate() {
-                                        let col_name = col_names
-                                            .get(i)
-                                            .cloned()
-                                            .unwrap_or_else(|| format!("col{i}"));
+                                        let col_name =
+                                            col_names.get(i).cloned().unwrap_or_else(|| {
+                                                crate::Ident::unquoted(format!("col{i}"))
+                                            });
                                         let ancestors = self.collect_ancestors(expr);
                                         let kind = determine_edge_kind(expr);
                                         let output =
@@ -317,7 +316,7 @@ impl LineageBuilder {
         self.graph.scopes.add_output_column(
             self.current_scope,
             ScopeColumn {
-                name: "*".to_string(),
+                name: crate::Ident::unquoted("*"),
                 node_id: star,
             },
         );
@@ -406,24 +405,24 @@ impl LineageBuilder {
         }
     }
 
-    pub(crate) fn normalize_ident(&self, ident: &Ident) -> String {
-        if self.normalize_case && ident.quote_style.is_none() {
-            ident.value.to_lowercase()
-        } else {
-            ident.value.clone()
-        }
-    }
-
-    pub(crate) fn table_ref_from_object_name(&self, name: &ast::ObjectName) -> TableRef {
-        let parts: Vec<String> = name
+    pub(crate) fn table_ref_from_object_name(name: &ast::ObjectName) -> TableRef {
+        let parts: Vec<crate::Ident> = name
             .0
             .iter()
             .filter_map(|p| p.as_ident())
-            .map(|i| self.normalize_ident(i))
+            .map(crate::Ident::from_ast)
             .collect();
         match parts.as_slice() {
-            [table] => TableRef::new(table.clone()),
-            [schema, table] => TableRef::with_schema(schema.clone(), table.clone()),
+            [table] => TableRef {
+                catalog: None,
+                schema: None,
+                table: table.clone(),
+            },
+            [schema, table] => TableRef {
+                catalog: None,
+                schema: Some(schema.clone()),
+                table: table.clone(),
+            },
             [catalog, schema, table] => TableRef {
                 catalog: Some(catalog.clone()),
                 schema: Some(schema.clone()),
@@ -433,34 +432,32 @@ impl LineageBuilder {
         }
     }
 
-    fn table_ref_from_table_object(&self, obj: &ast::TableObject) -> TableRef {
+    fn table_ref_from_table_object(obj: &ast::TableObject) -> TableRef {
         match obj {
-            ast::TableObject::TableName(name) => self.table_ref_from_object_name(name),
+            ast::TableObject::TableName(name) => Self::table_ref_from_object_name(name),
             _ => TableRef::new(obj.to_string()),
         }
     }
 
-    fn table_ref_from_table_factor(&self, factor: &ast::TableFactor) -> Option<TableRef> {
+    fn table_ref_from_table_factor(factor: &ast::TableFactor) -> Option<TableRef> {
         match factor {
-            ast::TableFactor::Table { name, .. } => Some(self.table_ref_from_object_name(name)),
+            ast::TableFactor::Table { name, .. } => Some(Self::table_ref_from_object_name(name)),
             _ => None,
         }
     }
 }
 
-fn assignment_target_name(target: &AssignmentTarget) -> String {
+fn assignment_target_name(target: &AssignmentTarget) -> crate::Ident {
     match target {
         AssignmentTarget::ColumnName(name) => name
             .0
             .last()
             .and_then(|p| p.as_ident())
-            .map(|i| i.value.clone())
-            .unwrap_or_default(),
+            .map_or_else(|| crate::Ident::unquoted(""), crate::Ident::from_ast),
         AssignmentTarget::Tuple(names) => names
             .first()
             .and_then(|n| n.0.last())
             .and_then(|p| p.as_ident())
-            .map(|i| i.value.clone())
-            .unwrap_or_default(),
+            .map_or_else(|| crate::Ident::unquoted(""), crate::Ident::from_ast),
     }
 }

@@ -542,10 +542,9 @@ fn catalog_never_uses_an_unrelated_quote_context_to_choose_a_source() {
         .unwrap()
         .into_single()
         .unwrap();
-    assert!(
-        matches!(&mixed.output.columns[0].lineage, Lineage::Partial { known, unresolved }
-        if known.is_empty() && matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-            if column.quote == Some(Quote::Double) && candidates.len() == 2))
+    assert_eq!(
+        mixed.output.columns[0].lineage,
+        direct.output.columns[0].lineage
     );
 }
 
@@ -580,10 +579,10 @@ fn generic_catalog_matching_follows_column_key_rules() {
 #[test]
 fn physical_source_quote_survives_cte_and_derived_output_references() {
     for sql in [
-        "WITH c AS (SELECT \"id\" FROM t) SELECT id FROM c",
-        "WITH c AS (SELECT \"id\" FROM t) SELECT id + 1 AS n FROM c",
-        "WITH c AS (SELECT \"id\" FROM t), d AS (SELECT id FROM c) SELECT id FROM d",
-        "SELECT id FROM (SELECT \"id\" FROM t) d",
+        "WITH c AS (SELECT \"id\" FROM t) SELECT \"id\" FROM c",
+        "WITH c AS (SELECT \"id\" FROM t) SELECT \"id\" + 1 AS n FROM c",
+        "WITH c AS (SELECT \"id\" FROM t), d AS (SELECT \"id\" FROM c) SELECT \"id\" FROM d",
+        "SELECT \"id\" FROM (SELECT \"id\" FROM t) d",
     ] {
         let result = one(sql);
         assert!(
@@ -674,7 +673,7 @@ fn source_relation_spelling_is_recovered_from_each_qualified_output() {
 
 #[test]
 fn nonrecursive_cte_definition_can_read_a_physical_table_with_the_same_name() {
-    let result = one("WITH T AS (SELECT \"id\" FROM T) SELECT id FROM T");
+    let result = one("WITH T AS (SELECT \"id\" FROM T) SELECT \"id\" FROM T");
     assert_eq!(result.read[0].name, Ident::unquoted("T"));
     assert!(
         matches!(&result.output.columns[0].lineage, Lineage::Complete(sources)
@@ -683,7 +682,7 @@ fn nonrecursive_cte_definition_can_read_a_physical_table_with_the_same_name() {
 }
 
 #[test]
-fn unresolved_source_quotes_do_not_come_from_output_aliases() {
+fn source_quotes_do_not_come_from_output_aliases() {
     let catalog = QuoteContextCatalog;
     let result = Analyzer::new(Dialect::Snowflake)
         .with_catalog(&catalog)
@@ -692,8 +691,9 @@ fn unresolved_source_quotes_do_not_come_from_output_aliases() {
         .into_single()
         .unwrap();
     assert!(
-        matches!(&result.output.columns[0].lineage, Lineage::Partial { unresolved, .. }
-        if matches!(&unresolved[..], [Unresolved::Ambiguous { column, .. }] if column.quote == Some(Quote::Double)))
+        matches!(&result.output.columns[0].lineage, Lineage::Complete(sources)
+        if sources.len() == 1 && sources[0].relation.name == Ident::unquoted("a")
+            && sources[0].column == Ident::quoted("id", Quote::Double))
     );
     let result = one("SELECT missing AS \"missing\"");
     assert!(

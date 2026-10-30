@@ -13,6 +13,7 @@ use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, JoinMerge, JoinMergeKind, MergedColumns, VirtualSourceId};
 use crate::types::{CatalogProvider, ColumnOrigin, TableRef, TransformKind};
+use crate::{Dialect, Ident};
 
 pub(super) fn resolve_node(
     node_id: NodeId,
@@ -35,9 +36,10 @@ pub(super) fn resolve_node(
             binding,
         } => {
             let binding = binding.clone().or_else(|| {
-                qualifier
-                    .as_deref()
-                    .and_then(|qual| graph.scopes.lookup(*scope, qual).cloned())
+                qualifier.as_deref().and_then(|parts| match parts {
+                    [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                    _ => None,
+                })
             });
             if let Some(binding) = binding {
                 resolve_captured_binding(
@@ -77,13 +79,10 @@ pub(super) fn resolve_node(
             scope,
             binding,
         } => {
-            if let Some(binding) = binding.clone().or_else(|| {
-                graph
-                    .scopes
-                    .lookup(*scope, name)
-                    .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
-                    .cloned()
-            }) {
+            if let Some(binding) = binding
+                .clone()
+                .or_else(|| lookup_virtual_binding(*scope, name, graph))
+            {
                 resolve_captured_binding(
                     name,
                     binding,
@@ -133,9 +132,28 @@ pub(super) fn resolve_node(
     origin
 }
 
+/// Virtual source aliases stand in for output columns in expressions such as
+/// `UNNEST(...) AS item`. Compare them with column rules, since SQL engines
+/// apply column-name case behavior to those aliases.
+pub(super) fn lookup_virtual_binding(
+    scope: usize,
+    name: &Ident,
+    graph: &RawGraph,
+) -> Option<Binding> {
+    graph
+        .scopes
+        .visible_bindings(scope)
+        .into_iter()
+        .find(|(binding_name, binding)| {
+            matches!(binding, Binding::VirtualSource(_))
+                && binding_name.column_key(graph.dialect) == name.column_key(graph.dialect)
+        })
+        .map(|(_, binding)| binding)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_row_value_candidate(
-    name: &str,
+    name: &Ident,
     scope: usize,
     binding: Option<Binding>,
     graph: &RawGraph,
@@ -148,7 +166,7 @@ fn resolve_row_value_candidate(
     let binding = binding.or_else(|| graph.scopes.lookup(scope, name).cloned());
     let Some(binding) = binding else {
         return Some(ColumnOrigin::Ambiguous {
-            column: name.to_string(),
+            column: name.clone(),
             candidates: Vec::new(),
         });
     };
@@ -160,11 +178,11 @@ fn resolve_row_value_candidate(
             {
                 Some(ColumnOrigin::Concrete {
                     table: owner,
-                    column: name.to_string(),
+                    column: name.clone(),
                 })
             } else {
                 Some(ColumnOrigin::Ambiguous {
-                    column: name.to_string(),
+                    column: name.clone(),
                     candidates: Vec::new(),
                 })
             }
@@ -174,7 +192,9 @@ fn resolve_row_value_candidate(
                 .scopes
                 .output_columns(target_scope)
                 .iter()
-                .any(|column| column.name == name);
+                .any(|column| {
+                    column.name.column_key(graph.dialect) == name.column_key(graph.dialect)
+                });
             if is_named_column {
                 resolve_through_scope(
                     name,
@@ -188,13 +208,13 @@ fn resolve_row_value_candidate(
                 )
             } else {
                 Some(ColumnOrigin::Ambiguous {
-                    column: name.to_string(),
+                    column: name.clone(),
                     candidates: Vec::new(),
                 })
             }
         }
         Binding::VirtualSource(_) => Some(ColumnOrigin::Ambiguous {
-            column: name.to_string(),
+            column: name.clone(),
             candidates: Vec::new(),
         }),
     }
@@ -202,7 +222,7 @@ fn resolve_row_value_candidate(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_captured_binding(
-    name: &str,
+    name: &Ident,
     binding: Binding,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -214,7 +234,7 @@ pub(super) fn resolve_captured_binding(
     match binding {
         Binding::Table(table) => Some(ColumnOrigin::Concrete {
             table,
-            column: name.to_string(),
+            column: name.clone(),
         }),
         Binding::Cte(scope) | Binding::DerivedTable(scope) => resolve_through_scope(
             name,
@@ -245,9 +265,10 @@ pub(super) fn find_cte_redirect(
             let binding = binding
                 .clone()
                 .or_else(|| {
-                    qualifier
-                        .as_deref()
-                        .and_then(|qual| graph.scopes.lookup(*scope, qual).cloned())
+                    qualifier.as_deref().and_then(|parts| match parts {
+                        [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                        _ => None,
+                    })
                 })
                 .or_else(|| find_unqualified_binding(name, *scope, graph, catalog));
             match binding {
@@ -255,7 +276,7 @@ pub(super) fn find_cte_redirect(
                     .scopes
                     .output_columns(s)
                     .iter()
-                    .find(|c| c.name == *name)
+                    .find(|c| c.name.column_key(graph.dialect) == name.column_key(graph.dialect))
                     .map(|c| (c.node_id, s)),
                 _ => None,
             }
@@ -273,7 +294,7 @@ pub(super) fn find_cte_redirect(
                     .scopes
                     .output_columns(s)
                     .iter()
-                    .find(|c| c.name == *name)
+                    .find(|c| c.name.column_key(graph.dialect) == name.column_key(graph.dialect))
                     .map(|c| (c.node_id, s)),
                 _ => None,
             }
@@ -287,7 +308,7 @@ pub(super) fn find_cte_redirect(
 /// A name that joins merge from several relations, or that is ambiguous, has
 /// no single relation; `resolve_merged_column` handles the merged case.
 pub(super) fn find_unqualified_binding(
-    name: &str,
+    name: &Ident,
     scope: usize,
     graph: &RawGraph,
     catalog: Option<&dyn CatalogProvider>,
@@ -315,16 +336,18 @@ enum UnqualifiedChoice {
 
 /// A relation that may supply an unqualified column.
 struct ColumnRelation<'a> {
-    name: &'a str,
+    name: &'a Ident,
     binding: &'a Binding,
     /// The CTE/derived-table scope, `None` for a physical table. Aliases of
     /// the same scope are separate relations for name resolution.
     scope: Option<usize>,
 }
 
-fn merge_covers(merge: &JoinMerge, name: &str) -> bool {
+fn merge_covers(merge: &JoinMerge, name: &Ident, dialect: Dialect) -> bool {
     match &merge.columns {
-        MergedColumns::Using(columns) => columns.iter().any(|column| column == name),
+        MergedColumns::Using(columns) => columns
+            .iter()
+            .any(|column| column.column_key(dialect) == name.column_key(dialect)),
         MergedColumns::Natural => true,
     }
 }
@@ -334,7 +357,7 @@ fn merge_covers(merge: &JoinMerge, name: &str) -> bool {
 /// lacking the column.
 fn table_has_column(
     table: &TableRef,
-    name: &str,
+    name: &Ident,
     catalog: Option<&dyn CatalogProvider>,
 ) -> Option<bool> {
     let catalog = catalog?;
@@ -344,13 +367,13 @@ fn table_has_column(
     {
         return Some(true);
     }
-    // TODO: The lowercase comparison disagrees with `Ident::column_key` for
-    // quoted catalog columns (for example Generic: unquoted `id` matches a
-    // catalog column quoted as `"id"` in a NATURAL join). Fix this when the
-    // resolver compares typed identifiers with the dialect's column rules.
+    // TODO: This legacy membership comparison is intentionally retained until
+    // the dedicated table_has_column follow-up adds dialect-aware matching.
     catalog.list_columns(table).map(|columns| {
-        let wanted = name.to_lowercase();
-        columns.iter().any(|column| column.to_lowercase() == wanted)
+        let wanted = name.value.to_lowercase();
+        columns
+            .iter()
+            .any(|column| column.value.to_lowercase() == wanted)
     })
 }
 
@@ -377,8 +400,8 @@ fn table_has_column(
 /// (their columns are unknown), so only relations merged with such a provider
 /// count; otherwise the physical tables compete.
 fn unqualified_choice(
-    name: &str,
-    bindings: &[(String, Binding)],
+    name: &Ident,
+    bindings: &[(Ident, Binding)],
     scope: usize,
     graph: &RawGraph,
     catalog: Option<&dyn CatalogProvider>,
@@ -387,12 +410,12 @@ fn unqualified_choice(
         .scopes
         .join_merges(scope)
         .iter()
-        .filter(|merge| merge_covers(merge, name))
+        .filter(|merge| merge_covers(merge, name, graph.dialect))
         .collect();
     let consult_catalog = !merges.is_empty();
 
     let mut relations: Vec<ColumnRelation<'_>> = Vec::new();
-    let mut relation_of: HashMap<&str, usize> = HashMap::new();
+    let mut relation_of: HashMap<String, usize> = HashMap::new();
     // Whether each relation is known to have the column.
     let mut known_to_have: Vec<bool> = Vec::new();
     for (binding_name, binding) in bindings {
@@ -407,7 +430,10 @@ fn unqualified_choice(
                     scope: Some(*provider),
                 });
                 known_to_have.push(true);
-                relation_of.insert(binding_name, relations.len() - 1);
+                relation_of.insert(
+                    binding_name.relation_key(graph.dialect).into_owned(),
+                    relations.len() - 1,
+                );
             }
             Binding::Table(table) => {
                 let has_column = if consult_catalog {
@@ -424,7 +450,10 @@ fn unqualified_choice(
                     binding,
                     scope: None,
                 });
-                relation_of.insert(binding_name, relations.len() - 1);
+                relation_of.insert(
+                    binding_name.relation_key(graph.dialect).into_owned(),
+                    relations.len() - 1,
+                );
             }
             Binding::VirtualSource(_) => {}
         }
@@ -436,10 +465,11 @@ fn unqualified_choice(
     let mut contributes = vec![true; relations.len()];
     for merge in merges {
         let natural = matches!(merge.columns, MergedColumns::Natural);
-        let side_group = |side: &[String]| {
+        let side_group = |side: &[Ident]| {
             let mut found = side.iter().filter_map(|member| {
+                let key = member.relation_key(graph.dialect);
                 relation_of
-                    .get(member.as_str())
+                    .get(key.as_ref())
                     .filter(|&&index| !natural || known_to_have[index])
                     .map(|&index| groups[index])
             });
@@ -477,7 +507,11 @@ fn unqualified_choice(
             return UnqualifiedChoice::Ambiguous(
                 providers
                     .iter()
-                    .map(|&index| TableRef::new(relations[index].name))
+                    .map(|&index| TableRef {
+                        catalog: None,
+                        schema: None,
+                        table: relations[index].name.clone(),
+                    })
                     .collect(),
             );
         }
@@ -517,7 +551,7 @@ fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
     format!("{left:?}") == format!("{right:?}")
 }
 
-fn binding_publishes(binding: &Binding, name: &str, graph: &RawGraph) -> bool {
+fn binding_publishes(binding: &Binding, name: &Ident, graph: &RawGraph) -> bool {
     let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
         return false;
     };
@@ -525,7 +559,7 @@ fn binding_publishes(binding: &Binding, name: &str, graph: &RawGraph) -> bool {
         .scopes
         .output_columns(*scope)
         .iter()
-        .any(|column| column.name == name)
+        .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
 }
 
 /// Resolve an unqualified column that `USING`/`NATURAL` joins merge from
@@ -617,7 +651,7 @@ pub(super) fn resolve_merged_column(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_unqualified(
-    name: &str,
+    name: &Ident,
     scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -641,8 +675,8 @@ fn resolve_unqualified(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_from_bindings(
-    name: &str,
-    bindings: &[(String, Binding)],
+    name: &Ident,
+    bindings: &[(Ident, Binding)],
     scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -656,7 +690,7 @@ fn resolve_from_bindings(
         match binding {
             Binding::Table(table_ref) => Some(ColumnOrigin::Concrete {
                 table: table_ref.clone(),
-                column: name.to_string(),
+                column: name.clone(),
             }),
             Binding::Cte(cte_scope) | Binding::DerivedTable(cte_scope) => resolve_through_scope(
                 name,
@@ -672,13 +706,13 @@ fn resolve_from_bindings(
         }
     } else if bindings.is_empty() {
         Some(ColumnOrigin::Ambiguous {
-            column: name.to_string(),
+            column: name.clone(),
             candidates: Vec::new(),
         })
     } else {
         match unqualified_choice(name, bindings, scope, graph, catalog) {
             UnqualifiedChoice::Ambiguous(candidates) => Some(ColumnOrigin::Ambiguous {
-                column: name.to_string(),
+                column: name.clone(),
                 candidates,
             }),
             // A merged column is collected from all its relations by
@@ -687,7 +721,7 @@ fn resolve_from_bindings(
             UnqualifiedChoice::Merged(members) => match members.into_iter().next() {
                 Some(Binding::Table(table)) => Some(ColumnOrigin::Concrete {
                     table,
-                    column: name.to_string(),
+                    column: name.clone(),
                 }),
                 Some(Binding::Cte(provider) | Binding::DerivedTable(provider)) => {
                     resolve_through_scope(
@@ -707,18 +741,18 @@ fn resolve_from_bindings(
     }
 }
 
-fn virtual_has_column(name: &str, source: VirtualSourceId, graph: &RawGraph) -> bool {
+fn virtual_has_column(name: &Ident, source: VirtualSourceId, graph: &RawGraph) -> bool {
     graph
         .scopes
         .virtual_source(source)
         .columns
         .iter()
-        .any(|column| column.name == name)
+        .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
 }
 
 pub(super) fn find_virtual_sources_for_column(
     scope: usize,
-    name: &str,
+    name: &Ident,
     graph: &RawGraph,
 ) -> Vec<VirtualSourceId> {
     effective_bindings(scope, graph)
@@ -734,7 +768,7 @@ pub(super) fn find_virtual_sources_for_column(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_through_scope(
-    column_name: &str,
+    column_name: &Ident,
     target_scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -754,10 +788,9 @@ fn resolve_through_scope(
         catalog,
         mapping_cache,
     );
-    if let Some(mapping) = mappings
-        .iter()
-        .find(|mapping| mapping.target.column == column_name)
-    {
+    if let Some(mapping) = mappings.iter().find(|mapping| {
+        mapping.target.column.column_key(graph.dialect) == column_name.column_key(graph.dialect)
+    }) {
         let (origins, has_back) = flatten_mapping_sources(&mapping.sources);
         return if has_back {
             Some(ColumnOrigin::Recursive {
@@ -771,7 +804,7 @@ fn resolve_through_scope(
         match scope_star_name_decision(target_scope, column_name, graph, &mut HashSet::new()) {
             StarNameDecision::Denied | StarNameDecision::Ambiguous => {
                 return Some(ColumnOrigin::Ambiguous {
-                    column: column_name.to_string(),
+                    column: column_name.clone(),
                     candidates: Vec::new(),
                 });
             }
@@ -793,13 +826,13 @@ fn resolve_through_scope(
                     sources.into_iter().next()
                 } else {
                     Some(ColumnOrigin::Ambiguous {
-                        column: column_name.to_string(),
+                        column: column_name.clone(),
                         candidates: Vec::new(),
                     })
                 };
             }
             StarNameDecision::Renamed(old) => old,
-            StarNameDecision::Allowed => column_name.to_string(),
+            StarNameDecision::Allowed => column_name.clone(),
         };
     if let Some(source) = named_wildcard_sources_for_scope(
         target_scope,
@@ -820,7 +853,7 @@ fn resolve_through_scope(
         .scopes
         .output_columns(target_scope)
         .iter()
-        .find(|c| c.name == column_name)
+        .find(|c| c.name.column_key(graph.dialect) == column_name.column_key(graph.dialect))
     {
         let (origins, _, has_back, _) = collect_output_sources(
             col.node_id,
@@ -845,7 +878,7 @@ fn resolve_through_scope(
         }
     } else {
         Some(ColumnOrigin::Ambiguous {
-            column: column_name.to_string(),
+            column: column_name.clone(),
             candidates: Vec::new(),
         })
     }

@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
+use crate::Ident;
 use crate::graph::node::NodeId;
-use crate::types::TableRef;
+use crate::types::{Dialect, TableRef};
 
 pub(crate) type ScopeId = usize;
 
@@ -21,7 +22,7 @@ pub(crate) enum VirtualColumnState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VirtualColumn {
-    pub name: String,
+    pub name: Ident,
     pub dependencies: Vec<NodeId>,
     pub state: VirtualColumnState,
 }
@@ -33,6 +34,7 @@ pub(crate) struct VirtualSource {
 
 pub(crate) struct ScopeTree {
     scopes: Vec<Scope>,
+    dialect: Dialect,
 }
 
 struct Scope {
@@ -40,7 +42,7 @@ struct Scope {
     /// Relations introduced by this scope's FROM clause, in source order.
     /// Iteration order is observable (star expansion, ambiguity candidates),
     /// so it must not depend on hashing.
-    bindings: IndexMap<String, Binding>,
+    bindings: IndexMap<String, (Ident, Binding)>,
     /// Every physical relation added to this scope, including ones whose
     /// binding name was later taken by another relation (`s.t` and `o.t`
     /// share the name `t`). Multi-part qualifiers are matched against these.
@@ -48,7 +50,7 @@ struct Scope {
     /// Binding names in the order they were added, including names that a
     /// later relation took over. A join reads the slice added while its
     /// operands were visited to learn which relations it combines.
-    binding_log: Vec<String>,
+    binding_log: Vec<Ident>,
     /// Joins in this scope that merge columns, in source order.
     join_merges: Vec<JoinMerge>,
     anonymous_derived: Vec<ScopeId>,
@@ -61,7 +63,7 @@ struct Scope {
 #[derive(Debug, Clone)]
 pub(crate) enum MergedColumns {
     /// `USING (...)`: the listed names.
-    Using(Vec<String>),
+    Using(Vec<Ident>),
     /// `NATURAL`: every name both sides publish.
     Natural,
 }
@@ -72,8 +74,8 @@ pub(crate) enum MergedColumns {
 /// rather than to the whole scope.
 #[derive(Debug, Clone)]
 pub(crate) struct JoinMerge {
-    pub left: Vec<String>,
-    pub right: Vec<String>,
+    pub left: Vec<Ident>,
+    pub right: Vec<Ident>,
     pub columns: MergedColumns,
     pub kind: JoinMergeKind,
 }
@@ -119,13 +121,14 @@ pub(crate) enum Binding {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScopeColumn {
-    pub name: String,
+    pub name: Ident,
     pub node_id: NodeId,
 }
 
 impl ScopeTree {
-    pub fn new() -> Self {
+    pub fn new(dialect: Dialect) -> Self {
         Self {
+            dialect,
             scopes: vec![Scope {
                 parent: None,
                 bindings: IndexMap::new(),
@@ -164,12 +167,13 @@ impl ScopeTree {
         self.scopes[scope].parent
     }
 
-    pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
+    pub fn add_binding(&mut self, scope: ScopeId, name: Ident, binding: Binding) {
+        let key = name.relation_key(self.dialect).into_owned();
         self.scopes[scope].binding_log.push(name.clone());
         if let Binding::Table(table) = &binding {
             self.scopes[scope].relations.push(table.clone());
         }
-        self.scopes[scope].bindings.insert(name, binding);
+        self.scopes[scope].bindings.insert(key, (name, binding));
     }
 
     /// Number of bindings added to `scope` so far; pass it to
@@ -179,7 +183,7 @@ impl ScopeTree {
     }
 
     /// Binding names added to `scope` since `mark`, in the order added.
-    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<String> {
+    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<Ident> {
         self.scopes[scope].binding_log[mark..].to_vec()
     }
 
@@ -224,9 +228,10 @@ impl ScopeTree {
 
     /// Lookup a name starting from `scope`, walking the parent chain.
     /// Returns the first match (nearest scope wins = shadowing).
-    pub fn lookup(&self, scope: ScopeId, name: &str) -> Option<&Binding> {
+    pub fn lookup(&self, scope: ScopeId, name: &Ident) -> Option<&Binding> {
         let s = &self.scopes[scope];
-        if let Some(b) = s.bindings.get(name) {
+        let key = name.relation_key(self.dialect);
+        if let Some((_, b)) = s.bindings.get(key.as_ref()) {
             return Some(b);
         }
         s.parent.and_then(|p| self.lookup(p, name))
@@ -265,22 +270,22 @@ impl ScopeTree {
     }
 
     /// Bindings in the immediate scope only (no parent chain walk).
-    pub fn immediate_bindings(&self, scope: ScopeId) -> Vec<(String, Binding)> {
+    pub fn immediate_bindings(&self, scope: ScopeId) -> Vec<(Ident, Binding)> {
         self.scopes[scope]
             .bindings
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(_, (name, binding))| (name.clone(), binding.clone()))
             .collect()
     }
 
     /// All bindings visible from `scope` (nearest scope wins for shadowing).
-    pub fn visible_bindings(&self, scope: ScopeId) -> Vec<(String, Binding)> {
+    pub fn visible_bindings(&self, scope: ScopeId) -> Vec<(Ident, Binding)> {
         let mut result = Vec::new();
         let mut seen = HashSet::new();
         let mut current = Some(scope);
         while let Some(id) = current {
-            for (name, binding) in &self.scopes[id].bindings {
-                if seen.insert(name.clone()) {
+            for (key, (name, binding)) in &self.scopes[id].bindings {
+                if seen.insert(key.clone()) {
                     result.push((name.clone(), binding.clone()));
                 }
             }

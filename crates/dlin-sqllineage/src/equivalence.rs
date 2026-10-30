@@ -280,7 +280,7 @@ fn assert_unexpanded_stars_equivalent(
         // The legacy marker for "the star expands to unknown columns" is an
         // unbound column named `*`; the public result names it explicitly.
         for item in &mut unresolved {
-            if item == "unbound:*" {
+            if item == &format!("unbound:{:?}", Ident::unquoted("*")) {
                 *item = "unsupported:star expansion".to_owned();
             }
         }
@@ -330,8 +330,8 @@ fn legacy_star_relations<'a>(
     }
 }
 
-fn assert_output_name(old: &str, new: &OutputName, dialect: Dialect, index: usize, sql: &str) {
-    if old == "?column?" {
+fn assert_output_name(old: &Ident, new: &OutputName, dialect: Dialect, index: usize, sql: &str) {
+    if old.value == "?column?" && old.quote.is_none() {
         assert_eq!(
             new,
             &OutputName::Anonymous,
@@ -345,14 +345,9 @@ fn assert_output_name(old: &str, new: &OutputName, dialect: Dialect, index: usiz
             "public reports anonymous output where legacy named it {old:?} at {index} for {dialect:?}: {sql}"
         ),
     };
-    let matches = if actual.quote.is_some() {
-        actual.value == old
-    } else {
-        Ident::unquoted(old).column_key(dialect) == actual.column_key(dialect)
-    };
-    assert!(
-        matches,
-        "output name differs at {index}: old={old:?}, public={actual:?}, {dialect:?}: {sql}"
+    assert_eq!(
+        old, actual,
+        "output name differs at {index} for {dialect:?}: {sql}"
     );
 }
 
@@ -383,21 +378,17 @@ fn expected_lineage(origins: &[ColumnOrigin]) -> (Vec<String>, Vec<String>) {
     ) {
         match origin {
             ColumnOrigin::Concrete { table, column } => {
-                known.insert(format!(
-                    "{}:{}",
-                    legacy_table_key(table),
-                    column.to_lowercase()
-                ));
+                known.insert(format!("{}:{}", legacy_table_key(table), ident_key(column)));
             }
             ColumnOrigin::Ambiguous { column, candidates } => {
                 if candidates.is_empty() {
-                    unresolved.insert(format!("unbound:{}", column.to_lowercase()));
+                    unresolved.insert(format!("unbound:{}", ident_key(column)));
                 } else {
                     let mut relations = legacy_relation_keys(candidates);
                     relations.sort();
                     unresolved.insert(format!(
                         "ambiguous:{}:{}",
-                        column.to_lowercase(),
+                        ident_key(column),
                         relations.join("|")
                     ));
                 }
@@ -409,7 +400,7 @@ fn expected_lineage(origins: &[ColumnOrigin]) -> (Vec<String>, Vec<String>) {
                 unresolved.insert(format!(
                     "named-star:{}:{}",
                     legacy_table_key(table),
-                    column.to_lowercase()
+                    ident_key(column)
                 ));
             }
             ColumnOrigin::SourceFree { .. } => {}
@@ -444,7 +435,7 @@ fn actual_lineage(lineage: &Lineage) -> (Vec<String>, Vec<String>) {
             format!(
                 "{}:{}",
                 relation_key(&source.relation),
-                source.column.value.to_lowercase()
+                ident_key(&source.column)
             )
         })
         .collect::<BTreeSet<_>>()
@@ -466,7 +457,7 @@ fn unresolved_key(origin: &Unresolved) -> String {
             format!(
                 "named-star:{}:{}",
                 relation_key(relation),
-                column.value.to_lowercase()
+                ident_key(column)
             )
         }
         Unresolved::Ambiguous { column, candidates } => {
@@ -474,36 +465,41 @@ fn unresolved_key(origin: &Unresolved) -> String {
                 .iter()
                 .map(|candidate| match candidate {
                     Candidate::Relation(relation) => relation_key(relation),
-                    Candidate::Cte(name) => format!("::{}", name.value.to_lowercase()),
-                    Candidate::Derived(name) => format!(
-                        "::{}",
-                        name.as_ref()
-                            .map_or_else(String::new, |ident| ident.value.to_lowercase())
-                    ),
+                    Candidate::Cte(name) => legacy_table_key(&TableRef {
+                        catalog: None,
+                        schema: None,
+                        table: name.clone(),
+                    }),
+                    Candidate::Derived(name) => match name {
+                        Some(name) => legacy_table_key(&TableRef {
+                            catalog: None,
+                            schema: None,
+                            table: name.clone(),
+                        }),
+                        None => "anonymous-derived".into(),
+                    },
                 })
                 .collect::<Vec<_>>();
             relations.sort();
-            format!(
-                "ambiguous:{}:{}",
-                column.value.to_lowercase(),
-                relations.join("|")
-            )
+            format!("ambiguous:{}:{}", ident_key(column), relations.join("|"))
         }
-        Unresolved::Unbound { column } => format!("unbound:{}", column.value.to_lowercase()),
+        Unresolved::Unbound { column } => format!("unbound:{}", ident_key(column)),
         Unresolved::Recursive => "recursive".to_owned(),
-        Unresolved::RowValue { alias } => format!("unbound:{}", alias.value.to_lowercase()),
+        Unresolved::RowValue { alias } => format!("unbound:{}", ident_key(alias)),
         Unresolved::Unsupported { what } => format!("unsupported:{what}"),
     }
 }
 
 fn is_actual_wildcard_sentinel(mapping: &ColumnMapping) -> bool {
-    mapping.target.column == "*" && mapping.sources.iter().any(origin_has_star)
+    mapping.target.column.value == "*"
+        && mapping.target.column.quote.is_none()
+        && mapping.sources.iter().any(origin_has_star)
 }
 
 fn origin_has_star(origin: &ColumnOrigin) -> bool {
     match origin {
         ColumnOrigin::Wildcard { .. } => true,
-        ColumnOrigin::Ambiguous { column, .. } => column == "*",
+        ColumnOrigin::Ambiguous { column, .. } => column.value == "*" && column.quote.is_none(),
         ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(origin_has_star),
         ColumnOrigin::Concrete { .. }
         | ColumnOrigin::NamedWildcard { .. }
@@ -556,28 +552,20 @@ fn legacy_relation_keys(relations: &[TableRef]) -> Vec<String> {
     keys
 }
 
+fn ident_key(ident: &Ident) -> String {
+    format!("{ident:?}")
+}
+
+// Compare spelling and quote style exactly now that both paths carry Ident.
 fn relation_key(relation: &Relation) -> String {
     format!(
-        "{}:{}:{}",
-        relation
-            .catalog
-            .as_ref()
-            .map_or_else(String::new, |ident| ident.value.to_lowercase()),
-        relation
-            .schema
-            .as_ref()
-            .map_or_else(String::new, |ident| ident.value.to_lowercase()),
-        relation.name.value.to_lowercase()
+        "{:?}:{:?}:{:?}",
+        relation.catalog, relation.schema, relation.name
     )
 }
 
 fn legacy_table_key(table: &TableRef) -> String {
-    format!(
-        "{}:{}:{}",
-        table.catalog.as_deref().unwrap_or_default().to_lowercase(),
-        table.schema.as_deref().unwrap_or_default().to_lowercase(),
-        table.table.to_lowercase()
-    )
+    format!("{:?}:{:?}:{:?}", table.catalog, table.schema, table.table)
 }
 
 fn assert_semantic_error_kind(

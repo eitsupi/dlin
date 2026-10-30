@@ -2,12 +2,15 @@ pub(crate) mod edge;
 pub(crate) mod node;
 pub(crate) mod scope;
 
+use crate::Ident;
+use crate::types::Dialect;
 use crate::types::TableLineage;
 use edge::{EdgeKind, RawEdge};
 use node::{NodeId, RawNode, StarBase, StarOptions};
 use scope::{ScopeId, ScopeTree};
 
 pub(crate) struct RawGraph {
+    pub dialect: Dialect,
     pub nodes: Vec<RawNode>,
     pub edges: Vec<RawEdge>,
     pub scopes: ScopeTree,
@@ -15,11 +18,12 @@ pub(crate) struct RawGraph {
 }
 
 impl RawGraph {
-    pub fn new() -> Self {
+    pub fn new(dialect: Dialect) -> Self {
         Self {
+            dialect,
             nodes: Vec::new(),
             edges: Vec::new(),
-            scopes: ScopeTree::new(),
+            scopes: ScopeTree::new(dialect),
             tables: TableLineage::default(),
         }
     }
@@ -30,7 +34,7 @@ impl RawGraph {
         id
     }
 
-    pub fn add_output(&mut self, name: String, intrinsic_kind: EdgeKind) -> NodeId {
+    pub fn add_output(&mut self, name: Ident, intrinsic_kind: EdgeKind) -> NodeId {
         self.add_node(RawNode::Output {
             name,
             intrinsic_kind,
@@ -39,8 +43,8 @@ impl RawGraph {
 
     pub fn add_ref_with_binding(
         &mut self,
-        name: String,
-        qualifier: Option<String>,
+        name: Ident,
+        qualifier: Option<Vec<Ident>>,
         scope: ScopeId,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {
@@ -54,7 +58,7 @@ impl RawGraph {
 
     pub fn add_unqualified_with_binding(
         &mut self,
-        name: String,
+        name: Ident,
         scope: ScopeId,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {
@@ -67,7 +71,7 @@ impl RawGraph {
 
     pub fn add_row_value_candidate(
         &mut self,
-        name: String,
+        name: Ident,
         scope: ScopeId,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {

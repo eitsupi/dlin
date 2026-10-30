@@ -141,7 +141,8 @@ mod tests {
                 matches!(
                     source,
                     ColumnOrigin::Concrete { table, column }
-                        if table.table == "external_table" && column == "id"
+                        if table.table == crate::Ident::unquoted("external_table")
+                            && column == &crate::Ident::unquoted("id")
                 )
             })
         }));

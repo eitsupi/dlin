@@ -14,6 +14,20 @@ pub struct Ident {
 }
 
 impl Ident {
+    pub(crate) fn from_ast(ident: &sqlparser::ast::Ident) -> Self {
+        let quote = ident.quote_style.map(|style| match style {
+            '"' => Quote::Double,
+            '`' => Quote::Backtick,
+            '[' | ']' => Quote::Bracket,
+            '\'' => Quote::Single,
+            _ => Quote::Double,
+        });
+        Self {
+            value: ident.value.clone(),
+            quote,
+        }
+    }
+
     /// Create an unquoted identifier.
     pub fn unquoted(value: impl Into<String>) -> Self {
         Self {

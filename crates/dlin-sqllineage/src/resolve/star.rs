@@ -19,6 +19,7 @@ use crate::graph::scope::{Binding, OutputPlan};
 use crate::types::{
     CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
 };
+use crate::{Dialect, Ident};
 
 /// Expand a Star node (qualified or unqualified) into `ColumnMapping`s.
 #[allow(clippy::too_many_arguments)]
@@ -90,13 +91,13 @@ pub(super) fn expand_star(
                 sources.push(origin);
             }
             sources.push(ColumnOrigin::Ambiguous {
-                column: "*".to_string(),
+                column: Ident::unquoted("*"),
                 candidates: Vec::new(),
             });
             mappings.push(ColumnMapping {
                 target: ColumnRef {
                     table: None,
-                    column: "*".to_string(),
+                    column: Ident::unquoted("*"),
                 },
                 sources,
                 transform: TransformKind::Direct,
@@ -119,17 +120,17 @@ pub(super) fn expand_star(
                 }
             }
             if !sources.iter().any(
-                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*"),
+                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*"),
             ) {
                 sources.push(ColumnOrigin::Ambiguous {
-                    column: "*".to_string(),
+                    column: Ident::unquoted("*"),
                     candidates: Vec::new(),
                 });
             }
             mappings.push(ColumnMapping {
                 target: ColumnRef {
                     table: None,
-                    column: "*".to_string(),
+                    column: Ident::unquoted("*"),
                 },
                 sources,
                 transform: TransformKind::Direct,
@@ -255,23 +256,21 @@ fn apply_star_options(
     let mut retained = Vec::with_capacity(original.len());
     for mapping in original {
         let name = &mapping.target.column;
-        let excluded = options
-            .exclude
-            .iter()
-            .any(|excluded| excluded_matches_mapping(excluded, name, &mapping, base));
+        let excluded = options.exclude.iter().any(|excluded| {
+            excluded_matches_mapping(excluded, name, &mapping, base, graph.dialect)
+        });
         let ilike_mismatch = options
             .ilike
             .as_deref()
-            .is_some_and(|pattern| !ilike_matches(pattern, name));
+            .is_some_and(|pattern| !ilike_matches(pattern, &name.value));
         if !excluded && !ilike_mismatch {
             retained.push(mapping);
         }
     }
     for replacement in &options.replace {
-        let Some(index) = retained
-            .iter()
-            .position(|mapping| same_column_name(&mapping.target.column, &replacement.column))
-        else {
+        let Some(index) = retained.iter().position(|mapping| {
+            same_column_name(&mapping.target.column, &replacement.column, graph.dialect)
+        }) else {
             continue;
         };
         let mut visited = HashSet::new();
@@ -293,12 +292,20 @@ fn apply_star_options(
     for (old, new) in &options.rename {
         if let Some(mapping) = retained
             .iter_mut()
-            .find(|mapping| same_column_name(&mapping.target.column, old))
+            .find(|mapping| same_column_name(&mapping.target.column, old, graph.dialect))
         {
             mapping.target.column.clone_from(new);
         }
     }
     mappings.extend(retained);
+}
+
+fn ident_parts_equal(left: &[Ident], right: &[Ident], dialect: Dialect) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.relation_key(dialect) == right.relation_key(dialect))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -316,7 +323,7 @@ fn append_unknown_star_options(
 ) {
     let unknown_sources = mappings[start..].to_vec();
     for replacement in &options.replace {
-        if !name_passes_star_filters(&replacement.column, options, base) {
+        if !name_passes_star_filters(&replacement.column, options, base, graph.dialect) {
             continue;
         }
         let mut visited = HashSet::new();
@@ -342,7 +349,7 @@ fn append_unknown_star_options(
         });
     }
     for (old, new) in &options.rename {
-        if !name_passes_star_filters(old, options, base) {
+        if !name_passes_star_filters(old, options, base, graph.dialect) {
             continue;
         }
         let sources =
@@ -364,43 +371,54 @@ fn append_unknown_star_options(
     }
 }
 
-fn name_passes_star_filters(name: &str, options: &StarOptions, base: &StarBase) -> bool {
+fn name_passes_star_filters(
+    name: &Ident,
+    options: &StarOptions,
+    base: &StarBase,
+    dialect: Dialect,
+) -> bool {
     !options
         .exclude
         .iter()
-        .any(|excluded| excluded_matches_name(excluded, name, base))
+        .any(|excluded| excluded_matches_name(excluded, name, base, dialect))
         && options
             .ilike
             .as_deref()
-            .is_none_or(|pattern| ilike_matches(pattern, name))
+            .is_none_or(|pattern| ilike_matches(pattern, &name.value))
 }
 
-fn excluded_matches_name(excluded: &StarColumnName, name: &str, base: &StarBase) -> bool {
-    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
-        return false;
-    };
-    same_column_name(name, excluded_column)
-        && (qualifier.is_empty()
-            || matches!(base, StarBase::Qualified(parts) if parts == qualifier))
-}
-
-fn excluded_matches_mapping(
+fn excluded_matches_name(
     excluded: &StarColumnName,
-    column: &str,
-    mapping: &ColumnMapping,
+    name: &Ident,
     base: &StarBase,
+    dialect: Dialect,
 ) -> bool {
     let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
         return false;
     };
-    if !same_column_name(column, excluded_column) {
+    same_column_name(name, excluded_column, dialect)
+        && (qualifier.is_empty()
+            || matches!(base, StarBase::Qualified(parts) if ident_parts_equal(parts, qualifier, dialect)))
+}
+
+fn excluded_matches_mapping(
+    excluded: &StarColumnName,
+    column: &Ident,
+    mapping: &ColumnMapping,
+    base: &StarBase,
+    dialect: Dialect,
+) -> bool {
+    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
+        return false;
+    };
+    if !same_column_name(column, excluded_column, dialect) {
         return false;
     }
     if qualifier.is_empty() {
         return true;
     }
     if let StarBase::Qualified(parts) = base
-        && parts == qualifier
+        && ident_parts_equal(parts, qualifier, dialect)
     {
         return true;
     }
@@ -412,31 +430,53 @@ fn excluded_matches_mapping(
             ColumnOrigin::Recursive { base_sources } => {
                 return base_sources
                     .iter()
-                    .any(|source| relation_matches_qualifier(source, qualifier));
+                    .any(|source| relation_matches_qualifier(source, qualifier, dialect));
             }
             _ => return false,
         };
-        table_matches_qualifier(table, qualifier)
+        table_matches_qualifier(table, qualifier, dialect)
     })
 }
 
-fn relation_matches_qualifier(source: &ColumnOrigin, qualifier: &[String]) -> bool {
+fn relation_matches_qualifier(
+    source: &ColumnOrigin,
+    qualifier: &[Ident],
+    dialect: Dialect,
+) -> bool {
     match source {
         ColumnOrigin::Concrete { table, .. }
         | ColumnOrigin::Wildcard { table }
-        | ColumnOrigin::NamedWildcard { table, .. } => table_matches_qualifier(table, qualifier),
+        | ColumnOrigin::NamedWildcard { table, .. } => {
+            table_matches_qualifier(table, qualifier, dialect)
+        }
         _ => false,
     }
 }
 
-pub(super) fn table_matches_qualifier(table: &TableRef, qualifier: &[String]) -> bool {
+pub(super) fn table_matches_qualifier(
+    table: &TableRef,
+    qualifier: &[Ident],
+    dialect: Dialect,
+) -> bool {
     match qualifier {
-        [name] => table.table == *name,
-        [schema, name] => table.schema.as_deref() == Some(schema) && table.table == *name,
+        [name] => table.table.relation_key(dialect) == name.relation_key(dialect),
+        [schema, name] => {
+            table
+                .schema
+                .as_ref()
+                .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
+                && table.table.relation_key(dialect) == name.relation_key(dialect)
+        }
         [catalog, schema, name] => {
-            table.catalog.as_deref() == Some(catalog)
-                && table.schema.as_deref() == Some(schema)
-                && table.table == *name
+            table
+                .catalog
+                .as_ref()
+                .is_some_and(|c| c.relation_key(dialect) == catalog.relation_key(dialect))
+                && table
+                    .schema
+                    .as_ref()
+                    .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
+                && table.table.relation_key(dialect) == name.relation_key(dialect)
         }
         _ => false,
     }
@@ -446,44 +486,45 @@ pub(super) fn table_matches_qualifier(table: &TableRef, qualifier: &[String]) ->
 pub(super) enum StarNameDecision {
     Allowed,
     Denied,
-    Renamed(String),
+    Renamed(Ident),
     Replaced(NodeId),
     Ambiguous,
 }
 
 pub(super) fn star_name_decision(
     options: &StarOptions,
-    name: &str,
+    name: &Ident,
     base: Option<&StarBase>,
+    dialect: Dialect,
 ) -> StarNameDecision {
     if options.exclude.iter().any(|excluded| {
-        excluded.parts.len() == 1 && same_column_name(name, &excluded.parts[0])
-            || base.is_some_and(|base| excluded_matches_name(excluded, name, base))
+        excluded.parts.len() == 1 && same_column_name(name, &excluded.parts[0], dialect)
+            || base.is_some_and(|base| excluded_matches_name(excluded, name, base, dialect))
     }) || options
         .ilike
         .as_deref()
-        .is_some_and(|pattern| !ilike_matches(pattern, name))
+        .is_some_and(|pattern| !ilike_matches(pattern, &name.value))
     {
         return StarNameDecision::Denied;
     }
     if let Some(replacement) = options
         .replace
         .iter()
-        .find(|replacement| same_column_name(name, &replacement.column))
+        .find(|replacement| same_column_name(name, &replacement.column, dialect))
     {
         return StarNameDecision::Replaced(replacement.node_id);
     }
     if let Some((old, _)) = options
         .rename
         .iter()
-        .find(|(_, new)| same_column_name(name, new))
+        .find(|(_, new)| same_column_name(name, new, dialect))
     {
         return StarNameDecision::Renamed(old.clone());
     }
     if options
         .rename
         .iter()
-        .any(|(old, _)| same_column_name(name, old))
+        .any(|(old, _)| same_column_name(name, old, dialect))
     {
         return StarNameDecision::Denied;
     }
@@ -492,7 +533,7 @@ pub(super) fn star_name_decision(
 
 pub(super) fn scope_star_name_decision(
     scope: usize,
-    name: &str,
+    name: &Ident,
     graph: &RawGraph,
     visited: &mut HashSet<usize>,
 ) -> StarNameDecision {
@@ -507,12 +548,13 @@ pub(super) fn scope_star_name_decision(
                 .iter()
                 .filter_map(|column| {
                     if let RawNode::Star { base, options, .. } = &graph.nodes[column.node_id] {
-                        Some(star_name_decision(options, name, Some(base)))
+                        Some(star_name_decision(options, name, Some(base), graph.dialect))
                     } else {
                         None
                     }
                 })
                 .collect(),
+            graph.dialect,
         ),
         OutputPlan::Delegate(child) => scope_star_name_decision(*child, name, graph, visited),
         // The left branch defines set-operation output names and modifiers.
@@ -522,7 +564,10 @@ pub(super) fn scope_star_name_decision(
     }
 }
 
-fn combine_star_name_decisions(decisions: Vec<StarNameDecision>) -> StarNameDecision {
+fn combine_star_name_decisions(
+    decisions: Vec<StarNameDecision>,
+    dialect: Dialect,
+) -> StarNameDecision {
     let mut has_allowed = false;
     let mut has_denied = false;
     let mut specific: Option<StarNameDecision> = None;
@@ -533,7 +578,8 @@ fn combine_star_name_decisions(decisions: Vec<StarNameDecision>) -> StarNameDeci
             StarNameDecision::Ambiguous => return StarNameDecision::Ambiguous,
             StarNameDecision::Renamed(old) => match &specific {
                 None => specific = Some(StarNameDecision::Renamed(old)),
-                Some(StarNameDecision::Renamed(existing)) if existing == &old => {}
+                Some(StarNameDecision::Renamed(existing))
+                    if same_column_name(existing, &old, dialect) => {}
                 Some(_) => return StarNameDecision::Ambiguous,
             },
             StarNameDecision::Replaced(node_id) => match specific {
