@@ -7,6 +7,10 @@
 //! engine defect, retaining the correct expectation; remove it when the runner
 //! reports that the expectation now matches. Do not copy engine output here.
 
+#[path = "expected_lineage/identifiers.rs"]
+mod identifiers;
+#[path = "expected_lineage/scopes_joins.rs"]
+mod scopes_joins;
 #[path = "expected_lineage/stars.rs"]
 mod stars;
 #[path = "expected_lineage/support.rs"]
@@ -14,7 +18,10 @@ mod support;
 
 #[test]
 fn hand_written_lineage_expectations() {
-    let cases = stars::cases();
+    let cases = identifiers::cases()
+        .into_iter()
+        .chain(scopes_joins::cases())
+        .chain(stars::cases());
     let mut names = std::collections::BTreeSet::new();
     let mut failures = Vec::new();
     let mut known_failures = 0;
