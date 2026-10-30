@@ -210,7 +210,8 @@ impl OutputName {
 pub enum Lineage {
     /// All contributing sources are known, sorted and deduplicated by the dialect's
     /// relation and column keys. Relation spelling follows the first FROM
-    /// occurrence; column spelling follows the first contributing reference.
+    /// occurrence; column spelling follows the first resolved reference in the
+    /// statement, in SQL order.
     /// An empty list represents source-free output.
     Complete(Vec<SourceColumn>),
     /// Known sources coexist with one or more unresolved contributions.

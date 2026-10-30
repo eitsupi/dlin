@@ -363,6 +363,15 @@ pub fn cases() -> Vec<Case> {
             u("id"),
         ).catalog_alias(relation("orders"), schema_table(q("Sales"), q("Orders")), vec![u("id")]),
     ]);
+
+    // x and y both read the column spelled fOO; Foo only feeds an unused CTE
+    // column and does not reach the output.
+    cases.push(Case::new(
+        "bigquery_unused_cte_column_does_not_choose_spelling",
+        "WITH c AS (SELECT Foo AS unused, fOO AS x, FOO AS y FROM t) SELECT x + y AS value FROM c",
+        Dialect::BigQuery,
+        vec![col(0, u("value"), vec![source(relation("t"), u("fOO"))])],
+    ));
     cases
 }
 
