@@ -32,13 +32,11 @@
 mod analyzer;
 mod build;
 mod catalog;
-mod convert;
 mod diagnostic;
 mod dialect;
 mod graph;
 mod ident;
 mod keys;
-mod metadata;
 mod output;
 mod resolve;
 mod types;
@@ -49,40 +47,3 @@ pub use diagnostic::*;
 pub use ident::*;
 pub use output::*;
 pub use types::Dialect;
-
-#[cfg(test)]
-mod equivalence;
-
-#[cfg(test)]
-use sqlparser::parser::Parser;
-
-/// Run the internal engine directly for migration correspondence tests.
-#[cfg(test)]
-#[allow(clippy::needless_pass_by_value)]
-pub(crate) fn legacy_analyze(
-    sql: &str,
-    opts: types::AnalyzeOptions,
-) -> Result<Vec<types::AnalyzeResult>, types::ParseError> {
-    let dialect = opts.dialect.to_sqlparser_dialect();
-    let statements = Parser::parse_sql(&*dialect, sql).map_err(|e| types::ParseError {
-        message: e.to_string(),
-    })?;
-
-    let catalog = opts
-        .catalog
-        .as_deref()
-        .map(|catalog| catalog::CatalogContext::new(catalog, opts.dialect));
-    statements
-        .iter()
-        .map(|stmt| {
-            let builder = build::LineageBuilder::new(opts.dialect);
-            let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
-            Ok(resolve::resolve(
-                raw_graph,
-                catalog.as_ref(),
-                warnings,
-                statement_type,
-            )?)
-        })
-        .collect()
-}

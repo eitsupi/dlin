@@ -190,24 +190,29 @@ fn complete_sources_fold_and_deduplicate_with_first_from_relation_spelling() {
         }])
     );
 
-    let bigquery_cte_first_occurrence = one(
+    // The output visits y before x, so its fOO contribution wins even when
+    // the CTE defines x first. Reordering definitions does not change it.
+    let bigquery_cte_contribution_order = one(
         Dialect::BigQuery,
         "WITH c AS (SELECT Foo AS x, fOO AS y FROM t) SELECT y + x AS value FROM c",
     );
     assert_eq!(
-        bigquery_cte_first_occurrence.output.columns[0].lineage,
+        bigquery_cte_contribution_order.output.columns[0].lineage,
         Lineage::Complete(vec![SourceColumn {
             relation: relation(None, None, id("t")),
-            column: id("Foo"),
+            column: id("fOO"),
         }])
     );
 
-    let bigquery_cte_reversed_definition = one(
+    let bigquery_cte_same_contributions_reordered_definition = one(
         Dialect::BigQuery,
         "WITH c AS (SELECT fOO AS y, Foo AS x FROM t) SELECT y + x AS value FROM c",
     );
     assert_eq!(
-        bigquery_cte_reversed_definition.output.columns[0].lineage,
+        bigquery_cte_same_contributions_reordered_definition
+            .output
+            .columns[0]
+            .lineage,
         Lineage::Complete(vec![SourceColumn {
             relation: relation(None, None, id("t")),
             column: id("fOO"),
@@ -352,4 +357,18 @@ fn star_unresolved_entries_deduplicate_by_relation_key_with_first_from_spelling(
             }],
         }
     );
+}
+
+#[test]
+fn nested_projection_relations_keep_first_sql_spelling() {
+    for (sql, expected) in [
+        ("SELECT (SELECT id FROM foo) FROM \"FOO\"", id("foo")),
+        (
+            "SELECT (SELECT id FROM \"FOO\") FROM foo",
+            quoted("FOO", Quote::Double),
+        ),
+    ] {
+        let result = one(Dialect::Snowflake, sql);
+        assert_eq!(result.read, vec![relation(None, None, expected)], "{sql}");
+    }
 }

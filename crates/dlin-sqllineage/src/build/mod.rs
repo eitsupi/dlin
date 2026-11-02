@@ -14,7 +14,6 @@ pub(crate) struct LineageBuilder {
     pub(crate) current_scope: ScopeId,
     pub(crate) recursive_cte_name: Option<crate::Ident>,
     pub(crate) warnings: Vec<Warning>,
-    pub(crate) input_positions: Vec<(u64, u64)>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
     /// First unsupported construct met while walking the statement. Once set,
@@ -31,7 +30,6 @@ impl LineageBuilder {
             current_scope: root,
             recursive_cte_name: None,
             warnings: Vec::new(),
-            input_positions: Vec::new(),
             inner_statement_type: None,
             dialect,
             error: None,
@@ -41,18 +39,15 @@ impl LineageBuilder {
     pub fn build(
         mut self,
         stmt: &Statement,
-    ) -> Result<(RawGraph, Vec<Warning>, StatementType), SemanticError> {
+    ) -> Result<(RawGraph, Vec<Warning>, StatementType), BuildError> {
+        self.graph.empty_projection = structural_diagnostics(stmt, self.dialect);
         let st = self.visit_statement(stmt);
         if let Some(error) = self.error {
-            return Err(error);
+            return Err(BuildError {
+                error,
+                empty_projection: self.graph.empty_projection.clone(),
+            });
         }
-        let mut inputs: Vec<_> = self
-            .input_positions
-            .into_iter()
-            .zip(std::mem::take(&mut self.graph.tables.inputs))
-            .collect();
-        inputs.sort_by_key(|(position, _)| *position);
-        self.graph.tables.inputs = inputs.into_iter().map(|(_, table)| table).collect();
         let final_type = self.inner_statement_type.unwrap_or(st);
         Ok((self.graph, self.warnings, final_type))
     }
@@ -81,4 +76,71 @@ impl LineageBuilder {
             .scopes
             .add_binding(self.current_scope, name, binding);
     }
+}
+
+pub(crate) struct BuildError {
+    pub error: SemanticError,
+    pub empty_projection: Option<crate::Diagnostic>,
+}
+
+/// Collect structural diagnostics independently of the lineage traversal.
+fn structural_diagnostics(stmt: &Statement, dialect: Dialect) -> Option<crate::Diagnostic> {
+    use sqlparser::ast::{Query, Select, SelectFlavor, SetExpr, Visit, Visitor};
+    use std::ops::ControlFlow;
+
+    struct Diagnostics {
+        dialect: Dialect,
+        empty_projection: Option<crate::Diagnostic>,
+    }
+
+    impl Diagnostics {
+        fn inspect_select(&mut self, select: &Select) {
+            if !select.projection.is_empty() {
+                return;
+            }
+            let severity = if select.flavor == SelectFlavor::FromFirstNoSelect
+                || matches!(self.dialect, Dialect::Generic | Dialect::PostgreSql)
+            {
+                crate::Severity::Warning
+            } else {
+                crate::Severity::Error
+            };
+            if self.empty_projection.as_ref().is_none_or(|current| {
+                current.severity == crate::Severity::Warning && severity == crate::Severity::Error
+            }) {
+                self.empty_projection = Some(crate::Diagnostic {
+                    severity,
+                    kind: crate::DiagnosticKind::EmptyProjection,
+                    location: None,
+                });
+            }
+        }
+
+        fn inspect_body(&mut self, body: &SetExpr) {
+            match body {
+                SetExpr::Select(select) => self.inspect_select(select),
+                SetExpr::SetOperation { left, right, .. } => {
+                    self.inspect_body(left);
+                    self.inspect_body(right);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Visitor for Diagnostics {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            self.inspect_body(&query.body);
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut diagnostics = Diagnostics {
+        dialect,
+        empty_projection: None,
+    };
+    let _ = stmt.visit(&mut diagnostics);
+    diagnostics.empty_projection
 }

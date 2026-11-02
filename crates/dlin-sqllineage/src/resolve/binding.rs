@@ -14,7 +14,7 @@ use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, JoinMerge, JoinMergeKind, MergedColumns, VirtualSourceId};
 use crate::types::{ColumnOrigin, TableRef, TransformKind};
-use crate::{Dialect, Ident};
+use crate::{Candidate, Dialect, Ident, Unresolved};
 
 pub(super) fn resolve_node(
     node_id: NodeId,
@@ -166,10 +166,9 @@ fn resolve_row_value_candidate(
 ) -> Option<ColumnOrigin> {
     let binding = binding.or_else(|| graph.scopes.lookup(scope, name).cloned());
     let Some(binding) = binding else {
-        return Some(ColumnOrigin::Ambiguous {
-            column: name.clone(),
-            candidates: Vec::new(),
-        });
+        return Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
+            alias: name.clone(),
+        }));
     };
 
     match binding {
@@ -182,10 +181,9 @@ fn resolve_row_value_candidate(
                     column: name.clone(),
                 })
             } else {
-                Some(ColumnOrigin::Ambiguous {
-                    column: name.clone(),
-                    candidates: Vec::new(),
-                })
+                Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
+                    alias: name.clone(),
+                }))
             }
         }
         Binding::Cte(target_scope) | Binding::DerivedTable(target_scope) => {
@@ -208,16 +206,14 @@ fn resolve_row_value_candidate(
                     mapping_cache,
                 )
             } else {
-                Some(ColumnOrigin::Ambiguous {
-                    column: name.clone(),
-                    candidates: Vec::new(),
-                })
+                Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
+                    alias: name.clone(),
+                }))
             }
         }
-        Binding::VirtualSource(_) => Some(ColumnOrigin::Ambiguous {
-            column: name.clone(),
-            candidates: Vec::new(),
-        }),
+        Binding::VirtualSource(_) => Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
+            alias: name.clone(),
+        })),
     }
 }
 
@@ -327,10 +323,9 @@ pub(super) fn find_unqualified_binding(
 /// What an unqualified column name denotes among the relations of a FROM
 /// clause.
 enum UnqualifiedChoice {
-    /// Several distinct columns could be meant. The tables listed are the
-    /// physical candidates (empty when only CTEs or derived tables compete);
-    /// a catalog may still single one out.
-    Ambiguous(Vec<TableRef>),
+    /// Competing physical or named relation providers. CTE/derived candidates
+    /// stay typed and are never fabricated as table references.
+    Ambiguous(Vec<Candidate>),
     /// A single column. Its contributing bindings are in FROM order.
     Merged(Vec<Binding>),
 }
@@ -499,10 +494,12 @@ fn unqualified_choice(
             return UnqualifiedChoice::Ambiguous(
                 providers
                     .iter()
-                    .map(|&index| TableRef {
-                        catalog: None,
-                        schema: None,
-                        table: relations[index].name.clone(),
+                    .map(|&index| match relations[index].binding {
+                        Binding::Cte(_) => Candidate::Cte(relations[index].name.clone()),
+                        Binding::DerivedTable(_) => {
+                            Candidate::Derived(Some(relations[index].name.clone()))
+                        }
+                        _ => unreachable!("provider is a CTE or derived table"),
                     })
                     .collect(),
             );
@@ -530,7 +527,15 @@ fn unqualified_choice(
             relations
                 .iter()
                 .filter_map(|relation| match relation.binding {
-                    Binding::Table(table) => Some(table.clone()),
+                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
+                        catalog: table.catalog.clone(),
+                        schema: table.schema.clone(),
+                        name: table.table.clone(),
+                    })),
+                    Binding::Cte(_) => Some(Candidate::Cte(relation.name.clone())),
+                    Binding::DerivedTable(_) => {
+                        Some(Candidate::Derived(Some(relation.name.clone())))
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -704,10 +709,33 @@ fn resolve_from_bindings(
         })
     } else {
         match unqualified_choice(name, bindings, scope, graph, catalog) {
-            UnqualifiedChoice::Ambiguous(candidates) => Some(ColumnOrigin::Ambiguous {
-                column: name.clone(),
-                candidates,
-            }),
+            UnqualifiedChoice::Ambiguous(candidates) => {
+                if candidates
+                    .iter()
+                    .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
+                {
+                    Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                        column: name.clone(),
+                        candidates,
+                    }))
+                } else {
+                    let candidates = candidates
+                        .into_iter()
+                        .filter_map(|candidate| match candidate {
+                            Candidate::Relation(relation) => Some(TableRef {
+                                catalog: relation.catalog,
+                                schema: relation.schema,
+                                table: relation.name,
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+                    Some(ColumnOrigin::Ambiguous {
+                        column: name.clone(),
+                        candidates,
+                    })
+                }
+            }
             // A merged column is collected from all its relations by
             // `resolve_merged_column`; a single origin can only name the
             // leftmost one.

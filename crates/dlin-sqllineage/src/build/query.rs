@@ -11,7 +11,8 @@ impl LineageBuilder {
         // unpiped body as if it were the query's output, so refuse instead.
         if !query.pipe_operators.is_empty() {
             self.reject(SemanticError::PipeOperators);
-            return;
+            // Continue building to retain structural diagnostics such as an
+            // empty projection. The rejected graph will never be resolved.
         }
 
         let has_ctes = query.with.is_some();

@@ -77,6 +77,11 @@ pub(super) fn expand_scope_columns(
                 &inherited_transform,
             );
             mappings.push(ColumnMapping {
+                output_name: graph
+                    .output_names
+                    .get(&col.node_id)
+                    .cloned()
+                    .or_else(|| Some(crate::OutputName::Explicit(col.name.clone()))),
                 target: ColumnRef {
                     table: None,
                     column: col.name.clone(),

@@ -1,3 +1,4 @@
+pub(crate) mod analysis;
 mod arity;
 mod binding;
 mod catalog;
@@ -12,33 +13,30 @@ use mapping::{ScopeMappingCache, resolve_scope_mappings};
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::scope::ScopeTree;
-use crate::types::{
-    AnalyzeResult, ColumnLineage, ColumnOrigin, SemanticError, StatementType, Warning, WarningKind,
-};
+use crate::types::{ColumnOrigin, SemanticError, StatementType, Warning, WarningKind};
 
-/// Resolve `RawGraph` into `AnalyzeResult`.
+/// Resolve the graph into the public statement analysis.
 #[allow(clippy::if_not_else, clippy::useless_let_if_seq)]
 pub(crate) fn resolve(
     mut graph: RawGraph,
     catalog: Option<&CatalogContext<'_>>,
     mut warnings: Vec<Warning>,
-    statement_type: StatementType,
-) -> Result<AnalyzeResult, SemanticError> {
+    statement_type: &StatementType,
+) -> Result<crate::StatementAnalysis, SemanticError> {
     crate::keys::sort_dedup_by_key(&mut graph.tables.inputs, |table| {
         crate::keys::table_key(table, graph.dialect)
     });
 
     if graph.nodes.is_empty() {
-        return Ok(AnalyzeResult {
+        return Ok(analysis::assemble(
+            &[],
+            &graph.tables,
+            &warnings,
             statement_type,
-            tables: graph.tables,
-            source_order: Vec::new(),
-            columns: ColumnLineage {
-                mappings: Vec::new(),
-                has_unresolved_stars: false,
-            },
-            warnings,
-        });
+            false,
+            graph.dialect,
+            catalog,
+        ));
     }
 
     if topo::topological_sort(&graph.nodes, &graph.edges).is_err() {
@@ -46,16 +44,15 @@ pub(crate) fn resolve(
             kind: WarningKind::UnexpectedCycle,
             location: None,
         });
-        return Ok(AnalyzeResult {
+        return Ok(analysis::assemble(
+            &[],
+            &graph.tables,
+            &warnings,
             statement_type,
-            tables: graph.tables,
-            source_order: Vec::new(),
-            columns: ColumnLineage {
-                mappings: Vec::new(),
-                has_unresolved_stars: false,
-            },
-            warnings,
-        });
+            false,
+            graph.dialect,
+            catalog,
+        ));
     }
 
     validate_set_arities(&graph, catalog)?;
@@ -91,40 +88,21 @@ pub(crate) fn resolve(
         mapping.target.table.clone_from(&output_table);
     }
 
-    let mut source_order: Vec<_> = resolved
-        .into_iter()
-        .enumerate()
-        .filter_map(|(node, origin)| {
-            origin.map(|origin| {
-                (
-                    graph.reference_positions[node].unwrap_or((u64::MAX, u64::MAX)),
-                    node,
-                    origin,
-                )
-            })
-        })
-        .collect();
-    source_order.sort_by_key(|(position, node, _)| (*position, *node));
-    Ok(AnalyzeResult {
+    Ok(analysis::assemble(
+        &mappings,
+        &graph.tables,
+        &warnings,
         statement_type,
-        tables: graph.tables,
-        source_order: source_order
-            .into_iter()
-            .map(|(_, _, origin)| origin)
-            .collect(),
-        columns: ColumnLineage {
-            mappings,
-            has_unresolved_stars,
-        },
-        warnings,
-    })
+        has_unresolved_stars,
+        graph.dialect,
+        catalog,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::mapping::{reset_scope_mapping_stats, scope_mapping_computations};
-    use crate::legacy_analyze as analyze;
-    use crate::types::{AnalyzeOptions, ColumnOrigin, Dialect};
+    use crate::{Analyzer, Dialect, Lineage};
 
     #[test]
     fn explicit_projection_reuses_scope_mappings() {
@@ -145,28 +123,16 @@ mod tests {
         );
 
         reset_scope_mapping_stats();
-        let results = analyze(
-            &sql,
-            AnalyzeOptions {
-                dialect: Dialect::Generic,
-                ..Default::default()
-            },
-        )
-        .expect("explicit projection should resolve");
-
-        assert_eq!(results.len(), 1);
-        let mappings = &results[0].columns.mappings;
-        assert_eq!(mappings.len(), 10);
-        assert!(mappings.iter().all(|mapping| {
-            mapping.sources.iter().any(|source| {
-                matches!(
-                    source,
-                    ColumnOrigin::Concrete { table, column }
-                        if table.table == crate::Ident::unquoted("external_table")
-                            && column == &crate::Ident::unquoted("id")
-                )
-            })
-        }));
+        let results = Analyzer::new(Dialect::Generic)
+            .analyze(&sql)
+            .expect("explicit projection should resolve");
+        assert_eq!(results.statements.len(), 1);
+        let columns = &results.statements[0].output.columns;
+        assert_eq!(columns.len(), 10);
+        assert!(columns.iter().all(|column| matches!(&column.lineage,
+            Lineage::Complete(sources) if sources.iter().any(|source|
+                source.relation.name == crate::Ident::unquoted("external_table")
+                    && source.column == crate::Ident::unquoted("id")))));
         // One materialization per scope, independent of the ten requested
         // columns. The exact scope count is an implementation detail, but it
         // must remain bounded by the five wrappers plus the base and root.

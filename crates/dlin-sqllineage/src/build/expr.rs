@@ -1,4 +1,4 @@
-use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Spanned, Subscript, WindowType};
+use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
 
 use crate::Ident;
 use crate::build::LineageBuilder;
@@ -10,7 +10,7 @@ use crate::types::TableRef;
 
 impl LineageBuilder {
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
-        let ancestors = match expr {
+        match expr {
             Expr::Identifier(ident) => {
                 let name = Ident::from_ast(ident);
                 let binding = self.graph.scopes.lookup(self.current_scope, &name).cloned();
@@ -24,8 +24,6 @@ impl LineageBuilder {
                     let node =
                         self.graph
                             .add_row_value_candidate(name, self.current_scope, binding);
-                    self.graph.reference_positions[node] =
-                        Some((ident.span.start.line, ident.span.start.column));
                     return vec![node];
                 }
                 let binding =
@@ -352,21 +350,7 @@ impl LineageBuilder {
             | Expr::Interval(_)
             | Expr::Lambda(_)
             | Expr::MatchAgainst { .. } => vec![],
-        };
-        if matches!(
-            expr,
-            Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::CompoundFieldAccess { .. }
-        ) {
-            let start = expr.span().start;
-            if start.line > 0 {
-                for &node in &ancestors {
-                    if self.graph.reference_positions[node].is_none() {
-                        self.graph.reference_positions[node] = Some((start.line, start.column));
-                    }
-                }
-            }
         }
-        ancestors
     }
 
     /// Collect the physical column at the root of a structured access chain.
