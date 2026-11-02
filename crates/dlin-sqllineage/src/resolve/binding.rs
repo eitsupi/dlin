@@ -8,11 +8,12 @@ use super::lineage::{
 use super::mapping::{ScopeMappingCache, merge_transform, resolve_scope_mappings};
 use super::star::{StarNameDecision, scope_star_name_decision};
 
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, JoinMerge, JoinMergeKind, MergedColumns, VirtualSourceId};
-use crate::types::{CatalogProvider, ColumnOrigin, TableRef, TransformKind};
+use crate::types::{ColumnOrigin, TableRef, TransformKind};
 use crate::{Dialect, Ident};
 
 pub(super) fn resolve_node(
@@ -21,7 +22,7 @@ pub(super) fn resolve_node(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     if let Some(ref origin) = resolved[node_id] {
@@ -160,7 +161,7 @@ fn resolve_row_value_candidate(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     let binding = binding.or_else(|| graph.scopes.lookup(scope, name).cloned());
@@ -228,7 +229,7 @@ pub(super) fn resolve_captured_binding(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     match binding {
@@ -253,7 +254,7 @@ pub(super) fn resolve_captured_binding(
 pub(super) fn find_cte_redirect(
     node_id: NodeId,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> Option<(NodeId, usize)> {
     match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -311,7 +312,7 @@ pub(super) fn find_unqualified_binding(
     name: &Ident,
     scope: usize,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> Option<Binding> {
     let bindings = effective_bindings(scope, graph);
     if bindings.len() == 1 {
@@ -358,22 +359,13 @@ fn merge_covers(merge: &JoinMerge, name: &Ident, dialect: Dialect) -> bool {
 fn table_has_column(
     table: &TableRef,
     name: &Ident,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> Option<bool> {
     let catalog = catalog?;
-    if catalog
-        .resolve_column(name, std::slice::from_ref(table))
-        .is_some()
-    {
-        return Some(true);
-    }
-    // TODO: This legacy membership comparison is intentionally retained until
-    // the dedicated table_has_column follow-up adds dialect-aware matching.
-    catalog.list_columns(table).map(|columns| {
-        let wanted = name.value.to_lowercase();
-        columns
-            .iter()
-            .any(|column| column.value.to_lowercase() == wanted)
+    catalog.entry(table).map(|entry| {
+        entry.columns.iter().any(|column| {
+            column.name.column_key(catalog.dialect) == name.column_key(catalog.dialect)
+        })
     })
 }
 
@@ -404,7 +396,7 @@ fn unqualified_choice(
     bindings: &[(Ident, Binding)],
     scope: usize,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> UnqualifiedChoice {
     let merges: Vec<&JoinMerge> = graph
         .scopes
@@ -573,7 +565,7 @@ pub(super) fn resolve_merged_column(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let (name, scope) = match &graph.nodes[node_id] {
@@ -658,7 +650,7 @@ fn resolve_unqualified(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     resolve_from_bindings(
@@ -683,7 +675,7 @@ fn resolve_from_bindings(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     if bindings.len() == 1 {
@@ -775,7 +767,7 @@ fn resolve_through_scope(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     // Resolve through the same expanded output mappings used by the public

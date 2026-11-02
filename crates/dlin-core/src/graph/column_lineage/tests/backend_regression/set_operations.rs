@@ -308,7 +308,7 @@ fn sqllineage_join_without_catalog_reports_genuine_ambiguity() {
 }
 
 #[test]
-fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
+fn sqllineage_join_with_catalog_returns_canonical_column_spelling() {
     let mut catalog = CatalogSnapshot::new();
     catalog.add_table("left_table", ["ID".to_string()]);
     catalog.add_table("right_table", ["other".to_string()]);
@@ -317,9 +317,8 @@ fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
         name: "id".to_string(),
     }];
     let statement = sqllineage_statement(
-        // Unqualified so that sqllineage has to ask the catalog which table owns
-        // `id`. A qualified reference resolves from the binding alone and never
-        // reaches `resolve_column`, so it would not exercise the case folding.
+        // Resolve the unqualified reference through the catalog, retaining
+        // the owning table's canonical column spelling rather than the reference.
         "select id from left_table join right_table on left_table.id = right_table.other",
         Some(&catalog),
         &outputs,
@@ -331,7 +330,7 @@ fn sqllineage_join_with_catalog_resolves_mixed_case_column() {
             result.sources,
             vec![BackendSource::Concrete {
                 relation: RelationRef::from_manifest(None, None, "left_table"),
-                column: "id".to_string(),
+                column: "ID".to_string(),
             }]
         ),
         other => panic!("expected catalog-resolved join column, got {other:?}"),

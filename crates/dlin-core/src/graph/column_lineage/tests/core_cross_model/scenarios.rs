@@ -699,3 +699,66 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
     assert_eq!(src.table, "raw.payments");
     assert_eq!(src.column, "amount");
 }
+
+#[test]
+fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
+    let mut manifest = make_cross_model_manifest();
+
+    // The upstream SQL and manifest expose ID, while the downstream SQL uses
+    // lowercase id. stg_payments has no matching column, so its presence in
+    // the join lets the catalog resolve id to stg_orders.ID unambiguously.
+    let upstream = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
+    upstream.columns.remove("order_id");
+    upstream.columns.insert(
+        "ID".to_string(),
+        ManifestColumn {
+            name: "ID".to_string(),
+        },
+    );
+    upstream.compiled_code =
+        Some("select id as ID, user_id as customer_id, order_date, status from orders".to_string());
+
+    let downstream = manifest.nodes.get_mut("model.proj.orders").unwrap();
+    downstream.columns = ["chosen"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ManifestColumn {
+                    name: name.to_string(),
+                },
+            )
+        })
+        .collect();
+    downstream.compiled_code = Some(
+        "SELECT id AS chosen FROM stg_orders JOIN stg_payments ON stg_orders.ID = stg_payments.order_id"
+            .to_string(),
+    );
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let chosen = result
+        .columns
+        .iter()
+        .find(|column| column.column == "chosen")
+        .expect("chosen should be present");
+    assert_eq!(chosen.sources.len(), 1, "sources: {:?}", chosen.sources);
+    let source = &chosen.sources[0];
+    // The raw source is referenced as orders in the upstream SQL.
+    assert_eq!(source.table, "orders");
+    assert_eq!(source.column, "id");
+    assert!(
+        source
+            .model_path
+            .iter()
+            .any(|(model, column, _)| model == "stg_orders" && column == "ID"),
+        "model_path should retain the upstream output name ID: {:?}",
+        source.model_path
+    );
+}

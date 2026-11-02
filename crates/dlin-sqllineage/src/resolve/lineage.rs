@@ -14,13 +14,12 @@ use super::star::{
 };
 
 use crate::Ident;
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
-use crate::types::{
-    CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
-};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 
 /// Recursively expand a scope's output columns into `ColumnMapping`s.
 #[allow(clippy::too_many_arguments)]
@@ -29,7 +28,7 @@ pub(super) fn expand_scope_columns(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
@@ -98,7 +97,7 @@ fn scope_column_sources(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     let mappings = resolve_scope_mappings(scope, graph, resolved, incoming, catalog, mapping_cache);
@@ -125,7 +124,7 @@ pub(super) fn collect_output_sources(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     if !visited.insert(node_id) {
@@ -169,7 +168,7 @@ pub(super) fn collect_leaf_origins(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
     if let Some(result) =
@@ -255,7 +254,7 @@ fn resolve_virtual_reference(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let (name, binding, scope) = match &graph.nodes[node_id] {
@@ -326,7 +325,7 @@ fn resolve_virtual_column_sources(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let column = graph
@@ -391,7 +390,7 @@ fn resolve_named_scope_reference(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let (name, qualifier, scope) = match &graph.nodes[node_id] {
@@ -445,7 +444,7 @@ pub(super) fn named_scope_sources(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let mappings = resolve_scope_mappings(
@@ -508,7 +507,7 @@ pub(super) fn named_wildcard_sources_for_scope(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Vec<ColumnOrigin> {
     match graph.scopes.output_plan(scope) {
