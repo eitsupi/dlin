@@ -626,6 +626,131 @@ pub fn cases() -> Vec<Case> {
         }),
     );
 
+    // Duplicate range variables cannot identify the two sides of a merged
+    // column. Even a known derived/CTE output must not select one side.
+    for (join_name, join_sql) in [
+        ("using", "JOIN {right} USING (id)"),
+        ("natural", "NATURAL JOIN {right}"),
+    ] {
+        for (kind, prefix, left, right, candidates) in [
+            (
+                "tables",
+                "",
+                "a AS t",
+                "b AS T",
+                vec![
+                    Candidate::Relation(relation("a")),
+                    Candidate::Relation(relation("b")),
+                ],
+            ),
+            (
+                "same_alias",
+                "",
+                "a AS t",
+                "b AS t",
+                vec![
+                    Candidate::Relation(relation("a")),
+                    Candidate::Relation(relation("b")),
+                ],
+            ),
+            (
+                "derived",
+                "",
+                "(SELECT id FROM a) AS t",
+                "(SELECT id FROM b) AS T",
+                // Candidate identities deduplicate by SQL key, retaining
+                // the first spelling even though the reference is ambiguous.
+                vec![Candidate::Derived(Some(u("t")))],
+            ),
+            (
+                "mixed",
+                "",
+                "a AS t",
+                "(SELECT id FROM b) AS T",
+                vec![
+                    Candidate::Relation(relation("a")),
+                    Candidate::Derived(Some(u("T"))),
+                ],
+            ),
+            (
+                "cte",
+                "WITH c AS (SELECT id FROM b) ",
+                "a AS t",
+                "c AS T",
+                vec![Candidate::Relation(relation("a")), Candidate::Cte(u("T"))],
+            ),
+        ] {
+            cases.push(
+                Case::new(
+                    &format!("colliding_range_variables_{join_name}_{kind}"),
+                    &format!(
+                        "{prefix}SELECT id FROM {left} {}",
+                        join_sql.replace("{right}", right)
+                    ),
+                    Dialect::Generic,
+                    vec![partial_col(
+                        0,
+                        u("id"),
+                        vec![],
+                        vec![Unresolved::Ambiguous {
+                            column: u("id"),
+                            candidates,
+                        }],
+                    )],
+                )
+                .catalog(vec![
+                    (relation("a"), vec![u("id")]),
+                    (relation("b"), vec![u("id")]),
+                ]),
+            );
+        }
+    }
+
+    for (name, sql) in [
+        (
+            "colliding_alias_using_without_catalog",
+            "SELECT id FROM a AS t JOIN b AS T USING (id)",
+        ),
+        (
+            "colliding_alias_natural_without_catalog",
+            "SELECT id FROM a AS t NATURAL JOIN b AS T",
+        ),
+    ] {
+        cases.push(ambiguous(name, sql, vec![relation("a"), relation("b")]));
+    }
+
+    // In ClickHouse these are distinct range variables, so merging is valid.
+    for (name, sql) in [
+        (
+            "clickhouse_distinct_alias_using",
+            "SELECT id FROM a AS t JOIN b AS T USING (id)",
+        ),
+        (
+            "clickhouse_distinct_alias_natural",
+            "SELECT id FROM a AS t NATURAL JOIN b AS T",
+        ),
+    ] {
+        cases.push(
+            Case::new(
+                name,
+                sql,
+                Dialect::ClickHouse,
+                vec![col(
+                    0,
+                    u("id"),
+                    vec![
+                        source(relation("a"), u("id")),
+                        source(relation("b"), u("id")),
+                    ],
+                )],
+            )
+            .catalog(vec![
+                (relation("a"), vec![u("id")]),
+                (relation("b"), vec![u("id")]),
+            ]),
+        );
+    }
+
     // x and y both read the column spelled fOO; Foo only feeds an unused CTE
     // column and does not reach the output.
     cases.push(Case::new(

@@ -426,6 +426,31 @@ fn unqualified_choice(
         .iter()
         .filter(|merge| merge_covers(merge, name, graph.dialect))
         .collect();
+    // Merge members name range variables, so duplicate names cannot identify
+    // join sides. Reject the invalid binding set before catalog filtering or
+    // provider precedence could turn it into a definite source.
+    let mut binding_names = HashSet::new();
+    if !merges.is_empty()
+        && bindings
+            .iter()
+            .any(|(name, _)| !binding_names.insert(name.column_key(graph.dialect)))
+    {
+        return UnqualifiedChoice::Ambiguous(
+            bindings
+                .iter()
+                .filter_map(|(name, binding)| match binding {
+                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
+                        catalog: table.catalog.clone(),
+                        schema: table.schema.clone(),
+                        name: table.table.clone(),
+                    })),
+                    Binding::Cte(_) => Some(Candidate::Cte(name.clone())),
+                    Binding::DerivedTable(_) => Some(Candidate::Derived(Some(name.clone()))),
+                    Binding::VirtualSource(_) => None,
+                })
+                .collect(),
+        );
+    }
     let consult_catalog = !merges.is_empty();
 
     let mut relations: Vec<ColumnRelation<'_>> = Vec::new();
