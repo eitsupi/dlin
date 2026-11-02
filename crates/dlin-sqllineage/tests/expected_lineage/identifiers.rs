@@ -355,6 +355,131 @@ pub fn cases() -> Vec<Case> {
         ).catalog_alias(relation("orders"), schema_table(q("Sales"), q("Orders")), vec![u("id")]),
     ]);
 
+    for (prefix, dialect) in [
+        ("generic", Dialect::Generic),
+        ("snowflake", Dialect::Snowflake),
+        ("postgres", Dialect::PostgreSql),
+    ] {
+        for (label, sql, output, table, column) in [
+            (
+                "uppercase_qualifier_preserves_column_spelling",
+                "SELECT T.Id AS y FROM T t",
+                u("y"),
+                relation("T"),
+                u("Id"),
+            ),
+            (
+                "schema_table_qualifier_preserves_column",
+                "SELECT S.T.Id FROM S.T",
+                u("Id"),
+                schema_table(u("S"), u("T")),
+                u("Id"),
+            ),
+            (
+                "catalog_schema_table_qualifier_preserves_column",
+                "SELECT C.S.T.Id FROM C.S.T",
+                u("Id"),
+                Relation {
+                    catalog: Some(u("C")),
+                    schema: Some(u("S")),
+                    name: u("T"),
+                },
+                u("Id"),
+            ),
+            (
+                "quoted_qualifier_preserves_column",
+                r#"SELECT "T".id FROM "T""#,
+                u("id"),
+                Relation {
+                    catalog: None,
+                    schema: None,
+                    name: q("T"),
+                },
+                u("id"),
+            ),
+            (
+                "quoted_column_after_uppercase_qualifier",
+                r#"SELECT T."Id" AS y FROM T"#,
+                u("y"),
+                relation("T"),
+                q("Id"),
+            ),
+            (
+                "uppercase_cte_qualifier_preserves_source",
+                "WITH T AS (SELECT id FROM a) SELECT T.id FROM T",
+                u("id"),
+                relation("a"),
+                u("id"),
+            ),
+            (
+                "uppercase_derived_qualifier_preserves_source",
+                "SELECT T.id FROM (SELECT id FROM a) T",
+                u("id"),
+                relation("a"),
+                u("id"),
+            ),
+            (
+                "uppercase_qualifier_with_using_join",
+                "SELECT T.id FROM T JOIN b USING(id)",
+                u("id"),
+                relation("T"),
+                u("id"),
+            ),
+            (
+                "uppercase_qualifier_with_struct_path",
+                "SELECT T.payload.field FROM T",
+                u("field"),
+                relation("T"),
+                u("payload"),
+            ),
+        ] {
+            cases.push(resolved(
+                &format!("{prefix}_{label}"),
+                sql,
+                dialect,
+                output,
+                table,
+                column,
+            ));
+        }
+    }
+    for (prefix, dialect) in [
+        ("snowflake", Dialect::Snowflake),
+        ("postgres", Dialect::PostgreSql),
+    ] {
+        for (label, sql, table) in [
+            (
+                "folded_table_qualifier",
+                "SELECT t.id FROM T",
+                relation("T"),
+            ),
+            (
+                "folded_cte_qualifier",
+                "WITH T AS (SELECT id FROM a) SELECT t.id FROM T",
+                relation("a"),
+            ),
+            (
+                "folded_derived_qualifier",
+                "SELECT T.id FROM (SELECT id FROM a) t",
+                relation("a"),
+            ),
+            (
+                "folded_schema_table_qualifier",
+                "SELECT s.t.id FROM S.T",
+                schema_table(u("S"), u("T")),
+            ),
+        ] {
+            cases.push(resolved(
+                &format!("{prefix}_{label}"),
+                sql,
+                dialect,
+                u("id"),
+                table,
+                u("id"),
+            ));
+        }
+    }
+
     // x and y both read the column spelled fOO; Foo only feeds an unused CTE
     // column and does not reach the output.
     cases.push(Case::new(
