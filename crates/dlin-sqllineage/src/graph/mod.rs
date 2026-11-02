@@ -8,11 +8,14 @@ use crate::types::TableLineage;
 use edge::{EdgeKind, RawEdge};
 use node::{NodeId, RawNode, StarBase, StarOptions};
 use scope::{ScopeId, ScopeTree};
+use std::collections::HashMap;
 
 pub(crate) struct RawGraph {
     pub dialect: Dialect,
     pub nodes: Vec<RawNode>,
     pub edges: Vec<RawEdge>,
+    pub output_names: HashMap<NodeId, crate::OutputName>,
+    pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
 }
@@ -23,6 +26,8 @@ impl RawGraph {
             dialect,
             nodes: Vec::new(),
             edges: Vec::new(),
+            output_names: HashMap::new(),
+            empty_projection: None,
             scopes: ScopeTree::new(dialect),
             tables: TableLineage::default(),
         }
@@ -35,10 +40,17 @@ impl RawGraph {
     }
 
     pub fn add_output(&mut self, name: Ident, intrinsic_kind: EdgeKind) -> NodeId {
-        self.add_node(RawNode::Output {
+        let output_name = crate::OutputName::Explicit(name.clone());
+        let id = self.add_node(RawNode::Output {
             name,
             intrinsic_kind,
-        })
+        });
+        self.output_names.insert(id, output_name);
+        id
+    }
+
+    pub fn set_output_name(&mut self, node_id: NodeId, output_name: crate::OutputName) {
+        self.output_names.insert(node_id, output_name);
     }
 
     pub fn add_ref_with_binding(

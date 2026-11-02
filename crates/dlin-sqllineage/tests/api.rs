@@ -804,3 +804,25 @@ fn clickhouse_compares_output_names_exactly() {
         Lookup::Absent { .. }
     ));
 }
+
+#[test]
+fn empty_projection_is_retained_when_pipe_syntax_is_rejected() {
+    let result = one("SELECT FROM t |> SELECT x");
+    assert!(result.output.columns.is_empty());
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.severity, diagnostic.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Severity::Error,
+                DiagnosticKind::UnsupportedSyntax {
+                    what: "pipe operators"
+                }
+            ),
+            (Severity::Warning, DiagnosticKind::EmptyProjection),
+        ]
+    );
+}

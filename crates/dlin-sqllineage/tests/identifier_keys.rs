@@ -358,3 +358,17 @@ fn star_unresolved_entries_deduplicate_by_relation_key_with_first_from_spelling(
         }
     );
 }
+
+#[test]
+fn nested_projection_relations_keep_first_sql_spelling() {
+    for (sql, expected) in [
+        ("SELECT (SELECT id FROM foo) FROM \"FOO\"", id("foo")),
+        (
+            "SELECT (SELECT id FROM \"FOO\") FROM foo",
+            quoted("FOO", Quote::Double),
+        ),
+    ] {
+        let result = one(Dialect::Snowflake, sql);
+        assert_eq!(result.read, vec![relation(None, None, expected)], "{sql}");
+    }
+}

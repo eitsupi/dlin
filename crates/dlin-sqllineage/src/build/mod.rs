@@ -14,7 +14,6 @@ pub(crate) struct LineageBuilder {
     pub(crate) current_scope: ScopeId,
     pub(crate) recursive_cte_name: Option<crate::Ident>,
     pub(crate) warnings: Vec<Warning>,
-    pub(crate) input_positions: Vec<(u64, u64)>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
     /// First unsupported construct met while walking the statement. Once set,
@@ -31,7 +30,6 @@ impl LineageBuilder {
             current_scope: root,
             recursive_cte_name: None,
             warnings: Vec::new(),
-            input_positions: Vec::new(),
             inner_statement_type: None,
             dialect,
             error: None,
@@ -41,20 +39,30 @@ impl LineageBuilder {
     pub fn build(
         mut self,
         stmt: &Statement,
-    ) -> Result<(RawGraph, Vec<Warning>, StatementType), SemanticError> {
+    ) -> Result<(RawGraph, Vec<Warning>, StatementType), BuildError> {
         let st = self.visit_statement(stmt);
         if let Some(error) = self.error {
-            return Err(error);
+            return Err(BuildError {
+                error,
+                empty_projection: self.graph.empty_projection.clone(),
+            });
         }
-        let mut inputs: Vec<_> = self
-            .input_positions
-            .into_iter()
-            .zip(std::mem::take(&mut self.graph.tables.inputs))
-            .collect();
-        inputs.sort_by_key(|(position, _)| *position);
-        self.graph.tables.inputs = inputs.into_iter().map(|(_, table)| table).collect();
         let final_type = self.inner_statement_type.unwrap_or(st);
         Ok((self.graph, self.warnings, final_type))
+    }
+
+    pub(crate) fn note_empty_projection(&mut self, severity: crate::Severity) {
+        let diagnostic = crate::Diagnostic {
+            severity,
+            kind: crate::DiagnosticKind::EmptyProjection,
+            location: None,
+        };
+        let should_replace = self.graph.empty_projection.as_ref().is_none_or(|current| {
+            current.severity == crate::Severity::Warning && severity == crate::Severity::Error
+        });
+        if should_replace {
+            self.graph.empty_projection = Some(diagnostic);
+        }
     }
 
     /// Record an unsupported construct. Only the first one is kept.
@@ -81,4 +89,9 @@ impl LineageBuilder {
             .scopes
             .add_binding(self.current_scope, name, binding);
     }
+}
+
+pub(crate) struct BuildError {
+    pub error: SemanticError,
+    pub empty_projection: Option<crate::Diagnostic>,
 }

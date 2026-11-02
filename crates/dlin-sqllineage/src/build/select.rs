@@ -3,7 +3,6 @@ use sqlparser::ast::{
     SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins, WildcardAdditionalOptions,
 };
 
-use crate::Ident;
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
@@ -12,17 +11,35 @@ use crate::graph::scope::{
     VirtualColumnState,
 };
 use crate::types::SemanticError;
+use crate::{Ident, OutputName};
 
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
     pub(crate) fn visit_select(&mut self, select: &Select) {
+        if select.projection.is_empty() {
+            let severity = if select.flavor == SelectFlavor::FromFirstNoSelect
+                || matches!(
+                    self.dialect,
+                    crate::Dialect::Generic | crate::Dialect::PostgreSql
+                ) {
+                crate::Severity::Warning
+            } else {
+                crate::Severity::Error
+            };
+            self.note_empty_projection(severity);
+        }
+        let input_mark = self.graph.tables.inputs.len();
         self.visit_from(&select.from);
+        // Bind FROM first, but retain SQL clause order for read spellings:
+        // projection subqueries appear before the FROM clause's relations.
+        let from_inputs = self.graph.tables.inputs.split_off(input_mark);
         if select.flavor == SelectFlavor::FromFirstNoSelect && select.projection.is_empty() {
             // `FROM t` without a SELECT list is shorthand for `SELECT * FROM t`.
             self.visit_projection(&[SelectItem::Wildcard(WildcardAdditionalOptions::default())]);
         } else {
             self.visit_projection(&select.projection);
         }
+        self.graph.tables.inputs.extend(from_inputs);
         if let Some(selection) = &select.selection {
             self.scan_expr_for_tables(selection);
         }
@@ -37,6 +54,8 @@ impl LineageBuilder {
                     let kind = determine_edge_kind(expr);
                     let name = infer_column_name(expr);
                     let output = self.graph.add_output(name.clone(), kind.clone());
+                    self.graph
+                        .set_output_name(output, classify_output_name(expr));
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -285,19 +304,6 @@ impl LineageBuilder {
 
                 if !is_self_ref && !is_cte_ref {
                     self.graph.tables.inputs.push(table_ref.clone());
-                    self.input_positions.push(
-                        name.0.iter().find_map(|part| part.as_ident()).map_or(
-                            (u64::MAX, u64::MAX),
-                            |ident| {
-                                let start = ident.span.start;
-                                if start.line == 0 {
-                                    (u64::MAX, u64::MAX)
-                                } else {
-                                    (start.line, start.column)
-                                }
-                            },
-                        ),
-                    );
                 }
 
                 let alias_name = alias
@@ -432,8 +438,32 @@ fn infer_column_name(expr: &Expr) -> Ident {
         Expr::CompoundIdentifier(parts) => parts
             .last()
             .map_or_else(|| Ident::unquoted(""), Ident::from_ast),
-        Expr::Function(func) => Ident::unquoted(func.name.to_string()),
+        Expr::Function(func) => func
+            .name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .map_or_else(|| Ident::unquoted(""), Ident::from_ast),
         Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
-        _ => Ident::unquoted("?column?"),
+        _ => Ident::unquoted(""),
+    }
+}
+
+fn classify_output_name(expr: &Expr) -> OutputName {
+    match expr {
+        Expr::Identifier(ident) => OutputName::Explicit(Ident::from_ast(ident)),
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .map(Ident::from_ast)
+            .map_or(OutputName::Anonymous, OutputName::Explicit),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => classify_output_name(expr),
+        Expr::Function(func) => func
+            .name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .map(Ident::from_ast)
+            .map_or(OutputName::Anonymous, OutputName::Inferred),
+        _ => OutputName::Anonymous,
     }
 }

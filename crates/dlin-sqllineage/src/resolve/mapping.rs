@@ -20,6 +20,7 @@ pub(super) fn wildcard_mapping(
     source_table: TableRef,
 ) -> ColumnMapping {
     ColumnMapping {
+        output_name: None,
         target: ColumnRef {
             table: output_table.cloned(),
             column: Ident::unquoted("*"),
@@ -69,6 +70,7 @@ pub(super) fn expand_virtual_source(
             });
         }
         mappings.push(ColumnMapping {
+            output_name: Some(crate::OutputName::Explicit(column.name.clone())),
             target: ColumnRef {
                 table: None,
                 column: column.name.clone(),
@@ -180,6 +182,11 @@ pub(super) fn resolve_scope_mappings(
                             &inherited_transform,
                         );
                         mappings.push(ColumnMapping {
+                            output_name: graph
+                                .output_names
+                                .get(&col.node_id)
+                                .cloned()
+                                .or_else(|| Some(crate::OutputName::Explicit(name.clone()))),
                             target: ColumnRef {
                                 table: None,
                                 column: name.clone(),
@@ -262,6 +269,7 @@ pub(super) fn resolve_scope_mappings(
                             merge_branch_sources(&left_mapping, right_mapping);
                         if recursive {
                             merged.push(ColumnMapping {
+                                output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources: vec![ColumnOrigin::Recursive {
                                     base_sources: sources,
@@ -270,6 +278,7 @@ pub(super) fn resolve_scope_mappings(
                             });
                         } else {
                             merged.push(ColumnMapping {
+                                output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources,
                                 transform,
@@ -280,6 +289,7 @@ pub(super) fn resolve_scope_mappings(
                         let transform = left_mapping.transform;
                         if recursive {
                             merged.push(ColumnMapping {
+                                output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources: vec![ColumnOrigin::Recursive {
                                     base_sources: sources,
@@ -288,6 +298,7 @@ pub(super) fn resolve_scope_mappings(
                             });
                         } else {
                             merged.push(ColumnMapping {
+                                output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources,
                                 transform,
@@ -307,20 +318,7 @@ pub(super) fn resolve_scope_mappings(
 }
 
 pub(super) fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
-    mappings.iter().any(|mapping| {
-        // A named output that happens to flow through an unresolved star has
-        // a known ordinal/name and must not act as a variable-width barrier.
-        mapping.target.column.value == "*" && mapping.target.column.quote.is_none()
-            && mapping.sources.iter().any(|source| match source {
-                ColumnOrigin::Wildcard { .. } => true,
-                ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none() => true,
-                ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(|source| {
-                    matches!(source, ColumnOrigin::Wildcard { .. })
-                        || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none())
-                }),
-                _ => false,
-            })
-    })
+    mappings.iter().any(|mapping| mapping.output_name.is_none())
 }
 
 fn merge_unknown_shape_mappings(
@@ -349,6 +347,7 @@ fn merge_unknown_shape_mappings(
     for (left_mapping, right_mapping) in left.iter().zip(right.iter()).take(prefix_len) {
         let (sources, transform) = merge_branch_sources(left_mapping, right_mapping);
         merged.push(ColumnMapping {
+            output_name: left_mapping.output_name.clone(),
             target: left_mapping.target.clone(),
             sources,
             transform,
@@ -397,15 +396,13 @@ pub(super) fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> 
         for source in &mapping.sources {
             match source {
                 ColumnOrigin::Wildcard { .. } => sources.push(source.clone()),
-                ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none() => {
-                    sources.push(source.clone());
-                }
+                source if source.is_unknown_star() => sources.push(source.clone()),
                 ColumnOrigin::Recursive { base_sources } => sources.extend(
                     base_sources
                         .iter()
                         .filter(|source| {
                             matches!(source, ColumnOrigin::Wildcard { .. })
-                                || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none())
+                                || source.is_unknown_star()
                         })
                         .cloned(),
                 ),
@@ -456,7 +453,7 @@ mod tests {
     use crate::{Ident, Quote};
 
     #[test]
-    fn quoted_star_origins_are_not_wildcards_even_inside_recursive_sources() {
+    fn only_typed_unknown_stars_create_unknown_shape_barriers() {
         for recursive in [false, true] {
             for quoted in [false, true] {
                 let name = if quoted {
@@ -464,9 +461,12 @@ mod tests {
                 } else {
                     Ident::unquoted("*")
                 };
-                let origin = ColumnOrigin::Ambiguous {
-                    column: name.clone(),
-                    candidates: vec![],
+                let origin = if quoted {
+                    ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
+                        column: name.clone(),
+                    })
+                } else {
+                    ColumnOrigin::UnknownStar
                 };
                 let origin = if recursive {
                     ColumnOrigin::Recursive {
@@ -476,6 +476,11 @@ mod tests {
                     origin
                 };
                 let mappings = [ColumnMapping {
+                    output_name: if quoted {
+                        Some(crate::OutputName::Explicit(name.clone()))
+                    } else {
+                        None
+                    },
                     target: ColumnRef {
                         table: None,
                         column: name,

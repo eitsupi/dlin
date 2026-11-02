@@ -90,11 +90,9 @@ pub(super) fn expand_star(
             {
                 sources.push(origin);
             }
-            sources.push(ColumnOrigin::Ambiguous {
-                column: Ident::unquoted("*"),
-                candidates: Vec::new(),
-            });
+            sources.push(ColumnOrigin::UnknownStar);
             mappings.push(ColumnMapping {
+                output_name: None,
                 target: ColumnRef {
                     table: None,
                     column: Ident::unquoted("*"),
@@ -119,15 +117,11 @@ pub(super) fn expand_star(
                     sources.extend(origins);
                 }
             }
-            if !sources.iter().any(
-                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column.value == "*" && column.quote.is_none()),
-            ) {
-                sources.push(ColumnOrigin::Ambiguous {
-                    column: Ident::unquoted("*"),
-                    candidates: Vec::new(),
-                });
+            if !sources.iter().any(ColumnOrigin::is_unknown_star) {
+                sources.push(ColumnOrigin::UnknownStar);
             }
             mappings.push(ColumnMapping {
+                output_name: None,
                 target: ColumnRef {
                     table: None,
                     column: Ident::unquoted("*"),
@@ -166,6 +160,7 @@ fn expand_star_binding(
         Binding::Table(table) => {
             if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(table)) {
                 mappings.extend(columns.into_iter().map(|column| ColumnMapping {
+                    output_name: Some(crate::OutputName::Explicit(column.clone())),
                     target: ColumnRef {
                         table: None,
                         column: column.clone(),
@@ -209,6 +204,7 @@ fn expand_unknown_relation(
 ) {
     if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(&table)) {
         mappings.extend(columns.into_iter().map(|column| ColumnMapping {
+            output_name: Some(crate::OutputName::Explicit(column.clone())),
             target: ColumnRef {
                 table: None,
                 column: column.clone(),
@@ -295,6 +291,7 @@ fn apply_star_options(
             .find(|mapping| same_column_name(&mapping.target.column, old, graph.dialect))
         {
             mapping.target.column.clone_from(new);
+            mapping.output_name = Some(crate::OutputName::Explicit(new.clone()));
         }
     }
     mappings.extend(retained);
@@ -329,6 +326,7 @@ fn append_unknown_star_options(
             mapping_cache,
         );
         mappings.push(ColumnMapping {
+            output_name: Some(crate::OutputName::Explicit(replacement.column.clone())),
             target: ColumnRef {
                 table: None,
                 column: replacement.column.clone(),
@@ -353,6 +351,7 @@ fn append_unknown_star_options(
             continue;
         }
         mappings.push(ColumnMapping {
+            output_name: Some(crate::OutputName::Explicit(new.clone())),
             target: ColumnRef {
                 table: None,
                 column: new.clone(),

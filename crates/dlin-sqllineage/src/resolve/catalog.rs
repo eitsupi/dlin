@@ -32,6 +32,7 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &Catalog
         {
             for col_name in columns {
                 result.push(ColumnMapping {
+                    output_name: Some(crate::OutputName::Explicit(col_name.clone())),
                     target: ColumnRef {
                         table: mapping.target.table.clone(),
                         column: col_name.clone(),
@@ -82,6 +83,7 @@ mod tests {
 
     fn named(name: &str) -> ColumnMapping {
         ColumnMapping {
+            output_name: Some(crate::OutputName::Explicit(crate::Ident::unquoted(name))),
             target: ColumnRef {
                 table: None,
                 column: crate::Ident::unquoted(name),
@@ -96,6 +98,7 @@ mod tests {
 
     fn star(table: &str) -> ColumnMapping {
         ColumnMapping {
+            output_name: None,
             target: ColumnRef {
                 table: None,
                 column: crate::Ident::unquoted("*"),

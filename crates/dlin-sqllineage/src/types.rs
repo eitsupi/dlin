@@ -59,30 +59,6 @@ pub(crate) enum StatementType {
     Other,
 }
 
-/// The complete result of analyzing a single SQL statement.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AnalyzeResult {
-    /// The kind of statement.
-    pub statement_type: StatementType,
-    /// Table-level lineage (inputs and output).
-    pub tables: TableLineage,
-    /// Column-level lineage mappings.
-    pub columns: ColumnLineage,
-    /// Warnings encountered during analysis.
-    pub warnings: Vec<Warning>,
-}
-
-impl Default for AnalyzeResult {
-    fn default() -> Self {
-        Self {
-            statement_type: StatementType::Other,
-            tables: TableLineage::default(),
-            columns: ColumnLineage::default(),
-            warnings: Vec::new(),
-        }
-    }
-}
-
 /// Table-level lineage: which tables are read and which is written.
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct TableLineage {
@@ -92,24 +68,14 @@ pub(crate) struct TableLineage {
     pub output: Option<TableRef>,
 }
 
-/// Column-level lineage: a collection of column derivation mappings.
-#[derive(Debug, Clone, Serialize, Default)]
-pub(crate) struct ColumnLineage {
-    pub mappings: Vec<ColumnMapping>,
-    /// Whether any `SELECT *` in the statement (including nested CTEs and
-    /// derived tables) could not be expanded with the supplied catalog.
-    ///
-    /// This is deliberately statement-wide: an unresolved star in a JOIN
-    /// branch still makes the statement's schema incomplete even when the
-    /// selected output happens to come from another relation.
-    pub has_unresolved_stars: bool,
-}
-
 /// One output column and the source columns it derives from.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ColumnMapping {
     /// The output column.
     pub target: ColumnRef,
+    /// Name and naming provenance for this single output slot. `None` marks
+    /// an unexpanded, variable-width star.
+    pub output_name: Option<crate::OutputName>,
     /// Source columns contributing to this output.
     pub sources: Vec<ColumnOrigin>,
     /// The kind of transformation applied.
@@ -141,6 +107,17 @@ pub(crate) enum ColumnOrigin {
     SourceFree { column: Ident },
     /// Derived via recursive CTE; base case sources only.
     Recursive { base_sources: Vec<ColumnOrigin> },
+    /// Star whose relation or width cannot be determined.
+    UnknownStar,
+    /// Typed unresolved contribution preserved by the resolver.
+    Unresolved(crate::Unresolved),
+}
+
+impl ColumnOrigin {
+    /// Whether this unresolved contribution represents an unknown-width star.
+    pub(crate) fn is_unknown_star(&self) -> bool {
+        matches!(self, Self::UnknownStar)
+    }
 }
 
 /// What kind of transformation produced an output column.
@@ -179,25 +156,6 @@ pub(crate) enum WarningKind {
 pub(crate) struct SourceLocation {
     pub line: usize,
     pub column: usize,
-}
-
-/// Options for checking the internal engine result.
-#[cfg(test)]
-pub(crate) struct AnalyzeOptions {
-    /// SQL dialect for parsing.
-    pub dialect: Dialect,
-    /// Optional catalog for resolving `SELECT *` and unqualified columns.
-    pub catalog: Option<Box<dyn crate::Catalog>>,
-}
-
-#[cfg(test)]
-impl Default for AnalyzeOptions {
-    fn default() -> Self {
-        Self {
-            dialect: Dialect::Generic,
-            catalog: None,
-        }
-    }
 }
 
 /// Supported SQL dialects (maps to sqlparser dialects).
@@ -273,29 +231,3 @@ impl fmt::Display for SemanticError {
         }
     }
 }
-
-/// Error returned when SQL parsing or semantic validation fails.
-#[cfg(test)]
-#[derive(Debug, Clone)]
-pub(crate) struct ParseError {
-    pub message: String,
-}
-
-#[cfg(test)]
-impl From<SemanticError> for ParseError {
-    fn from(error: SemanticError) -> Self {
-        Self {
-            message: error.to_string(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SQL parse error: {}", self.message)
-    }
-}
-
-#[cfg(test)]
-impl std::error::Error for ParseError {}

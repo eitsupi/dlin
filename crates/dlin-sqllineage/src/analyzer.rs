@@ -1,7 +1,6 @@
 use sqlparser::ast::Statement;
 use sqlparser::parser::{Parser, ParserError};
 
-use super::convert::analyze_statement;
 use super::{Analysis, Catalog, Dialect, Location, Options, ParseError, ParseErrorKind};
 use crate::catalog::CatalogContext;
 
@@ -137,4 +136,60 @@ fn parse_error(error: &ParserError) -> ParseError {
         kind,
         location,
     }
+}
+
+fn analyze_statement(
+    statement: &Statement,
+    dialect: Dialect,
+    catalog: Option<&CatalogContext<'_>>,
+) -> crate::StatementAnalysis {
+    use crate::resolve::analysis::{plain_relation, semantic_failure, statement_kind};
+    let (graph, warnings, kind) = match crate::build::LineageBuilder::new(dialect).build(statement)
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let kind = match statement {
+                Statement::Query(_) => crate::StatementKind::Query,
+                Statement::Insert(_) => crate::StatementKind::Insert,
+                Statement::CreateTable(create) if create.query.is_some() => {
+                    crate::StatementKind::CreateTableAs
+                }
+                Statement::Update(_) => crate::StatementKind::Update,
+                Statement::Delete(_) => crate::StatementKind::Delete,
+                Statement::Merge(_) => crate::StatementKind::Merge,
+                _ => crate::StatementKind::Other,
+            };
+            return semantic_failure(
+                kind,
+                None,
+                Vec::new(),
+                &error.error,
+                error.empty_projection.into_iter().collect(),
+                dialect,
+            );
+        }
+    };
+    let empty = graph.empty_projection.clone();
+    let written = graph.tables.output.as_ref().map(plain_relation);
+    let read = graph.tables.inputs.iter().map(plain_relation).collect();
+    let mut analysis = match crate::resolve::resolve(graph, catalog, warnings, &kind) {
+        Ok(result) => result,
+        Err(error) => {
+            return semantic_failure(
+                statement_kind(&kind),
+                written,
+                read,
+                &error,
+                empty.into_iter().collect(),
+                dialect,
+            );
+        }
+    };
+    if let Some(diagnostic) = empty {
+        if diagnostic.severity == crate::Severity::Error {
+            analysis.output.columns.clear();
+        }
+        analysis.diagnostics.push(diagnostic);
+    }
+    analysis
 }
