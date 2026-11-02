@@ -55,7 +55,6 @@ impl LineageBuilder {
             | Expr::IsNormalized { expr, .. }
             | Expr::IsJson { expr, .. }
             | Expr::Collate { expr, .. }
-            | Expr::Convert { expr, .. }
             | Expr::Ceil { expr, .. }
             | Expr::Floor { expr, .. }
             | Expr::Prefixed { value: expr, .. }
@@ -63,6 +62,10 @@ impl LineageBuilder {
             | Expr::OuterJoin(expr)
             | Expr::Named { expr, .. } => self.collect_ancestors(expr),
 
+            Expr::Convert { expr, styles, .. } => {
+                self.inspect_diagnostics(styles);
+                self.collect_ancestors(expr)
+            }
             Expr::Extract { expr, .. } => self.collect_ancestors(expr),
 
             Expr::Trim {
@@ -227,14 +230,28 @@ impl LineageBuilder {
             Expr::CompoundFieldAccess { root, access_chain } => {
                 self.collect_compound_field_ancestors(root, access_chain)
             }
-            Expr::JsonAccess { value, .. } => self.collect_ancestors(value),
+            Expr::JsonAccess { value, path } => {
+                self.inspect_diagnostics(path);
+                self.collect_ancestors(value)
+            }
 
             Expr::Function(func) => {
+                self.inspect_diagnostics(&func.parameters);
+                self.inspect_diagnostics(&func.filter);
+                if let FunctionArguments::List(list) = &func.args {
+                    self.inspect_diagnostics(&list.clauses);
+                }
+                if let Some(WindowType::WindowSpec(spec)) = &func.over {
+                    self.inspect_diagnostics(&spec.window_frame);
+                }
                 let mut ancestors = Vec::new();
                 if let FunctionArguments::List(list) = &func.args {
                     let semantics = function_semantics::classify_function(self.dialect, func)
                         .map(|signature| signature.arguments);
                     for (index, arg) in list.args.iter().enumerate() {
+                        if let ast::FunctionArg::ExprNamed { name, .. } = arg {
+                            self.inspect_diagnostics(name);
+                        }
                         let arg_expr = match arg {
                             ast::FunctionArg::Unnamed(arg_expr)
                             | ast::FunctionArg::Named { arg: arg_expr, .. }
@@ -349,7 +366,10 @@ impl LineageBuilder {
             | Expr::Dictionary(_)
             | Expr::Interval(_)
             | Expr::Lambda(_)
-            | Expr::MatchAgainst { .. } => vec![],
+            | Expr::MatchAgainst { .. } => {
+                self.inspect_diagnostics(expr);
+                vec![]
+            }
         }
     }
 

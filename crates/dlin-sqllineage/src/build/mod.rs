@@ -65,6 +65,47 @@ impl LineageBuilder {
         }
     }
 
+    pub(crate) fn note_select_projection(&mut self, select: &sqlparser::ast::Select) {
+        if select.projection.is_empty() {
+            let severity = if select.flavor == sqlparser::ast::SelectFlavor::FromFirstNoSelect
+                || matches!(
+                    self.dialect,
+                    crate::Dialect::Generic | crate::Dialect::PostgreSql
+                ) {
+                crate::Severity::Warning
+            } else {
+                crate::Severity::Error
+            };
+            self.note_empty_projection(severity);
+        }
+    }
+
+    /// Visit a fragment excluded from value/table lineage, retaining only its
+    /// structural diagnostics. This does not revisit the enclosing statement.
+    pub(crate) fn inspect_diagnostics(&mut self, fragment: &impl sqlparser::ast::Visit) {
+        use sqlparser::ast::{Query, SetExpr, Visitor};
+        use std::ops::ControlFlow;
+        struct Diagnostics<'a>(&'a mut LineageBuilder);
+        impl Visitor for Diagnostics<'_> {
+            type Break = ();
+            fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+                fn inspect(body: &SetExpr, builder: &mut LineageBuilder) {
+                    match body {
+                        SetExpr::Select(select) => builder.note_select_projection(select),
+                        SetExpr::SetOperation { left, right, .. } => {
+                            inspect(left, builder);
+                            inspect(right, builder);
+                        }
+                        _ => {}
+                    }
+                }
+                inspect(&query.body, self.0);
+                ControlFlow::Continue(())
+            }
+        }
+        let _ = fragment.visit(&mut Diagnostics(self));
+    }
+
     /// Record an unsupported construct. Only the first one is kept.
     pub(crate) fn reject(&mut self, error: SemanticError) {
         if self.error.is_none() {

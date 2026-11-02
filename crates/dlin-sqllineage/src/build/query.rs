@@ -43,6 +43,12 @@ impl LineageBuilder {
         }
 
         self.visit_set_expr(&query.body);
+        self.inspect_diagnostics(&query.order_by);
+        self.inspect_diagnostics(&query.limit_clause);
+        self.inspect_diagnostics(&query.fetch);
+        self.inspect_diagnostics(&query.for_clause);
+        self.inspect_diagnostics(&query.settings);
+        self.inspect_diagnostics(&query.pipe_operators);
 
         if has_ctes {
             let body_outputs: Vec<_> = self
@@ -107,7 +113,8 @@ impl LineageBuilder {
             SetExpr::Query(q) => {
                 self.visit_query(q);
             }
-            SetExpr::Values(_) | SetExpr::Table(_) => {}
+            SetExpr::Values(values) => self.inspect_diagnostics(values),
+            SetExpr::Table(_) => {}
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
             | SetExpr::Delete(stmt)
