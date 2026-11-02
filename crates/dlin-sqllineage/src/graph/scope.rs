@@ -42,7 +42,7 @@ struct Scope {
     /// Relations introduced by this scope's FROM clause, in source order.
     /// Iteration order is observable (star expansion, ambiguity candidates),
     /// so it must not depend on hashing.
-    bindings: IndexMap<String, (Ident, Binding)>,
+    bindings: IndexMap<String, Vec<(Ident, Binding)>>,
     /// Every physical relation added to this scope, including ones whose
     /// binding name was later taken by another relation (`s.t` and `o.t`
     /// share the name `t`). Multi-part qualifiers are matched against these.
@@ -168,12 +168,18 @@ impl ScopeTree {
     }
 
     pub fn add_binding(&mut self, scope: ScopeId, name: Ident, binding: Binding) {
-        let key = name.relation_key(self.dialect).into_owned();
+        let key = name.column_key(self.dialect).into_owned();
         self.scopes[scope].binding_log.push(name.clone());
         if let Binding::Table(table) = &binding {
             self.scopes[scope].relations.push(table.clone());
         }
-        self.scopes[scope].bindings.insert(key, (name, binding));
+        let group = self.scopes[scope].bindings.entry(key).or_default();
+        // Lateral virtual sources intentionally replace the range variable
+        // whose value they expand; its captured dependencies remain intact.
+        if matches!(binding, Binding::VirtualSource(_)) {
+            group.clear();
+        }
+        group.push((name, binding));
     }
 
     /// Number of bindings added to `scope` so far; pass it to
@@ -227,14 +233,50 @@ impl ScopeTree {
     }
 
     /// Lookup a name starting from `scope`, walking the parent chain.
-    /// Returns the first match (nearest scope wins = shadowing).
+    /// Nearest scope wins; a conflicting group has no unique binding.
     pub fn lookup(&self, scope: ScopeId, name: &Ident) -> Option<&Binding> {
         let s = &self.scopes[scope];
-        let key = name.relation_key(self.dialect);
-        if let Some((_, b)) = s.bindings.get(key.as_ref()) {
-            return Some(b);
+        let key = name.column_key(self.dialect);
+        if let Some(group) = s.bindings.get(key.as_ref()) {
+            return match group.as_slice() {
+                [(_, binding)] => Some(binding),
+                _ => None,
+            };
         }
         s.parent.and_then(|p| self.lookup(p, name))
+    }
+
+    /// Conflicting range variables in the nearest scope that publishes this name.
+    pub fn ambiguous_binding_candidates(
+        &self,
+        scope: ScopeId,
+        name: &Ident,
+    ) -> Option<Vec<crate::Candidate>> {
+        let current = &self.scopes[scope];
+        if let Some(group) = current.bindings.get(name.column_key(self.dialect).as_ref()) {
+            return (group.len() > 1).then(|| {
+                group
+                    .iter()
+                    .filter_map(|(name, binding)| match binding {
+                        Binding::Table(table) => {
+                            Some(crate::Candidate::Relation(crate::Relation {
+                                catalog: table.catalog.clone(),
+                                schema: table.schema.clone(),
+                                name: table.table.clone(),
+                            }))
+                        }
+                        Binding::Cte(_) => Some(crate::Candidate::Cte(name.clone())),
+                        Binding::DerivedTable(_) => {
+                            Some(crate::Candidate::Derived(Some(name.clone())))
+                        }
+                        Binding::VirtualSource(_) => None,
+                    })
+                    .collect()
+            });
+        }
+        current
+            .parent
+            .and_then(|parent| self.ambiguous_binding_candidates(parent, name))
     }
 
     /// Physical relations visible from `scope`, nearest scope first and in
@@ -274,7 +316,7 @@ impl ScopeTree {
         self.scopes[scope]
             .bindings
             .iter()
-            .map(|(_, (name, binding))| (name.clone(), binding.clone()))
+            .flat_map(|(_, group)| group.iter().cloned())
             .collect()
     }
 
@@ -284,9 +326,9 @@ impl ScopeTree {
         let mut seen = HashSet::new();
         let mut current = Some(scope);
         while let Some(id) = current {
-            for (key, (name, binding)) in &self.scopes[id].bindings {
+            for (key, group) in &self.scopes[id].bindings {
                 if seen.insert(key.clone()) {
-                    result.push((name.clone(), binding.clone()));
+                    result.extend(group.iter().cloned());
                 }
             }
             current = self.scopes[id].parent;

@@ -389,7 +389,15 @@ impl LineageBuilder {
                     .graph
                     .scopes
                     .lookup(self.current_scope, &Ident::from_ast(binding_name))
-                    .is_some() =>
+                    .is_some()
+                    || self
+                        .graph
+                        .scopes
+                        .ambiguous_binding_candidates(
+                            self.current_scope,
+                            &Ident::from_ast(binding_name),
+                        )
+                        .is_some() =>
             {
                 let binding = self
                     .graph
@@ -524,7 +532,7 @@ impl LineageBuilder {
             // first component of a compound identifier.
             if prefix_len == 1
                 && let Some((_, binding)) = visible.iter().find(|(name, _)| {
-                    name.relation_key(self.dialect) == prefix[0].relation_key(self.dialect)
+                    name.column_key(self.dialect) == prefix[0].column_key(self.dialect)
                 })
             {
                 return Some((prefix_len, binding.clone()));

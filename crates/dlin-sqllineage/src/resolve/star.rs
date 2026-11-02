@@ -37,6 +37,18 @@ pub(super) fn expand_star(
 ) {
     let start = mappings.len();
     match resolve_star_target(base, scope, graph) {
+        StarTarget::Ambiguous(candidates) => mappings.push(ColumnMapping {
+            output_name: None,
+            target: ColumnRef {
+                table: None,
+                column: Ident::unquoted("*"),
+            },
+            sources: vec![ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
+                column: Ident::unquoted("*"),
+                candidates,
+            })],
+            transform: TransformKind::Direct,
+        }),
         StarTarget::All => {
             for (_, binding) in effective_bindings(scope, graph) {
                 expand_star_binding(

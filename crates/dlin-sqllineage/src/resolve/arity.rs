@@ -126,12 +126,13 @@ fn star_arity(
         StarTarget::Unknown(table) => catalog
             .and_then(|catalog| catalog.list_columns(&table))
             .map(|names| apply_name_options(names, options, Some(base), None, graph.dialect)),
-        StarTarget::FieldPath { .. } | StarTarget::Expr => None,
+        StarTarget::FieldPath { .. } | StarTarget::Expr | StarTarget::Ambiguous(_) => None,
     };
     names.map(|names| names.len())
 }
 
 pub(super) enum StarTarget {
+    Ambiguous(Vec<crate::Candidate>),
     All,
     Binding(Binding),
     Unknown(TableRef),
@@ -218,7 +219,9 @@ fn scope_output_names(
                                         graph.dialect,
                                     )
                                 }),
-                            StarTarget::FieldPath { .. } | StarTarget::Expr => None,
+                            StarTarget::FieldPath { .. }
+                            | StarTarget::Expr
+                            | StarTarget::Ambiguous(_) => None,
                         }?;
                         names.extend(child_names);
                     }
@@ -326,7 +329,12 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
                 };
                 for candidate in candidates {
                     if parts.len() >= candidate.len()
-                        && ident_parts_equal(&parts[..candidate.len()], &candidate, graph.dialect)
+                        && if candidate.len() == 1 {
+                            parts[0].column_key(graph.dialect)
+                                == candidate[0].column_key(graph.dialect)
+                        } else {
+                            ident_parts_equal(&parts[..candidate.len()], &candidate, graph.dialect)
+                        }
                     {
                         let matched = candidate.len();
                         if best.as_ref().is_none_or(|(length, _)| matched > *length) {
@@ -336,6 +344,12 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
                 }
             }
             if let Some((matched, binding)) = best {
+                if matched == 1
+                    && let Some(candidates) =
+                        graph.scopes.ambiguous_binding_candidates(scope, &parts[0])
+                {
+                    return StarTarget::Ambiguous(candidates);
+                }
                 if matched == parts.len() {
                     StarTarget::Binding(binding)
                 } else {

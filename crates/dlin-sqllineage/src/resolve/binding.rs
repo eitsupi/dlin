@@ -25,6 +25,9 @@ pub(super) fn resolve_node(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
+    if let Some(origin) = ambiguous_qualified_origin(node_id, graph) {
+        return Some(origin);
+    }
     if let Some(ref origin) = resolved[node_id] {
         return Some(origin.clone());
     }
@@ -131,6 +134,30 @@ pub(super) fn resolve_node(
 
     resolved[node_id].clone_from(&origin);
     origin
+}
+
+pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Option<ColumnOrigin> {
+    let RawNode::Ref {
+        name,
+        qualifier: Some(parts),
+        scope,
+        ..
+    } = &graph.nodes[node]
+    else {
+        return None;
+    };
+    let [qualifier] = parts.as_slice() else {
+        return None;
+    };
+    graph
+        .scopes
+        .ambiguous_binding_candidates(*scope, qualifier)
+        .map(|candidates| {
+            ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                column: name.clone(),
+                candidates,
+            })
+        })
 }
 
 /// Virtual source aliases stand in for output columns in expressions such as
@@ -418,7 +445,7 @@ fn unqualified_choice(
                 });
                 known_to_have.push(true);
                 relation_of.insert(
-                    binding_name.relation_key(graph.dialect).into_owned(),
+                    binding_name.column_key(graph.dialect).into_owned(),
                     relations.len() - 1,
                 );
             }
@@ -438,7 +465,7 @@ fn unqualified_choice(
                     scope: None,
                 });
                 relation_of.insert(
-                    binding_name.relation_key(graph.dialect).into_owned(),
+                    binding_name.column_key(graph.dialect).into_owned(),
                     relations.len() - 1,
                 );
             }
@@ -454,7 +481,7 @@ fn unqualified_choice(
         let natural = matches!(merge.columns, MergedColumns::Natural);
         let side_group = |side: &[Ident]| {
             let mut found = side.iter().filter_map(|member| {
-                let key = member.relation_key(graph.dialect);
+                let key = member.column_key(graph.dialect);
                 relation_of
                     .get(key.as_ref())
                     .filter(|&&index| !natural || known_to_have[index])

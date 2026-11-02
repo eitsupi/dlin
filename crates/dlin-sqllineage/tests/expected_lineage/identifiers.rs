@@ -480,6 +480,152 @@ pub fn cases() -> Vec<Case> {
         }
     }
 
+    for (prefix, dialect) in [
+        ("generic", Dialect::Generic),
+        ("ansi", Dialect::Ansi),
+        ("bigquery", Dialect::BigQuery),
+        ("duckdb", Dialect::DuckDb),
+        ("mysql", Dialect::MySql),
+        ("snowflake", Dialect::Snowflake),
+        ("postgres", Dialect::PostgreSql),
+    ] {
+        for (label, sql, table, column) in [
+            (
+                "implicit_binding_folds",
+                "SELECT t.id FROM T",
+                relation("T"),
+                u("id"),
+            ),
+            (
+                "explicit_binding_folds",
+                "SELECT X.Id FROM a x",
+                relation("a"),
+                u("Id"),
+            ),
+            (
+                "derived_binding_folds",
+                "SELECT T.id FROM (SELECT id FROM a) t",
+                relation("a"),
+                u("id"),
+            ),
+            (
+                "cte_binding_folds",
+                "WITH T AS (SELECT id FROM a) SELECT t.id FROM T",
+                relation("a"),
+                u("id"),
+            ),
+            (
+                "inner_folded_binding_shadows_outer",
+                "SELECT (SELECT X.id FROM b x) AS id FROM a X",
+                relation("b"),
+                u("id"),
+            ),
+            (
+                "unmatched_qualifier_stays_struct_root",
+                "SELECT payload.field AS id FROM a",
+                relation("a"),
+                u("payload"),
+            ),
+        ] {
+            let name = if label == "explicit_binding_folds" {
+                u("Id")
+            } else {
+                u("id")
+            };
+            cases.push(resolved(
+                &format!("{prefix}_{label}"),
+                sql,
+                dialect,
+                name,
+                table,
+                column,
+            ));
+        }
+        for qualifier in ["t", "T"] {
+            cases.push(
+                Case::new(
+                    &format!("{prefix}_colliding_alias_{qualifier}"),
+                    &format!("SELECT {qualifier}.id FROM a AS t CROSS JOIN b AS T"),
+                    dialect,
+                    vec![partial_col(
+                        0,
+                        u("id"),
+                        vec![],
+                        vec![Unresolved::Ambiguous {
+                            column: u("id"),
+                            candidates: vec![
+                                Candidate::Relation(relation("a")),
+                                Candidate::Relation(relation("b")),
+                            ],
+                        }],
+                    )],
+                )
+                .catalog(vec![
+                    (relation("a"), vec![u("id")]),
+                    (relation("b"), vec![u("other")]),
+                ]),
+            );
+        }
+    }
+    cases.push(resolved(
+        "clickhouse_alias_case_stays_exact",
+        "SELECT T.id FROM a t",
+        Dialect::ClickHouse,
+        u("id"),
+        relation("a"),
+        u("T"),
+    ));
+    cases.push(Case::new(
+        "clickhouse_distinct_aliases",
+        "SELECT t.id AS x, T.id AS y FROM a t CROSS JOIN b T",
+        Dialect::ClickHouse,
+        vec![
+            col(0, u("x"), vec![source(relation("a"), u("id"))]),
+            col(1, u("y"), vec![source(relation("b"), u("id"))]),
+        ],
+    ));
+
+    cases.push(
+        resolved(
+            "folded_alias_star_uses_binding",
+            "SELECT X.* FROM a x",
+            Dialect::Generic,
+            u("id"),
+            relation("a"),
+            u("id"),
+        )
+        .catalog(vec![(relation("a"), vec![u("id")])]),
+    );
+    cases.push(
+        Case::new(
+            "colliding_alias_star_stays_ambiguous",
+            "SELECT t.* FROM a t CROSS JOIN b T",
+            Dialect::Generic,
+            vec![],
+        )
+        .catalog(vec![
+            (relation("a"), vec![u("id")]),
+            (relation("b"), vec![u("id")]),
+        ])
+        .unresolved_stars(true)
+        .shape(dlin_sqllineage::Shape::Open {
+            unexpanded: vec![dlin_sqllineage::UnexpandedStar {
+                relation: None,
+                after_ordinal: None,
+                lineage: dlin_sqllineage::Lineage::Partial {
+                    known: vec![],
+                    unresolved: vec![Unresolved::Ambiguous {
+                        column: u("*"),
+                        candidates: vec![
+                            Candidate::Relation(relation("a")),
+                            Candidate::Relation(relation("b")),
+                        ],
+                    }],
+                },
+            }],
+        }),
+    );
+
     // x and y both read the column spelled fOO; Foo only feeds an unused CTE
     // column and does not reach the output.
     cases.push(Case::new(
@@ -587,5 +733,36 @@ fn column_keys_follow_each_dialects_identifier_rules() {
                 "{dialect}: unquoted id versus quoted id ({quote:?})"
             );
         }
+    }
+}
+
+#[test]
+fn binding_folding_preserves_physical_relation_identity() {
+    for dialect in [
+        Dialect::Generic,
+        Dialect::BigQuery,
+        Dialect::DuckDb,
+        Dialect::MySql,
+        Dialect::ClickHouse,
+    ] {
+        let result = dlin_sqllineage::Analyzer::new(dialect)
+            .analyze("SELECT X.id AS first, Y.id AS second FROM T X CROSS JOIN t Y")
+            .unwrap()
+            .into_single()
+            .unwrap();
+        assert_eq!(
+            result.read,
+            vec![relation("T"), relation("t")],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            result.output.columns[0].lineage,
+            complete(vec![source(relation("T"), u("id"))])
+        );
+        assert_eq!(
+            result.output.columns[1].lineage,
+            complete(vec![source(relation("t"), u("id"))])
+        );
+        assert!(result.diagnostics.is_empty());
     }
 }
