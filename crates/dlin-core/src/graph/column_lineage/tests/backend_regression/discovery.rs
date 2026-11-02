@@ -430,3 +430,48 @@ fn sqllineage_discovery_matches_analyze_mapping_targets() {
 
     assert_eq!(discovered, analyzed_names);
 }
+
+#[test]
+fn sqllineage_discovery_groups_sql_names_without_changing_display_names() {
+    let backend = backend_for_tests(BackendId::Sqllineage);
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        for (sql, names, duplicate) in [
+            (
+                "SELECT a AS Foo, b AS foo FROM t",
+                ["Foo", "foo"],
+                dialect != DlinDialect::ClickHouse,
+            ),
+            (
+                r#"SELECT a AS id, b AS "ID" FROM t"#,
+                ["id", "ID"],
+                !matches!(dialect, DlinDialect::PostgreSQL | DlinDialect::ClickHouse),
+            ),
+            (
+                r#"SELECT a AS id, b AS "id" FROM t"#,
+                ["id", "id"],
+                !matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake),
+            ),
+        ] {
+            let discovery = backend
+                .discover_output_columns(&OutputDiscoveryRequest {
+                    sql,
+                    dialect,
+                    catalog: None,
+                })
+                .unwrap();
+            assert_eq!(discovered_names(&discovery), names);
+            let expected = if duplicate {
+                names.into_iter().map(String::from).collect()
+            } else {
+                BTreeSet::new()
+            };
+            assert_eq!(discovery.duplicate_names, expected, "{dialect:?}: {sql}");
+        }
+    }
+}

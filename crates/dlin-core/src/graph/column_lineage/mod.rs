@@ -43,7 +43,9 @@ fn discover_named_output_columns(
     let Ok(analysis) = analyze_sql(sql, dialect, catalog) else {
         return HashSet::new();
     };
-    discovered_output_names(&analysis).into_iter().collect()
+    discovered_output_names(&analysis, dialect)
+        .into_iter()
+        .collect()
 }
 
 fn output_failure_state(kind: OutputFailureKind) -> &'static str {
@@ -295,9 +297,12 @@ pub(super) fn compute_column_lineage_internal(
     let yaml_schema = build_yaml_schema_for_node(manifest, node);
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
     let discovered = if yaml_schema.as_ref() == catalog.as_ref() {
-        discovered_output_names(&analyzed)
+        discovered_output_names(&analyzed, dialect)
     } else {
-        discovered_output_names(&analyze_parsed(&parsed, dialect, yaml_schema.as_ref()))
+        discovered_output_names(
+            &analyze_parsed(&parsed, dialect, yaml_schema.as_ref()),
+            dialect,
+        )
     };
     let mut names: HashSet<String> = node.columns.keys().cloned().collect();
     names.extend(discovered);
@@ -328,7 +333,7 @@ pub(super) fn compute_column_lineage_internal(
     let mut columns = Vec::new();
     let mut errors = Vec::new();
     for col_name in &column_names {
-        match resolve_statement_output(&statement, col_name, false) {
+        match resolve_statement_output(&statement, col_name, false, dialect) {
             Ok(output) => {
                 if let Some(failure) = lineage_failure(&output.lineage) {
                     let state = output_failure_state(failure.kind);

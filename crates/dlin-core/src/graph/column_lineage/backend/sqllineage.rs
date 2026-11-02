@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqllineage::{Analyzer, Dialect, Lineage, OutputName, Transform, Unresolved, parse};
 
@@ -100,21 +100,19 @@ pub fn debug_trace_column_json(
 ) -> Result<String, String> {
     let analysis = analyze_sql(sql, dialect, catalog)?;
     let statement = analysis.into_single().map_err(legacy_single_error)?;
-    let wanted = column.to_lowercase();
-    let matches = statement
-        .output
-        .columns
-        .iter()
-        .filter(|output| output_column_name(output).to_lowercase() == wanted)
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
+    let lookup = lookup_output(&statement.output, column, engine_dialect(dialect)?);
+    if lookup.candidates.is_empty() {
         return Err(format!("lineage error: no mapping for column '{column}'"));
     }
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "column": column,
-        "mappings": matches,
+        "mappings": lookup.candidates,
         "shape": statement.output.shape,
     });
+    if let Some(reason) = lookup.ambiguity_reason {
+        result["ambiguous"] = serde_json::json!(true);
+        result["ambiguity_reason"] = serde_json::json!(reason);
+    }
     if pretty {
         serde_json::to_string_pretty(&result)
     } else {
@@ -125,17 +123,24 @@ pub fn debug_trace_column_json(
 
 pub(crate) fn output_names(
     analysis: &sqllineage::StatementAnalysis,
+    dialect: DlinDialect,
 ) -> (Vec<String>, BTreeSet<String>) {
+    let dialect = engine_dialect(dialect).expect("dialect checked during parsing");
     let mut names = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut duplicates = BTreeSet::new();
+    let mut groups = BTreeMap::<Option<String>, Vec<String>>::new();
     for column in &analysis.output.columns {
         let name = output_column_name(column).to_string();
-        if !seen.insert(name.clone()) {
-            duplicates.insert(name.clone());
-        }
+        groups
+            .entry(output_column_key(column, dialect))
+            .or_default()
+            .push(name.clone());
         names.push(name);
     }
+    let duplicates = groups
+        .into_values()
+        .filter(|names| names.len() > 1)
+        .flatten()
+        .collect();
     (names, duplicates)
 }
 
@@ -199,10 +204,13 @@ pub(crate) fn analysis_error(analysis: &sqllineage::Analysis) -> Option<String> 
 
 /// Output names a model exposes, or nothing unless the input is exactly one
 /// lineage-carrying statement that analyzed without a semantic error.
-pub(crate) fn discovered_output_names(analysis: &sqllineage::Analysis) -> Vec<String> {
+pub(crate) fn discovered_output_names(
+    analysis: &sqllineage::Analysis,
+    dialect: DlinDialect,
+) -> Vec<String> {
     match analysis.statements.as_slice() {
         [statement] if statement.kind.carries_lineage() && semantic_error(statement).is_none() => {
-            output_names(statement).0
+            output_names(statement, dialect).0
         }
         _ => Vec::new(),
     }
@@ -216,6 +224,7 @@ pub(crate) fn resolve_statement_output<'a>(
     statement: &'a sqllineage::StatementAnalysis,
     name: &str,
     duplicate_hint: bool,
+    dialect: DlinDialect,
 ) -> Result<&'a sqllineage::OutputColumn, OutputFailure> {
     if duplicate_hint {
         return Err(OutputFailure {
@@ -225,17 +234,15 @@ pub(crate) fn resolve_statement_output<'a>(
             ),
         });
     }
-    // TODO: Names are matched with `to_lowercase()` instead of `Output::lookup`
-    // to keep dlin output unchanged. Move to the dialect's column rules and keep
-    // dlin-specific compatibility handling separate.
-    let wanted = name.to_lowercase();
-    let matches = statement
-        .output
-        .columns
-        .iter()
-        .filter(|column| output_column_name(column).to_lowercase() == wanted)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
+    let dialect = engine_dialect(dialect).expect("dialect checked during parsing");
+    let lookup = lookup_output(&statement.output, name, dialect);
+    if let Some(message) = lookup.ambiguity_reason {
+        return Err(OutputFailure {
+            kind: OutputFailureKind::Ambiguous,
+            message,
+        });
+    }
+    match lookup.candidates.as_slice() {
         [column] => Ok(column),
         [] if statement.has_unresolved_stars => Err(OutputFailure {
             kind: OutputFailureKind::Indeterminate,
@@ -251,6 +258,68 @@ pub(crate) fn resolve_statement_output<'a>(
             kind: OutputFailureKind::Ambiguous,
             message: format!("more than one sqllineage mapping matches output '{name}'"),
         }),
+    }
+}
+
+struct OutputLookup<'a> {
+    candidates: Vec<&'a sqllineage::OutputColumn>,
+    ambiguity_reason: Option<String>,
+}
+
+/// Prefer stored output spellings before interpreting a name as an unquoted
+/// SQL reference. Keep all candidates and distinguish display collisions.
+fn lookup_output<'a>(
+    output: &'a sqllineage::Output,
+    name: &str,
+    dialect: Dialect,
+) -> OutputLookup<'a> {
+    let exact: Vec<_> = output
+        .columns
+        .iter()
+        .filter(|column| output_column_name(column) == name)
+        .collect();
+    let keys: BTreeSet<_> = exact
+        .iter()
+        .filter_map(|column| output_column_key(column, dialect))
+        .collect();
+    // Anonymous expressions retain dlin's placeholder lookup, independently of
+    // SQL identifier keys (including its collision with a literal alias).
+    let candidates = if name == ANONYMOUS_COLUMN {
+        exact
+    } else if !keys.is_empty() {
+        output
+            .columns
+            .iter()
+            .filter(|column| {
+                output_column_key(column, dialect).is_some_and(|key| keys.contains(&key))
+            })
+            .collect()
+    } else {
+        match output.lookup(name, dialect) {
+            sqllineage::Lookup::Found(column) => vec![column],
+            sqllineage::Lookup::Duplicate(columns) => columns,
+            sqllineage::Lookup::Absent { .. } => Vec::new(),
+        }
+    };
+    let ambiguity_reason = (candidates.len() > 1).then(|| {
+        if name != ANONYMOUS_COLUMN && keys.len() > 1 {
+            format!("cannot resolve output '{name}' because distinct SQL identifiers share the same display name")
+        } else {
+            format!("more than one sqllineage mapping matches output '{name}'")
+        }
+    });
+    OutputLookup {
+        candidates,
+        ambiguity_reason,
+    }
+}
+
+fn output_column_key(column: &sqllineage::OutputColumn, dialect: Dialect) -> Option<String> {
+    match &column.name {
+        OutputName::Explicit(ident) | OutputName::Inferred(ident) => {
+            Some(ident.column_key(dialect).into_owned())
+        }
+        OutputName::Anonymous => None,
     }
 }
 
@@ -408,7 +477,7 @@ impl super::LineageBackend for SqllineageBackend {
                 message,
             });
         }
-        let (names, duplicate_names) = output_names(&statement);
+        let (names, duplicate_names) = output_names(&statement, request.dialect);
         Ok(super::OutputDiscovery {
             outputs: names
                 .into_iter()
@@ -452,6 +521,7 @@ impl super::LineageBackend for SqllineageBackend {
                             request
                                 .duplicate_output_names
                                 .contains(&request_output.name),
+                            request.dialect,
                         ) {
                             Ok(column) => column,
                             Err(failure) => return legacy_failed_output(target, failure),
