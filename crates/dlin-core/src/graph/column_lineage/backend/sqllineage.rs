@@ -100,19 +100,19 @@ pub fn debug_trace_column_json(
 ) -> Result<String, String> {
     let analysis = analyze_sql(sql, dialect, catalog)?;
     let statement = analysis.into_single().map_err(legacy_single_error)?;
-    let output =
-        resolve_statement_output(&statement, column, false, dialect).map_err(|failure| {
-            if failure.kind == OutputFailureKind::NotFound {
-                format!("lineage error: no mapping for column '{column}'")
-            } else {
-                format!("lineage error: {}", failure.message)
-            }
-        })?;
-    let result = serde_json::json!({
+    let lookup = lookup_output(&statement.output, column, engine_dialect(dialect)?);
+    if lookup.candidates.is_empty() {
+        return Err(format!("lineage error: no mapping for column '{column}'"));
+    }
+    let mut result = serde_json::json!({
         "column": column,
-        "mappings": [output],
+        "mappings": lookup.candidates,
         "shape": statement.output.shape,
     });
+    if let Some(reason) = lookup.ambiguity_reason {
+        result["ambiguous"] = serde_json::json!(true);
+        result["ambiguity_reason"] = serde_json::json!(reason);
+    }
     if pretty {
         serde_json::to_string_pretty(&result)
     } else {
@@ -235,8 +235,14 @@ pub(crate) fn resolve_statement_output<'a>(
         });
     }
     let dialect = engine_dialect(dialect).expect("dialect checked during parsing");
-    let matches = lookup_output(&statement.output, name, dialect)?;
-    match matches.as_slice() {
+    let lookup = lookup_output(&statement.output, name, dialect);
+    if let Some(message) = lookup.ambiguity_reason {
+        return Err(OutputFailure {
+            kind: OutputFailureKind::Ambiguous,
+            message,
+        });
+    }
+    match lookup.candidates.as_slice() {
         [column] => Ok(column),
         [] if statement.has_unresolved_stars => Err(OutputFailure {
             kind: OutputFailureKind::Indeterminate,
@@ -255,47 +261,57 @@ pub(crate) fn resolve_statement_output<'a>(
     }
 }
 
+struct OutputLookup<'a> {
+    candidates: Vec<&'a sqllineage::OutputColumn>,
+    ambiguity_reason: Option<String>,
+}
+
 /// Prefer stored output spellings before interpreting a name as an unquoted
-/// SQL reference. Display collisions between distinct SQL names stay ambiguous.
+/// SQL reference. Keep all candidates and distinguish display collisions.
 fn lookup_output<'a>(
     output: &'a sqllineage::Output,
     name: &str,
     dialect: Dialect,
-) -> Result<Vec<&'a sqllineage::OutputColumn>, OutputFailure> {
+) -> OutputLookup<'a> {
     let exact: Vec<_> = output
         .columns
         .iter()
         .filter(|column| output_column_name(column) == name)
         .collect();
-    // Anonymous expressions retain dlin's placeholder lookup, independently of
-    // SQL identifier keys (including its collision with a literal alias).
-    if name == ANONYMOUS_COLUMN {
-        return Ok(exact);
-    }
     let keys: BTreeSet<_> = exact
         .iter()
         .filter_map(|column| output_column_key(column, dialect))
         .collect();
-    if keys.len() > 1 {
-        return Err(OutputFailure {
-            kind: OutputFailureKind::Ambiguous,
-            message: format!(
-                "cannot resolve output '{name}' because distinct SQL identifiers share the same display name"
-            ),
-        });
-    }
-    if let Some(key) = keys.first() {
-        return Ok(output
+    // Anonymous expressions retain dlin's placeholder lookup, independently of
+    // SQL identifier keys (including its collision with a literal alias).
+    let candidates = if name == ANONYMOUS_COLUMN {
+        exact
+    } else if !keys.is_empty() {
+        output
             .columns
             .iter()
-            .filter(|column| output_column_key(column, dialect).as_ref() == Some(key))
-            .collect());
+            .filter(|column| {
+                output_column_key(column, dialect).is_some_and(|key| keys.contains(&key))
+            })
+            .collect()
+    } else {
+        match output.lookup(name, dialect) {
+            sqllineage::Lookup::Found(column) => vec![column],
+            sqllineage::Lookup::Duplicate(columns) => columns,
+            sqllineage::Lookup::Absent { .. } => Vec::new(),
+        }
+    };
+    let ambiguity_reason = (candidates.len() > 1).then(|| {
+        if name != ANONYMOUS_COLUMN && keys.len() > 1 {
+            format!("cannot resolve output '{name}' because distinct SQL identifiers share the same display name")
+        } else {
+            format!("more than one sqllineage mapping matches output '{name}'")
+        }
+    });
+    OutputLookup {
+        candidates,
+        ambiguity_reason,
     }
-    Ok(match output.lookup(name, dialect) {
-        sqllineage::Lookup::Found(column) => vec![column],
-        sqllineage::Lookup::Duplicate(columns) => columns,
-        sqllineage::Lookup::Absent { .. } => Vec::new(),
-    })
 }
 
 fn output_column_key(column: &sqllineage::OutputColumn, dialect: Dialect) -> Option<String> {

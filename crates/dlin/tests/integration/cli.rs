@@ -713,23 +713,20 @@ fn debug_trace_column_preserves_exact_quoted_output_identity() {
 }
 
 #[test]
-fn debug_trace_column_reports_display_collisions_and_dialect_misses() {
-    for (sql, column, message) in [
+fn debug_trace_column_shows_ambiguous_candidates_and_reports_dialect_misses() {
+    for (sql, column, reason) in [
         (
             r#"SELECT a AS id, b AS "id" FROM t"#,
             "id",
-            "distinct SQL identifiers share the same display name",
-        ),
-        (
-            r#"SELECT a AS "MiXeD" FROM t"#,
-            "mixed",
-            "no mapping for column 'mixed'",
+            Some("distinct SQL identifiers share the same display name"),
         ),
         (
             "SELECT a AS Foo, b AS foo FROM t",
             "Foo",
-            "more than one sqllineage mapping",
+            Some("more than one sqllineage mapping"),
         ),
+        (r#"SELECT a AS "MiXeD" FROM t"#, "mixed", None),
+        ("SELECT * FROM t", "missing", None),
     ] {
         let output = Command::new(binary_path())
             .args([
@@ -743,11 +740,33 @@ fn debug_trace_column_reports_display_collisions_and_dialect_misses() {
             ])
             .output()
             .unwrap();
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(message),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if let Some(reason) = reason {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(json["column"], column);
+            assert_eq!(json["ambiguous"], true);
+            assert!(json["ambiguity_reason"].as_str().unwrap().contains(reason));
+            let mappings = json["mappings"].as_array().unwrap();
+            assert_eq!(mappings.len(), 2);
+            for (ordinal, source) in ["a", "b"].into_iter().enumerate() {
+                assert_eq!(mappings[ordinal]["ordinal"], ordinal);
+                assert_eq!(
+                    mappings[ordinal]["lineage"]["Complete"][0]["column"]["value"],
+                    source
+                );
+            }
+        } else {
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains(&format!("no mapping for column '{column}'")),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
