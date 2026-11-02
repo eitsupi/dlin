@@ -29,3 +29,54 @@ pub struct CatalogColumn {
     /// Nested fields for structured column types, if known.
     pub fields: Option<Vec<CatalogColumn>>,
 }
+
+/// Catalog access shared by the resolver and the transitional result conversion.
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogContext<'a> {
+    catalog: &'a dyn Catalog,
+    pub(crate) dialect: crate::Dialect,
+}
+
+impl<'a> CatalogContext<'a> {
+    pub(crate) fn new(catalog: &'a dyn Catalog, dialect: crate::Dialect) -> Self {
+        Self { catalog, dialect }
+    }
+
+    pub(crate) fn entry(&self, table: &crate::types::TableRef) -> Option<CatalogEntry<'_>> {
+        self.catalog.lookup(&Relation {
+            catalog: table.catalog.clone(),
+            schema: table.schema.clone(),
+            name: table.table.clone(),
+        })
+    }
+
+    pub(crate) fn list_columns(&self, table: &crate::types::TableRef) -> Option<Vec<Ident>> {
+        Some(
+            self.entry(table)?
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        )
+    }
+
+    pub(crate) fn resolve_column(
+        &self,
+        column: &Ident,
+        candidates: &[crate::types::TableRef],
+    ) -> Option<crate::types::TableRef> {
+        let mut matching = candidates
+            .iter()
+            .filter(|table| self.column(table, column).is_some());
+        let only = matching.next()?;
+        matching.next().is_none().then(|| only.clone())
+    }
+
+    pub(crate) fn column(&self, table: &crate::types::TableRef, name: &Ident) -> Option<Ident> {
+        self.entry(table)?
+            .columns
+            .iter()
+            .find(|column| column.name.column_key(self.dialect) == name.column_key(self.dialect))
+            .map(|column| column.name.clone())
+    }
+}

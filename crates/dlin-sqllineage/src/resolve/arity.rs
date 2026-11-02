@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
 use crate::keys::ident_parts_equal;
-use crate::types::{CatalogProvider, SemanticError, TableRef};
+use crate::types::{SemanticError, TableRef};
 use crate::{Dialect, Ident};
 
 /// Inspect the complete graph rather than only the root projection. A star
@@ -12,7 +13,7 @@ use crate::{Dialect, Ident};
 /// dependency and must be visible to consumers of the public result.
 pub(super) fn graph_has_unresolved_stars(
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> bool {
     graph.nodes.iter().any(|node| {
         let RawNode::Star {
@@ -29,7 +30,7 @@ pub(super) fn graph_has_unresolved_stars(
 
 pub(super) fn validate_set_arities(
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> Result<(), SemanticError> {
     let mut active = HashSet::new();
     let _ = scope_arity(ScopeTree::root(), graph, catalog, &mut active)?;
@@ -41,7 +42,7 @@ pub(super) fn validate_set_arities(
 fn scope_arity(
     scope: usize,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Result<Option<usize>, SemanticError> {
     if !active.insert(scope) {
@@ -90,7 +91,7 @@ fn star_arity(
     options: &StarOptions,
     scope: usize,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Option<usize> {
     let target = resolve_star_target(base, scope, graph);
@@ -141,7 +142,7 @@ pub(super) enum StarTarget {
 fn binding_column_names(
     binding: &Binding,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Option<Vec<Ident>> {
     match binding {
@@ -164,7 +165,7 @@ fn binding_column_names(
 fn scope_output_names(
     scope: usize,
     graph: &RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Option<Vec<Ident>> {
     if !active.insert(scope) {

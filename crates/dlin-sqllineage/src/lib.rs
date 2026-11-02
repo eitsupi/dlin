@@ -68,7 +68,10 @@ pub(crate) fn legacy_analyze(
         message: e.to_string(),
     })?;
 
-    let catalog = opts.catalog;
+    let catalog = opts
+        .catalog
+        .as_deref()
+        .map(|catalog| catalog::CatalogContext::new(catalog, opts.dialect));
     statements
         .iter()
         .map(|stmt| {
@@ -76,7 +79,7 @@ pub(crate) fn legacy_analyze(
             let (raw_graph, warnings, statement_type) = builder.build(stmt)?;
             Ok(resolve::resolve(
                 raw_graph,
-                catalog.as_deref(),
+                catalog.as_ref(),
                 warnings,
                 statement_type,
             )?)

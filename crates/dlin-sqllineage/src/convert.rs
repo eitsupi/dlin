@@ -5,11 +5,12 @@ use std::ops::ControlFlow;
 
 use super::metadata::StatementMetadata;
 use super::{
-    Catalog, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Ident, Lineage, Location, Output,
-    OutputColumn, OutputName, Relation, Severity, Shape, SourceColumn, StatementAnalysis,
-    StatementKind, Transform, UnexpandedStar, Unresolved,
+    Diagnostic, DiagnosticKind, Dialect, Ident, Lineage, Location, Output, OutputColumn,
+    OutputName, Relation, Severity, Shape, SourceColumn, StatementAnalysis, StatementKind,
+    Transform, UnexpandedStar, Unresolved,
 };
 use crate::build::LineageBuilder;
+use crate::catalog::CatalogContext;
 use crate::graph::{
     RawGraph,
     node::RawNode,
@@ -18,60 +19,14 @@ use crate::graph::{
 use crate::keys::{
     RelationKey, candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key,
 };
-use crate::types::{self as old, CatalogProvider, SemanticError};
-
-/// TODO: Remove this bridge when the resolver uses `Catalog` directly.
-pub(super) struct CatalogAdapter<'a> {
-    catalog: &'a dyn Catalog,
-    dialect: Dialect,
-}
-
-impl<'a> CatalogAdapter<'a> {
-    pub(super) fn new(catalog: &'a dyn Catalog, dialect: Dialect) -> Self {
-        Self { catalog, dialect }
-    }
-
-    fn entry(&self, table: &old::TableRef) -> Option<CatalogEntry<'_>> {
-        self.catalog.lookup(&plain_relation(table))
-    }
-}
-
-impl CatalogProvider for CatalogAdapter<'_> {
-    fn list_columns(&self, table: &old::TableRef) -> Option<Vec<Ident>> {
-        Some(
-            self.entry(table)?
-                .columns
-                .iter()
-                .map(|col| col.name.clone())
-                .collect(),
-        )
-    }
-
-    fn resolve_column(
-        &self,
-        column: &Ident,
-        candidates: &[old::TableRef],
-    ) -> Option<old::TableRef> {
-        let mut matching = candidates.iter().filter(|table| {
-            self.entry(table).is_some_and(|entry| {
-                entry
-                    .columns
-                    .iter()
-                    .any(|col| col.name.column_key(self.dialect) == column.column_key(self.dialect))
-            })
-        });
-        let only = matching.next()?;
-        matching.next().is_none().then(|| only.clone())
-    }
-}
+use crate::types::{self as old, SemanticError};
 
 pub(super) fn analyze_statement(
     statement: &Statement,
     dialect: Dialect,
-    catalog: Option<&CatalogAdapter<'_>>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> StatementAnalysis {
     let metadata = StatementMetadata::new(statement, dialect);
-    let provider = catalog.map(|adapter| adapter as &dyn CatalogProvider);
     let builder = LineageBuilder::new(dialect);
     let empty = empty_projection_diagnostic(statement, dialect);
     let (graph, warnings, kind) = match builder.build(statement) {
@@ -105,7 +60,7 @@ pub(super) fn analyze_statement(
         .iter()
         .map(StatementMetadata::relation)
         .collect();
-    let result = match crate::resolve::resolve(graph, provider, warnings, kind.clone()) {
+    let result = match crate::resolve::resolve(graph, catalog, warnings, kind.clone()) {
         Ok(result) => result,
         Err(error) => {
             return semantic_failure(
@@ -141,7 +96,7 @@ pub(super) fn analyze_statement(
 fn convert_result(
     result: &old::AnalyzeResult,
     metadata: &StatementMetadata,
-    catalog: Option<&CatalogAdapter<'_>>,
+    catalog: Option<&CatalogContext<'_>>,
     row_values: &BTreeMap<Ident, Vec<Ident>>,
     dialect: Dialect,
     read_order: &[Relation],
@@ -153,9 +108,11 @@ fn convert_result(
             if let old::ColumnOrigin::Concrete { table, column } = origin {
                 Some(SourceColumn {
                     relation: catalog
-                        .and_then(|adapter| adapter.entry(table))
+                        .and_then(|catalog| catalog.entry(table))
                         .map_or_else(|| plain_relation(table), |entry| entry.relation),
-                    column: column.clone(),
+                    column: catalog
+                        .and_then(|catalog| catalog.column(table, column))
+                        .unwrap_or_else(|| column.clone()),
                 })
             } else {
                 None
@@ -303,12 +260,12 @@ fn convert_result(
 
 fn canonical_relations(
     table: &old::TableRef,
-    catalog: Option<&CatalogAdapter<'_>>,
+    catalog: Option<&CatalogContext<'_>>,
 ) -> Vec<Relation> {
     let relation = StatementMetadata::relation(table);
     vec![
         catalog
-            .and_then(|adapter| adapter.catalog.lookup(&relation))
+            .and_then(|catalog| catalog.entry(table))
             .map_or(relation, |entry| entry.relation),
     ]
 }
@@ -410,7 +367,7 @@ fn lift_origin(
     origin: &old::ColumnOrigin,
     output_index: usize,
     metadata: &StatementMetadata,
-    catalog: Option<&CatalogAdapter<'_>>,
+    catalog: Option<&CatalogContext<'_>>,
     row_aliases: &[Ident],
     known: &mut Vec<SourceColumn>,
     unresolved: &mut Vec<Unresolved>,
@@ -419,11 +376,13 @@ fn lift_origin(
         old::ColumnOrigin::Concrete { table, column } => {
             let relation = plain_relation(table);
             let relation = catalog
-                .and_then(|adapter| adapter.entry(table))
+                .and_then(|catalog| catalog.entry(table))
                 .map_or(relation, |entry| entry.relation);
             known.push(SourceColumn {
                 relation,
-                column: column.clone(),
+                column: catalog
+                    .and_then(|catalog| catalog.column(table, column))
+                    .unwrap_or_else(|| column.clone()),
             });
         }
         old::ColumnOrigin::Ambiguous { column, candidates } => {

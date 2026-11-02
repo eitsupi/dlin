@@ -1,8 +1,9 @@
 use sqlparser::ast::Statement;
 use sqlparser::parser::{Parser, ParserError};
 
-use super::convert::{CatalogAdapter, analyze_statement};
+use super::convert::analyze_statement;
 use super::{Analysis, Catalog, Dialect, Location, Options, ParseError, ParseErrorKind};
+use crate::catalog::CatalogContext;
 
 /// A reusable SQL analyzer borrowing its optional catalog.
 #[must_use]
@@ -81,14 +82,14 @@ impl ParsedSql {
     /// Parsing uses the dialect passed to [`parse`]; resolution and catalog
     /// matching use the analyzer's dialect.
     pub fn analyze(&self, analyzer: &Analyzer<'_>) -> Analysis {
-        let adapter = analyzer
+        let catalog = analyzer
             .catalog
-            .map(|catalog| CatalogAdapter::new(catalog, analyzer.dialect));
+            .map(|catalog| CatalogContext::new(catalog, analyzer.dialect));
         Analysis {
             statements: self
                 .statements
                 .iter()
-                .map(|statement| analyze_statement(statement, analyzer.dialect, adapter.as_ref()))
+                .map(|statement| analyze_statement(statement, analyzer.dialect, catalog.as_ref()))
                 .collect(),
         }
     }

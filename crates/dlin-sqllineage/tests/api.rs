@@ -561,7 +561,7 @@ fn generic_catalog_matching_follows_column_key_rules() {
         matches!(&unquoted.output.columns[0].lineage, Lineage::Complete(sources)
         if sources.len() == 1
             && sources[0].relation.name.value == "b"
-            && sources[0].column == Ident::unquoted("id"))
+            && sources[0].column == Ident::unquoted("ID"))
     );
     let quoted = analyzer
         .analyze("SELECT \"id\" FROM a CROSS JOIN b")

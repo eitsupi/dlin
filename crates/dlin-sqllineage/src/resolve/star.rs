@@ -13,13 +13,12 @@ use super::mapping::{
     wildcard_mapping,
 };
 
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan};
 use crate::keys::ident_parts_equal;
-use crate::types::{
-    CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
-};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 use crate::{Dialect, Ident};
 
 /// Expand a Star node (qualified or unqualified) into `ColumnMapping`s.
@@ -31,7 +30,7 @@ pub(super) fn expand_star(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
@@ -158,7 +157,7 @@ fn expand_star_binding(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
@@ -205,7 +204,7 @@ fn expand_star_binding(
 
 fn expand_unknown_relation(
     table: TableRef,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mappings: &mut Vec<ColumnMapping>,
 ) {
     if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(&table)) {
@@ -235,7 +234,7 @@ fn apply_star_options(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) {
     if mappings_have_unknown_shape(&mappings[start..]) {
@@ -311,7 +310,7 @@ fn append_unknown_star_options(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) {
     let unknown_sources = mappings[start..].to_vec();

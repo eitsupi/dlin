@@ -1,7 +1,8 @@
-use crate::types::{CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
+use crate::catalog::CatalogContext;
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 
-/// Apply `CatalogProvider` to refine unresolved column origins.
-pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn CatalogProvider) {
+/// Apply `Catalog` to refine unresolved column origins.
+pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &CatalogContext<'_>) {
     for mapping in mappings.iter_mut() {
         for source in &mut mapping.sources {
             if let ColumnOrigin::Ambiguous { column, candidates } = source
@@ -12,6 +13,11 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
                     table: owner,
                     column: column.clone(),
                 };
+            }
+            if let ColumnOrigin::Concrete { table, column } = source
+                && let Some(canonical) = catalog.column(table, column)
+            {
+                *column = canonical;
             }
         }
     }
@@ -47,30 +53,30 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
 #[cfg(test)]
 mod tests {
     use super::apply_catalog;
-    use crate::types::{
-        CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
-    };
+    use crate::catalog::CatalogContext;
+    use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 
     struct Columns;
 
-    impl CatalogProvider for Columns {
-        fn list_columns(&self, table: &TableRef) -> Option<Vec<crate::Ident>> {
-            match table.table.value.as_str() {
-                "t" => Some(vec![
-                    crate::Ident::unquoted("x"),
-                    crate::Ident::unquoted("y"),
-                ]),
-                "u" => Some(vec![crate::Ident::unquoted("p")]),
-                _ => None,
-            }
-        }
-
-        fn resolve_column(
-            &self,
-            _column: &crate::Ident,
-            _candidates: &[TableRef],
-        ) -> Option<TableRef> {
-            None
+    impl crate::Catalog for Columns {
+        fn lookup(&self, relation: &crate::Relation) -> Option<crate::CatalogEntry<'_>> {
+            let names = match relation.name.value.as_str() {
+                "t" => vec!["x", "y"],
+                "u" => vec!["p"],
+                _ => return None,
+            };
+            Some(crate::CatalogEntry {
+                relation: relation.clone(),
+                columns: names
+                    .into_iter()
+                    .map(|name| crate::CatalogColumn {
+                        name: crate::Ident::unquoted(name),
+                        data_type: None,
+                        fields: None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
         }
     }
 
@@ -111,21 +117,30 @@ mod tests {
     #[test]
     fn expanded_star_replaces_the_wildcard_in_place() {
         let mut mappings = vec![named("a"), star("t"), named("b")];
-        apply_catalog(&mut mappings, &Columns);
+        apply_catalog(
+            &mut mappings,
+            &CatalogContext::new(&Columns, crate::Dialect::Generic),
+        );
         assert_eq!(targets(&mappings), ["a", "x", "y", "b"]);
     }
 
     #[test]
     fn several_stars_are_each_expanded_in_place() {
         let mut mappings = vec![star("t"), named("a"), star("u"), named("b"), star("t")];
-        apply_catalog(&mut mappings, &Columns);
+        apply_catalog(
+            &mut mappings,
+            &CatalogContext::new(&Columns, crate::Dialect::Generic),
+        );
         assert_eq!(targets(&mappings), ["x", "y", "a", "p", "b", "x", "y"]);
     }
 
     #[test]
     fn star_without_catalog_columns_is_kept_where_it_was() {
         let mut mappings = vec![named("a"), star("unknown"), star("t"), named("b")];
-        apply_catalog(&mut mappings, &Columns);
+        apply_catalog(
+            &mut mappings,
+            &CatalogContext::new(&Columns, crate::Dialect::Generic),
+        );
         assert_eq!(targets(&mappings), ["a", "*", "x", "y", "b"]);
         assert!(matches!(
             mappings[1].sources.as_slice(),

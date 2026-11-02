@@ -191,7 +191,7 @@ pub(crate) struct AnalyzeOptions {
     /// SQL dialect for parsing.
     pub dialect: Dialect,
     /// Optional catalog for resolving `SELECT *` and unqualified columns.
-    pub catalog: Option<Box<dyn CatalogProvider>>,
+    pub catalog: Option<Box<dyn crate::Catalog>>,
 }
 
 #[cfg(test)]
@@ -303,12 +303,3 @@ impl std::fmt::Display for ParseError {
 
 #[cfg(test)]
 impl std::error::Error for ParseError {}
-
-/// Optional metadata source for resolving `SELECT *` and ambiguous columns.
-pub(crate) trait CatalogProvider {
-    /// Return the column names of a table. Used to expand `SELECT *`.
-    fn list_columns(&self, table: &TableRef) -> Option<Vec<Ident>>;
-    /// Given a column name and candidate tables, return the owning table. This
-    /// is only called with a non-empty candidate slice.
-    fn resolve_column(&self, column: &Ident, candidates: &[TableRef]) -> Option<TableRef>;
-}

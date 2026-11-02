@@ -9,12 +9,11 @@ use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::star::expand_star;
 
 use crate::Ident;
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
-use crate::types::{
-    CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind,
-};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 
 pub(super) fn wildcard_mapping(
     output_table: Option<&TableRef>,
@@ -38,7 +37,7 @@ pub(super) fn expand_virtual_source(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
 ) {
@@ -140,7 +139,7 @@ pub(super) fn resolve_scope_mappings(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Arc<[ColumnMapping]> {
     if let Some(entry) = mapping_cache.entries.get(&scope) {

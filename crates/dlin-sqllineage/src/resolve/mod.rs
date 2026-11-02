@@ -9,18 +9,18 @@ mod topo;
 use arity::{graph_has_unresolved_stars, validate_set_arities};
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
 
+use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::scope::ScopeTree;
 use crate::types::{
-    AnalyzeResult, CatalogProvider, ColumnLineage, ColumnOrigin, SemanticError, StatementType,
-    Warning, WarningKind,
+    AnalyzeResult, ColumnLineage, ColumnOrigin, SemanticError, StatementType, Warning, WarningKind,
 };
 
 /// Resolve `RawGraph` into `AnalyzeResult`.
 #[allow(clippy::if_not_else, clippy::useless_let_if_seq)]
 pub(crate) fn resolve(
     mut graph: RawGraph,
-    catalog: Option<&dyn CatalogProvider>,
+    catalog: Option<&CatalogContext<'_>>,
     mut warnings: Vec<Warning>,
     statement_type: StatementType,
 ) -> Result<AnalyzeResult, SemanticError> {
