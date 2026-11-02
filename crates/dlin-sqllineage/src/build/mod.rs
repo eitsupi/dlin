@@ -40,6 +40,7 @@ impl LineageBuilder {
         mut self,
         stmt: &Statement,
     ) -> Result<(RawGraph, Vec<Warning>, StatementType), BuildError> {
+        self.graph.empty_projection = structural_diagnostics(stmt, self.dialect);
         let st = self.visit_statement(stmt);
         if let Some(error) = self.error {
             return Err(BuildError {
@@ -49,61 +50,6 @@ impl LineageBuilder {
         }
         let final_type = self.inner_statement_type.unwrap_or(st);
         Ok((self.graph, self.warnings, final_type))
-    }
-
-    pub(crate) fn note_empty_projection(&mut self, severity: crate::Severity) {
-        let diagnostic = crate::Diagnostic {
-            severity,
-            kind: crate::DiagnosticKind::EmptyProjection,
-            location: None,
-        };
-        let should_replace = self.graph.empty_projection.as_ref().is_none_or(|current| {
-            current.severity == crate::Severity::Warning && severity == crate::Severity::Error
-        });
-        if should_replace {
-            self.graph.empty_projection = Some(diagnostic);
-        }
-    }
-
-    pub(crate) fn note_select_projection(&mut self, select: &sqlparser::ast::Select) {
-        if select.projection.is_empty() {
-            let severity = if select.flavor == sqlparser::ast::SelectFlavor::FromFirstNoSelect
-                || matches!(
-                    self.dialect,
-                    crate::Dialect::Generic | crate::Dialect::PostgreSql
-                ) {
-                crate::Severity::Warning
-            } else {
-                crate::Severity::Error
-            };
-            self.note_empty_projection(severity);
-        }
-    }
-
-    /// Visit a fragment excluded from value/table lineage, retaining only its
-    /// structural diagnostics. This does not revisit the enclosing statement.
-    pub(crate) fn inspect_diagnostics(&mut self, fragment: &impl sqlparser::ast::Visit) {
-        use sqlparser::ast::{Query, SetExpr, Visitor};
-        use std::ops::ControlFlow;
-        struct Diagnostics<'a>(&'a mut LineageBuilder);
-        impl Visitor for Diagnostics<'_> {
-            type Break = ();
-            fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
-                fn inspect(body: &SetExpr, builder: &mut LineageBuilder) {
-                    match body {
-                        SetExpr::Select(select) => builder.note_select_projection(select),
-                        SetExpr::SetOperation { left, right, .. } => {
-                            inspect(left, builder);
-                            inspect(right, builder);
-                        }
-                        _ => {}
-                    }
-                }
-                inspect(&query.body, self.0);
-                ControlFlow::Continue(())
-            }
-        }
-        let _ = fragment.visit(&mut Diagnostics(self));
     }
 
     /// Record an unsupported construct. Only the first one is kept.
@@ -135,4 +81,66 @@ impl LineageBuilder {
 pub(crate) struct BuildError {
     pub error: SemanticError,
     pub empty_projection: Option<crate::Diagnostic>,
+}
+
+/// Collect structural diagnostics independently of the lineage traversal.
+fn structural_diagnostics(stmt: &Statement, dialect: Dialect) -> Option<crate::Diagnostic> {
+    use sqlparser::ast::{Query, Select, SelectFlavor, SetExpr, Visit, Visitor};
+    use std::ops::ControlFlow;
+
+    struct Diagnostics {
+        dialect: Dialect,
+        empty_projection: Option<crate::Diagnostic>,
+    }
+
+    impl Diagnostics {
+        fn inspect_select(&mut self, select: &Select) {
+            if !select.projection.is_empty() {
+                return;
+            }
+            let severity = if select.flavor == SelectFlavor::FromFirstNoSelect
+                || matches!(self.dialect, Dialect::Generic | Dialect::PostgreSql)
+            {
+                crate::Severity::Warning
+            } else {
+                crate::Severity::Error
+            };
+            if self.empty_projection.as_ref().is_none_or(|current| {
+                current.severity == crate::Severity::Warning && severity == crate::Severity::Error
+            }) {
+                self.empty_projection = Some(crate::Diagnostic {
+                    severity,
+                    kind: crate::DiagnosticKind::EmptyProjection,
+                    location: None,
+                });
+            }
+        }
+
+        fn inspect_body(&mut self, body: &SetExpr) {
+            match body {
+                SetExpr::Select(select) => self.inspect_select(select),
+                SetExpr::SetOperation { left, right, .. } => {
+                    self.inspect_body(left);
+                    self.inspect_body(right);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl Visitor for Diagnostics {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            self.inspect_body(&query.body);
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut diagnostics = Diagnostics {
+        dialect,
+        empty_projection: None,
+    };
+    let _ = stmt.visit(&mut diagnostics);
+    diagnostics.empty_projection
 }

@@ -14,16 +14,6 @@ impl LineageBuilder {
             }
 
             Statement::Insert(insert) => {
-                self.inspect_diagnostics(&insert.table);
-                self.inspect_diagnostics(&insert.assignments);
-                self.inspect_diagnostics(&insert.partitioned);
-                self.inspect_diagnostics(&insert.on);
-                self.inspect_diagnostics(&insert.returning);
-                self.inspect_diagnostics(&insert.output);
-                self.inspect_diagnostics(&insert.settings);
-                self.inspect_diagnostics(&insert.multi_table_into_clauses);
-                self.inspect_diagnostics(&insert.multi_table_when_clauses);
-                self.inspect_diagnostics(&insert.multi_table_else_clause);
                 self.graph.tables.output = Some(Self::table_ref_from_table_object(&insert.table));
                 if let Some(ref source) = insert.source {
                     self.visit_query(source);
@@ -32,20 +22,6 @@ impl LineageBuilder {
             }
 
             Statement::CreateTable(ct) => {
-                self.inspect_diagnostics(&ct.columns);
-                self.inspect_diagnostics(&ct.constraints);
-                self.inspect_diagnostics(&ct.hive_distribution);
-                self.inspect_diagnostics(&ct.hive_formats);
-                self.inspect_diagnostics(&ct.table_options);
-                self.inspect_diagnostics(&ct.version);
-                self.inspect_diagnostics(&ct.primary_key);
-                self.inspect_diagnostics(&ct.order_by);
-                self.inspect_diagnostics(&ct.partition_by);
-                self.inspect_diagnostics(&ct.cluster_by);
-                self.inspect_diagnostics(&ct.clustered_by);
-                self.inspect_diagnostics(&ct.for_values);
-                self.inspect_diagnostics(&ct.distkey);
-                self.inspect_diagnostics(&ct.sortkey);
                 if let Some(ref query) = ct.query {
                     self.graph.tables.output = Some(Self::table_ref_from_object_name(&ct.name));
                     self.visit_query(query);
@@ -56,14 +32,6 @@ impl LineageBuilder {
             }
 
             Statement::Update(update) => {
-                self.inspect_diagnostics(&update.table.relation);
-                self.inspect_diagnostics(&update.returning);
-                self.inspect_diagnostics(&update.output);
-                self.inspect_diagnostics(&update.order_by);
-                self.inspect_diagnostics(&update.limit);
-                for join in &update.table.joins {
-                    self.inspect_diagnostics(&join.join_operator);
-                }
                 if let Some(tref) = Self::table_ref_from_table_factor(&update.table.relation) {
                     self.graph.tables.output = Some(tref);
                 }
@@ -101,11 +69,6 @@ impl LineageBuilder {
             }
 
             Statement::Delete(delete) => {
-                self.inspect_diagnostics(&delete.from);
-                self.inspect_diagnostics(&delete.returning);
-                self.inspect_diagnostics(&delete.output);
-                self.inspect_diagnostics(&delete.order_by);
-                self.inspect_diagnostics(&delete.limit);
                 let from_tables = match &delete.from {
                     ast::FromTable::WithFromKeyword(tables)
                     | ast::FromTable::WithoutKeyword(tables) => tables,
@@ -126,16 +89,12 @@ impl LineageBuilder {
             }
 
             Statement::Merge(merge) => {
-                self.inspect_diagnostics(&merge.table);
-                self.inspect_diagnostics(&merge.on);
-                self.inspect_diagnostics(&merge.output);
                 if let Some(tref) = Self::table_ref_from_table_factor(&merge.table) {
                     self.graph.tables.output = Some(tref);
                 }
                 self.visit_table_factor(&merge.source);
 
                 for clause in &merge.clauses {
-                    self.inspect_diagnostics(&clause.predicate);
                     match &clause.action {
                         MergeAction::Update(upd) => match &upd.kind {
                             ast::MergeUpdateKind::Set(assignments) => {
@@ -338,10 +297,7 @@ impl LineageBuilder {
             | Statement::Use(_)
             | Statement::Vacuum { .. }
             | Statement::WaitFor { .. }
-            | Statement::While { .. } => {
-                self.inspect_diagnostics(stmt);
-                StatementType::Other
-            }
+            | Statement::While { .. } => StatementType::Other,
         }
     }
 
@@ -428,18 +384,8 @@ impl LineageBuilder {
                 }
             }
             ast::Expr::Function(func) => {
-                self.inspect_diagnostics(&func.parameters);
-                self.inspect_diagnostics(&func.filter);
-                self.inspect_diagnostics(&func.within_group);
-                self.inspect_diagnostics(&func.over);
-                if let FunctionArguments::List(list) = &func.args {
-                    self.inspect_diagnostics(&list.clauses);
-                }
                 if let FunctionArguments::List(list) = &func.args {
                     for arg in &list.args {
-                        if let ast::FunctionArg::ExprNamed { name, .. } = arg {
-                            self.inspect_diagnostics(name);
-                        }
                         match arg {
                             ast::FunctionArg::Unnamed(arg_expr)
                             | ast::FunctionArg::Named { arg: arg_expr, .. }
@@ -455,7 +401,7 @@ impl LineageBuilder {
                     self.visit_query(q);
                 }
             }
-            _ => self.inspect_diagnostics(expr),
+            _ => {}
         }
     }
 

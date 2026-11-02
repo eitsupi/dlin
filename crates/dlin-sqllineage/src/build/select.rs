@@ -16,7 +16,6 @@ use crate::{Ident, OutputName};
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
     pub(crate) fn visit_select(&mut self, select: &Select) {
-        self.note_select_projection(select);
         let input_mark = self.graph.tables.inputs.len();
         self.visit_from(&select.from);
         // Bind FROM first, but retain SQL clause order for read spellings:
@@ -28,18 +27,6 @@ impl LineageBuilder {
         } else {
             self.visit_projection(&select.projection);
         }
-        self.inspect_diagnostics(&select.distinct);
-        self.inspect_diagnostics(&select.top);
-        self.inspect_diagnostics(&select.lateral_views);
-        self.inspect_diagnostics(&select.prewhere);
-        self.inspect_diagnostics(&select.connect_by);
-        self.inspect_diagnostics(&select.group_by);
-        self.inspect_diagnostics(&select.cluster_by);
-        self.inspect_diagnostics(&select.distribute_by);
-        self.inspect_diagnostics(&select.sort_by);
-        self.inspect_diagnostics(&select.having);
-        self.inspect_diagnostics(&select.named_window);
-        self.inspect_diagnostics(&select.qualify);
         self.graph.tables.inputs.extend(from_inputs);
         if let Some(selection) = &select.selection {
             self.scan_expr_for_tables(selection);
@@ -244,12 +231,6 @@ impl LineageBuilder {
     /// sides, so an unqualified reference to one of them is not reported as
     /// ambiguous between those relations.
     fn note_join_constraint(&mut self, join: &Join, left: Vec<Ident>, right: Vec<Ident>) {
-        if let JoinOperator::AsOf {
-            match_condition, ..
-        } = &join.join_operator
-        {
-            self.inspect_diagnostics(match_condition);
-        }
         let (constraint, kind) = match &join.join_operator {
             JoinOperator::Join(constraint)
             | JoinOperator::Inner(constraint)
@@ -278,11 +259,7 @@ impl LineageBuilder {
                 MergedColumns::Using(columns.iter().flat_map(Self::object_name_parts).collect())
             }
             JoinConstraint::Natural => MergedColumns::Natural,
-            JoinConstraint::On(expr) => {
-                self.inspect_diagnostics(expr);
-                return;
-            }
-            JoinConstraint::None => return,
+            JoinConstraint::On(_) | JoinConstraint::None => return,
         };
         self.graph.scopes.add_join_merge(
             self.current_scope,
@@ -298,17 +275,7 @@ impl LineageBuilder {
     /// Process a single table factor — register table as input and as scope binding.
     pub(crate) fn visit_table_factor(&mut self, factor: &TableFactor) {
         match factor {
-            TableFactor::Table {
-                name,
-                alias,
-                args,
-                with_hints,
-                version,
-                ..
-            } => {
-                self.inspect_diagnostics(args);
-                self.inspect_diagnostics(with_hints);
-                self.inspect_diagnostics(version);
+            TableFactor::Table { name, alias, .. } => {
                 let table_ref = Self::table_ref_from_object_name(name);
 
                 let is_self_ref = self.recursive_cte_name.as_ref().is_some_and(|name| {
@@ -436,7 +403,6 @@ impl LineageBuilder {
             // would make a reference to its alias resolve to a column that
             // does not exist, so refuse it.
             TableFactor::UnpivotExpr { .. } => {
-                self.inspect_diagnostics(factor);
                 self.reject(SemanticError::UnpivotExpression);
             }
 
@@ -448,7 +414,7 @@ impl LineageBuilder {
             | TableFactor::Unpivot { .. }
             | TableFactor::MatchRecognize { .. }
             | TableFactor::XmlTable { .. }
-            | TableFactor::SemanticView { .. } => self.inspect_diagnostics(factor),
+            | TableFactor::SemanticView { .. } => {}
         }
     }
 }
