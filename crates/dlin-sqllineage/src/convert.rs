@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use sqlparser::ast::{Query, SelectFlavor, SetExpr, Statement, Visit, Visitor};
 use std::ops::ControlFlow;
@@ -16,9 +16,7 @@ use crate::graph::{
     node::RawNode,
     scope::{Binding, ScopeTree},
 };
-use crate::keys::{
-    RelationKey, candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key,
-};
+use crate::keys::{candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key};
 use crate::types::{self as old, SemanticError};
 
 pub(super) fn analyze_statement(
@@ -101,25 +99,6 @@ fn convert_result(
     dialect: Dialect,
     read_order: &[Relation],
 ) -> StatementAnalysis {
-    let source_order: Vec<_> = result
-        .source_order
-        .iter()
-        .filter_map(|origin| {
-            if let old::ColumnOrigin::Concrete { table, column } = origin {
-                Some(SourceColumn {
-                    relation: catalog
-                        .and_then(|catalog| catalog.entry(table))
-                        .map_or_else(|| plain_relation(table), |entry| entry.relation),
-                    column: catalog
-                        .and_then(|catalog| catalog.column(table, column))
-                        .unwrap_or_else(|| column.clone()),
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
-    let reference_positions = first_references(&source_order, dialect);
     let mut columns = Vec::new();
     let mut unexpanded = Vec::new();
     let mut position = Some(0);
@@ -153,8 +132,7 @@ fn convert_result(
                     };
                 }
             }
-            let lineage =
-                normalize_lineage(known, unresolved, dialect, read_order, &reference_positions);
+            let lineage = normalize_lineage(known, unresolved, dialect, read_order);
             let mut relations = Vec::new();
             star_relations(&mapping.sources, &mut relations);
             if relations.is_empty() {
@@ -192,8 +170,7 @@ fn convert_result(
                 &mut unresolved,
             );
         }
-        let lineage =
-            normalize_lineage(known, unresolved, dialect, read_order, &reference_positions);
+        let lineage = normalize_lineage(known, unresolved, dialect, read_order);
         columns.push(OutputColumn {
             ordinal: position,
             name,
@@ -270,49 +247,18 @@ fn canonical_relations(
     ]
 }
 
-/// Position of the first resolved reference to each column, keyed by the
-/// relation's dialect key and the column's exact spelling.
-type FirstReferences = HashMap<(RelationKey, Ident), usize>;
-
-fn first_references(source_order: &[SourceColumn], dialect: Dialect) -> FirstReferences {
-    let mut positions = HashMap::with_capacity(source_order.len());
-    for (index, reference) in source_order.iter().enumerate() {
-        positions
-            .entry((
-                relation_key(&reference.relation, dialect),
-                reference.column.clone(),
-            ))
-            .or_insert(index);
-    }
-    positions
-}
-
 fn normalize_lineage(
     mut known: Vec<SourceColumn>,
     unresolved: Vec<Unresolved>,
     dialect: Dialect,
     read_order: &[Relation],
-    first_references: &FirstReferences,
 ) -> Lineage {
-    // Relation spelling follows FROM order; column spelling follows the first
-    // resolved reference in the statement, independently of which alias
-    // supplied that reference.
+    // Keep the first spelling encountered along this output's contribution
+    // paths. Catalog-resolved sources already carry canonical column names.
     for source in &mut known {
         retain_first_relation_spelling(&mut source.relation, read_order, dialect);
     }
-    known.sort_by_cached_key(|source| {
-        (
-            source_key(source, dialect),
-            first_references
-                .get(&(
-                    relation_key(&source.relation, dialect),
-                    source.column.clone(),
-                ))
-                .copied()
-                .unwrap_or(usize::MAX),
-        )
-    });
-    known.dedup_by(|later, earlier| source_key(later, dialect) == source_key(earlier, dialect));
+    sort_dedup_by_key(&mut known, |source| source_key(source, dialect));
     let mut unique = Vec::new();
     for mut item in unresolved {
         normalize_unresolved(&mut item, read_order, dialect);
