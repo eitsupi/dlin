@@ -680,3 +680,74 @@ fn test_sql_mode_test_warning_absent_in_manifest_mode() {
         "Warning should not appear in manifest mode, got: {stderr}"
     );
 }
+
+#[test]
+fn debug_trace_column_preserves_exact_quoted_output_identity() {
+    for (column, source, ordinal) in [("id", "a", 0), ("ID", "b", 1)] {
+        let output = Command::new(binary_path())
+            .args([
+                "debug",
+                "trace-column",
+                r#"SELECT a AS id, b AS "ID" FROM t"#,
+                "--column",
+                column,
+                "--dialect",
+                "postgresql",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["column"], column);
+        assert_eq!(json["mappings"].as_array().unwrap().len(), 1);
+        assert_eq!(json["mappings"][0]["ordinal"], ordinal);
+        assert_eq!(
+            json["mappings"][0]["lineage"]["Complete"][0]["column"]["value"],
+            source
+        );
+    }
+}
+
+#[test]
+fn debug_trace_column_reports_display_collisions_and_dialect_misses() {
+    for (sql, column, message) in [
+        (
+            r#"SELECT a AS id, b AS "id" FROM t"#,
+            "id",
+            "distinct SQL identifiers share the same display name",
+        ),
+        (
+            r#"SELECT a AS "MiXeD" FROM t"#,
+            "mixed",
+            "no mapping for column 'mixed'",
+        ),
+        (
+            "SELECT a AS Foo, b AS foo FROM t",
+            "Foo",
+            "more than one sqllineage mapping",
+        ),
+    ] {
+        let output = Command::new(binary_path())
+            .args([
+                "debug",
+                "trace-column",
+                sql,
+                "--column",
+                column,
+                "--dialect",
+                "snowflake",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

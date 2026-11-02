@@ -406,3 +406,180 @@ fn analysis_findings_that_are_not_errors_do_not_reject_the_model() {
         None
     );
 }
+
+#[test]
+fn quoted_output_spellings_resolve_exactly_in_each_dialect() {
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        for name in ["MiXeD", "id", "ID"] {
+            let result = analyze(&format!("SELECT a AS \"{name}\" FROM t"), &[name], dialect);
+            assert!(
+                result.errors.is_empty(),
+                "{dialect:?}/{name}: {:?}",
+                result.errors
+            );
+            assert_eq!(result.total_columns, 1);
+            assert_eq!(result.traced_columns, 1);
+            assert_eq!(column_names(&result), [name]);
+            assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
+        }
+    }
+}
+
+#[test]
+fn yaml_names_without_exact_spelling_use_dialect_lookup() {
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        for (alias, requested) in [("MiXeD", "mixed"), ("id", "ID"), ("ID", "id")] {
+            let found = match dialect {
+                DlinDialect::BigQuery => true,
+                DlinDialect::Generic | DlinDialect::Snowflake => alias == "ID",
+                DlinDialect::PostgreSQL => alias == "id",
+                DlinDialect::ClickHouse => false,
+                _ => unreachable!(),
+            };
+            let result = analyze(
+                &format!("SELECT a AS \"{alias}\" FROM t"),
+                &[requested],
+                dialect,
+            );
+            assert_eq!(result.total_columns, 2);
+            assert_eq!(
+                result.traced_columns,
+                if found { 2 } else { 1 },
+                "{dialect:?}/{alias}: {result:?}"
+            );
+            for column in &result.columns {
+                assert_eq!(source_pairs(column), [("t", "a")]);
+            }
+            if found {
+                assert!(result.errors.is_empty());
+            } else {
+                assert_column_error(
+                    &result,
+                    ColumnLineageErrorKind::ColumnNotFound,
+                    requested,
+                    &format!(
+                        "column '{requested}': no sqllineage mapping for output '{requested}'"
+                    ),
+                    None,
+                );
+                assert_eq!(result.errors.len(), 1);
+                assert_eq!(column_names(&result), [alias]);
+            }
+        }
+    }
+}
+
+#[test]
+fn identical_display_names_distinguish_sql_duplicates_from_collisions() {
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        let result = analyze(r#"SELECT a AS id, b AS "id" FROM t"#, &[], dialect);
+        assert_eq!(result.total_columns, 1);
+        assert_eq!(result.traced_columns, 0);
+        let reason = if matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake) {
+            "cannot resolve output 'id' because distinct SQL identifiers share the same display name"
+        } else {
+            "more than one sqllineage mapping matches output 'id'"
+        };
+        assert_column_error(
+            &result,
+            ColumnLineageErrorKind::ColumnAmbiguous,
+            "id",
+            &format!("column 'id': {reason}"),
+            None,
+        );
+    }
+}
+
+#[test]
+fn differently_cased_outputs_resolve_by_sql_identity() {
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        let result = analyze(
+            r#"SELECT a AS id, b AS "ID" FROM t"#,
+            &["ID", "id"],
+            dialect,
+        );
+        assert_eq!(result.total_columns, 2);
+        if matches!(dialect, DlinDialect::PostgreSQL | DlinDialect::ClickHouse) {
+            assert!(result.errors.is_empty(), "{dialect:?}: {:?}", result.errors);
+            assert_eq!(result.traced_columns, 2);
+            assert_eq!(column_names(&result), ["ID", "id"]);
+            // The quoted uppercase output must keep b's lineage, rather than
+            // folding the discovery name back onto the unquoted id output.
+            assert_eq!(source_pairs(&result.columns[0]), [("t", "b")]);
+            assert_eq!(source_pairs(&result.columns[1]), [("t", "a")]);
+        } else {
+            assert_eq!(result.traced_columns, 0);
+            assert_eq!(result.errors.len(), 2);
+            for name in ["ID", "id"] {
+                assert_column_error(
+                    &result,
+                    ColumnLineageErrorKind::ColumnAmbiguous,
+                    name,
+                    &format!(
+                        "column '{name}': more than one sqllineage mapping matches output '{name}'"
+                    ),
+                    None,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unquoted_output_groups_include_every_spelling_of_the_sql_key() {
+    for dialect in [
+        DlinDialect::Generic,
+        DlinDialect::Snowflake,
+        DlinDialect::PostgreSQL,
+        DlinDialect::BigQuery,
+        DlinDialect::ClickHouse,
+    ] {
+        let result = analyze("SELECT a AS Foo, b AS foo FROM t", &[], dialect);
+        assert_eq!(result.total_columns, 2);
+        if dialect == DlinDialect::ClickHouse {
+            assert!(result.errors.is_empty());
+            assert_eq!(result.traced_columns, 2);
+            assert_eq!(column_names(&result), ["Foo", "foo"]);
+            assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
+            assert_eq!(source_pairs(&result.columns[1]), [("t", "b")]);
+        } else {
+            assert_eq!(result.traced_columns, 0);
+            assert_eq!(result.errors.len(), 2);
+            for name in ["Foo", "foo"] {
+                assert_column_error(
+                    &result,
+                    ColumnLineageErrorKind::ColumnAmbiguous,
+                    name,
+                    &format!(
+                        "column '{name}': more than one sqllineage mapping matches output '{name}'"
+                    ),
+                    None,
+                );
+            }
+        }
+    }
+}
