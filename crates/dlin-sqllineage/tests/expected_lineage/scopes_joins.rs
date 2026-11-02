@@ -1,5 +1,5 @@
 use super::support::*;
-use dlin_sqllineage::Dialect;
+use dlin_sqllineage::{Analyzer, Dialect, OutputColumn, OutputName, SourceColumn, Transform};
 
 pub fn cases() -> Vec<Case> {
     let mut cases = vec![
@@ -37,32 +37,32 @@ pub fn cases() -> Vec<Case> {
             "scalar_subquery_value_only",
             "SELECT (SELECT b.amount FROM b WHERE b.id = 1) AS value FROM a",
             &[("value", "b", "amount")],
-        ).known_failure(complete(vec![]), "Scalar subquery value dependencies are dropped instead of tracing the projected column."),
+        ),
         scope(
             "scalar_subquery_and_outer_projection",
             "SELECT a.id, (SELECT b.amount FROM b) AS value FROM a",
             &[("id", "a", "id"), ("value", "b", "amount")],
-        ).known_failure_at(1, complete(vec![]), "Scalar subquery value dependencies are dropped while the outer projection retains its sources."),
+        ),
         scope(
             "correlated_predicate_is_not_value_lineage",
             "SELECT (SELECT b.amount FROM b WHERE b.id = a.id) AS value FROM a",
             &[("value", "b", "amount")],
-        ).known_failure(complete(vec![]), "A correlated scalar subquery loses its projected value source."),
+        ),
         scope(
             "correlated_outer_value_is_a_source",
             "SELECT (SELECT a.amount FROM b WHERE b.id = a.id) AS value FROM a",
             &[("value", "a", "amount")],
-        ).known_failure(complete(vec![]), "A scalar subquery projecting an outer-scope column loses that value dependency."),
+        ),
         scope(
             "inner_alias_shadows_outer_alias",
             "SELECT (SELECT x.amount FROM b x) AS value FROM a x",
             &[("value", "b", "amount")],
-        ).known_failure(complete(vec![]), "A scalar subquery loses the value dependency bound to its shadowing local alias."),
+        ),
         scope(
             "shadowed_alias_does_not_escape_subquery",
             "SELECT x.id, (SELECT x.amount FROM b x) AS value FROM a x",
             &[("id", "a", "id"), ("value", "b", "amount")],
-        ).known_failure_at(1, complete(vec![]), "A scalar subquery loses its local-alias value dependency while the outer alias still resolves."),
+        ),
         scope(
             "cte_used_twice_traces_physical_source",
             "WITH c AS (SELECT id FROM a) SELECT l.id AS left_id, r.id AS right_id FROM c l JOIN c r ON l.id = r.id",
@@ -74,6 +74,26 @@ pub fn cases() -> Vec<Case> {
             &[("left_value", "a", "id"), ("right_value", "b", "amount")],
         ),
     ];
+
+    cases.extend(scalar_value_expectations().into_iter().map(|case| {
+        Case::new(
+            case.name,
+            case.sql,
+            Dialect::Generic,
+            vec![col(0, u("value"), case.sources)],
+        )
+    }));
+    cases.push(Case::new(
+        "exists_projection_keeps_predicate_sources_out",
+        "SELECT EXISTS(SELECT b.amount FROM b WHERE b.id = a.id) AS flag FROM a",
+        Dialect::Generic,
+        vec![col(0, u("flag"), vec![])],
+    ));
+    cases.push(scope(
+        "in_subquery_keeps_only_left_value_source",
+        "SELECT a.id IN (SELECT b.id FROM b WHERE b.amount > 0) AS flag FROM a",
+        &[("flag", "a", "id")],
+    ));
 
     // A merged INNER/FULL key can take values from both sides; LEFT/RIGHT
     // keys take their value from the preserved side.
@@ -272,4 +292,63 @@ fn merged(name: &str, sql: &str, tables: &[&str]) -> Case {
         (relation("b"), vec![u("id"), u("right_value")]),
         (relation("c"), vec![u("id"), u("third_value")]),
     ])
+}
+
+struct ScalarExpectation {
+    name: &'static str,
+    sql: &'static str,
+    sources: Vec<SourceColumn>,
+    transform: Transform,
+}
+
+fn scalar_value_expectations() -> Vec<ScalarExpectation> {
+    [
+        ("scalar_aggregate_value", "SELECT (SELECT max(b.amount) FROM b) AS value FROM a", vec![("b", "amount")], Transform::Aggregation),
+        ("scalar_in_arithmetic", "SELECT 1 + (SELECT b.amount FROM b) AS value FROM a", vec![("b", "amount")], Transform::Expression),
+        ("scalar_and_outer_value_in_arithmetic", "SELECT a.id + (SELECT b.amount FROM b WHERE b.id = a.id) AS value FROM a", vec![("a", "id"), ("b", "amount")], Transform::Expression),
+        ("scalar_aggregate_in_arithmetic", "SELECT 1 + (SELECT max(b.amount) FROM b) AS value FROM a", vec![("b", "amount")], Transform::Aggregation),
+        ("scalar_aggregate_in_function", "SELECT coalesce((SELECT max(b.amount) FROM b), 0) AS value FROM a", vec![("b", "amount")], Transform::Aggregation),
+        ("scalar_source_free_aggregate", "SELECT (SELECT count(*) FROM b) AS value FROM a", vec![], Transform::Aggregation),
+        ("scalar_correlated_outer_value_with_having", "SELECT (SELECT a.amount FROM b WHERE b.id = a.id HAVING max(b.id) > 0) AS value FROM a", vec![("a", "amount")], Transform::Expression),
+        ("scalar_with_cte_projection", "SELECT (WITH c AS (SELECT b.amount AS x FROM b) SELECT x FROM c) AS value FROM a", vec![("b", "amount")], Transform::Expression),
+        ("scalar_set_operation_projection", "SELECT (SELECT b.amount FROM b UNION ALL SELECT a.amount) AS value FROM a", vec![("a", "amount"), ("b", "amount")], Transform::Expression),
+        ("scalar_nested_value", "SELECT (SELECT (SELECT a.amount FROM b) FROM b) AS value FROM a", vec![("a", "amount")], Transform::Expression),
+    ].into_iter().map(|(name, sql, sources, transform)| ScalarExpectation {
+        name, sql, transform,
+        sources: sources.into_iter().map(|(table, column)| source(relation(table), u(column))).collect(),
+    }).collect()
+}
+
+#[test]
+fn scalar_value_sources_and_transforms_follow_projection_paths() {
+    for case in scalar_value_expectations() {
+        let result = Analyzer::new(Dialect::Generic)
+            .analyze(case.sql)
+            .unwrap()
+            .into_single()
+            .unwrap();
+        assert_eq!(
+            result.output.columns,
+            vec![OutputColumn {
+                ordinal: Some(0),
+                name: OutputName::Explicit(u("value")),
+                lineage: complete(case.sources),
+                transform: case.transform,
+            }],
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            result.read,
+            vec![relation("a"), relation("b")],
+            "{}",
+            case.name
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "{}: {:?}",
+            case.name,
+            result.diagnostics
+        );
+    }
 }

@@ -305,10 +305,28 @@ impl LineageBuilder {
             }
 
             Expr::Subquery(query) => {
-                let _sub = self.push_scope(ScopeKind::Subquery);
+                let scope = self.push_scope(ScopeKind::Subquery);
                 self.visit_query(query);
                 self.pop_scope();
-                vec![]
+                let [column] = self.graph.scopes.output_columns(scope) else {
+                    return vec![];
+                };
+                // Keep multi-column and star subqueries outside the scalar
+                // value path. A captured scope binding preserves correlation,
+                // alias shadowing and the projection's inherited transform.
+                if !matches!(
+                    self.graph.nodes[column.node_id],
+                    crate::graph::node::RawNode::Output { .. }
+                ) {
+                    return vec![];
+                }
+                let name = column.name.clone();
+                vec![self.graph.add_ref_with_binding(
+                    name,
+                    None,
+                    self.current_scope,
+                    Some(Binding::DerivedTable(scope)),
+                )]
             }
 
             Expr::InSubquery { expr, subquery, .. } => {
