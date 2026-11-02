@@ -176,6 +176,9 @@ pub(super) fn collect_leaf_origins(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    if let Some(origin) = super::binding::ambiguous_qualified_origin(node_id, graph) {
+        return (vec![origin], false, TransformKind::Direct);
+    }
     if let Some(result) =
         resolve_virtual_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
     {
@@ -697,7 +700,7 @@ fn excluded_matches_source(
     if qualifier.len() == 1
         && relation_from_origin(source).is_some_and(|table| {
             graph.scopes.visible_bindings(scope).iter().any(|(name, binding)| {
-                name.relation_key(graph.dialect) == qualifier[0].relation_key(graph.dialect)
+                name.column_key(graph.dialect) == qualifier[0].column_key(graph.dialect)
                     && matches!(binding, Binding::Table(binding_table) if binding_table == table)
             })
         })

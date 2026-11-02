@@ -53,11 +53,10 @@ pub(crate) enum CandidateKey {
 pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> CandidateKey {
     match candidate {
         Candidate::Relation(relation) => CandidateKey::Relation(relation_key(relation, dialect)),
-        Candidate::Cte(name) => CandidateKey::Cte(name.relation_key(dialect).into_owned()),
-        Candidate::Derived(name) => CandidateKey::Derived(
-            name.as_ref()
-                .map(|id| id.relation_key(dialect).into_owned()),
-        ),
+        Candidate::Cte(name) => CandidateKey::Cte(name.column_key(dialect).into_owned()),
+        Candidate::Derived(name) => {
+            CandidateKey::Derived(name.as_ref().map(|id| id.column_key(dialect).into_owned()))
+        }
     }
 }
 

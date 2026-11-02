@@ -279,7 +279,7 @@ impl LineageBuilder {
                 let table_ref = Self::table_ref_from_object_name(name);
 
                 let is_self_ref = self.recursive_cte_name.as_ref().is_some_and(|name| {
-                    name.relation_key(self.dialect) == table_ref.table.relation_key(self.dialect)
+                    name.column_key(self.dialect) == table_ref.table.column_key(self.dialect)
                 });
 
                 let existing = self
