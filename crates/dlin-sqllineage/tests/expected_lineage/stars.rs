@@ -303,18 +303,297 @@ pub fn cases() -> Vec<Case> {
             .catalog(vec![
                 (relation("a"), vec![u("id"), u("left_value")]),
                 (relation("b"), vec![u("id"), u("right_value")]),
-            ])
-            .merged_star_failure(
+            ]),
+        );
+    }
+    for (name, sql, contributors) in [
+        (
+            "using_chain_left_then_right",
+            "SELECT * FROM a LEFT JOIN b USING (id) RIGHT JOIN c USING (id)",
+            vec!["c"],
+        ),
+        (
+            "using_chain_right_then_full",
+            "SELECT * FROM a RIGHT JOIN b USING (id) FULL JOIN c USING (id)",
+            vec!["b", "c"],
+        ),
+        (
+            "mixed_using_natural_chain",
+            "SELECT * FROM a LEFT JOIN b USING (id) NATURAL JOIN c",
+            vec!["a", "c"],
+        ),
+        (
+            "mixed_natural_using_chain",
+            "SELECT * FROM a NATURAL RIGHT JOIN b LEFT JOIN c USING (id)",
+            vec!["b"],
+        ),
+        (
+            "parenthesized_right_inner_group",
+            "SELECT * FROM a LEFT JOIN (b RIGHT JOIN c USING (id)) USING (id)",
+            vec!["a"],
+        ),
+        (
+            "parenthesized_right_full_group",
+            "SELECT * FROM a FULL JOIN (b RIGHT JOIN c USING (id)) USING (id)",
+            vec!["a", "c"],
+        ),
+        (
+            "parenthesized_right_natural_group",
+            "SELECT * FROM a NATURAL RIGHT JOIN (b NATURAL LEFT JOIN c)",
+            vec!["b"],
+        ),
+    ] {
+        cases.push(
+            Case::new(
+                name,
+                sql,
+                Dialect::Generic,
                 vec![
-                    physical(0, "a", "id"),
+                    col(
+                        0,
+                        u("id"),
+                        contributors
+                            .iter()
+                            .map(|table| source(relation(table), u("id")))
+                            .collect(),
+                    ),
                     physical(1, "a", "left_value"),
-                    physical(2, "b", "id"),
-                    physical(3, "b", "right_value"),
+                    physical(2, "b", "middle_value"),
+                    physical(3, "c", "right_value"),
                 ],
-                vec![duplicate_name(u("id"), vec![0, 2])],
-                "Unqualified stars duplicate USING/NATURAL merged columns instead of expanding one merged output.",
-            ),
+            )
+            .catalog(vec![
+                (relation("a"), vec![u("left_value"), u("id")]),
+                (relation("b"), vec![u("middle_value"), u("id")]),
+                (relation("c"), vec![u("right_value"), u("id")]),
+            ]),
+        );
+    }
+    cases.push(
+        Case::new(
+            "qualified_and_merged_stars",
+            "SELECT a.*, *, b.* FROM a LEFT JOIN b USING (id)",
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "left_value"),
+                physical(1, "a", "id"),
+                physical(2, "a", "id"),
+                physical(3, "a", "left_value"),
+                physical(4, "b", "right_value"),
+                physical(5, "b", "right_value"),
+                physical(6, "b", "id"),
+            ],
+        )
+        .catalog(vec![
+            (relation("a"), vec![u("left_value"), u("id")]),
+            (relation("b"), vec![u("right_value"), u("id")]),
+        ])
+        .diagnostics(vec![
+            duplicate_name(u("id"), vec![1, 2, 6]),
+            duplicate_name(u("left_value"), vec![0, 3]),
+            duplicate_name(u("right_value"), vec![4, 5]),
+        ]),
+    );
+    for (name, join, keys) in [
+        (
+            "using_keys_follow_list_order",
+            "JOIN b USING (second, first)",
+            vec!["second", "first"],
+        ),
+        (
+            "natural_keys_follow_left_order",
+            "NATURAL JOIN b",
+            vec!["first", "second"],
+        ),
+    ] {
+        let mut columns = keys
+            .iter()
+            .enumerate()
+            .map(|(ordinal, key)| {
+                col(
+                    ordinal,
+                    u(key),
+                    vec![source(relation("a"), u(key)), source(relation("b"), u(key))],
+                )
+            })
+            .collect::<Vec<_>>();
+        columns.extend([
+            physical(2, "a", "left_value"),
+            physical(3, "b", "right_value"),
+        ]);
+        cases.push(
+            Case::new(
+                name,
+                &format!("SELECT * FROM a {join}"),
+                Dialect::Generic,
+                columns,
+            )
+            .catalog(vec![
+                (
+                    relation("a"),
+                    vec![u("left_value"), u("first"), u("second")],
+                ),
+                (
+                    relation("b"),
+                    vec![u("second"), u("right_value"), u("first")],
+                ),
+            ]),
+        );
+    }
+    for (name, sql) in [
+        (
+            "merged_star_union_width",
+            "SELECT * FROM a JOIN b USING (id) UNION ALL SELECT id, left_value, 1 AS other FROM a",
+        ),
+        (
+            "derived_merged_star_width",
+            "SELECT * FROM (SELECT * FROM a JOIN b USING (id)) d UNION ALL SELECT id, left_value, 1 AS other FROM a",
+        ),
+    ] {
+        cases.push(
+            Case::new(
+                name,
+                sql,
+                Dialect::Generic,
+                vec![
+                    col(
+                        0,
+                        u("id"),
+                        vec![
+                            source(relation("a"), u("id")),
+                            source(relation("b"), u("id")),
+                        ],
+                    ),
+                    physical(1, "a", "left_value"),
+                    physical(2, "b", "right_value"),
+                ],
+            )
+            .catalog(vec![
+                (relation("a"), vec![u("left_value"), u("id")]),
+                (relation("b"), vec![u("right_value"), u("id")]),
+            ]),
+        );
+    }
+    // The left catalog determines the merged label, even for a RIGHT join.
+    cases.push(
+        Case::new(
+            "merged_key_uses_left_catalog_spelling",
+            "SELECT * FROM a RIGHT JOIN b USING (id)",
+            Dialect::Generic,
+            vec![col(0, q("ID"), vec![source(relation("b"), u("id"))])],
+        )
+        .catalog(vec![
+            (relation("a"), vec![q("ID")]),
+            (relation("b"), vec![u("id")]),
+        ]),
+    );
+    for (name, join) in [
+        ("partial_catalog_using_star", "JOIN b USING (id)"),
+        ("partial_catalog_natural_star", "NATURAL JOIN b"),
+    ] {
+        cases.push(
+            Case::new(
+                name,
+                &format!("SELECT * FROM a {join}"),
+                Dialect::Generic,
+                vec![physical(0, "a", "left_value"), physical(1, "a", "id")],
+            )
+            .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
+            .shape(open_star("b", Some(1)))
+            .unresolved_stars(true),
+        );
+    }
+    cases.push(Case::new("renamed_derived_star_keeps_join_arity",
+        "SELECT * FROM (SELECT * RENAME (a AS b, b AS c) FROM t) d JOIN u USING (b) UNION ALL SELECT b, b, tail FROM u",
+        Dialect::Generic,
+        vec![col(0, u("b"), vec![source(relation("t"), u("b")), source(relation("u"), u("b"))]),
+             col(1, u("c"), vec![source(relation("t"), u("a")), source(relation("u"), u("b"))]),
+             physical(2, "u", "tail")],
+    ).catalog(vec![(relation("t"), vec![u("a"), u("b")]), (relation("u"), vec![u("b"), u("tail")])]));
+    cases.push(Case::new("merged_star_rename_runs_on_whole_output",
+        "SELECT * RENAME (id AS left_value, left_value AS renamed) FROM a JOIN b USING (id) UNION ALL SELECT id, left_value, 1 FROM a",
+        Dialect::Generic,
+        vec![col(0, u("renamed"), vec![source(relation("a"), u("id")), source(relation("b"), u("id"))]),
+             physical(1, "a", "left_value"), physical(2, "b", "right_value")],
+    ).catalog(vec![(relation("a"), vec![u("left_value"), u("id")]), (relation("b"), vec![u("right_value"), u("id")])]));
+    for (name, join) in [
+        ("unknown_using_star_is_not_guessed", "JOIN b USING (id)"),
+        ("unknown_natural_star_is_not_guessed", "NATURAL JOIN b"),
+    ] {
+        cases.push(
+            Case::new(
+                name,
+                &format!("SELECT * FROM a {join}"),
+                Dialect::Generic,
+                vec![],
+            )
+            .shape(Shape::Open {
+                unexpanded: vec![
+                    UnexpandedStar {
+                        relation: Some(relation("a")),
+                        after_ordinal: None,
+                        lineage: Lineage::Partial {
+                            known: vec![],
+                            unresolved: vec![Unresolved::BehindStar {
+                                relation: relation("a"),
+                            }],
+                        },
+                    },
+                    UnexpandedStar {
+                        relation: Some(relation("b")),
+                        after_ordinal: None,
+                        lineage: Lineage::Partial {
+                            known: vec![],
+                            unresolved: vec![Unresolved::BehindStar {
+                                relation: relation("b"),
+                            }],
+                        },
+                    },
+                ],
+            })
+            .unresolved_stars(true),
         );
     }
     cases
+}
+
+#[test]
+fn merged_star_inherits_only_contributing_transforms() {
+    use dlin_sqllineage::{Analyzer, Transform};
+    for (join, expected, tables) in [
+        ("LEFT JOIN", Transform::Aggregation, vec!["a"]),
+        ("RIGHT JOIN", Transform::Direct, vec!["b"]),
+        ("FULL JOIN", Transform::Aggregation, vec!["a", "b"]),
+        ("JOIN", Transform::Aggregation, vec!["a", "b"]),
+    ] {
+        let sql = format!(
+            "SELECT * FROM (SELECT max(value) AS id FROM a) l {join} (SELECT id FROM b) r USING (id)"
+        );
+        let result = Analyzer::new(Dialect::Generic)
+            .analyze(&sql)
+            .unwrap()
+            .into_single()
+            .unwrap();
+        assert!(
+            result.diagnostics.is_empty(),
+            "{sql}: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.output.columns.len(), 1, "{sql}");
+        let column = &result.output.columns[0];
+        assert_eq!(column.transform, expected, "{sql}");
+        assert_eq!(
+            column.lineage,
+            super::support::complete(
+                tables
+                    .into_iter()
+                    .map(|table| source(
+                        relation(table),
+                        u(if table == "a" { "value" } else { "id" })
+                    ))
+                    .collect()
+            ),
+            "{sql}"
+        );
+    }
 }

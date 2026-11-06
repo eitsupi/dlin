@@ -2,6 +2,7 @@ pub(crate) mod analysis;
 mod arity;
 mod binding;
 mod catalog;
+mod join;
 mod lineage;
 mod mapping;
 mod star;

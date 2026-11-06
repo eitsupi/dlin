@@ -16,7 +16,7 @@ use super::mapping::{
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
-use crate::graph::scope::{Binding, OutputPlan};
+use crate::graph::scope::{Binding, JoinMergeKind, OutputPlan};
 use crate::keys::ident_parts_equal;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 use crate::{Dialect, Ident};
@@ -50,7 +50,9 @@ pub(super) fn expand_star(
             transform: TransformKind::Direct,
         }),
         StarTarget::All => {
-            for (_, binding) in effective_bindings(scope, graph) {
+            let mut groups = Vec::new();
+            for (name, binding) in effective_bindings(scope, graph) {
+                let binding_start = mappings.len();
                 expand_star_binding(
                     &binding,
                     graph,
@@ -61,6 +63,35 @@ pub(super) fn expand_star(
                     mappings,
                     visited_scopes,
                 );
+                groups.push((vec![name], mappings[binding_start..].to_vec()));
+            }
+            if !graph.scopes.join_merges(scope).is_empty()
+                && !mappings_have_unknown_shape(&mappings[start..])
+                && let Some(merged) = super::join::merge_join_columns(
+                    groups,
+                    graph.scopes.join_merges(scope),
+                    graph.dialect,
+                    |column| &column.target.column,
+                    |left, right, kind| {
+                        let mut column = left.clone();
+                        match kind {
+                            JoinMergeKind::Left => {}
+                            JoinMergeKind::Right => {
+                                column.sources.clone_from(&right.sources);
+                                column.transform.clone_from(&right.transform);
+                            }
+                            JoinMergeKind::Inner | JoinMergeKind::Full => {
+                                column.sources.extend(right.sources.clone());
+                                column.transform =
+                                    merge_transform(&left.transform, &right.transform);
+                            }
+                        }
+                        column
+                    },
+                )
+            {
+                mappings.truncate(start);
+                mappings.extend(merged);
             }
             for &child in graph.scopes.anonymous_derived(scope) {
                 expand_scope_columns(

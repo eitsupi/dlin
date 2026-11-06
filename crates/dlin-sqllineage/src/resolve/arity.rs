@@ -96,31 +96,7 @@ fn star_arity(
 ) -> Option<usize> {
     let target = resolve_star_target(base, scope, graph);
     let names = match target {
-        StarTarget::All => {
-            let mut names = Vec::new();
-            for (binding_name, binding) in effective_bindings(scope, graph) {
-                let binding_names = binding_column_names(&binding, graph, catalog, active)?;
-                let qualifier = [binding_name];
-                names.extend(apply_name_options(
-                    binding_names,
-                    options,
-                    Some(base),
-                    Some(&qualifier),
-                    graph.dialect,
-                ));
-            }
-            for &child in graph.scopes.anonymous_derived(scope) {
-                let child_names = scope_output_names(child, graph, catalog, active)?;
-                names.extend(apply_name_options(
-                    child_names,
-                    options,
-                    Some(base),
-                    None,
-                    graph.dialect,
-                ));
-            }
-            Some(names)
-        }
+        StarTarget::All => all_star_names(scope, options, base, graph, catalog, active),
         StarTarget::Binding(binding) => binding_column_names(&binding, graph, catalog, active)
             .map(|names| apply_name_options(names, options, Some(base), None, graph.dialect)),
         StarTarget::Unknown(table) => catalog
@@ -129,6 +105,88 @@ fn star_arity(
         StarTarget::FieldPath { .. } | StarTarget::Expr | StarTarget::Ambiguous(_) => None,
     };
     names.map(|names| names.len())
+}
+
+fn all_star_names(
+    scope: usize,
+    options: &StarOptions,
+    base: &StarBase,
+    graph: &RawGraph,
+    catalog: Option<&CatalogContext<'_>>,
+    active: &mut HashSet<usize>,
+) -> Option<Vec<Ident>> {
+    let mut groups = Vec::new();
+    for (binding_name, binding) in effective_bindings(scope, graph) {
+        let names = binding_column_names(&binding, graph, catalog, active)?;
+        groups.push((
+            vec![binding_name.clone()],
+            names
+                .into_iter()
+                .map(|name| (name, vec![binding_name.clone()]))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    let original = groups.clone();
+    let columns = super::join::merge_join_columns(
+        groups,
+        graph.scopes.join_merges(scope),
+        graph.dialect,
+        |column| &column.0,
+        |left, right, kind| {
+            use crate::graph::scope::JoinMergeKind;
+            let qualifiers = match kind {
+                JoinMergeKind::Left => left.1.clone(),
+                JoinMergeKind::Right => right.1.clone(),
+                JoinMergeKind::Inner | JoinMergeKind::Full => {
+                    left.1.iter().chain(&right.1).cloned().collect()
+                }
+            };
+            (left.0.clone(), qualifiers)
+        },
+    );
+    let mut names = if graph.scopes.join_merges(scope).is_empty() || columns.is_none() {
+        original
+            .into_iter()
+            .flat_map(|(qualifier, columns)| {
+                apply_name_options(
+                    columns.into_iter().map(|column| column.0).collect(),
+                    options,
+                    Some(base),
+                    Some(&qualifier),
+                    graph.dialect,
+                )
+            })
+            .collect()
+    } else {
+        let retained = columns?
+            .into_iter()
+            .filter_map(|(name, qualifiers)| {
+                let excluded = qualifiers.iter().any(|qualifier| {
+                    options.exclude.iter().any(|excluded| {
+                        excluded_matches_name_with_context(
+                            excluded,
+                            &name,
+                            Some(base),
+                            Some(std::slice::from_ref(qualifier)),
+                            graph.dialect,
+                        )
+                    })
+                });
+                (!excluded).then_some(name)
+            })
+            .collect();
+        apply_name_options(retained, options, Some(base), None, graph.dialect)
+    };
+    for &child in graph.scopes.anonymous_derived(scope) {
+        names.extend(apply_name_options(
+            scope_output_names(child, graph, catalog, active)?,
+            options,
+            Some(base),
+            None,
+            graph.dialect,
+        ));
+    }
+    Some(names)
 }
 
 pub(super) enum StarTarget {
@@ -185,22 +243,7 @@ fn scope_output_names(
                         let target = resolve_star_target(base, *star_scope, graph);
                         let child_names = match target {
                             StarTarget::All => {
-                                let mut values = Vec::new();
-                                for (binding_name, binding) in
-                                    effective_bindings(*star_scope, graph)
-                                {
-                                    let binding_names =
-                                        binding_column_names(&binding, graph, catalog, active)?;
-                                    let qualifier = [binding_name];
-                                    values.extend(apply_name_options(
-                                        binding_names,
-                                        options,
-                                        Some(base),
-                                        Some(&qualifier),
-                                        graph.dialect,
-                                    ));
-                                }
-                                Some(values)
+                                all_star_names(*star_scope, options, base, graph, catalog, active)
                             }
                             StarTarget::Binding(binding) => binding_column_names(
                                 &binding, graph, catalog, active,
