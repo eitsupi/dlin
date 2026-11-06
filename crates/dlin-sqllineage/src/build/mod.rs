@@ -16,6 +16,8 @@ pub(crate) struct LineageBuilder {
     pub(crate) warnings: Vec<Warning>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
+    /// Model VALUES only while visiting a source with an explicit target list.
+    pub(crate) target_values: bool,
     /// First unsupported construct met while walking the statement. Once set,
     /// the walk stops adding to the graph and `build` reports the error.
     pub(crate) error: Option<SemanticError>,
@@ -32,6 +34,7 @@ impl LineageBuilder {
             warnings: Vec::new(),
             inner_statement_type: None,
             dialect,
+            target_values: false,
             error: None,
         }
     }

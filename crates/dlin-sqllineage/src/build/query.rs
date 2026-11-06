@@ -107,6 +107,8 @@ impl LineageBuilder {
             SetExpr::Query(q) => {
                 self.visit_query(q);
             }
+            SetExpr::Values(values) if self.target_values => self.visit_target_values(values),
+            SetExpr::Table(_) if self.target_values => self.graph.unknown_target_source = true,
             SetExpr::Values(_) | SetExpr::Table(_) => {}
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
@@ -115,6 +117,50 @@ impl LineageBuilder {
                 let st = self.visit_statement(stmt);
                 self.inner_statement_type = Some(st);
             }
+        }
+    }
+
+    fn visit_target_values(&mut self, values: &sqlparser::ast::Values) {
+        let Some(first) = values.rows.first() else {
+            return;
+        };
+        if values.rows.iter().any(|row| row.len() != first.len()) {
+            self.graph.unknown_target_source = true;
+            return;
+        }
+        for index in 0..first.len() {
+            let name = crate::Ident::unquoted(format!("column{}", index + 1));
+            let intrinsic = values
+                .rows
+                .iter()
+                .map(|row| crate::build::expr::determine_edge_kind(&row[index]))
+                .max_by_key(|kind| match kind {
+                    crate::graph::edge::EdgeKind::Direct => 0,
+                    crate::graph::edge::EdgeKind::ViaExpression => 1,
+                    crate::graph::edge::EdgeKind::ViaConditional => 2,
+                    crate::graph::edge::EdgeKind::ViaAggregation => 3,
+                })
+                .unwrap_or(crate::graph::edge::EdgeKind::Direct);
+            let output = self.graph.add_output(name.clone(), intrinsic.clone());
+            self.graph
+                .set_output_name(output, crate::OutputName::Anonymous);
+            for row in &values.rows {
+                let expr = &row[index];
+                let kind = crate::build::expr::determine_edge_kind(expr);
+                let ancestors = self.collect_ancestors(expr);
+                let value = self.graph.add_output(name.clone(), kind.clone());
+                for ancestor in ancestors {
+                    self.graph.add_edge(ancestor, value, kind.clone());
+                }
+                self.graph.add_edge(value, output, intrinsic.clone());
+            }
+            self.graph.scopes.add_output_column(
+                self.current_scope,
+                crate::graph::scope::ScopeColumn {
+                    name,
+                    node_id: output,
+                },
+            );
         }
     }
 }

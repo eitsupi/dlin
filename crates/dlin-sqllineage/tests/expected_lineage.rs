@@ -19,13 +19,16 @@ mod scopes_joins;
 mod stars;
 #[path = "expected_lineage/support.rs"]
 mod support;
+#[path = "expected_lineage/target_columns.rs"]
+mod target_columns;
 
 #[test]
 fn hand_written_lineage_expectations() {
     let cases = identifiers::cases()
         .into_iter()
         .chain(scopes_joins::cases())
-        .chain(stars::cases());
+        .chain(stars::cases())
+        .chain(target_columns::cases());
     let mut names = std::collections::BTreeSet::new();
     let mut failures = Vec::new();
     let mut known_failures = 0;

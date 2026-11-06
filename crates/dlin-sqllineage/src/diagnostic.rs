@@ -72,6 +72,13 @@ pub enum DiagnosticKind {
         /// Number of columns in the right operand.
         right: usize,
     },
+    /// A target column list and its source have different output arities.
+    TargetColumnCountMismatch {
+        /// Number of columns in the target list.
+        target: usize,
+        /// Number of columns in the source output.
+        source: usize,
+    },
     /// A cycle was detected in the lineage graph.
     UnexpectedCycle,
     /// A query has an empty projection list.
@@ -100,6 +107,7 @@ impl DiagnosticKind {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::SetOperationArityMismatch { .. } => "SET_OPERATION_ARITY_MISMATCH",
+            Self::TargetColumnCountMismatch { .. } => "TARGET_COLUMN_COUNT_MISMATCH",
             Self::UnexpectedCycle => "UNEXPECTED_CYCLE",
             Self::EmptyProjection => "EMPTY_PROJECTION",
             Self::DuplicateOutputName { .. } => "DUPLICATE_OUTPUT_NAME",
@@ -118,6 +126,13 @@ mod tests {
             (
                 DiagnosticKind::SetOperationArityMismatch { left: 1, right: 2 },
                 "SET_OPERATION_ARITY_MISMATCH",
+            ),
+            (
+                DiagnosticKind::TargetColumnCountMismatch {
+                    target: 2,
+                    source: 1,
+                },
+                "TARGET_COLUMN_COUNT_MISMATCH",
             ),
             (DiagnosticKind::UnexpectedCycle, "UNEXPECTED_CYCLE"),
             (DiagnosticKind::EmptyProjection, "EMPTY_PROJECTION"),

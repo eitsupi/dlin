@@ -17,6 +17,7 @@ use crate::{
 pub(super) fn assemble(
     mappings: &[ColumnMapping],
     tables: &TableLineage,
+    target_columns: &[Ident],
     warnings: &[Warning],
     kind: &StatementType,
     has_unresolved_stars: bool,
@@ -35,7 +36,10 @@ pub(super) fn assemble(
     let mut columns = Vec::new();
     let mut unexpanded = Vec::new();
     let mut position = Some(0);
-    for mapping in mappings {
+    let exact_width = mappings.iter().all(|mapping| mapping.output_name.is_some());
+    let rename =
+        !target_columns.is_empty() && exact_width && target_columns.len() == mappings.len();
+    for (index, mapping) in mappings.iter().enumerate() {
         let mut known = Vec::new();
         let mut unresolved = Vec::new();
         for origin in &mapping.sources {
@@ -45,7 +49,11 @@ pub(super) fn assemble(
         if let Some(name) = &mapping.output_name {
             columns.push(OutputColumn {
                 ordinal: position,
-                name: name.clone(),
+                name: if rename {
+                    OutputName::Explicit(target_columns[index].clone())
+                } else {
+                    name.clone()
+                },
                 lineage,
                 transform: transform(&mapping.transform),
             });
@@ -79,6 +87,16 @@ pub(super) fn assemble(
             }),
         })
         .collect::<Vec<_>>();
+    if !target_columns.is_empty() && exact_width && target_columns.len() != mappings.len() {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Error,
+            kind: DiagnosticKind::TargetColumnCountMismatch {
+                target: target_columns.len(),
+                source: mappings.len(),
+            },
+            location: None,
+        });
+    }
     let mut names: BTreeMap<String, (Ident, usize, Vec<usize>)> = BTreeMap::new();
     for column in &columns {
         if let OutputName::Explicit(id) | OutputName::Inferred(id) = &column.name {

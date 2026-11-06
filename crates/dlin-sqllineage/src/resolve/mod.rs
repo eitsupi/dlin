@@ -32,6 +32,11 @@ pub(crate) fn resolve(
         return Ok(analysis::assemble(
             &[],
             &graph.tables,
+            if graph.unknown_target_source {
+                &[]
+            } else {
+                &graph.target_columns
+            },
             &warnings,
             statement_type,
             false,
@@ -48,6 +53,11 @@ pub(crate) fn resolve(
         return Ok(analysis::assemble(
             &[],
             &graph.tables,
+            if graph.unknown_target_source {
+                &[]
+            } else {
+                &graph.target_columns
+            },
             &warnings,
             statement_type,
             false,
@@ -92,6 +102,11 @@ pub(crate) fn resolve(
     Ok(analysis::assemble(
         &mappings,
         &graph.tables,
+        if graph.unknown_target_source && mappings.is_empty() {
+            &[]
+        } else {
+            &graph.target_columns
+        },
         &warnings,
         statement_type,
         has_unresolved_stars,
