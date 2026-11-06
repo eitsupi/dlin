@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
+use super::star::excluded_matches_name;
+
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
-use crate::graph::node::{RawNode, StarBase, StarColumnName, StarOptions};
+use crate::graph::node::{RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
 use crate::keys::ident_parts_equal;
 use crate::types::{SemanticError, TableRef};
@@ -96,33 +98,18 @@ fn star_arity(
 ) -> Option<usize> {
     let target = resolve_star_target(base, scope, graph);
     let names = match target {
-        StarTarget::All => {
-            let mut names = Vec::new();
-            for (binding_name, binding) in effective_bindings(scope, graph) {
-                let binding_names = binding_column_names(&binding, graph, catalog, active)?;
-                let qualifier = [binding_name];
-                names.extend(apply_name_options(
-                    binding_names,
+        StarTarget::All => all_star_names(scope, options, base, graph, catalog, active),
+        StarTarget::Binding { name, binding } => {
+            binding_column_names(&binding, graph, catalog, active).map(|names| {
+                apply_name_options(
+                    names,
                     options,
                     Some(base),
-                    Some(&qualifier),
+                    Some(std::slice::from_ref(&name)),
                     graph.dialect,
-                ));
-            }
-            for &child in graph.scopes.anonymous_derived(scope) {
-                let child_names = scope_output_names(child, graph, catalog, active)?;
-                names.extend(apply_name_options(
-                    child_names,
-                    options,
-                    Some(base),
-                    None,
-                    graph.dialect,
-                ));
-            }
-            Some(names)
+                )
+            })
         }
-        StarTarget::Binding(binding) => binding_column_names(&binding, graph, catalog, active)
-            .map(|names| apply_name_options(names, options, Some(base), None, graph.dialect)),
         StarTarget::Unknown(table) => catalog
             .and_then(|catalog| catalog.list_columns(&table))
             .map(|names| apply_name_options(names, options, Some(base), None, graph.dialect)),
@@ -131,10 +118,87 @@ fn star_arity(
     names.map(|names| names.len())
 }
 
+fn all_star_names(
+    scope: usize,
+    options: &StarOptions,
+    base: &StarBase,
+    graph: &RawGraph,
+    catalog: Option<&CatalogContext<'_>>,
+    active: &mut HashSet<usize>,
+) -> Option<Vec<Ident>> {
+    let mut groups = Vec::new();
+    for (binding_name, binding) in effective_bindings(scope, graph) {
+        let names = binding_column_names(&binding, graph, catalog, active)?;
+        groups.push((
+            vec![binding_name.clone()],
+            names
+                .into_iter()
+                .map(|name| (name, vec![binding_name.clone()]))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    let original = groups.clone();
+    let columns = super::join::merge_join_columns(
+        groups,
+        graph.scopes.join_merges(scope),
+        graph.dialect,
+        |column| &column.0,
+        |left, right, _kind| {
+            (
+                left.0.clone(),
+                left.1.iter().chain(&right.1).cloned().collect(),
+            )
+        },
+    );
+    let mut names = if graph.scopes.join_merges(scope).is_empty() || columns.is_none() {
+        original
+            .into_iter()
+            .flat_map(|(qualifier, columns)| {
+                apply_name_options(
+                    columns.into_iter().map(|column| column.0).collect(),
+                    options,
+                    Some(base),
+                    Some(&qualifier),
+                    graph.dialect,
+                )
+            })
+            .collect()
+    } else {
+        let retained = columns?
+            .into_iter()
+            .filter_map(|(name, qualifiers)| {
+                let excluded = qualifiers.iter().any(|qualifier| {
+                    options.exclude.iter().any(|excluded| {
+                        excluded_matches_name(
+                            excluded,
+                            &name,
+                            Some(base),
+                            std::slice::from_ref(qualifier),
+                            graph.dialect,
+                        )
+                    })
+                });
+                (!excluded).then_some(name)
+            })
+            .collect();
+        apply_name_options(retained, options, Some(base), None, graph.dialect)
+    };
+    for &child in graph.scopes.anonymous_derived(scope) {
+        names.extend(apply_name_options(
+            scope_output_names(child, graph, catalog, active)?,
+            options,
+            Some(base),
+            None,
+            graph.dialect,
+        ));
+    }
+    Some(names)
+}
+
 pub(super) enum StarTarget {
     Ambiguous(Vec<crate::Candidate>),
     All,
-    Binding(Binding),
+    Binding { name: Ident, binding: Binding },
     Unknown(TableRef),
     FieldPath { binding: Binding, path: Vec<Ident> },
     Expr,
@@ -185,28 +249,19 @@ fn scope_output_names(
                         let target = resolve_star_target(base, *star_scope, graph);
                         let child_names = match target {
                             StarTarget::All => {
-                                let mut values = Vec::new();
-                                for (binding_name, binding) in
-                                    effective_bindings(*star_scope, graph)
-                                {
-                                    let binding_names =
-                                        binding_column_names(&binding, graph, catalog, active)?;
-                                    let qualifier = [binding_name];
-                                    values.extend(apply_name_options(
-                                        binding_names,
-                                        options,
-                                        Some(base),
-                                        Some(&qualifier),
-                                        graph.dialect,
-                                    ));
-                                }
-                                Some(values)
+                                all_star_names(*star_scope, options, base, graph, catalog, active)
                             }
-                            StarTarget::Binding(binding) => binding_column_names(
+                            StarTarget::Binding { name, binding } => binding_column_names(
                                 &binding, graph, catalog, active,
                             )
                             .map(|names| {
-                                apply_name_options(names, options, Some(base), None, graph.dialect)
+                                apply_name_options(
+                                    names,
+                                    options,
+                                    Some(base),
+                                    Some(std::slice::from_ref(&name)),
+                                    graph.dialect,
+                                )
                             }),
                             StarTarget::Unknown(table) => catalog
                                 .and_then(|catalog| catalog.list_columns(&table))
@@ -246,7 +301,13 @@ fn apply_name_options(
 ) -> Vec<Ident> {
     names.retain(|name| {
         !options.exclude.iter().any(|excluded| {
-            excluded_matches_name_with_context(excluded, name, base, relation_qualifier, dialect)
+            excluded_matches_name(
+                excluded,
+                name,
+                base,
+                relation_qualifier.unwrap_or_default(),
+                dialect,
+            )
         }) && options
             .ilike
             .as_deref()
@@ -261,24 +322,6 @@ fn apply_name_options(
         }
     }
     names
-}
-
-fn excluded_matches_name_with_context(
-    excluded: &StarColumnName,
-    name: &Ident,
-    base: Option<&StarBase>,
-    relation_qualifier: Option<&[Ident]>,
-    dialect: Dialect,
-) -> bool {
-    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
-        return false;
-    };
-    same_column_name(name, excluded_column, dialect)
-        && (qualifier.is_empty()
-            || base.is_some_and(
-                |base| matches!(base, StarBase::Qualified(parts) if ident_parts_equal(parts, qualifier, dialect)),
-            )
-            || relation_qualifier.is_some_and(|parts| ident_parts_equal(parts, qualifier, dialect)))
 }
 
 pub(super) fn same_column_name(left: &Ident, right: &Ident, dialect: Dialect) -> bool {
@@ -311,7 +354,7 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
         StarBase::Unqualified => StarTarget::All,
         StarBase::Expr(_) => StarTarget::Expr,
         StarBase::Qualified(parts) => {
-            let mut best: Option<(usize, Binding)> = None;
+            let mut best: Option<(usize, Ident, Binding)> = None;
             for (name, binding) in graph.scopes.visible_bindings(scope) {
                 let candidates = match &binding {
                     Binding::Table(table) => {
@@ -337,13 +380,13 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
                         }
                     {
                         let matched = candidate.len();
-                        if best.as_ref().is_none_or(|(length, _)| matched > *length) {
-                            best = Some((matched, binding.clone()));
+                        if best.as_ref().is_none_or(|(length, _, _)| matched > *length) {
+                            best = Some((matched, name.clone(), binding.clone()));
                         }
                     }
                 }
             }
-            if let Some((matched, binding)) = best {
+            if let Some((matched, name, binding)) = best {
                 if matched == 1
                     && let Some(candidates) =
                         graph.scopes.ambiguous_binding_candidates(scope, &parts[0])
@@ -351,7 +394,7 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
                     return StarTarget::Ambiguous(candidates);
                 }
                 if matched == parts.len() {
-                    StarTarget::Binding(binding)
+                    StarTarget::Binding { name, binding }
                 } else {
                     StarTarget::FieldPath {
                         binding,

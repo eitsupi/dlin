@@ -509,6 +509,63 @@ fn identical_display_names_distinguish_sql_duplicates_from_collisions() {
 }
 
 #[test]
+fn merged_using_star_production_output_keeps_both_sources_and_other_columns() {
+    let mut manifest = make_test_manifest();
+    let node = manifest.nodes.get_mut("model.proj.orders").unwrap();
+    node.columns.clear();
+    node.compiled_code =
+        Some("SELECT * FROM stg_orders JOIN stg_payments USING (order_id)".to_string());
+
+    let result = compute_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.total_columns, 7);
+    assert_eq!(result.traced_columns, 7);
+    assert_eq!(
+        column_names(&result),
+        [
+            "amount",
+            "customer_id",
+            "order_date",
+            "order_id",
+            "payment_id",
+            "payment_method",
+            "status",
+        ]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[0]),
+        [("stg_payments", "amount")]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[1]),
+        [("stg_orders", "customer_id")]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[2]),
+        [("stg_orders", "order_date")]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[3]),
+        [("stg_orders", "order_id"), ("stg_payments", "order_id")]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[4]),
+        [("stg_payments", "payment_id")]
+    );
+    assert_eq!(
+        source_pairs(&result.columns[5]),
+        [("stg_payments", "payment_method")]
+    );
+    assert_eq!(source_pairs(&result.columns[6]), [("stg_orders", "status")]);
+}
+
+#[test]
 fn differently_cased_outputs_resolve_by_sql_identity() {
     for dialect in [
         DlinDialect::Generic,

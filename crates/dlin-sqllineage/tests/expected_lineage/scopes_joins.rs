@@ -234,25 +234,7 @@ pub fn cases() -> Vec<Case> {
             .catalog(vec![
                 (relation("a"), vec![u("left_value"), u("id")]),
                 (relation("b"), vec![u("right_value"), u("id")]),
-            ])
-            .merged_star_failure(
-                vec![
-                    col(
-                        0,
-                        u("left_value"),
-                        vec![source(relation("a"), u("left_value"))],
-                    ),
-                    col(1, u("id"), vec![source(relation("a"), u("id"))]),
-                    col(
-                        2,
-                        u("right_value"),
-                        vec![source(relation("b"), u("right_value"))],
-                    ),
-                    col(3, u("id"), vec![source(relation("b"), u("id"))]),
-                ],
-                vec![duplicate_name(u("id"), vec![1, 3])],
-                "Star expansion repeats the merged join key instead of emitting it once.",
-            ),
+            ]),
         );
     }
     cases

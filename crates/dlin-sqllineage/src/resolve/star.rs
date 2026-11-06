@@ -16,7 +16,7 @@ use super::mapping::{
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
-use crate::graph::scope::{Binding, OutputPlan};
+use crate::graph::scope::{Binding, JoinMergeKind, OutputPlan};
 use crate::keys::ident_parts_equal;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 use crate::{Dialect, Ident};
@@ -36,6 +36,7 @@ pub(super) fn expand_star(
     visited_scopes: &mut HashSet<usize>,
 ) {
     let start = mappings.len();
+    let mut range_variables = Vec::new();
     match resolve_star_target(base, scope, graph) {
         StarTarget::Ambiguous(candidates) => mappings.push(ColumnMapping {
             output_name: None,
@@ -50,7 +51,9 @@ pub(super) fn expand_star(
             transform: TransformKind::Direct,
         }),
         StarTarget::All => {
-            for (_, binding) in effective_bindings(scope, graph) {
+            let mut groups = Vec::new();
+            for (name, binding) in effective_bindings(scope, graph) {
+                let binding_start = mappings.len();
                 expand_star_binding(
                     &binding,
                     graph,
@@ -61,6 +64,47 @@ pub(super) fn expand_star(
                     mappings,
                     visited_scopes,
                 );
+                let columns = mappings[binding_start..]
+                    .iter()
+                    .map(|column| (column.clone(), vec![name.clone()]))
+                    .collect();
+                range_variables.extend((binding_start..mappings.len()).map(|_| vec![name.clone()]));
+                groups.push((vec![name], columns));
+            }
+            if !graph.scopes.join_merges(scope).is_empty()
+                && !mappings_have_unknown_shape(&mappings[start..])
+                && let Some(merged) = super::join::merge_join_columns(
+                    groups,
+                    graph.scopes.join_merges(scope),
+                    graph.dialect,
+                    |column| &column.0.target.column,
+                    |left, right, kind| {
+                        let mut column = left.0.clone();
+                        match kind {
+                            JoinMergeKind::Left => {}
+                            JoinMergeKind::Right => {
+                                column.sources.clone_from(&right.0.sources);
+                                column.transform.clone_from(&right.0.transform);
+                            }
+                            JoinMergeKind::Inner | JoinMergeKind::Full => {
+                                column.sources.extend(right.0.sources.clone());
+                                column.transform =
+                                    merge_transform(&left.0.transform, &right.0.transform);
+                            }
+                        }
+                        (
+                            column,
+                            left.1.iter().chain(&right.1).cloned().collect::<Vec<_>>(),
+                        )
+                    },
+                )
+            {
+                mappings.truncate(start);
+                range_variables.clear();
+                for (column, qualifiers) in merged {
+                    mappings.push(column);
+                    range_variables.push(qualifiers);
+                }
             }
             for &child in graph.scopes.anonymous_derived(scope) {
                 expand_scope_columns(
@@ -75,16 +119,19 @@ pub(super) fn expand_star(
                 );
             }
         }
-        StarTarget::Binding(binding) => expand_star_binding(
-            &binding,
-            graph,
-            resolved,
-            incoming,
-            catalog,
-            mapping_cache,
-            mappings,
-            visited_scopes,
-        ),
+        StarTarget::Binding { name, binding } => {
+            expand_star_binding(
+                &binding,
+                graph,
+                resolved,
+                incoming,
+                catalog,
+                mapping_cache,
+                mappings,
+                visited_scopes,
+            );
+            range_variables.resize(mappings.len() - start, vec![name]);
+        }
         StarTarget::Unknown(table) => expand_unknown_relation(table, catalog, mappings),
         StarTarget::FieldPath { binding, path } => {
             let mut sources = Vec::new();
@@ -143,9 +190,11 @@ pub(super) fn expand_star(
             });
         }
     }
+    range_variables.resize(mappings.len() - start, Vec::new());
     apply_star_options(
         mappings,
         start,
+        &range_variables,
         base,
         scope,
         options,
@@ -236,6 +285,7 @@ fn expand_unknown_relation(
 fn apply_star_options(
     mappings: &mut Vec<ColumnMapping>,
     start: usize,
+    range_variables: &[Vec<Ident>],
     base: &StarBase,
     scope: usize,
     options: &StarOptions,
@@ -262,10 +312,10 @@ fn apply_star_options(
     }
     let original = mappings.split_off(start);
     let mut retained = Vec::with_capacity(original.len());
-    for mapping in original {
+    for (mapping, qualifiers) in original.into_iter().zip(range_variables) {
         let name = &mapping.target.column;
         let excluded = options.exclude.iter().any(|excluded| {
-            excluded_matches_mapping(excluded, name, &mapping, base, graph.dialect)
+            excluded_matches_name(excluded, name, Some(base), qualifiers, graph.dialect)
         });
         let ilike_mismatch = options
             .ilike
@@ -383,17 +433,19 @@ fn name_passes_star_filters(
     !options
         .exclude
         .iter()
-        .any(|excluded| excluded_matches_name(excluded, name, base, dialect))
+        .any(|excluded| excluded_matches_name(excluded, name, Some(base), &[], dialect))
         && options
             .ilike
             .as_deref()
             .is_none_or(|pattern| ilike_matches(pattern, &name.value))
 }
 
-fn excluded_matches_name(
+/// EXCLUDE resolves range variables, independently of value lineage.
+pub(super) fn excluded_matches_name(
     excluded: &StarColumnName,
     name: &Ident,
-    base: &StarBase,
+    base: Option<&StarBase>,
+    range_variables: &[Ident],
     dialect: Dialect,
 ) -> bool {
     let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
@@ -401,59 +453,14 @@ fn excluded_matches_name(
     };
     same_column_name(name, excluded_column, dialect)
         && (qualifier.is_empty()
-            || matches!(base, StarBase::Qualified(parts) if ident_parts_equal(parts, qualifier, dialect)))
-}
-
-fn excluded_matches_mapping(
-    excluded: &StarColumnName,
-    column: &Ident,
-    mapping: &ColumnMapping,
-    base: &StarBase,
-    dialect: Dialect,
-) -> bool {
-    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
-        return false;
-    };
-    if !same_column_name(column, excluded_column, dialect) {
-        return false;
-    }
-    if qualifier.is_empty() {
-        return true;
-    }
-    if let StarBase::Qualified(parts) = base
-        && ident_parts_equal(parts, qualifier, dialect)
-    {
-        return true;
-    }
-    mapping.sources.iter().any(|source| {
-        let table = match source {
-            ColumnOrigin::Concrete { table, .. }
-            | ColumnOrigin::Wildcard { table }
-            | ColumnOrigin::NamedWildcard { table, .. } => table,
-            ColumnOrigin::Recursive { base_sources } => {
-                return base_sources
-                    .iter()
-                    .any(|source| relation_matches_qualifier(source, qualifier, dialect));
-            }
-            _ => return false,
-        };
-        table_matches_qualifier(table, qualifier, dialect)
-    })
-}
-
-fn relation_matches_qualifier(
-    source: &ColumnOrigin,
-    qualifier: &[Ident],
-    dialect: Dialect,
-) -> bool {
-    match source {
-        ColumnOrigin::Concrete { table, .. }
-        | ColumnOrigin::Wildcard { table }
-        | ColumnOrigin::NamedWildcard { table, .. } => {
-            table_matches_qualifier(table, qualifier, dialect)
-        }
-        _ => false,
-    }
+            || matches!(qualifier, [name] if range_variables.iter().any(|variable| same_column_name(variable, name, dialect)))
+            || base.is_some_and(|base| match base {
+                StarBase::Qualified(parts) => match (parts.as_slice(), qualifier) {
+                    ([left], [right]) => same_column_name(left, right, dialect),
+                    _ => ident_parts_equal(parts, qualifier, dialect),
+                },
+                _ => false,
+            }))
 }
 
 pub(super) fn table_matches_qualifier(
@@ -502,7 +509,8 @@ pub(super) fn star_name_decision(
 ) -> StarNameDecision {
     if options.exclude.iter().any(|excluded| {
         excluded.parts.len() == 1 && same_column_name(name, &excluded.parts[0], dialect)
-            || base.is_some_and(|base| excluded_matches_name(excluded, name, base, dialect))
+            || base
+                .is_some_and(|base| excluded_matches_name(excluded, name, Some(base), &[], dialect))
     }) || options
         .ilike
         .as_deref()
