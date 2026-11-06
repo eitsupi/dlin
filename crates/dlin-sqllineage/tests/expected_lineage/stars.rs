@@ -554,6 +554,143 @@ pub fn cases() -> Vec<Case> {
             .unresolved_stars(true),
         );
     }
+    for (name, sql, expected) in [
+        (
+            "aliased_merged_exclude_matches_union_width",
+            "SELECT * EXCLUDE (x.id) FROM a AS x JOIN b AS y USING (id) UNION ALL SELECT left_value, right_value FROM c",
+            vec![
+                col(
+                    0,
+                    u("left_value"),
+                    vec![
+                        source(relation("a"), u("left_value")),
+                        source(relation("c"), u("left_value")),
+                    ],
+                ),
+                col(
+                    1,
+                    u("right_value"),
+                    vec![
+                        source(relation("b"), u("right_value")),
+                        source(relation("c"), u("right_value")),
+                    ],
+                ),
+            ],
+        ),
+        (
+            "aliased_unmerged_exclude",
+            "SELECT * EXCLUDE (x.id) FROM a AS x",
+            vec![physical(0, "a", "left_value")],
+        ),
+        (
+            "left_merged_exclude_right_alias",
+            "SELECT * EXCLUDE (y.id) FROM a AS x LEFT JOIN b AS y USING (id) UNION ALL SELECT left_value, right_value FROM c",
+            vec![
+                col(
+                    0,
+                    u("left_value"),
+                    vec![
+                        source(relation("a"), u("left_value")),
+                        source(relation("c"), u("left_value")),
+                    ],
+                ),
+                col(
+                    1,
+                    u("right_value"),
+                    vec![
+                        source(relation("b"), u("right_value")),
+                        source(relation("c"), u("right_value")),
+                    ],
+                ),
+            ],
+        ),
+        (
+            "exclude_does_not_match_hidden_physical_name",
+            "SELECT * EXCLUDE (a.id) FROM a AS x",
+            vec![physical(0, "a", "id"), physical(1, "a", "left_value")],
+        ),
+        (
+            "exclude_implicit_binding_follows_column_key",
+            "SELECT * EXCLUDE (A.id) FROM a",
+            vec![physical(0, "a", "left_value")],
+        ),
+        (
+            "exclude_derived_binding_not_base_source",
+            "SELECT * EXCLUDE (x.id) FROM (SELECT id, left_value FROM a) x",
+            vec![physical(0, "a", "left_value")],
+        ),
+    ] {
+        cases.push(
+            Case::new(name, sql, Dialect::Generic, expected).catalog(vec![
+                (relation("a"), vec![u("id"), u("left_value")]),
+                (relation("b"), vec![u("id"), u("right_value")]),
+            ]),
+        );
+    }
+    cases.push(
+        Case::new(
+            "unmerged_exclude_matches_union_width",
+            "SELECT * EXCLUDE (x.id) FROM a AS x UNION ALL SELECT left_value FROM c",
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("left_value"),
+                vec![
+                    source(relation("a"), u("left_value")),
+                    source(relation("c"), u("left_value")),
+                ],
+            )],
+        )
+        .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])]),
+    );
+    cases.push(
+        Case::new(
+            "exclude_self_join_keeps_other_range_variable",
+            "SELECT * EXCLUDE (x.id) FROM a AS x CROSS JOIN a AS y",
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "left_value"),
+                physical(1, "a", "id"),
+                physical(2, "a", "left_value"),
+            ],
+        )
+        .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])])
+        .diagnostics(vec![duplicate_name(u("left_value"), vec![0, 2])]),
+    );
+    cases.push(
+        Case::new(
+            "qualified_star_exclude_uses_column_key",
+            "SELECT x.* EXCLUDE (X.id) FROM a AS x UNION ALL SELECT left_value FROM c",
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("left_value"),
+                vec![
+                    source(relation("a"), u("left_value")),
+                    source(relation("c"), u("left_value")),
+                ],
+            )],
+        )
+        .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])]),
+    );
+    let mut schema_table = relation("a");
+    schema_table.schema = Some(u("s"));
+    cases.push(
+        Case::new(
+            "qualified_relation_star_keeps_implicit_range_variable",
+            "SELECT s.a.* EXCLUDE (a.id) FROM s.a UNION ALL SELECT left_value FROM c",
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("left_value"),
+                vec![
+                    source(schema_table.clone(), u("left_value")),
+                    source(relation("c"), u("left_value")),
+                ],
+            )],
+        )
+        .catalog(vec![(schema_table, vec![u("id"), u("left_value")])]),
+    );
     cases
 }
 
