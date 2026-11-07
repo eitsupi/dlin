@@ -52,7 +52,8 @@ pub(super) enum ValueId {
     Expr(NodeId),
     /// A slot of a CTE or derived table.
     ScopeSlot { scope: ScopeId, index: usize },
-    /// A named column of a CTE or derived table that has no slot of its own.
+    /// A column a USING key takes from a CTE or derived table that lists no
+    /// slot of that name, found the way a direct reference finds it.
     ScopeName { scope: ScopeId, column: Ident },
     /// A slot of a set operation, which combines the operands positionally.
     SetOperation { scope: ScopeId, index: usize },
@@ -186,22 +187,12 @@ pub(super) struct BranchTail {
     pub domain: NameDomain,
 }
 
-/// A name that can be referenced but is not listed as an output column: the
-/// key of a USING join whose sides are both unknown.
-#[derive(Debug, Clone)]
-pub(super) struct SymbolicColumn {
-    pub name: Ident,
-    pub ranges: Rc<[Ident]>,
-    pub value: ValueId,
-}
-
 /// All candidates for a name, built on first use. Names are compared by the
 /// dialect's column key and duplicates are kept.
 #[derive(Debug)]
 pub(super) struct NameIndex {
     dialect: Dialect,
     slots: OnceCell<HashMap<String, Vec<usize>>>,
-    pub symbolic: Vec<SymbolicColumn>,
 }
 
 #[derive(Debug)]
@@ -215,14 +206,16 @@ pub(super) struct OutputModel {
 }
 
 impl OutputModel {
-    fn new(part: Part, unknown_reasons: Vec<&'static str>, dialect: Dialect) -> Self {
-        let listed = part
-            .elements
+    fn new(
+        elements: Vec<OutputElement>,
+        unknown_reasons: Vec<&'static str>,
+        dialect: Dialect,
+    ) -> Self {
+        let listed = elements
             .iter()
             .filter(|element| !matches!(element, OutputElement::Tail(_)))
             .count();
-        let width = if part
-            .elements
+        let width = if elements
             .iter()
             .any(|element| matches!(element, OutputElement::Unknown(_)))
         {
@@ -231,11 +224,10 @@ impl OutputModel {
             Width::Exact(listed)
         };
         Self {
-            elements: part.elements,
+            elements,
             names: NameIndex {
                 dialect,
                 slots: OnceCell::new(),
-                symbolic: part.symbolic,
             },
             width,
             unknown_reasons,
@@ -244,10 +236,7 @@ impl OutputModel {
 
     fn opaque(reason: OpaqueReason, dialect: Dialect) -> Self {
         Self::new(
-            Part {
-                elements: vec![OutputElement::Unknown(UnknownSegment::opaque(reason))],
-                symbolic: Vec::new(),
-            },
+            vec![OutputElement::Unknown(UnknownSegment::opaque(reason))],
             Vec::new(),
             dialect,
         )
@@ -266,16 +255,9 @@ impl OutputModel {
         self.width == Width::Unknown
     }
 
-    /// Whether the output has a column called `name` for certain: it is
-    /// listed or it is a merged key.
+    /// Whether the output lists a column called `name`.
     pub(super) fn publishes(&self, name: &Ident) -> bool {
-        let dialect = self.names.dialect;
         !self.slots_named(name).is_empty()
-            || self
-                .names
-                .symbolic
-                .iter()
-                .any(|symbolic| same_column_name(&symbolic.name, name, dialect))
     }
 
     /// Whether the output may have a column called `name`: it publishes it,
@@ -314,18 +296,11 @@ impl OutputModel {
     }
 }
 
-/// Elements together with the names referenced without being listed.
-#[derive(Debug, Clone, Default)]
-struct Part {
-    elements: Vec<OutputElement>,
-    symbolic: Vec<SymbolicColumn>,
-}
-
 /// The output of the relations a join combined, which can be merged further.
 #[derive(Debug, Clone)]
 struct Group {
     members: Vec<Ident>,
-    part: Part,
+    elements: Vec<OutputElement>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -439,16 +414,15 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
 
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
         let graph = self.graph;
-        let mut part = match graph.scopes.output_plan(scope) {
+        let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
-                let mut part = Part::default();
+                let mut elements = Vec::new();
                 for column in graph.scopes.output_columns(scope) {
                     if matches!(graph.nodes[column.node_id], RawNode::Star { .. }) {
                         let star = self.star(column.node_id);
-                        part.elements.extend(star.elements.iter().cloned());
-                        part.symbolic.extend(star.names.symbolic.iter().cloned());
+                        elements.extend(star.elements.iter().cloned());
                     } else {
-                        part.elements.push(OutputElement::Column(ColumnSlot {
+                        elements.push(OutputElement::Column(ColumnSlot {
                             name: column.name.clone(),
                             output_name: graph
                                 .output_names
@@ -460,7 +434,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         }));
                     }
                 }
-                part
+                elements
             }
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
@@ -471,36 +445,33 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 left, recursive, ..
             } => {
                 let model = self.scope(*left);
-                let mut part = forward_scope(*left, &model, &Rc::from([]), true);
+                let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
                 if !recursive {
                     // This operation's tail covers whatever the left operand
                     // already carried.
-                    part.elements
-                        .retain(|element| !matches!(element, OutputElement::Tail(_)));
-                    part.elements.push(OutputElement::Tail(BranchTail {
+                    elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
+                    elements.push(OutputElement::Tail(BranchTail {
                         scope,
                         ranges: Rc::from([]),
                         domain: NameDomain::default(),
                     }));
                 }
-                part
+                elements
             }
         };
         // Only the output plan is followed, so a flagged operand shows up here
         // while an unrelated nested query does not.
         if graph.scopes.has_unknown_output_width(scope)
-            && !part
-                .elements
+            && !elements
                 .iter()
                 .any(|element| matches!(element, OutputElement::Unknown(_)))
         {
-            part.elements
-                .push(OutputElement::Unknown(UnknownSegment::opaque(
-                    OpaqueReason::UnknownWidth,
-                )));
+            elements.push(OutputElement::Unknown(UnknownSegment::opaque(
+                OpaqueReason::UnknownWidth,
+            )));
         }
         OutputModel::new(
-            part,
+            elements,
             graph.scopes.unknown_output_reasons(scope),
             graph.dialect,
         )
@@ -514,11 +485,8 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         scope: ScopeId,
     ) -> OutputModel {
         let graph = self.graph;
-        let opaque = |reason| Part {
-            elements: vec![OutputElement::Unknown(UnknownSegment::opaque(reason))],
-            symbolic: Vec::new(),
-        };
-        let part = match resolve_star_target(base, scope, graph) {
+        let opaque = |reason| vec![OutputElement::Unknown(UnknownSegment::opaque(reason))];
+        let elements = match resolve_star_target(base, scope, graph) {
             StarTarget::All => self.all_bindings(scope),
             StarTarget::Binding { name, binding } => self.binding_part(&binding, &Rc::from([name])),
             StarTarget::Unknown(table) => self.relation_part(&Rc::new(table), &Rc::from([])),
@@ -527,7 +495,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
         OutputModel::new(
-            apply_options(base, options, part, graph.dialect),
+            apply_options(base, options, elements, graph.dialect),
             Vec::new(),
             graph.dialect,
         )
@@ -535,60 +503,56 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
 
     /// An unqualified star: every relation of the FROM clause with USING and
     /// NATURAL joins folded, followed by the anonymous derived tables.
-    fn all_bindings(&mut self, scope: ScopeId) -> Part {
+    fn all_bindings(&mut self, scope: ScopeId) -> Vec<OutputElement> {
         let graph = self.graph;
         let mut groups = Vec::new();
         for (name, binding) in effective_bindings(scope, graph) {
-            let part = self.binding_part(&binding, &Rc::from([name.clone()]));
+            let elements = self.binding_part(&binding, &Rc::from([name.clone()]));
             groups.push(Group {
                 members: vec![name],
-                part,
+                elements,
             });
         }
-        let mut part = fold_join_columns(groups, graph.scopes.join_merges(scope), graph.dialect);
+        let mut elements =
+            fold_join_columns(groups, graph.scopes.join_merges(scope), graph.dialect);
         for &child in graph.scopes.anonymous_derived(scope) {
             let model = self.scope(child);
-            let child_part = forward_scope(child, &model, &Rc::from([]), false);
-            part.elements.extend(child_part.elements);
-            part.symbolic.extend(child_part.symbolic);
+            elements.extend(forward_scope(child, &model, &Rc::from([]), false));
         }
-        part
+        elements
     }
 
-    fn binding_part(&mut self, binding: &Binding, ranges: &Rc<[Ident]>) -> Part {
+    fn binding_part(&mut self, binding: &Binding, ranges: &Rc<[Ident]>) -> Vec<OutputElement> {
         match binding {
             Binding::Table(table) => self.relation_part(&Rc::new(table.clone()), ranges),
             Binding::Cte(child) | Binding::DerivedTable(child) => {
                 let model = self.scope(*child);
                 forward_scope(*child, &model, ranges, false)
             }
-            Binding::VirtualSource(source) => Part {
-                elements: self
-                    .graph
-                    .scopes
-                    .virtual_source(*source)
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(index, column)| {
-                        OutputElement::Column(ColumnSlot {
-                            name: column.name.clone(),
-                            output_name: OutputName::Explicit(column.name.clone()),
-                            ranges: ranges.clone(),
-                            value: ValueId::VirtualColumn {
-                                source: *source,
-                                index,
-                            },
-                        })
+            Binding::VirtualSource(source) => self
+                .graph
+                .scopes
+                .virtual_source(*source)
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    OutputElement::Column(ColumnSlot {
+                        name: column.name.clone(),
+                        output_name: OutputName::Explicit(column.name.clone()),
+                        ranges: ranges.clone(),
+                        value: ValueId::VirtualColumn {
+                            source: *source,
+                            index,
+                        },
                     })
-                    .collect(),
-                symbolic: Vec::new(),
-            },
+                })
+                .collect(),
         }
     }
 
-    fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[Ident]>) -> Part {
-        let elements = match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
+    fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[Ident]>) -> Vec<OutputElement> {
+        match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
             Some(columns) => columns
                 .into_iter()
                 .map(|column| {
@@ -608,10 +572,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 ranges: ranges.clone(),
                 domain: NameDomain::default(),
             })],
-        };
-        Part {
-            elements,
-            symbolic: Vec::new(),
         }
     }
 }
@@ -623,8 +583,8 @@ fn forward_scope(
     model: &OutputModel,
     ranges: &Rc<[Ident]>,
     set_operation: bool,
-) -> Part {
-    let elements = model
+) -> Vec<OutputElement> {
+    model
         .elements
         .iter()
         .enumerate()
@@ -650,21 +610,7 @@ fn forward_scope(
                 domain: tail.domain.clone(),
             }),
         })
-        .collect();
-    let symbolic = model
-        .names
-        .symbolic
-        .iter()
-        .map(|symbolic| SymbolicColumn {
-            name: symbolic.name.clone(),
-            ranges: ranges.clone(),
-            value: ValueId::ScopeName {
-                scope,
-                column: symbolic.name.clone(),
-            },
-        })
-        .collect();
-    Part { elements, symbolic }
+        .collect()
 }
 
 fn union_ranges(left: &[Ident], right: &[Ident]) -> Rc<[Ident]> {
@@ -674,7 +620,11 @@ fn union_ranges(left: &[Ident], right: &[Ident]) -> Rc<[Ident]> {
 /// Fold USING and NATURAL joins in the order they were written. A shape the
 /// fold cannot make sense of (a missing or ambiguous key, relations that
 /// share a name) leaves every relation's columns as they are.
-fn fold_join_columns(groups: Vec<Group>, merges: &[JoinMerge], dialect: Dialect) -> Part {
+fn fold_join_columns(
+    groups: Vec<Group>,
+    merges: &[JoinMerge],
+    dialect: Dialect,
+) -> Vec<OutputElement> {
     if merges.is_empty() {
         return concat_groups(groups);
     }
@@ -682,29 +632,25 @@ fn fold_join_columns(groups: Vec<Group>, merges: &[JoinMerge], dialect: Dialect)
     fold_groups(groups, merges, dialect).map_or_else(|| concat_groups(original), concat_groups)
 }
 
-fn concat_groups(groups: Vec<Group>) -> Part {
-    let mut result = Part::default();
-    for group in groups {
-        result.elements.extend(group.part.elements);
-        result.symbolic.extend(group.part.symbolic);
-    }
-    result
+fn concat_groups(groups: Vec<Group>) -> Vec<OutputElement> {
+    groups
+        .into_iter()
+        .flat_map(|group| group.elements)
+        .collect()
 }
 
 /// Where a USING key sits on one side of a join.
 #[derive(Clone, Copy)]
 enum KeyAt {
     Slot(usize),
-    Symbolic(usize),
     /// No column is listed, but unknown segments may publish the key.
     Unlisted,
 }
 
 /// Locate the column a USING key names on one side. A key matching several
 /// columns, or none that could exist, makes the join unfoldable.
-fn find_key(part: &Part, key: &Ident, dialect: Dialect) -> Option<KeyAt> {
-    let slots: Vec<usize> = part
-        .elements
+fn find_key(elements: &[OutputElement], key: &Ident, dialect: Dialect) -> Option<KeyAt> {
+    let slots: Vec<usize> = elements
         .iter()
         .enumerate()
         .filter_map(|(index, element)| {
@@ -712,42 +658,39 @@ fn find_key(part: &Part, key: &Ident, dialect: Dialect) -> Option<KeyAt> {
                 .then_some(index)
         })
         .collect();
-    let symbolic: Vec<usize> = part
-        .symbolic
-        .iter()
-        .enumerate()
-        .filter_map(|(index, symbolic)| {
-            same_column_name(&symbolic.name, key, dialect).then_some(index)
-        })
-        .collect();
-    match (slots.as_slice(), symbolic.as_slice()) {
-        ([index], []) => Some(KeyAt::Slot(*index)),
-        ([], [index]) => Some(KeyAt::Symbolic(*index)),
-        ([], []) => (!unknown_publishers(&part.elements, key, dialect)
-            .0
-            .is_empty())
-        .then_some(KeyAt::Unlisted),
+    match slots.as_slice() {
+        [index] => Some(KeyAt::Slot(*index)),
+        [] => (!unknown_publishers(elements, key, dialect).0.is_empty()).then_some(KeyAt::Unlisted),
         _ => None,
     }
 }
 
-/// The value and range variables a side contributes to a merged key. Unknown
-/// segments that may publish the key stop doing so: the merged column
-/// replaces it.
-fn key_contribution(
-    part: &mut Part,
+/// What one side contributes to a merged key.
+struct KeySide {
+    value: ValueId,
+    ranges: Rc<[Ident]>,
+    /// The name of the side's listed column, if it lists one.
+    names: Option<(Ident, OutputName)>,
+}
+
+/// Take the key out of one side. Unknown segments that may publish the key
+/// stop doing so: the merged column replaces it.
+fn take_key(
+    elements: &mut Vec<OutputElement>,
     at: KeyAt,
     key: &Ident,
     dialect: Dialect,
-) -> (ValueId, Rc<[Ident]>) {
+) -> KeySide {
     match at {
-        KeyAt::Slot(index) => match &part.elements[index] {
-            OutputElement::Column(slot) => (slot.value.clone(), slot.ranges.clone()),
-            _ => unreachable!("a key slot is a column"),
-        },
-        KeyAt::Symbolic(index) => {
-            let symbolic = &part.symbolic[index];
-            (symbolic.value.clone(), symbolic.ranges.clone())
+        KeyAt::Slot(index) => {
+            let OutputElement::Column(slot) = elements.remove(index) else {
+                unreachable!("a key slot is a column");
+            };
+            KeySide {
+                value: slot.value,
+                ranges: slot.ranges,
+                names: Some((slot.name, slot.output_name)),
+            }
         }
         // The key is guaranteed to exist on every joined relation, so a
         // physical relation contributes the column itself and a CTE or
@@ -757,7 +700,7 @@ fn key_contribution(
             let mut values: Vec<ValueId> = Vec::new();
             let mut opaque = Vec::new();
             let mut ranges: Vec<Ident> = Vec::new();
-            for element in &mut part.elements {
+            for element in elements.iter_mut() {
                 let OutputElement::Unknown(segment) = element else {
                     continue;
                 };
@@ -794,7 +737,11 @@ fn key_contribution(
                 .into_iter()
                 .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
                 .expect("an unlisted key has a publisher");
-            (value, ranges.into())
+            KeySide {
+                value,
+                ranges: ranges.into(),
+                names: None,
+            }
         }
     }
 }
@@ -841,8 +788,8 @@ fn fold_groups(
             .flat_map(|&index| groups[index].members.clone())
             .collect();
         let first = *left.iter().chain(&right).min()?;
-        let mut left_part = take_parts(&mut groups, &left);
-        let mut right_part = take_parts(&mut groups, &right);
+        let mut left_elements = take_elements(&mut groups, &left);
+        let mut right_elements = take_elements(&mut groups, &right);
         let mut position = 0;
         groups.retain(|_| {
             let keep = !left.contains(&position) && !right.contains(&position);
@@ -854,12 +801,11 @@ fn fold_groups(
             MergedColumns::Using(names) => names.clone(),
             // Only listed columns establish a shared name. Unknown segments
             // may publish more, but guessing which would invent columns.
-            MergedColumns::Natural => left_part
-                .elements
+            MergedColumns::Natural => left_elements
                 .iter()
                 .filter_map(|element| match element {
                     OutputElement::Column(slot)
-                        if right_part.elements.iter().any(|other| {
+                        if right_elements.iter().any(|other| {
                             matches!(other, OutputElement::Column(other)
                                 if same_column_name(&other.name, &slot.name, dialect))
                         }) =>
@@ -871,106 +817,62 @@ fn fold_groups(
                 .collect(),
         };
 
+        // Every key is a column of the merged output, whatever the sides
+        // list: USING guarantees it exists. The keys lead, in the order they
+        // were written.
         let mut output = Vec::new();
         let mut selected_keys = HashSet::new();
-        let mut symbolic = Vec::new();
         for key in keys {
-            let left_at = find_key(&left_part, &key, dialect)?;
-            let right_at = find_key(&right_part, &key, dialect)?;
+            let left_at = find_key(&left_elements, &key, dialect)?;
+            let right_at = find_key(&right_elements, &key, dialect)?;
             if !selected_keys.insert(key.column_key(dialect).into_owned()) {
                 return None;
             }
-            let (left_value, left_ranges) =
-                key_contribution(&mut left_part, left_at, &key, dialect);
-            let (right_value, right_ranges) =
-                key_contribution(&mut right_part, right_at, &key, dialect);
-            let ranges = union_ranges(&left_ranges, &right_ranges);
+            let left_side = take_key(&mut left_elements, left_at, &key, dialect);
+            let right_side = take_key(&mut right_elements, right_at, &key, dialect);
+            let ranges = union_ranges(&left_side.ranges, &right_side.ranges);
             // An outer join takes the value from the preserved side; an inner
             // or full join may take it from either.
             let value = match merge.kind {
-                JoinMergeKind::Left => left_value,
-                JoinMergeKind::Right => right_value,
+                JoinMergeKind::Left => left_side.value,
+                JoinMergeKind::Right => right_side.value,
                 JoinMergeKind::Inner | JoinMergeKind::Full => {
-                    ValueId::Merged(Box::new(left_value), Box::new(right_value))
+                    ValueId::Merged(Box::new(left_side.value), Box::new(right_side.value))
                 }
             };
-            match (left_at, right_at) {
-                (KeyAt::Slot(left_index), KeyAt::Slot(right_index)) => {
-                    // The merged column leads the output and takes the left
-                    // column's names.
-                    let OutputElement::Column(left_slot) = left_part.elements.remove(left_index)
-                    else {
-                        unreachable!("a key slot is a column");
-                    };
-                    right_part.elements.remove(right_index);
-                    output.push(OutputElement::Column(ColumnSlot {
-                        name: left_slot.name,
-                        output_name: left_slot.output_name,
-                        ranges,
-                        value,
-                    }));
-                }
-                // Only one side lists the column, so it stays where it is and
-                // only gains the other side's range variables and value.
-                (KeyAt::Slot(index), other) => {
-                    retarget_slot(&mut left_part, index, ranges, value);
-                    drop_symbolic(&mut right_part, other);
-                }
-                (other, KeyAt::Slot(index)) => {
-                    retarget_slot(&mut right_part, index, ranges, value);
-                    drop_symbolic(&mut left_part, other);
-                }
-                (left_other, right_other) => {
-                    drop_symbolic(&mut left_part, left_other);
-                    drop_symbolic(&mut right_part, right_other);
-                    symbolic.push(SymbolicColumn {
-                        name: key,
-                        ranges,
-                        value,
-                    });
-                }
-            }
+            // The names come from the left column, else from the right one,
+            // else from the USING list.
+            let (name, output_name) = left_side
+                .names
+                .or(right_side.names)
+                .unwrap_or_else(|| (key.clone(), OutputName::Explicit(key.clone())));
+            output.push(OutputElement::Column(ColumnSlot {
+                name,
+                output_name,
+                ranges,
+                value,
+            }));
         }
-        output.extend(left_part.elements);
-        output.extend(right_part.elements);
-        symbolic.extend(left_part.symbolic);
-        symbolic.extend(right_part.symbolic);
+        output.extend(left_elements);
+        output.extend(right_elements);
         groups.insert(
             first,
             Group {
                 members,
-                part: Part {
-                    elements: output,
-                    symbolic,
-                },
+                elements: output,
             },
         );
     }
     Some(groups)
 }
 
-/// Move the contents of the groups at `indexes` into one part.
-fn take_parts(groups: &mut [Group], indexes: &[usize]) -> Part {
-    let mut part = Part::default();
+/// Move the elements of the groups at `indexes` into one list.
+fn take_elements(groups: &mut [Group], indexes: &[usize]) -> Vec<OutputElement> {
+    let mut elements = Vec::new();
     for &index in indexes {
-        let group = &mut groups[index];
-        part.elements.append(&mut group.part.elements);
-        part.symbolic.append(&mut group.part.symbolic);
+        elements.append(&mut groups[index].elements);
     }
-    part
-}
-
-fn retarget_slot(part: &mut Part, index: usize, ranges: Rc<[Ident]>, value: ValueId) {
-    if let OutputElement::Column(slot) = &mut part.elements[index] {
-        slot.ranges = ranges;
-        slot.value = value;
-    }
-}
-
-fn drop_symbolic(part: &mut Part, at: KeyAt) {
-    if let KeyAt::Symbolic(index) = at {
-        part.symbolic.remove(index);
-    }
+    elements
 }
 
 /// The providers and range variables of the unknown segments that may publish
@@ -997,7 +899,12 @@ fn unknown_publishers(
 /// current names. Columns that are not listed can only be restricted: their
 /// domain records the filters, and a REPLACE or RENAME that names one makes it
 /// an explicit column of its own.
-fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Dialect) -> Part {
+fn apply_options(
+    base: &StarBase,
+    options: &StarOptions,
+    elements: Vec<OutputElement>,
+    dialect: Dialect,
+) -> Vec<OutputElement> {
     let admits = |name: &Ident, ranges: &[Ident]| {
         !options
             .exclude
@@ -1015,8 +922,7 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
             ilike: options.ilike.clone(),
         })
     });
-    let mut elements: Vec<OutputElement> = part
-        .elements
+    let mut elements: Vec<OutputElement> = elements
         .into_iter()
         .filter_map(|element| match element {
             OutputElement::Column(slot) => {
@@ -1041,38 +947,24 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
             }
         })
         .collect();
-    let mut symbolic: Vec<SymbolicColumn> = part
-        .symbolic
-        .into_iter()
-        .filter(|symbolic| admits(&symbolic.name, &symbolic.ranges))
-        .collect();
 
     for replacement in &options.replace {
         if let Some(slot) = first_slot_named(&mut elements, &replacement.column, dialect) {
             slot.value = ValueId::Expr(replacement.node_id);
             continue;
         }
-        let ranges = if let Some(position) = symbolic
-            .iter()
-            .position(|symbolic| same_column_name(&symbolic.name, &replacement.column, dialect))
-        {
-            symbolic.remove(position).ranges
-        } else {
-            let (providers, mut ranges) =
-                unknown_publishers(&elements, &replacement.column, dialect);
-            let tails = tail_publishers(&elements, &replacement.column, dialect);
-            if providers.is_empty() && tails.is_empty() {
-                continue;
-            }
-            // The replacement stands for the tail's column of that name.
-            retire_tail_name(&mut elements, &replacement.column, dialect);
-            ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
-            ranges.into()
-        };
+        let (providers, mut ranges) = unknown_publishers(&elements, &replacement.column, dialect);
+        let tails = tail_publishers(&elements, &replacement.column, dialect);
+        if providers.is_empty() && tails.is_empty() {
+            continue;
+        }
+        // The replacement stands for the tail's column of that name.
+        retire_tail_name(&mut elements, &replacement.column, dialect);
+        ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
         elements.push(OutputElement::Column(ColumnSlot {
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
-            ranges,
+            ranges: ranges.into(),
             value: ValueId::Expr(replacement.node_id),
         }));
     }
@@ -1083,57 +975,47 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
             slot.output_name = OutputName::Explicit(new.clone());
             continue;
         }
-        let (ranges, value) = if let Some(position) = symbolic
-            .iter()
-            .position(|symbolic| same_column_name(&symbolic.name, old, dialect))
-        {
-            let symbolic = symbolic.remove(position);
-            (symbolic.ranges, symbolic.value)
-        } else {
-            let (providers, mut ranges) = unknown_publishers(&elements, old, dialect);
-            let tails = tail_publishers(&elements, old, dialect);
-            if providers.is_empty() && tails.is_empty() {
-                continue;
+        let (providers, mut ranges) = unknown_publishers(&elements, old, dialect);
+        let tails = tail_publishers(&elements, old, dialect);
+        if providers.is_empty() && tails.is_empty() {
+            continue;
+        }
+        for element in &mut elements {
+            if let OutputElement::Unknown(segment) = element
+                && segment.domain.admits(old, dialect)
+            {
+                segment.domain.removed.push(old.clone());
             }
-            for element in &mut elements {
-                if let OutputElement::Unknown(segment) = element
-                    && segment.domain.admits(old, dialect)
-                {
-                    segment.domain.removed.push(old.clone());
-                }
-            }
-            retire_tail_name(&mut elements, old, dialect);
-            // The renamed column carries what every publisher of the old
-            // name contributes: the unknown segments and the set-operation
-            // tails.
-            let mut values = Vec::new();
-            if !providers.is_empty() {
-                values.push(ValueId::Named {
-                    providers,
-                    column: old.clone(),
-                });
-            }
-            for (scope, tail_ranges) in tails {
-                ranges.extend(tail_ranges.iter().cloned());
-                values.push(ValueId::Tail {
-                    scope,
-                    column: old.clone(),
-                });
-            }
-            let value = values
-                .into_iter()
-                .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-                .expect("a renamed column has a publisher");
-            (ranges.into(), value)
-        };
+        }
+        retire_tail_name(&mut elements, old, dialect);
+        // The renamed column carries what every publisher of the old name
+        // contributes: the unknown segments and the set-operation tails.
+        let mut values = Vec::new();
+        if !providers.is_empty() {
+            values.push(ValueId::Named {
+                providers,
+                column: old.clone(),
+            });
+        }
+        for (scope, tail_ranges) in tails {
+            ranges.extend(tail_ranges.iter().cloned());
+            values.push(ValueId::Tail {
+                scope,
+                column: old.clone(),
+            });
+        }
+        let value = values
+            .into_iter()
+            .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
+            .expect("a renamed column has a publisher");
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
-            ranges,
+            ranges: ranges.into(),
             value,
         }));
     }
-    Part { elements, symbolic }
+    elements
 }
 
 /// The set-operation tails that may publish `name`, with their range variables.
@@ -1357,15 +1239,15 @@ mod tests {
             "SELECT * FROM a JOIN b USING (id)",
             &[("b", vec!["id", "y"])],
         );
-        // The listed column keeps its position. An inner join takes the key
-        // from both sides, and the unknown relation supplies it as a column.
-        assert_eq!(layout(&model), ["?", "id", "y"]);
+        // The key leads. An inner join takes it from both sides, and the
+        // unknown relation supplies it as a column.
+        assert_eq!(layout(&model), ["id", "?", "y"]);
         assert_eq!(ranges(&model, "id"), ["a", "b"]);
-        let OutputElement::Column(slot) = &model.elements[1] else {
+        let OutputElement::Column(slot) = &model.elements[0] else {
             unreachable!();
         };
         assert!(matches!(slot.value, ValueId::Merged(..)));
-        let OutputElement::Unknown(segment) = &model.elements[0] else {
+        let OutputElement::Unknown(segment) = &model.elements[1] else {
             unreachable!();
         };
         assert!(
@@ -1378,7 +1260,6 @@ mod tests {
                 .domain
                 .admits(&Ident::unquoted("name"), Dialect::Generic)
         );
-        assert!(model.names.symbolic.is_empty());
     }
 
     #[test]
@@ -1394,8 +1275,8 @@ mod tests {
                 &format!("SELECT * FROM a {join} b USING (id)"),
                 &[("b", vec!["id", "y"])],
             );
-            assert_eq!(layout(&model), ["?", "id", "y"], "{join}");
-            let OutputElement::Column(slot) = &model.elements[1] else {
+            assert_eq!(layout(&model), ["id", "?", "y"], "{join}");
+            let OutputElement::Column(slot) = &model.elements[0] else {
                 unreachable!();
             };
             match (&slot.value, expected) {
@@ -1420,18 +1301,22 @@ mod tests {
     }
 
     #[test]
-    fn using_with_two_unknown_sides_names_the_key_without_listing_it() {
+    fn using_with_two_unknown_sides_lists_the_key_first() {
         let model = first_star("SELECT * FROM a JOIN b USING (id)", &[]);
-        assert_eq!(layout(&model), ["?", "?"]);
-        let [symbolic] = model.names.symbolic.as_slice() else {
-            panic!("expected one symbolic column");
-        };
-        assert_eq!(symbolic.name, Ident::unquoted("id"));
-        assert_eq!(symbolic.ranges.len(), 2);
-        assert!(model.slots_named(&Ident::unquoted("id")).is_empty());
+        assert_eq!(layout(&model), ["id", "?", "?"]);
+        assert_eq!(ranges(&model, "id"), ["a", "b"]);
 
         let excluded = first_star("SELECT * EXCLUDE (b.id) FROM a JOIN b USING (id)", &[]);
-        assert!(excluded.names.symbolic.is_empty());
+        assert_eq!(layout(&excluded), ["?", "?"]);
+    }
+
+    #[test]
+    fn several_using_keys_lead_in_the_order_they_were_written() {
+        let model = first_star(
+            "SELECT * FROM a JOIN b USING (k2, k1)",
+            &[("a", vec!["k1", "x", "k2"])],
+        );
+        assert_eq!(layout(&model), ["k2", "k1", "x", "?"]);
     }
 
     #[test]

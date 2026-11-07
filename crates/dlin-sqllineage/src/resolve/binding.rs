@@ -351,8 +351,10 @@ pub(super) fn find_unqualified_binding(
 /// clause.
 enum UnqualifiedChoice {
     /// Competing physical or named relation providers. CTE/derived candidates
-    /// stay typed and are never fabricated as table references.
-    Ambiguous(Vec<Candidate>),
+    /// stay typed and are never fabricated as table references. The flag is
+    /// set when a `USING` join guarantees that some candidate has the column,
+    /// so a catalog that does not list the other candidates cannot settle it.
+    Ambiguous(Vec<Candidate>, bool),
     /// A single column. Its contributing bindings are in FROM order.
     Merged(Vec<Binding>),
 }
@@ -450,6 +452,7 @@ fn unqualified_choice(
                     Binding::VirtualSource(_) => None,
                 })
                 .collect(),
+            false,
         );
     }
     let consult_catalog = !merges.is_empty();
@@ -564,6 +567,7 @@ fn unqualified_choice(
                         _ => unreachable!("provider is a CTE or derived table"),
                     })
                     .collect(),
+                false,
             );
         }
         return UnqualifiedChoice::Merged(
@@ -585,6 +589,9 @@ fn unqualified_choice(
                 .collect(),
         )
     } else {
+        let guaranteed = relations.iter().any(|relation| {
+            using_members.contains(relation.name.column_key(graph.dialect).as_ref())
+        });
         UnqualifiedChoice::Ambiguous(
             relations
                 .iter()
@@ -601,6 +608,7 @@ fn unqualified_choice(
                     _ => None,
                 })
                 .collect(),
+            guaranteed,
         )
     }
 }
@@ -782,10 +790,11 @@ fn resolve_from_bindings(
         })
     } else {
         match unqualified_choice(name, bindings, scope, graph, catalog, mapping_cache) {
-            UnqualifiedChoice::Ambiguous(candidates) => {
-                if candidates
-                    .iter()
-                    .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
+            UnqualifiedChoice::Ambiguous(candidates, guaranteed) => {
+                if guaranteed
+                    || candidates
+                        .iter()
+                        .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
                 {
                     Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                         column: name.clone(),

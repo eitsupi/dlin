@@ -22,12 +22,13 @@ use super::model::{
 };
 use super::target::{StarTarget, resolve_star_target, same_column_name};
 
-use crate::Ident;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase};
-use crate::graph::scope::{OutputPlan, ScopeId, VirtualColumnState};
+use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
+use crate::keys::candidate_key;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
+use crate::{Candidate, Ident};
 
 /// What a scope publishes under a name that none of its listed columns has.
 pub(super) enum Unlisted {
@@ -105,9 +106,8 @@ pub(super) fn listed_name_sources(
     .listed(scope, name)
 }
 
-/// Look `name` up among the unlisted columns of a scope: names that are
-/// merged by a join of unknown relations, and whatever unknown relations may
-/// publish under the star modifiers.
+/// Look `name` up among the unlisted columns of a scope: whatever unknown
+/// relations may publish under the star modifiers.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn unlisted_name_sources(
     scope: ScopeId,
@@ -283,6 +283,59 @@ impl Evaluator<'_, '_, '_> {
         result
     }
 
+    /// The relations the listed columns that share a name come from, in the
+    /// order the scope lists them, found through the range variables of those
+    /// columns. Columns without a range variable are attributed to the scope
+    /// itself, as the CTE or derived table that is read.
+    fn duplicate_candidates(
+        &self,
+        scope: ScopeId,
+        model: &OutputModel,
+        slots: &[usize],
+    ) -> Vec<Candidate> {
+        let graph = self.graph;
+        let dialect = graph.dialect;
+        let visible = graph.scopes.visible_bindings(scope);
+        let mut candidates = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut push = |candidate: Candidate| {
+            if seen.insert(candidate_key(&candidate, dialect)) {
+                candidates.push(candidate);
+            }
+        };
+        for &index in slots {
+            let OutputElement::Column(slot) = &model.elements[index] else {
+                continue;
+            };
+            for range in slot.ranges.iter() {
+                let binding = visible
+                    .iter()
+                    .find(|(name, _)| same_column_name(name, range, dialect));
+                if let Some((name, binding)) = binding {
+                    match binding {
+                        Binding::Table(table) => push(Candidate::Relation(crate::Relation {
+                            catalog: table.catalog.clone(),
+                            schema: table.schema.clone(),
+                            name: table.table.clone(),
+                        })),
+                        Binding::Cte(_) => push(Candidate::Cte(name.clone())),
+                        Binding::DerivedTable(_) => push(Candidate::Derived(Some(name.clone()))),
+                        Binding::VirtualSource(_) => {}
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            candidates.extend(graph.scopes.reading_binding(scope).map(|(name, binding)| {
+                match binding {
+                    Binding::Cte(_) => Candidate::Cte(name),
+                    _ => Candidate::Derived(Some(name)),
+                }
+            }));
+        }
+        candidates
+    }
+
     /// The origins of the column a scope lists under `name`, or of the
     /// first right-operand column of a set operation that has that name.
     fn listed(
@@ -291,8 +344,17 @@ impl Evaluator<'_, '_, '_> {
         name: &Ident,
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
         let model = self.scope_model(scope);
-        if let Some(&index) = model.slots_named(name).first() {
-            return Some(self.scope_slot(scope, index, true));
+        match model.slots_named(name) {
+            [] => {}
+            [index] => return Some(self.scope_slot(scope, *index, true)),
+            // Several listed columns carry the name, so it picks none.
+            slots => {
+                let ambiguous = ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
+                    column: name.clone(),
+                    candidates: self.duplicate_candidates(scope, &model, slots),
+                });
+                return Some((vec![ambiguous], false, TransformKind::Direct));
+            }
         }
         let dialect = self.graph.dialect;
         for element in &model.elements {
@@ -569,12 +631,6 @@ impl Evaluator<'_, '_, '_> {
                 let mut admitted = false;
                 let mut unknown_seen = false;
                 let mut sources = Vec::new();
-                for symbolic in &model.names.symbolic {
-                    if same_column_name(&symbolic.name, name, graph.dialect) {
-                        admitted = true;
-                        sources.extend(self.value(&symbolic.value).0);
-                    }
-                }
                 for element in &model.elements {
                     let OutputElement::Unknown(segment) = element else {
                         continue;

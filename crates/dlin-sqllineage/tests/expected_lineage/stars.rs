@@ -487,39 +487,40 @@ pub fn cases() -> Vec<Case> {
             (relation("b"), vec![u("id")]),
         ]),
     );
-    // USING guarantees that `b` has `id`, so the merged key also comes from
-    // `b`. NATURAL cannot name a shared column without knowing `b`.
-    for (name, join, id) in [
-        (
+    // USING guarantees that `b` has `id`, so the key leads the output and also
+    // comes from `b`. NATURAL cannot name a shared column without knowing `b`.
+    cases.push(
+        Case::new(
             "partial_catalog_using_star",
-            "JOIN b USING (id)",
-            col(
-                1,
-                u("id"),
-                vec![
-                    source(relation("a"), u("id")),
-                    source(relation("b"), u("id")),
-                ],
-            ),
-        ),
-        (
+            "SELECT * FROM a JOIN b USING (id)",
+            Dialect::Generic,
+            vec![
+                col(
+                    0,
+                    u("id"),
+                    vec![
+                        source(relation("a"), u("id")),
+                        source(relation("b"), u("id")),
+                    ],
+                ),
+                physical(1, "a", "left_value"),
+            ],
+        )
+        .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+    );
+    cases.push(
+        Case::new(
             "partial_catalog_natural_star",
-            "NATURAL JOIN b",
-            physical(1, "a", "id"),
-        ),
-    ] {
-        cases.push(
-            Case::new(
-                name,
-                &format!("SELECT * FROM a {join}"),
-                Dialect::Generic,
-                vec![physical(0, "a", "left_value"), id],
-            )
-            .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
-            .shape(open_star("b", Some(1)))
-            .unresolved_stars(true),
-        );
-    }
+            "SELECT * FROM a NATURAL JOIN b",
+            Dialect::Generic,
+            vec![physical(0, "a", "left_value"), physical(1, "a", "id")],
+        )
+        .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+    );
     cases.push(Case::new("renamed_derived_star_keeps_join_arity",
         "SELECT * FROM (SELECT * RENAME (a AS b, b AS c) FROM t) d JOIN u USING (b) UNION ALL SELECT b, b, tail FROM u",
         Dialect::Generic,
@@ -533,44 +534,49 @@ pub fn cases() -> Vec<Case> {
         vec![col(0, u("renamed"), vec![source(relation("a"), u("id")), source(relation("b"), u("id"))]),
              physical(1, "a", "left_value"), physical(2, "b", "right_value")],
     ).catalog(vec![(relation("a"), vec![u("left_value"), u("id")]), (relation("b"), vec![u("right_value"), u("id")])]));
-    for (name, join) in [
-        ("unknown_using_star_is_not_guessed", "JOIN b USING (id)"),
-        ("unknown_natural_star_is_not_guessed", "NATURAL JOIN b"),
-    ] {
-        cases.push(
-            Case::new(
-                name,
-                &format!("SELECT * FROM a {join}"),
-                Dialect::Generic,
-                vec![],
-            )
-            .shape(Shape::Open {
-                unexpanded: vec![
-                    UnexpandedStar {
-                        relation: Some(relation("a")),
-                        after_ordinal: None,
-                        lineage: Lineage::Partial {
-                            known: vec![],
-                            unresolved: vec![Unresolved::BehindStar {
-                                relation: relation("a"),
-                            }],
-                        },
-                    },
-                    UnexpandedStar {
-                        relation: Some(relation("b")),
-                        after_ordinal: None,
-                        lineage: Lineage::Partial {
-                            known: vec![],
-                            unresolved: vec![Unresolved::BehindStar {
-                                relation: relation("b"),
-                            }],
-                        },
-                    },
-                ],
+    let unexpanded_after = |ordinal| Shape::Open {
+        unexpanded: ["a", "b"]
+            .into_iter()
+            .map(|table| UnexpandedStar {
+                relation: Some(relation(table)),
+                after_ordinal: ordinal,
+                lineage: Lineage::Partial {
+                    known: vec![],
+                    unresolved: vec![Unresolved::BehindStar {
+                        relation: relation(table),
+                    }],
+                },
             })
-            .unresolved_stars(true),
-        );
-    }
+            .collect(),
+    };
+    // USING lists the key whatever the relations hide; NATURAL cannot.
+    cases.push(
+        Case::new(
+            "unknown_using_star_lists_the_key",
+            "SELECT * FROM a JOIN b USING (id)",
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("id"),
+                vec![
+                    source(relation("a"), u("id")),
+                    source(relation("b"), u("id")),
+                ],
+            )],
+        )
+        .shape(unexpanded_after(Some(0)))
+        .unresolved_stars(true),
+    );
+    cases.push(
+        Case::new(
+            "unknown_natural_star_is_not_guessed",
+            "SELECT * FROM a NATURAL JOIN b",
+            Dialect::Generic,
+            vec![],
+        )
+        .shape(unexpanded_after(None))
+        .unresolved_stars(true),
+    );
     for (name, sql, expected) in [
         (
             "aliased_merged_exclude_matches_union_width",
@@ -837,6 +843,7 @@ pub fn cases() -> Vec<Case> {
     cases.extend(partial_catalog_modifier_cases());
     cases.extend(unknown_using_key_cases());
     cases.extend(set_operation_tail_cases());
+    cases.extend(using_key_position_and_ambiguity_cases());
     cases
 }
 
@@ -1113,6 +1120,170 @@ fn set_operation_tail_cases() -> Vec<Case> {
         .shape(open_star("t1", None))
         .unresolved_stars(true),
     ]
+}
+
+/// The USING keys lead the output in the order they were written, whatever the
+/// joined relations list. A name that two listed columns carry is ambiguous,
+/// whether it is read directly or through a star.
+fn using_key_position_and_ambiguity_cases() -> Vec<Case> {
+    let key = |ordinal, name: &str| {
+        col(
+            ordinal,
+            u(name),
+            vec![
+                source(relation("a"), u(name)),
+                source(relation("b"), u(name)),
+            ],
+        )
+    };
+    let ambiguous = |candidates: &[&str]| {
+        partial_col(
+            0,
+            u("id"),
+            vec![],
+            vec![Unresolved::Ambiguous {
+                column: u("id"),
+                candidates: candidates
+                    .iter()
+                    .map(|table| dlin_sqllineage::Candidate::Relation(relation(table)))
+                    .collect(),
+            }],
+        )
+    };
+    let c_only = || vec![(relation("c"), vec![u("id"), u("y")])];
+    let a_and_c = || {
+        vec![
+            (relation("a"), vec![u("id"), u("x")]),
+            (relation("c"), vec![u("id"), u("y")]),
+        ]
+    };
+    vec![
+        // `a` lists the keys in another order than USING names them.
+        Case::new(
+            "known_left_unknown_right_using_keys_lead_in_written_order",
+            "SELECT * FROM a JOIN b USING (k2, k1)",
+            Dialect::Generic,
+            vec![key(0, "k2"), key(1, "k1"), physical(2, "a", "x")],
+        )
+        .catalog(vec![(relation("a"), vec![u("k1"), u("x"), u("k2")])])
+        .shape(open_star("b", Some(2)))
+        .unresolved_stars(true),
+        // The unknown relation is on the left, so its remaining columns come
+        // after the keys and `b`'s remaining column is not at a known place.
+        Case::new(
+            "unknown_left_known_right_using_keys_lead_in_written_order",
+            "SELECT * FROM a JOIN b USING (k2, k1)",
+            Dialect::Generic,
+            vec![key(0, "k2"), key(1, "k1"), {
+                let mut remaining = physical(0, "b", "y");
+                remaining.ordinal = None;
+                remaining
+            }],
+        )
+        .catalog(vec![(relation("b"), vec![u("k1"), u("y"), u("k2")])])
+        .shape(open_star("a", Some(1)))
+        .unresolved_stars(true),
+        // Two listed columns called `id`: the merged key of `a` and `b`, and
+        // `c`'s own. Only `c` is in the catalog.
+        Case::new(
+            "using_key_and_cross_joined_column_are_ambiguous_directly",
+            "SELECT id FROM a JOIN b USING (id) CROSS JOIN c",
+            Dialect::Generic,
+            vec![ambiguous(&["a", "b", "c"])],
+        )
+        .catalog(c_only()),
+        Case::new(
+            "using_key_and_cross_joined_column_are_ambiguous_through_star",
+            "SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN c) d",
+            Dialect::Generic,
+            vec![ambiguous(&["a", "b", "c"])],
+        )
+        .catalog(c_only())
+        .unresolved_stars(true),
+        Case::new(
+            "duplicate_column_is_ambiguous_directly",
+            "SELECT id FROM a CROSS JOIN c",
+            Dialect::Generic,
+            vec![ambiguous(&["a", "c"])],
+        )
+        .catalog(a_and_c()),
+        Case::new(
+            "duplicate_column_is_ambiguous_through_star",
+            "SELECT id FROM (SELECT * FROM a CROSS JOIN c) d",
+            Dialect::Generic,
+            vec![ambiguous(&["a", "c"])],
+        )
+        .catalog(a_and_c()),
+        // Columns of a projection list have no range variable, so the scope
+        // that is read stands for them.
+        Case::new(
+            "duplicate_projected_name_is_ambiguous_in_a_derived_table",
+            "SELECT x FROM (SELECT 1 AS x, 2 AS x) d",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![dlin_sqllineage::Candidate::Derived(Some(u("d")))],
+                }],
+            )],
+        ),
+        Case::new(
+            "duplicate_projected_name_is_ambiguous_in_a_cte",
+            "WITH c AS (SELECT 1 AS x, 2 AS x) SELECT x FROM c",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![dlin_sqllineage::Candidate::Cte(u("c"))],
+                }],
+            )],
+        ),
+    ]
+}
+
+#[test]
+fn ambiguous_name_reads_the_same_directly_and_through_a_star() {
+    // With only `c` in the catalog a plain cross join resolves to `c`: the
+    // unlisted relation is taken to lack the column. A USING key is certain.
+    let c_only = vec![(relation("c"), vec![u("id"), u("y")])];
+    let a_and_c = vec![
+        (relation("a"), vec![u("id"), u("x")]),
+        (relation("c"), vec![u("id"), u("y")]),
+    ];
+    for (catalog_name, catalog, from) in [
+        ("c_only", c_only, "a JOIN b USING (id) CROSS JOIN c"),
+        (
+            "a_and_c",
+            a_and_c.clone(),
+            "a JOIN b USING (id) CROSS JOIN c",
+        ),
+        ("a_and_c", a_and_c, "a CROSS JOIN c"),
+    ] {
+        let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![]).catalog(catalog);
+        let direct = case
+            .analyze_sql(&format!("SELECT id FROM {from}"), true)
+            .unwrap();
+        let through_star = case
+            .analyze_sql(&format!("SELECT id FROM (SELECT * FROM {from}) d"), true)
+            .unwrap();
+        assert!(
+            matches!(&direct.output.columns[0].lineage,
+                Lineage::Partial { known, unresolved }
+                    if known.is_empty() && matches!(&unresolved[..], [Unresolved::Ambiguous { .. }])),
+            "{catalog_name} {from}: {:?}",
+            direct.output.columns[0].lineage
+        );
+        assert_eq!(
+            direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
+            "{catalog_name} {from}"
+        );
+    }
 }
 
 const JOIN_KINDS: [(&str, &str); 4] = [
