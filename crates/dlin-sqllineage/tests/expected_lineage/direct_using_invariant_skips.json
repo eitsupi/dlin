@@ -1,0 +1,50 @@
+{
+  "ansi_unmatched_qualifier_stays_struct_root": [
+    "ansi_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "bigquery_unmatched_qualifier_stays_struct_root": [
+    "bigquery_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "clickhouse_alias_case_stays_exact": [
+    "clickhouse_alias_case_stays_exact/branch_0: projection path `T.id` does not match a FROM relation/alias prefix"
+  ],
+  "duckdb_unmatched_qualifier_stays_struct_root": [
+    "duckdb_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "generic_unmatched_qualifier_stays_struct_root": [
+    "generic_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "generic_uppercase_qualifier_with_struct_path": [
+    "generic_uppercase_qualifier_with_struct_path/branch_0: projection path `T.payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "insert_target_columns_rename_values": [
+    "insert_target_columns_rename_values: top-level VALUES set-expression is not a SELECT branch",
+    "insert_target_columns_rename_values: source Query has no top-level SELECT branch (VALUES/TABLE/etc.)"
+  ],
+  "insert_target_values_merge_sources_across_rows": [
+    "insert_target_values_merge_sources_across_rows: top-level VALUES set-expression is not a SELECT branch",
+    "insert_target_values_merge_sources_across_rows: source Query has no top-level SELECT branch (VALUES/TABLE/etc.)"
+  ],
+  "insert_values_without_target_columns_keeps_empty_output": [
+    "insert_values_without_target_columns_keeps_empty_output: top-level VALUES set-expression is not a SELECT branch",
+    "insert_values_without_target_columns_keeps_empty_output: source Query has no top-level SELECT branch (VALUES/TABLE/etc.)"
+  ],
+  "mysql_unmatched_qualifier_stays_struct_root": [
+    "mysql_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "postgres_unmatched_qualifier_stays_struct_root": [
+    "postgres_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "postgres_uppercase_qualifier_with_struct_path": [
+    "postgres_uppercase_qualifier_with_struct_path/branch_0: projection path `T.payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "snowflake_unmatched_qualifier_stays_struct_root": [
+    "snowflake_unmatched_qualifier_stays_struct_root/branch_0: projection path `payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "snowflake_uppercase_qualifier_with_struct_path": [
+    "snowflake_uppercase_qualifier_with_struct_path/branch_0: projection path `T.payload.field` does not match a FROM relation/alias prefix"
+  ],
+  "star_union_source_free_branch": [
+    "star_union_source_free_branch/branch_1: SELECT has no FROM"
+  ]
+}

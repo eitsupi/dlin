@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{identifiers, scopes_joins, stars, support::Case, target_columns};
 
-fn reference(name: &Ident) -> String {
+pub(super) fn reference(name: &Ident) -> String {
     match name.quote {
         None => name.value.clone(),
         Some(Quote::Double) => format!("\"{}\"", name.value.replace('"', "\"\"")),
