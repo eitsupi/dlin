@@ -745,15 +745,13 @@ const FORWARD_REFERENCE: &str =
     "WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x";
 
 /// Dialects whose CTE visibility rule is not modelled.
-const UNMODELLED_DIALECTS: [Dialect; 8] = [
-    Dialect::Ansi,
+const UNMODELLED_DIALECTS: [Dialect; 6] = [
     Dialect::MySql,
     Dialect::Hive,
     Dialect::Databricks,
     Dialect::Redshift,
     Dialect::Trino,
     Dialect::Spark,
-    Dialect::SQLite,
 ];
 
 /// Candidates of every ambiguity in an output column's unresolved part.
@@ -786,15 +784,38 @@ fn all_ambiguity_candidates(column: &dlin_sqllineage::OutputColumn) -> Vec<Vec<S
 // Whether a CTE can read one defined after it depends on the dialect.
 #[test]
 fn forward_cte_reference_follows_the_dialect() {
-    for dialect in [Dialect::PostgreSql, Dialect::BigQuery, Dialect::Generic] {
+    for dialect in [
+        Dialect::PostgreSql,
+        Dialect::BigQuery,
+        Dialect::Generic,
+        Dialect::Ansi,
+        Dialect::SQLite,
+    ] {
         let result = analyze(FORWARD_REFERENCE, dialect, false);
         assert_eq!(sources(&result, "id"), [pair("t", "id")], "{dialect:?}");
         assert_eq!(read_names(&result), ["t"], "{dialect:?}");
     }
-    // DuckDB and Snowflake see only earlier CTEs, even with RECURSIVE: `y` is
-    // the physical relation.
-    for dialect in [Dialect::DuckDb, Dialect::Snowflake] {
+    // DuckDB, Snowflake and SQL Server see only earlier CTEs, even with
+    // RECURSIVE: `y` is the physical relation.
+    for dialect in [Dialect::DuckDb, Dialect::Snowflake, Dialect::MsSql] {
         let result = analyze(FORWARD_REFERENCE, dialect, false);
+        assert_eq!(sources(&result, "id"), [pair("y", "id")], "{dialect:?}");
+    }
+}
+
+#[test]
+fn forward_cte_reference_without_the_keyword_follows_the_dialect() {
+    let sql = FORWARD_REFERENCE.replace("WITH RECURSIVE", "WITH");
+    // SQLite sees every CTE of the list without RECURSIVE too.
+    let result = analyze(&sql, Dialect::SQLite, false);
+    assert_eq!(sources(&result, "id"), [pair("t", "id")]);
+    assert_eq!(read_names(&result), ["t"]);
+    // SQL Server has no forward references.
+    let result = analyze(&sql, Dialect::MsSql, false);
+    assert_eq!(sources(&result, "id"), [pair("y", "id")]);
+    // The standard dialects need the keyword.
+    for dialect in [Dialect::Generic, Dialect::Ansi, Dialect::PostgreSql] {
+        let result = analyze(&sql, dialect, false);
         assert_eq!(sources(&result, "id"), [pair("y", "id")], "{dialect:?}");
     }
 }
@@ -859,6 +880,24 @@ fn source(relation: &str, column: &str) -> dlin_sqllineage::SourceColumn {
     dlin_sqllineage::SourceColumn {
         relation: common::table(relation),
         column: Ident::unquoted(column),
+    }
+}
+
+// SQLite and SQL Server also let a CTE read itself without the keyword.
+#[test]
+fn sqlite_and_sql_server_cte_read_themselves_without_the_keyword() {
+    for dialect in [Dialect::SQLite, Dialect::MsSql] {
+        let result = analyze(KEYWORD_LESS_SELF_REFERENCE, dialect, false);
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+        let column = &result.output.columns[0];
+        assert_eq!(known_sources(column), [source("t", "n")], "{dialect:?}");
+        assert!(
+            matches!(&column.lineage, Lineage::Partial { unresolved, .. }
+                if unresolved.iter().any(|item| matches!(item, Unresolved::Recursive))),
+            "{dialect:?}: {:?}",
+            column.lineage
+        );
+        assert!(all_ambiguity_candidates(column).is_empty(), "{dialect:?}");
     }
 }
 

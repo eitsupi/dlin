@@ -33,13 +33,15 @@ pub(crate) struct CteListRule {
 /// The visibility rule of a WITH list; `recursive` is whether the list was
 /// written with `RECURSIVE`.
 ///
-/// - `PostgreSQL`, `BigQuery` and the generic dialect (which follows the SQL
-///   standard): without `RECURSIVE` a body sees the CTEs before it; with it,
+/// - `PostgreSQL`, `BigQuery`, ANSI and the generic dialect (which follow the
+///   SQL standard): without `RECURSIVE` a body sees the CTEs before it; with it,
 ///   every CTE of the list.
 /// - `DuckDB`: a body sees only earlier CTEs even with `RECURSIVE`, which is
 ///   needed for a CTE to read itself.
-/// - Snowflake: a body sees only earlier CTEs, and a CTE may read itself
-///   with or without `RECURSIVE`.
+/// - Snowflake and SQL Server: a body sees only earlier CTEs, and a CTE may
+///   read itself with or without `RECURSIVE`.
+/// - `SQLite`: every CTE of the list is visible with or without `RECURSIVE`,
+///   and a CTE may read itself without the keyword.
 /// - Any other dialect: earlier CTEs, and the CTE itself only under
 ///   `RECURSIVE`. A name that matches a CTE the body cannot see stays
 ///   unresolved between the CTE and a physical relation.
@@ -50,7 +52,7 @@ pub(crate) fn cte_list_rule(dialect: Dialect, recursive: bool) -> CteListRule {
         OwnName::Unresolved
     };
     match dialect {
-        Dialect::Generic | Dialect::PostgreSql | Dialect::BigQuery => CteListRule {
+        Dialect::Generic | Dialect::Ansi | Dialect::PostgreSql | Dialect::BigQuery => CteListRule {
             forward: recursive,
             own_name: if recursive {
                 OwnName::Recursive
@@ -64,8 +66,15 @@ pub(crate) fn cte_list_rule(dialect: Dialect, recursive: bool) -> CteListRule {
             own_name,
             modelled: true,
         },
-        Dialect::Snowflake => CteListRule {
+        // These read themselves without the keyword, so `RECURSIVE` changes
+        // nothing; SQL Server has no such keyword at all.
+        Dialect::Snowflake | Dialect::MsSql => CteListRule {
             forward: false,
+            own_name: OwnName::Recursive,
+            modelled: true,
+        },
+        Dialect::SQLite => CteListRule {
+            forward: true,
             own_name: OwnName::Recursive,
             modelled: true,
         },
