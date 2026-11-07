@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -146,6 +144,7 @@ impl RelationRef {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_backend_lookup(
         catalog: Option<&str>,
         schema: Option<&str>,

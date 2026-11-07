@@ -19,16 +19,6 @@ pub(crate) struct OutputFailure {
     pub message: String,
 }
 
-#[cfg(test)]
-pub(crate) struct SqllineageBackend;
-
-#[cfg(test)]
-impl SqllineageBackend {
-    pub(crate) const fn new() -> Self {
-        Self
-    }
-}
-
 pub(crate) fn engine_dialect(dialect: DlinDialect) -> Result<Dialect, String> {
     dialect.to_engine_dialect()
 }
@@ -431,11 +421,6 @@ fn candidate_name(candidate: &sqllineage::Candidate) -> String {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn has_open_shape(analysis: &sqllineage::StatementAnalysis) -> bool {
-    analysis.has_unresolved_stars
-}
-
 pub(crate) fn transformation(
     transform: Transform,
 ) -> crate::graph::column_lineage::TransformationType {
@@ -450,122 +435,6 @@ pub(crate) fn transformation(
     }
 }
 
-#[cfg(test)]
-impl super::LineageBackend for SqllineageBackend {
-    fn id(&self) -> super::BackendId {
-        super::BackendId::Sqllineage
-    }
-
-    fn discover_output_columns(
-        &self,
-        request: &super::OutputDiscoveryRequest<'_>,
-    ) -> Result<super::OutputDiscovery, super::BackendError> {
-        let analysis = analyze_sql(request.sql, request.dialect, request.catalog)
-            .map_err(|message| legacy_error(request.dialect, message))?;
-        let statement = analysis
-            .into_single()
-            .map_err(|error| super::BackendError {
-                kind: super::BackendErrorKind::IncompleteAnalysis,
-                message: legacy_single_error(error),
-            })?;
-        if !statement.kind.carries_lineage() {
-            return Err(super::BackendError {
-                kind: super::BackendErrorKind::UnsupportedStatement,
-                message: "statement is not lineage-bearing".to_owned(),
-            });
-        }
-        if let Some(message) = statement_error(&statement) {
-            return Err(super::BackendError {
-                kind: super::BackendErrorKind::Parse,
-                message,
-            });
-        }
-        let (names, duplicate_names) = output_names(&statement, request.dialect);
-        Ok(super::OutputDiscovery {
-            outputs: names
-                .into_iter()
-                .map(|name| super::DiscoveredOutput {
-                    name: super::OutputName::Named(name),
-                })
-                .collect(),
-            duplicate_names,
-        })
-    }
-
-    fn analyze(
-        &self,
-        request: &super::LineageRequest<'_>,
-    ) -> Result<super::BackendAnalysis, super::BackendError> {
-        let analysis = analyze_sql(request.sql, request.dialect, request.catalog)
-            .map_err(|message| legacy_error(request.dialect, message))?;
-        if let Some(message) = analysis_error(&analysis) {
-            return Err(super::BackendError {
-                kind: super::BackendErrorKind::Parse,
-                message,
-            });
-        }
-        let statements = analysis
-            .statements
-            .into_iter()
-            .enumerate()
-            .map(|(statement_ordinal, statement)| {
-                let open = has_open_shape(&statement);
-                let columns = request
-                    .outputs
-                    .iter()
-                    .map(|request_output| {
-                        let target = super::OutputTarget {
-                            slot: request_output.slot.clone(),
-                            name: request_output.name.clone(),
-                        };
-                        let column = match resolve_statement_output(
-                            &statement,
-                            &request_output.name,
-                            request
-                                .duplicate_output_names
-                                .contains(&request_output.name),
-                            request.dialect,
-                        ) {
-                            Ok(column) => column,
-                            Err(failure) => return legacy_failed_output(target, failure),
-                        };
-                        if let Some(failure) = lineage_failure(&column.lineage) {
-                            return legacy_failed_output(target, failure);
-                        }
-                        let Lineage::Complete(known) = &column.lineage else {
-                            unreachable!("lineage failure was handled above")
-                        };
-                        super::BackendColumnOutcome::Resolved(super::BackendColumnResult {
-                            target,
-                            resolution: super::ResolutionState::Resolved,
-                            transformation: transformation(column.transform),
-                            sources: known
-                                .iter()
-                                .map(|source| super::BackendSource::Concrete {
-                                    relation: super::source_relation(
-                                        &source.relation,
-                                        request.catalog,
-                                        request.dialect,
-                                    ),
-                                    column: source.column.value.clone(),
-                                })
-                                .collect(),
-                        })
-                    })
-                    .collect();
-                super::BackendStatementResult {
-                    statement_ordinal,
-                    lineage_bearing: statement.kind.carries_lineage(),
-                    completeness: super::AnalysisCompleteness::Complete,
-                    has_unresolved_stars: open,
-                    columns,
-                }
-            })
-            .collect();
-        Ok(super::BackendAnalysis { statements })
-    }
-}
-
 pub(crate) fn legacy_single_error(error: sqllineage::SingleStatementError) -> String {
     match error {
         sqllineage::SingleStatementError::NoStatements => {
@@ -575,36 +444,6 @@ pub(crate) fn legacy_single_error(error: sqllineage::SingleStatementError) -> St
             format!("expected exactly one statement, found {count}")
         }
     }
-}
-
-#[cfg(test)]
-fn legacy_error(dialect: DlinDialect, message: String) -> super::BackendError {
-    let kind = if engine_dialect(dialect).is_err() {
-        super::BackendErrorKind::UnsupportedDialect
-    } else {
-        super::BackendErrorKind::Parse
-    };
-    super::BackendError { kind, message }
-}
-
-#[cfg(test)]
-fn legacy_failed_output(
-    target: super::OutputTarget,
-    failure: OutputFailure,
-) -> super::BackendColumnOutcome {
-    let state = match failure.kind {
-        OutputFailureKind::NotFound => super::ResolutionState::NotFound,
-        OutputFailureKind::Ambiguous => super::ResolutionState::Ambiguous,
-        OutputFailureKind::Indeterminate => super::ResolutionState::Indeterminate,
-    };
-    super::BackendColumnOutcome::Failed(super::BackendColumnFailure {
-        target,
-        resolution: state,
-        error: super::BackendError {
-            kind: super::BackendErrorKind::ColumnResolution { state },
-            message: failure.message,
-        },
-    })
 }
 
 #[cfg(test)]

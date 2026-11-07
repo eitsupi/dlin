@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::relation::{RelationRef, RelationResolution};
@@ -112,10 +110,6 @@ impl CatalogSnapshot {
         self.tables.contains_key(relation)
     }
 
-    pub(crate) fn resolve(&self, query: &RelationRef, dialect: DlinDialect) -> RelationResolution {
-        self.resolve_filtered(query, dialect, false)
-    }
-
     pub(crate) fn resolve_exact(
         &self,
         query: &RelationRef,
@@ -152,21 +146,6 @@ impl CatalogSnapshot {
             ),
             _ => RelationResolution::Ambiguous,
         }
-    }
-
-    pub(crate) fn table_for_relation(&self, relation: &RelationRef) -> Option<&CatalogTable> {
-        self.tables.get(relation)
-    }
-
-    pub(crate) fn resolve_table(
-        &self,
-        query: &RelationRef,
-        dialect: DlinDialect,
-    ) -> Option<&CatalogTable> {
-        let RelationResolution::Unique(index) = self.resolve(query, dialect) else {
-            return None;
-        };
-        self.tables.values().nth(index)
     }
 
     pub(crate) fn resolve_table_exact(
@@ -226,6 +205,7 @@ impl CatalogSnapshot {
             .map(|table| table.columns.as_slice())
     }
 
+    #[cfg(test)]
     pub(crate) fn unambiguous_table_columns(&self, name: &str) -> Option<&[String]> {
         let relation = RelationRef::parse(name).ok()?.as_manifest();
         let targets = self.aliases.get(&relation)?;

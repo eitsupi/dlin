@@ -5,11 +5,6 @@ use super::backend::DlinDialect;
 use super::backend::sqllineage::{
     analyze_parsed, lineage_failure, parse_sql, resolve_statement_output, statement_error,
 };
-#[cfg(test)]
-use super::backend::{
-    AnalysisSlot, BackendColumnOutcome, BackendSource, OutputColumnRequest,
-    normalize_column_outcomes,
-};
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::schema;
 use super::{
@@ -272,12 +267,6 @@ fn compute_single_column_lineage(
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
-    #[cfg(test)]
-    let catalog = {
-        let backend = super::backend::backend_for_tests(super::backend::BackendId::Sqllineage);
-        schema::build_schema_from_manifest(manifest, node, dialect, &backend)
-    };
-    #[cfg(not(test))]
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
     let parsed = parse_sql(compiled_code, dialect).ok()?;
     let statement = analyze_parsed(&parsed, dialect, catalog.as_ref())
@@ -311,69 +300,8 @@ fn compute_single_column_lineage(
 }
 
 #[cfg(test)]
-fn normalize_single_column_outcome(
-    outputs: &[OutputColumnRequest],
-    outcomes: Vec<BackendColumnOutcome>,
-) -> Option<BackendColumnOutcome> {
-    let (normalized_outcomes, _contract_errors) = normalize_column_outcomes(outputs, outcomes);
-    normalized_outcomes.into_iter().next()
-}
-
-#[cfg(test)]
 mod tests {
-    use super::super::relation::RelationRef;
     use super::*;
-    use crate::graph::column_lineage::backend::{
-        BackendColumnFailure, BackendError, BackendErrorKind,
-    };
-    use crate::graph::column_lineage::backend::{BackendColumnResult, ResolutionState};
-
-    #[test]
-    fn cross_model_keeps_requested_outcome_with_unrelated_contract_diagnostic() {
-        let outputs = [OutputColumnRequest {
-            slot: AnalysisSlot(0),
-            name: "alpha".to_string(),
-        }];
-        let outcome = normalize_single_column_outcome(
-            &outputs,
-            vec![
-                BackendColumnOutcome::Resolved(BackendColumnResult {
-                    target: crate::graph::column_lineage::backend::OutputTarget {
-                        slot: AnalysisSlot(0),
-                        name: "alpha".to_string(),
-                    },
-                    resolution: ResolutionState::Resolved,
-                    transformation: TransformationType::Direct,
-                    sources: vec![BackendSource::Concrete {
-                        relation: RelationRef::bare("upstream"),
-                        column: "alpha".to_string(),
-                    }],
-                }),
-                BackendColumnOutcome::Failed(BackendColumnFailure {
-                    target: crate::graph::column_lineage::backend::OutputTarget {
-                        slot: AnalysisSlot(9),
-                        name: "unrelated".to_string(),
-                    },
-                    resolution: ResolutionState::Indeterminate,
-                    error: BackendError {
-                        kind: BackendErrorKind::Internal,
-                        message: "unrelated diagnostic".to_string(),
-                    },
-                }),
-            ],
-        );
-
-        assert!(matches!(
-            outcome,
-            Some(BackendColumnOutcome::Resolved(result))
-                if result.target.slot == AnalysisSlot(0)
-                    && result.target.name == "alpha"
-                    && result.sources == vec![BackendSource::Concrete {
-                        relation: RelationRef::bare("upstream"),
-                        column: "alpha".to_string(),
-                    }]
-        ));
-    }
 
     #[test]
     fn missing_column_retry_skips_matching_scoped_diagnostic() {

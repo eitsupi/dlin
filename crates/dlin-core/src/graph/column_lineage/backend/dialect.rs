@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -222,15 +220,6 @@ impl DlinDialect {
             Self::DataFusion => "datafusion",
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn to_sqllineage(self) -> Result<sqllineage::Dialect, super::BackendError> {
-        self.to_engine_dialect()
-            .map_err(|message| super::BackendError {
-                kind: super::BackendErrorKind::UnsupportedDialect,
-                message,
-            })
-    }
 }
 
 impl fmt::Display for DlinDialect {
@@ -355,69 +344,65 @@ mod tests {
 
     #[cfg(feature = "column-lineage")]
     #[test]
-    fn test_dlin_dialect_to_sqllineage() {
+    fn test_dlin_dialect_to_engine_dialect() {
         assert!(matches!(
-            DlinDialect::Generic.to_sqllineage().unwrap(),
+            DlinDialect::Generic.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Generic
         ));
         assert!(matches!(
-            DlinDialect::PostgreSQL.to_sqllineage().unwrap(),
+            DlinDialect::PostgreSQL.to_engine_dialect().unwrap(),
             sqllineage::Dialect::PostgreSql
         ));
         assert!(matches!(
-            DlinDialect::MySQL.to_sqllineage().unwrap(),
+            DlinDialect::MySQL.to_engine_dialect().unwrap(),
             sqllineage::Dialect::MySql
         ));
         assert!(matches!(
-            DlinDialect::Hive.to_sqllineage().unwrap(),
+            DlinDialect::Hive.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Hive
         ));
         assert!(matches!(
-            DlinDialect::Databricks.to_sqllineage().unwrap(),
+            DlinDialect::Databricks.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Databricks
         ));
         assert!(matches!(
-            DlinDialect::Snowflake.to_sqllineage().unwrap(),
+            DlinDialect::Snowflake.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Snowflake
         ));
         assert!(matches!(
-            DlinDialect::BigQuery.to_sqllineage().unwrap(),
+            DlinDialect::BigQuery.to_engine_dialect().unwrap(),
             sqllineage::Dialect::BigQuery
         ));
         assert!(matches!(
-            DlinDialect::DuckDB.to_sqllineage().unwrap(),
+            DlinDialect::DuckDB.to_engine_dialect().unwrap(),
             sqllineage::Dialect::DuckDb
         ));
         assert!(matches!(
-            DlinDialect::SQLite.to_sqllineage().unwrap(),
+            DlinDialect::SQLite.to_engine_dialect().unwrap(),
             sqllineage::Dialect::SQLite
         ));
         assert!(matches!(
-            DlinDialect::Spark.to_sqllineage().unwrap(),
+            DlinDialect::Spark.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Spark
         ));
         assert!(matches!(
-            DlinDialect::Trino.to_sqllineage().unwrap(),
+            DlinDialect::Trino.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Trino
         ));
         assert!(matches!(
-            DlinDialect::Redshift.to_sqllineage().unwrap(),
+            DlinDialect::Redshift.to_engine_dialect().unwrap(),
             sqllineage::Dialect::Redshift
         ));
         assert!(matches!(
-            DlinDialect::TSQL.to_sqllineage().unwrap(),
+            DlinDialect::TSQL.to_engine_dialect().unwrap(),
             sqllineage::Dialect::MsSql
         ));
         assert!(matches!(
-            DlinDialect::ClickHouse.to_sqllineage().unwrap(),
+            DlinDialect::ClickHouse.to_engine_dialect().unwrap(),
             sqllineage::Dialect::ClickHouse
         ));
 
-        let error = DlinDialect::Presto.to_sqllineage().unwrap_err();
-        assert_eq!(
-            error.kind,
-            super::super::BackendErrorKind::UnsupportedDialect
-        );
-        assert!(error.message.contains("presto"));
+        let error = DlinDialect::Presto.to_engine_dialect().unwrap_err();
+        assert!(error.contains("presto"));
     }
 }

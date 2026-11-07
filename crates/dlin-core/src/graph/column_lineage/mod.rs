@@ -277,12 +277,6 @@ pub(super) fn compute_column_lineage_internal(
         return cached;
     }
 
-    #[cfg(test)]
-    let catalog = {
-        let backend = backend::backend_for_tests(backend::BackendId::Sqllineage);
-        schema::build_schema_from_manifest(manifest, node, dialect, &backend)
-    };
-    #[cfg(not(test))]
     let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
 
     let parsed = match parse_sql(compiled_code, dialect) {

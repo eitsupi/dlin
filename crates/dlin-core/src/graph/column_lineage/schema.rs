@@ -6,26 +6,7 @@ use super::relation::RelationRef;
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
-#[cfg(not(test))]
 pub(super) fn build_schema_from_manifest(
-    manifest: &Manifest,
-    node: &crate::parser::manifest::ManifestNode,
-    dialect: DlinDialect,
-) -> Option<CatalogSnapshot> {
-    build_schema(manifest, node, dialect)
-}
-
-#[cfg(test)]
-pub(super) fn build_schema_from_manifest(
-    manifest: &Manifest,
-    node: &crate::parser::manifest::ManifestNode,
-    dialect: DlinDialect,
-    _backend: &dyn super::backend::LineageBackend,
-) -> Option<CatalogSnapshot> {
-    build_schema(manifest, node, dialect)
-}
-
-fn build_schema(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
     dialect: DlinDialect,

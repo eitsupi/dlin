@@ -1,319 +1,181 @@
 use super::*;
 
 #[test]
-fn sqllineage_bigquery_temporal_date_parts_are_not_columns() {
-    let mut catalog = CatalogSnapshot::new();
-    catalog.add_table(
-        "events",
-        [
-            "event_date".to_string(),
-            "other_date".to_string(),
-            "event_ts".to_string(),
-            "tz_name".to_string(),
-        ],
-    );
-    let outputs = [
-        OutputColumnRequest {
-            slot: AnalysisSlot(0),
-            name: "monday_start".to_string(),
-        },
-        OutputColumnRequest {
-            slot: AnalysisSlot(1),
-            name: "week_diff".to_string(),
-        },
-        OutputColumnRequest {
-            slot: AnalysisSlot(2),
-            name: "timestamp_year".to_string(),
-        },
-    ];
-    let statement = sqllineage_statement_with_dialect(
+fn bigquery_temporal_date_parts_are_not_columns() {
+    let result = analyze(
         "SELECT DATE_TRUNC(event_date, WEEK(MONDAY)) AS monday_start, DATE_DIFF(event_date, other_date, ISOWEEK) AS week_diff, TIMESTAMP_TRUNC(event_ts, ISOYEAR, tz_name) AS timestamp_year FROM events",
         DlinDialect::BigQuery,
-        Some(&catalog),
-        &outputs,
-        &BTreeSet::new(),
+        &[(
+            "events",
+            &["event_date", "other_date", "event_ts", "tz_name"],
+        )],
+        &[],
     );
-    let expected = [
-        (
-            "monday_start",
-            vec![BackendSource::Concrete {
-                relation: RelationRef::from_manifest(None, None, "events"),
-                column: "event_date".to_string(),
-            }],
-        ),
+    assert_no_errors(&result);
+    assert_eq!(result.total_columns, 3);
+    assert_eq!(result.traced_columns, 3);
+    let expected: [(&str, &[(&str, &str)]); 3] = [
+        ("monday_start", &[("events", "event_date")]),
         (
             "week_diff",
-            vec![
-                BackendSource::Concrete {
-                    relation: RelationRef::from_manifest(None, None, "events"),
-                    column: "event_date".to_string(),
-                },
-                BackendSource::Concrete {
-                    relation: RelationRef::from_manifest(None, None, "events"),
-                    column: "other_date".to_string(),
-                },
-            ],
+            &[("events", "event_date"), ("events", "other_date")],
         ),
         (
             "timestamp_year",
-            vec![
-                BackendSource::Concrete {
-                    relation: RelationRef::from_manifest(None, None, "events"),
-                    column: "event_ts".to_string(),
-                },
-                BackendSource::Concrete {
-                    relation: RelationRef::from_manifest(None, None, "events"),
-                    column: "tz_name".to_string(),
-                },
-            ],
+            &[("events", "event_ts"), ("events", "tz_name")],
         ),
     ];
-
-    for (slot, (name, expected_sources)) in expected.into_iter().enumerate() {
-        match sqllineage_outcome(&statement, slot) {
-            BackendColumnOutcome::Resolved(result) => {
-                assert_eq!(result.target.name, name);
-                assert_eq!(result.resolution, ResolutionState::Resolved);
-                assert_eq!(result.sources, expected_sources);
-                assert!(result.sources.iter().all(|source| match source {
-                    BackendSource::Concrete { column, .. } => {
-                        !matches!(column.as_str(), "MONDAY" | "ISOWEEK" | "ISOYEAR")
-                    }
-                    _ => false,
-                }));
-            }
-            other => panic!("expected resolved BigQuery output {name}, got {other:?}"),
-        }
+    for (name, sources) in expected {
+        let traced = entry(&result, name);
+        assert_eq!(source_pairs(traced), sources, "sources for {name}");
+        assert!(
+            traced
+                .sources
+                .iter()
+                .all(|source| !matches!(source.column.as_str(), "MONDAY" | "ISOWEEK" | "ISOYEAR")),
+            "date parts must not be reported as columns: {traced:?}"
+        );
     }
 }
 
 #[test]
-fn sqllineage_returns_failed_outcome_for_unmapped_requested_output() {
-    let outputs = [
-        OutputColumnRequest {
-            slot: AnalysisSlot(12),
-            name: "id".to_string(),
-        },
-        OutputColumnRequest {
-            slot: AnalysisSlot(27),
-            name: "missing".to_string(),
-        },
-    ];
-    let statement = sqllineage_statement("select id from orders", None, &outputs, &BTreeSet::new());
-
-    assert_eq!(statement.columns.len(), outputs.len());
-    match sqllineage_outcome(&statement, 27) {
-        BackendColumnOutcome::Failed(failure) => {
-            assert_eq!(failure.target.name, "missing");
-            assert_eq!(
-                failure.resolution,
-                super::super::backend::ResolutionState::NotFound
-            );
-        }
-        other => panic!("expected missing output to fail, got {other:?}"),
-    }
-}
-
-#[test]
-fn sqllineage_duplicate_output_name_fails_as_ambiguous() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "value".to_string(),
-    }];
-    let duplicates = BTreeSet::from(["value".to_string()]);
-    let statement = sqllineage_statement(
-        "select id as value, amount as value from orders",
-        None,
-        &outputs,
-        &duplicates,
+fn unmapped_requested_output_fails_without_affecting_others() {
+    let result = generic("select id from orders", &["id", "missing"]);
+    assert_eq!(result.total_columns, 2);
+    assert_eq!(result.traced_columns, 1);
+    assert_resolved(
+        &result,
+        "id",
+        &[("orders", "id")],
+        TransformationType::Direct,
     );
-
-    match sqllineage_outcome(&statement, 0) {
-        BackendColumnOutcome::Failed(failure) => {
-            assert_eq!(
-                failure.resolution,
-                super::super::backend::ResolutionState::Ambiguous
-            );
-            assert!(failure.error.message.contains("output name is duplicated"));
-        }
-        other => panic!("expected duplicate output failure, got {other:?}"),
-    }
+    assert_column_error(
+        &result,
+        "missing",
+        ColumnLineageErrorKind::ColumnNotFound,
+        "no sqllineage mapping for output 'missing'",
+    );
 }
 
 #[test]
-fn sqllineage_parse_failure_is_parse_error() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "value".to_string(),
-    }];
-    let request = LineageRequest {
-        sql: "select * from",
-        dialect: DlinDialect::Generic,
-        catalog: None,
-        outputs: &outputs,
-        duplicate_output_names: &BTreeSet::new(),
-    };
-    let backend = backend_for_tests(BackendId::Sqllineage);
-
-    let error = backend.analyze(&request).unwrap_err();
-    assert_eq!(error.kind, BackendErrorKind::Parse);
+fn duplicate_output_name_fails_as_ambiguous() {
+    // The name is both declared in the YAML and produced twice by the SQL; it
+    // is still one column, and it cannot be told apart.
+    let result = generic(
+        "select id as value, amount as value from orders",
+        &["value"],
+    );
+    assert_eq!(result.total_columns, 1);
+    assert_eq!(result.traced_columns, 0);
+    assert_column_error(
+        &result,
+        "value",
+        ColumnLineageErrorKind::ColumnAmbiguous,
+        "more than one sqllineage mapping matches output 'value'",
+    );
 }
 
 #[test]
-fn sqllineage_empty_projection_is_parse_error() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "value".to_string(),
-    }];
-    let request = LineageRequest {
-        sql: "select from from",
-        dialect: DlinDialect::Generic,
-        catalog: None,
-        outputs: &outputs,
-        duplicate_output_names: &BTreeSet::new(),
-    };
-    let backend = backend_for_tests(BackendId::Sqllineage);
-
-    let error = backend.analyze(&request).unwrap_err();
-    assert_eq!(error.kind, BackendErrorKind::Parse);
+fn parse_failure_is_parse_failure() {
+    let result = generic("select * from", &["value"]);
+    assert_parse_failure(&result, 1, "");
 }
 
 #[test]
-fn sqllineage_empty_projection_in_set_operation_branch_is_parse_error() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "value".to_string(),
-    }];
-    let request = LineageRequest {
-        sql: "select 1 union all select from foo",
-        dialect: DlinDialect::Generic,
-        catalog: None,
-        outputs: &outputs,
-        duplicate_output_names: &BTreeSet::new(),
-    };
-    let backend = backend_for_tests(BackendId::Sqllineage);
-
-    let error = backend.analyze(&request).unwrap_err();
-    assert_eq!(error.kind, BackendErrorKind::Parse);
+fn empty_projection_is_parse_failure() {
+    let result = generic("select from from", &["value"]);
+    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
-fn sqllineage_empty_projection_in_nested_subquery_is_parse_error() {
-    let outputs = [OutputColumnRequest {
-        slot: AnalysisSlot(0),
-        name: "value".to_string(),
-    }];
-    let request = LineageRequest {
-        sql: "select id from (select from foo) as t",
-        dialect: DlinDialect::Generic,
-        catalog: None,
-        outputs: &outputs,
-        duplicate_output_names: &BTreeSet::new(),
-    };
-    let backend = backend_for_tests(BackendId::Sqllineage);
-
-    let error = backend.analyze(&request).unwrap_err();
-    assert_eq!(error.kind, BackendErrorKind::Parse);
+fn empty_projection_in_set_operation_branch_is_parse_failure() {
+    let result = generic("select 1 union all select from foo", &["value"]);
+    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
-fn sqllineage_unsupported_dialect_is_reported() {
-    let request = LineageRequest {
-        sql: "SELECT 1",
-        dialect: DlinDialect::Presto,
-        catalog: None,
-        outputs: &[],
-        duplicate_output_names: &BTreeSet::new(),
-    };
-    let backend = backend_for_tests(BackendId::Sqllineage);
-
-    let error = backend.analyze(&request).unwrap_err();
-    assert_eq!(error.kind, BackendErrorKind::UnsupportedDialect);
-    assert!(error.message.contains("presto"));
-}
-
-fn sqllineage_discovery(
-    sql: &str,
-    catalog: Option<&CatalogSnapshot>,
-) -> Result<OutputDiscovery, super::super::backend::BackendError> {
-    sqllineage_discovery_with_dialect(sql, DlinDialect::Generic, catalog)
-}
-
-fn sqllineage_discovery_with_dialect(
-    sql: &str,
-    dialect: DlinDialect,
-    catalog: Option<&CatalogSnapshot>,
-) -> Result<OutputDiscovery, super::super::backend::BackendError> {
-    let request = OutputDiscoveryRequest {
-        sql,
-        dialect,
-        catalog,
-    };
-    backend_for_tests(BackendId::Sqllineage).discover_output_columns(&request)
-}
-
-fn discovered_names(discovery: &OutputDiscovery) -> Vec<String> {
-    discovery
-        .outputs
-        .iter()
-        .map(|output| match &output.name {
-            OutputName::Named(name) => name.clone(),
-            OutputName::UnaliasedExpression => {
-                panic!("sqllineage discovery produced an unaliased expression")
-            }
-        })
-        .collect()
+fn empty_projection_in_nested_subquery_is_parse_failure() {
+    let result = generic("select id from (select from foo) as t", &["id"]);
+    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
-fn sqllineage_discovery_plain_projection_preserves_order_and_aliases() {
-    let discovery =
-        sqllineage_discovery("SELECT id, amount AS total, status FROM orders", None).unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["id", "total", "status"]);
+fn unsupported_dialect_is_reported_as_parse_failure() {
+    let result = analyze("SELECT 1", DlinDialect::Presto, &[], &["value"]);
+    assert_parse_failure(&result, 1, "presto");
 }
 
 #[test]
-fn sqllineage_discovery_top_level_set_operation_uses_projection_names() {
-    let discovery = sqllineage_discovery(
+fn discovery_plain_projection_names_outputs_by_alias() {
+    let result = generic("SELECT id, amount AS total, status FROM orders", &[]);
+    assert_no_errors(&result);
+    // Columns are reported in sorted order, not in projection order.
+    assert_eq!(column_names(&result), ["id", "status", "total"]);
+    assert_eq!(result.total_columns, 3);
+    assert_resolved(
+        &result,
+        "total",
+        &[("orders", "amount")],
+        TransformationType::Direct,
+    );
+}
+
+#[test]
+fn discovery_top_level_set_operation_uses_projection_names() {
+    let result = generic(
         "SELECT id, amount AS total FROM first_source UNION ALL SELECT id, amount AS other FROM second_source",
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["id", "total"]);
+        &[],
+    );
+    assert_no_errors(&result);
+    assert_eq!(column_names(&result), ["id", "total"]);
+    assert_resolved(
+        &result,
+        "total",
+        &[("first_source", "amount"), ("second_source", "amount")],
+        TransformationType::Direct,
+    );
 }
 
 #[test]
-fn sqllineage_discovery_unexpanded_star_has_no_name() {
-    let discovery = sqllineage_discovery("SELECT * FROM orders", None).unwrap();
-
-    assert!(discovery.outputs.is_empty());
-    assert!(!discovery.duplicate_names.contains("*"));
+fn discovery_unexpanded_star_has_no_name() {
+    let result = generic("SELECT * FROM orders", &[]);
+    assert_column_inference_failed(&result);
 }
 
 #[test]
-fn sqllineage_discovery_preserves_quoted_star_output_name() {
-    let discovery = sqllineage_discovery(r#"SELECT id AS "*" FROM orders"#, None).unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["*"]);
+fn discovery_preserves_quoted_star_output_name() {
+    let result = generic(r#"SELECT id AS "*" FROM orders"#, &[]);
+    assert_no_errors(&result);
+    assert_eq!(column_names(&result), ["*"]);
+    assert_resolved(
+        &result,
+        "*",
+        &[("orders", "id")],
+        TransformationType::Direct,
+    );
 }
 
 #[test]
-fn sqllineage_discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
-    let discovery = sqllineage_discovery_with_dialect(
+fn discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
+    let result = analyze(
         r#"SELECT id AS "*", base.event.* FROM source AS base"#,
         DlinDialect::BigQuery,
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["*"]);
-    assert!(!discovery.duplicate_names.contains("*"));
+        &[],
+        &[],
+    );
+    assert_eq!(column_names(&result), ["*"]);
+    assert_eq!(result.total_columns, 1);
+    assert_resolved(
+        &result,
+        "*",
+        &[("source", "id")],
+        TransformationType::Direct,
+    );
+    assert_no_errors(&result);
 }
 
 #[test]
-fn sqllineage_discovery_drops_field_path_star_without_forged_output_name() {
+fn discovery_drops_field_path_star_without_forged_output_name() {
     let parsed = sqllineage::parse(
         "SELECT base.event.* FROM source AS base",
         DlinDialect::BigQuery.to_engine_dialect().unwrap(),
@@ -349,91 +211,111 @@ fn sqllineage_discovery_drops_field_path_star_without_forged_output_name() {
         }]
     );
 
-    let discovery = sqllineage_discovery_with_dialect(
+    let result = analyze(
         "SELECT base.event.* FROM source AS base",
         DlinDialect::BigQuery,
-        None,
-    )
-    .unwrap();
-
-    assert!(discovery.outputs.is_empty());
-    assert!(!discovery.duplicate_names.contains("*"));
+        &[],
+        &[],
+    );
+    assert_column_inference_failed(&result);
 }
 
 #[test]
-fn sqllineage_discovery_expands_star_from_catalog() {
-    let mut catalog = CatalogSnapshot::new();
-    catalog.add_table("orders", ["id".to_string(), "amount".to_string()]);
-
-    let discovery = sqllineage_discovery("SELECT * FROM orders", Some(&catalog)).unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["id", "amount"]);
+fn discovery_expands_star_from_known_schema() {
+    let result = analyze(
+        "SELECT * FROM orders",
+        DlinDialect::Generic,
+        &[("orders", &["id", "amount"])],
+        &[],
+    );
+    assert_no_errors(&result);
+    // Columns are reported in sorted order.
+    assert_eq!(column_names(&result), ["amount", "id"]);
+    assert_resolved(
+        &result,
+        "amount",
+        &[("orders", "amount")],
+        TransformationType::Direct,
+    );
+    assert_resolved(
+        &result,
+        "id",
+        &[("orders", "id")],
+        TransformationType::Direct,
+    );
 }
 
 #[test]
-fn sqllineage_discovery_cte_uses_outer_projection() {
-    let discovery = sqllineage_discovery(
+fn discovery_cte_uses_outer_projection() {
+    let result = generic(
         "WITH base AS (SELECT id, amount AS inner_amount FROM orders) SELECT inner_amount AS outer_amount FROM base",
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["outer_amount"]);
-}
-
-#[test]
-fn sqllineage_discovery_records_duplicate_names() {
-    let discovery =
-        sqllineage_discovery("SELECT id AS value, amount AS value FROM orders", None).unwrap();
-
-    assert_eq!(discovered_names(&discovery), ["value", "value"]);
-    assert_eq!(
-        discovery.duplicate_names,
-        BTreeSet::from(["value".to_string()])
+        &[],
+    );
+    assert_no_errors(&result);
+    assert_eq!(column_names(&result), ["outer_amount"]);
+    assert_resolved(
+        &result,
+        "outer_amount",
+        &[("orders", "amount")],
+        TransformationType::Direct,
     );
 }
 
 #[test]
-fn sqllineage_discovery_parse_failure_is_parse_error() {
-    let error = sqllineage_discovery("SELECT * FROM", None).unwrap_err();
-
-    assert_eq!(error.kind, BackendErrorKind::Parse);
-}
-
-#[test]
-fn sqllineage_discovery_matches_analyze_mapping_targets() {
-    let mut catalog = CatalogSnapshot::new();
-    catalog.add_table(
-        "orders",
-        ["id".to_string(), "amount".to_string(), "status".to_string()],
+fn discovery_records_duplicate_names() {
+    let result = generic("SELECT id AS value, amount AS value FROM orders", &[]);
+    // The duplicated name is listed once and cannot be traced.
+    assert_eq!(result.total_columns, 1);
+    assert_eq!(result.traced_columns, 0);
+    assert_column_error(
+        &result,
+        "value",
+        ColumnLineageErrorKind::ColumnAmbiguous,
+        "more than one sqllineage mapping matches output 'value'",
     );
-    let sql = "SELECT id, amount AS total, status FROM orders";
-
-    let discovery = sqllineage_discovery(sql, Some(&catalog)).unwrap();
-    let discovered = discovered_names(&discovery);
-    let parsed = sqllineage::parse(sql, DlinDialect::Generic.to_engine_dialect().unwrap()).unwrap();
-    let catalog_adapter = SqllineageCatalogProvider::new(&catalog, DlinDialect::Generic);
-    let analyzer = sqllineage::Analyzer::new(DlinDialect::Generic.to_engine_dialect().unwrap())
-        .with_catalog(&catalog_adapter);
-    let analyzed = parsed.analyze(&analyzer);
-    let analyzed_names: Vec<String> = analyzed.statements[0]
-        .output
-        .columns
-        .iter()
-        .filter_map(|column| match &column.name {
-            sqllineage::OutputName::Explicit(name) | sqllineage::OutputName::Inferred(name) => {
-                Some(name.value.clone())
-            }
-            sqllineage::OutputName::Anonymous => None,
-        })
-        .collect();
-
-    assert_eq!(discovered, analyzed_names);
 }
 
 #[test]
-fn sqllineage_discovery_groups_sql_names_without_changing_display_names() {
-    let backend = backend_for_tests(BackendId::Sqllineage);
+fn discovery_parse_failure_does_not_name_columns() {
+    // Discovery cannot name columns of SQL that does not parse; without YAML
+    // columns the model's outputs are undetermined rather than a parse error.
+    let result = generic("SELECT * FROM", &[]);
+    assert_column_inference_failed(&result);
+}
+
+#[test]
+fn discovered_names_are_all_traced_through_a_known_schema() {
+    let result = analyze(
+        "SELECT id, amount AS total, status FROM orders",
+        DlinDialect::Generic,
+        &[("orders", &["id", "amount", "status"])],
+        &[],
+    );
+    assert_no_errors(&result);
+    assert_eq!(column_names(&result), ["id", "status", "total"]);
+    assert_eq!(result.total_columns, result.traced_columns);
+    assert_resolved(
+        &result,
+        "id",
+        &[("orders", "id")],
+        TransformationType::Direct,
+    );
+    assert_resolved(
+        &result,
+        "status",
+        &[("orders", "status")],
+        TransformationType::Direct,
+    );
+    assert_resolved(
+        &result,
+        "total",
+        &[("orders", "amount")],
+        TransformationType::Direct,
+    );
+}
+
+#[test]
+fn discovery_groups_sql_names_without_changing_display_names() {
     for dialect in [
         DlinDialect::Generic,
         DlinDialect::Snowflake,
@@ -458,20 +340,47 @@ fn sqllineage_discovery_groups_sql_names_without_changing_display_names() {
                 !matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake),
             ),
         ] {
-            let discovery = backend
-                .discover_output_columns(&OutputDiscoveryRequest {
-                    sql,
-                    dialect,
-                    catalog: None,
-                })
-                .unwrap();
-            assert_eq!(discovered_names(&discovery), names);
-            let expected = if duplicate {
-                names.into_iter().map(String::from).collect()
+            let context = format!("{dialect:?}: {sql}");
+            let result = analyze(sql, dialect, &[], &[]);
+            // Display names are kept as written, and a name used by several
+            // outputs is listed once.
+            let mut expected_names = names.to_vec();
+            expected_names.sort();
+            expected_names.dedup();
+            assert_eq!(result.total_columns, expected_names.len(), "{context}");
+            let mut reported: Vec<&str> = column_names(&result);
+            reported.extend(
+                result
+                    .errors
+                    .iter()
+                    .map(|error| error.column.as_deref().expect("column-scoped error")),
+            );
+            reported.sort();
+            assert_eq!(reported, expected_names, "{context}");
+            if duplicate {
+                // Outputs sharing one SQL identifier cannot be told apart.
+                assert_eq!(result.traced_columns, 0, "{context}");
+                for name in &expected_names {
+                    assert_column_error(
+                        &result,
+                        name,
+                        ColumnLineageErrorKind::ColumnAmbiguous,
+                        &format!("more than one sqllineage mapping matches output '{name}'"),
+                    );
+                }
+            } else if names[0] == names[1] {
+                // Distinct SQL identifiers that display alike.
+                assert_eq!(result.traced_columns, 0, "{context}");
+                assert_column_error(
+                    &result,
+                    names[0],
+                    ColumnLineageErrorKind::ColumnAmbiguous,
+                    "distinct SQL identifiers share the same display name",
+                );
             } else {
-                BTreeSet::new()
-            };
-            assert_eq!(discovery.duplicate_names, expected, "{dialect:?}: {sql}");
+                assert_no_errors(&result);
+                assert_eq!(result.traced_columns, 2, "{context}");
+            }
         }
     }
 }
