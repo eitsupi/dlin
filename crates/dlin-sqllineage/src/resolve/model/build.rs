@@ -16,13 +16,13 @@ use crate::OutputName;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, OutputPlan, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId};
 use crate::types::TableRef;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheKey {
     Scope(ScopeId),
-    Input(ScopeId),
+    Input(BindingEnv),
     Star(NodeId),
 }
 
@@ -33,7 +33,7 @@ pub(super) enum CacheKey {
 #[derive(Default)]
 pub(in crate::resolve) struct ModelStore {
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
-    pub(super) inputs: HashMap<ScopeId, Rc<InputModel>>,
+    pub(super) inputs: HashMap<BindingEnv, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
     /// Models under construction, each flagged when a cycle was cut beneath it.
     pub(super) active: Vec<(CacheKey, bool)>,
@@ -92,11 +92,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         }
         let graph = self.graph;
         let model = match &graph.nodes[node_id] {
-            RawNode::Star {
-                base,
-                options,
-                scope,
-            } => self.build_star(node_id, base, options, *scope),
+            RawNode::Star { base, options, env } => self.build_star(node_id, base, options, *env),
             _ => OutputModel::opaque(OpaqueReason::Recursive, graph.dialect),
         };
         let model = Rc::new(model);
@@ -211,22 +207,22 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         node_id: NodeId,
         base: &StarBase,
         options: &StarOptions,
-        scope: ScopeId,
+        env: BindingEnv,
     ) -> OutputModel {
         let graph = self.graph;
         let opaque = |reason| vec![OutputElement::Unknown(UnknownSegment::opaque(reason))];
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
-        let elements = match resolve_star_target(base, scope, graph) {
+        let elements = match resolve_star_target(base, env, graph) {
             StarTarget::All => {
-                let input = self.input(scope);
+                let input = self.input(env);
                 invalid.extend(input.model.invalid.iter().cloned());
                 reads.extend(input.model.reads.iter().cloned());
                 input.star_elements()
             }
             StarTarget::Binding { name, binding } => {
                 let range = RangeRef {
-                    index: self.range_index(scope, &name, &binding),
+                    index: self.range_index(env, &name, &binding),
                     name,
                     binding,
                 };

@@ -2,7 +2,7 @@ use super::model::RangeRef;
 
 use crate::graph::RawGraph;
 use crate::graph::node::{StarBase, StarColumnName};
-use crate::graph::scope::Binding;
+use crate::graph::scope::{Binding, BindingEnv};
 use crate::keys::ident_parts_equal;
 use crate::types::TableRef;
 use crate::{Dialect, Ident};
@@ -41,13 +41,17 @@ pub(super) fn ilike_matches(pattern: &str, value: &str) -> bool {
     )
 }
 
-pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGraph) -> StarTarget {
+pub(super) fn resolve_star_target(
+    base: &StarBase,
+    env: BindingEnv,
+    graph: &RawGraph,
+) -> StarTarget {
     match base {
         StarBase::Unqualified => StarTarget::All,
         StarBase::Expr(_) => StarTarget::Expr,
         StarBase::Qualified(parts) => {
             let mut best: Option<(usize, Ident, Binding)> = None;
-            for (name, binding) in graph.scopes.visible_bindings(scope) {
+            for (name, binding) in graph.scopes.visible_bindings(env) {
                 let candidates = match &binding {
                     Binding::Table(table) => {
                         let mut values = Vec::new();
@@ -81,7 +85,7 @@ pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGrap
             if let Some((matched, name, binding)) = best {
                 if matched == 1
                     && let Some(candidates) =
-                        graph.scopes.ambiguous_binding_candidates(scope, &parts[0])
+                        graph.scopes.ambiguous_binding_candidates(env, &parts[0])
                 {
                     return StarTarget::Ambiguous(candidates);
                 }
@@ -127,13 +131,9 @@ fn table_ref_from_parts(parts: &[Ident]) -> TableRef {
     }
 }
 
-pub(super) fn effective_bindings(scope: usize, graph: &RawGraph) -> Vec<(Ident, Binding)> {
-    let immediate = graph.scopes.immediate_bindings(scope);
-    if immediate.is_empty() {
-        graph.scopes.visible_bindings(scope)
-    } else {
-        immediate
-    }
+/// The range variables that decide an unqualified name at `env`.
+pub(super) fn effective_bindings(env: BindingEnv, graph: &RawGraph) -> Vec<(Ident, Binding)> {
+    graph.scopes.clause_bindings(env)
 }
 
 /// EXCLUDE resolves range variables, independently of value lineage.

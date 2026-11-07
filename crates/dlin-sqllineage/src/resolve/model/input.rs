@@ -13,7 +13,7 @@ use std::rc::Rc;
 use super::build::{CacheKey, OutputModels, forward_scope};
 use super::join::fold_join_columns;
 use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
-use crate::graph::scope::{Binding, MergedColumns, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv, MergedColumns, ScopeId};
 use crate::keys::table_key;
 use crate::types::TableRef;
 use crate::{Candidate, Dialect, Ident, Relation};
@@ -208,19 +208,21 @@ impl OutputModels<'_, '_, '_> {
     /// The relations of a scope's FROM clause with their joins folded. This is
     /// what an unqualified star expands and what an unqualified name is read
     /// from; it is not the scope's output, which is projected from it.
-    pub(in crate::resolve) fn input(&mut self, scope: ScopeId) -> Rc<InputModel> {
-        if let Some(model) = self.store.inputs.get(&scope) {
+    pub(in crate::resolve) fn input(&mut self, env: BindingEnv) -> Rc<InputModel> {
+        // Environments that see the same range variables share one model.
+        let env = self.graph.scopes.clause_env(env);
+        if let Some(model) = self.store.inputs.get(&env) {
             return model.clone();
         }
-        if self.enter(CacheKey::Input(scope)) {
+        if self.enter(CacheKey::Input(env)) {
             return Rc::new(InputModel {
                 model: OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect),
                 anonymous: Vec::new(),
             });
         }
-        let model = Rc::new(self.build_input(scope));
+        let model = Rc::new(self.build_input(env));
         if self.leave() {
-            self.store.inputs.insert(scope, model.clone());
+            self.store.inputs.insert(env, model.clone());
         }
         model
     }
@@ -228,8 +230,12 @@ impl OutputModels<'_, '_, '_> {
     /// Decide what the unqualified `name` denotes in the FROM clause of
     /// `scope`. A clause with a single relation needs no model: the name is
     /// that relation's.
-    pub(in crate::resolve) fn lookup_input(&mut self, scope: ScopeId, name: &Ident) -> InputLookup {
-        let bindings = effective_bindings(scope, self.graph);
+    pub(in crate::resolve) fn lookup_input(
+        &mut self,
+        env: BindingEnv,
+        name: &Ident,
+    ) -> InputLookup {
+        let bindings = effective_bindings(env, self.graph);
         match bindings.as_slice() {
             [] => InputLookup::Absent,
             [(range_name, binding)] => InputLookup::single(&RangeRef {
@@ -237,16 +243,16 @@ impl OutputModels<'_, '_, '_> {
                 name: range_name.clone(),
                 binding: binding.clone(),
             }),
-            _ => self.input(scope).lookup(name),
+            _ => self.input(env).lookup(name),
         }
     }
 
     /// The position of a binding among the relations of a FROM clause. A
     /// binding of an enclosing query, which the clause does not contain, has
     /// none.
-    pub(super) fn range_index(&self, scope: ScopeId, name: &Ident, binding: &Binding) -> usize {
+    pub(super) fn range_index(&self, env: BindingEnv, name: &Ident, binding: &Binding) -> usize {
         let dialect = self.graph.dialect;
-        effective_bindings(scope, self.graph)
+        effective_bindings(env, self.graph)
             .iter()
             .position(|(other_name, other)| {
                 same_column_name(other_name, name, dialect)
@@ -269,10 +275,10 @@ impl OutputModels<'_, '_, '_> {
 
     /// Build the model of a scope's FROM clause: every binding, then the
     /// joins that merge columns folded in the order they were written.
-    fn build_input(&mut self, scope: ScopeId) -> InputModel {
+    fn build_input(&mut self, env: BindingEnv) -> InputModel {
         let graph = self.graph;
         let dialect = graph.dialect;
-        let ranges: Vec<RangeRef> = effective_bindings(scope, graph)
+        let ranges: Vec<RangeRef> = effective_bindings(env, graph)
             .into_iter()
             .enumerate()
             .map(|(index, (name, binding))| RangeRef {
@@ -293,7 +299,7 @@ impl OutputModels<'_, '_, '_> {
                 elements: self.binding_part(range),
             });
         }
-        let merges = graph.scopes.join_merges(scope);
+        let merges = graph.scopes.join_merges(env);
         let mut seen = HashSet::new();
         if !merges.is_empty()
             && ranges
@@ -319,7 +325,7 @@ impl OutputModels<'_, '_, '_> {
         }
         let elements = fold_join_columns(groups, merges, dialect);
         let mut anonymous = Vec::new();
-        for &child in graph.scopes.anonymous_derived(scope) {
+        for child in graph.scopes.anonymous_derived(env) {
             let model = self.scope(child);
             anonymous.extend(forward_scope(child, &model, &Rc::from([]), false));
         }

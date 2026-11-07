@@ -1,11 +1,12 @@
 pub(crate) mod expr;
 pub(crate) mod function_semantics;
 pub(crate) mod query;
+pub(crate) mod relation;
 pub(crate) mod select;
 pub(crate) mod statement;
 
 use crate::graph::RawGraph;
-use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
+use crate::graph::scope::{Binding, BindingEnv, ScopeId, ScopeKind, ScopeTree};
 use crate::types::{Dialect, SemanticError, StatementType, Warning};
 use sqlparser::ast::Statement;
 
@@ -69,6 +70,11 @@ impl LineageBuilder {
         if let Some(parent) = self.graph.scopes.parent(self.current_scope) {
             self.current_scope = parent;
         }
+    }
+
+    /// The environment at the current position of the current scope.
+    pub(crate) fn env(&self) -> BindingEnv {
+        self.graph.scopes.env(self.current_scope)
     }
 
     pub(crate) fn add_binding(&mut self, name: crate::Ident, binding: Binding) {

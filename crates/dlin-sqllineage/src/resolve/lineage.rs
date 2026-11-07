@@ -4,13 +4,11 @@ use super::binding::{
     find_cte_redirect, find_unqualified_binding, find_virtual_sources_for_column,
     lookup_virtual_binding, resolve_input_reference, resolve_node,
 };
-use super::mapping::{
-    ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
-};
+use super::context::{EvalContext, EvalKey};
+use super::mapping::{known_empty_dependency, merge_transform, resolve_scope_mappings};
 use super::star::named_scope_sources;
 
 use crate::Ident;
-use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
@@ -23,13 +21,9 @@ use crate::types::{ColumnOrigin, TransformKind};
 fn scope_column_sources(
     scope: usize,
     index: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
-    let mappings = resolve_scope_mappings(scope, graph, resolved, incoming, catalog, mapping_cache);
+    let mappings = resolve_scope_mappings(scope, cx);
     let Some(mapping) = mappings.get(index) else {
         return (vec![], vec![], false, TransformKind::Direct);
     };
@@ -49,16 +43,25 @@ fn scope_column_sources(
 
 pub(super) fn collect_output_sources(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     if !visited.insert(node_id) {
         return (vec![], vec![], false, TransformKind::Direct);
     }
+    // Reaching a node that is already being collected, from a walk that does
+    // not share `visited`, means its sources depend on themselves.
+    let key = EvalKey::Node(node_id);
+    if !cx.enter(key) {
+        return (
+            vec![indeterminate_origin(cx.graph, node_id)],
+            vec![],
+            false,
+            TransformKind::Direct,
+        );
+    }
+    let graph = cx.graph;
+    let incoming = cx.incoming;
 
     let mut sources = Vec::new();
     let mut kinds = Vec::new();
@@ -71,15 +74,7 @@ pub(super) fn collect_output_sources(
             has_back = true;
             continue;
         }
-        let (sub_sources, sub_back, sub_transform) = collect_leaf_origins(
-            edge.from,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        );
+        let (sub_sources, sub_back, sub_transform) = collect_leaf_origins(edge.from, cx, visited);
         for _ in &sub_sources {
             kinds.push(edge.kind.clone());
         }
@@ -88,41 +83,49 @@ pub(super) fn collect_output_sources(
         inherited_transform = merge_transform(&inherited_transform, &sub_transform);
     }
 
+    cx.leave(key);
     (sources, kinds, has_back, inherited_transform)
+}
+
+/// The origin of a value whose evaluation depends on itself: nothing can be
+/// proven about it, so it is reported as an ambiguous column rather than as a
+/// source-free one.
+fn indeterminate_origin(graph: &RawGraph, node_id: NodeId) -> ColumnOrigin {
+    let column = match &graph.nodes[node_id] {
+        RawNode::Output { name, .. }
+        | RawNode::Ref { name, .. }
+        | RawNode::Unqualified { name, .. }
+        | RawNode::RowValueCandidate { name, .. } => name.clone(),
+        RawNode::Star { .. } => Ident::unquoted("*"),
+    };
+    ColumnOrigin::Ambiguous {
+        column,
+        candidates: Vec::new(),
+    }
 }
 
 pub(super) fn collect_leaf_origins(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    let graph = cx.graph;
     if let Some(origin) = super::binding::ambiguous_qualified_origin(node_id, graph) {
         return (vec![origin], false, TransformKind::Direct);
     }
-    if let Some(result) =
-        resolve_virtual_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
-    {
+    if let Some(result) = resolve_virtual_reference(node_id, cx) {
         return result;
     }
 
-    if let Some(result) =
-        resolve_input_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
-    {
+    if let Some(result) = resolve_input_reference(node_id, cx) {
         return result;
     }
 
-    if let Some((sources, has_back, transform)) =
-        resolve_named_scope_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
-    {
+    if let Some((sources, has_back, transform)) = resolve_named_scope_reference(node_id, cx) {
         return (sources, has_back, transform);
     }
 
-    if let Some((target_output, scope)) = find_cte_redirect(node_id, graph, catalog, mapping_cache)
-    {
+    if let Some((target_output, scope)) = find_cte_redirect(node_id, cx) {
         if let Some(index) = graph
             .scopes
             .output_columns(scope)
@@ -130,50 +133,18 @@ pub(super) fn collect_leaf_origins(
             .position(|c| c.node_id == target_output)
             && !matches!(graph.scopes.output_plan(scope), OutputPlan::Projection)
         {
-            let (sources, _, has_back, transform) = scope_column_sources(
-                scope,
-                index,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-            );
+            let (sources, _, has_back, transform) = scope_column_sources(scope, index, cx);
             return (sources, has_back, transform);
         }
-        let (sources, _, has_back, transform) = collect_output_sources(
-            target_output,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        );
+        let (sources, _, has_back, transform) = collect_output_sources(target_output, cx, visited);
         return (sources, has_back, transform);
     }
 
     if let RawNode::Output { .. } = &graph.nodes[node_id] {
-        let (sources, _, has_back, transform) = collect_output_sources(
-            node_id,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        );
+        let (sources, _, has_back, transform) = collect_output_sources(node_id, cx, visited);
         (sources, has_back, transform)
     } else {
-        let origin = resolve_node(
-            node_id,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        );
+        let origin = resolve_node(node_id, cx, visited);
         match origin {
             Some(o) => (vec![o], false, TransformKind::Direct),
             None => (vec![], false, TransformKind::Direct),
@@ -181,20 +152,16 @@ pub(super) fn collect_leaf_origins(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_virtual_reference(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let (name, binding, scope) = match &graph.nodes[node_id] {
+    let graph = cx.graph;
+    let (name, binding, env) = match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
-            scope,
+            env,
             binding,
         } => (
             name,
@@ -202,30 +169,26 @@ fn resolve_virtual_reference(
                 .clone()
                 .or_else(|| {
                     qualifier.as_deref().and_then(|parts| match parts {
-                        [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                        [qualifier] => graph.scopes.lookup(*env, qualifier).cloned(),
                         _ => None,
                     })
                 })
-                .or_else(|| lookup_virtual_binding(*scope, name, graph)),
-            *scope,
+                .or_else(|| lookup_virtual_binding(*env, name, graph)),
+            *env,
         ),
-        RawNode::Unqualified {
-            name,
-            scope,
-            binding,
-        } => (
+        RawNode::Unqualified { name, env, binding } => (
             name,
             binding
                 .clone()
-                .or_else(|| lookup_virtual_binding(*scope, name, graph)),
-            *scope,
+                .or_else(|| lookup_virtual_binding(*env, name, graph)),
+            *env,
         ),
         _ => return None,
     };
     let source = match binding {
         Some(Binding::VirtualSource(source)) => source,
         Some(_) => return None,
-        None => match find_virtual_sources_for_column(scope, name, graph).as_slice() {
+        None => match find_virtual_sources_for_column(env, name, graph).as_slice() {
             [source] => *source,
             [] => return None,
             _ => {
@@ -240,27 +203,15 @@ fn resolve_virtual_reference(
             }
         },
     };
-    resolve_virtual_column_sources(
-        name,
-        source,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    )
+    resolve_virtual_column_sources(name, source, cx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_virtual_column_sources(
     name: &Ident,
     source: VirtualSourceId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    let graph = cx.graph;
     let column = graph
         .scopes
         .virtual_source(source)
@@ -269,15 +220,7 @@ fn resolve_virtual_column_sources(
         .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
     let mut origins = Vec::new();
     for &dependency in &column.dependencies {
-        let (dependency_origins, _, _) = collect_leaf_origins(
-            dependency,
-            graph,
-            resolved,
-            incoming,
-            &mut HashSet::new(),
-            catalog,
-            mapping_cache,
-        );
+        let (dependency_origins, _, _) = collect_leaf_origins(dependency, cx, &mut HashSet::new());
         origins.extend(dependency_origins);
     }
     if origins.is_empty()
@@ -320,20 +263,17 @@ pub(super) fn virtual_column_origin(
 /// for individual catalog-expanded star outputs, so lookup must happen here.
 fn resolve_named_scope_reference(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let (name, qualifier, scope) = match &graph.nodes[node_id] {
+    let graph = cx.graph;
+    let (name, qualifier, env) = match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
-            scope,
+            env,
             ..
-        } => (name, qualifier.as_ref(), *scope),
-        RawNode::Unqualified { name, scope, .. } => (name, None, *scope),
+        } => (name, qualifier.as_ref(), *env),
+        RawNode::Unqualified { name, env, .. } => (name, None, *env),
         _ => return None,
     };
     let binding = match &graph.nodes[node_id] {
@@ -349,23 +289,15 @@ fn resolve_named_scope_reference(
     }
     .or_else(|| {
         qualifier.and_then(|parts| match parts.as_slice() {
-            [qualifier] => graph.scopes.lookup(scope, qualifier).cloned(),
+            [qualifier] => graph.scopes.lookup(env, qualifier).cloned(),
             _ => None,
         })
     })
-    .or_else(|| find_unqualified_binding(name, scope, graph, catalog, mapping_cache));
+    .or_else(|| find_unqualified_binding(name, env, cx));
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
     };
-    named_scope_sources(
-        name,
-        target_scope,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    )
+    named_scope_sources(name, target_scope, cx)
 }
 
 pub(super) fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {

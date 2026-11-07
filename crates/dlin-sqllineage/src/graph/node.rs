@@ -1,6 +1,6 @@
 use crate::Ident;
 use crate::graph::edge::EdgeKind;
-use crate::graph::scope::{Binding, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv};
 pub(crate) type NodeId = usize;
 
 /// The expression which a wildcard expands from. Keeping the original parts
@@ -46,7 +46,7 @@ pub(crate) enum RawNode {
     Ref {
         name: Ident,
         qualifier: Option<Vec<Ident>>,
-        scope: ScopeId,
+        env: BindingEnv,
         /// Binding captured while building a FROM expression. This prevents
         /// a later table alias from changing the meaning of a lateral
         /// dependency (for example `base, UNNEST(base.items) AS base`).
@@ -56,12 +56,12 @@ pub(crate) enum RawNode {
     Star {
         base: StarBase,
         options: StarOptions,
-        scope: ScopeId,
+        env: BindingEnv,
     },
     /// Unqualified column in multi-table scope.
     Unqualified {
         name: Ident,
-        scope: ScopeId,
+        env: BindingEnv,
         /// Binding visible while the expression was built. This keeps a
         /// lateral FROM dependency attached to the preceding relation even
         /// when a later range variable shadows its name.
@@ -73,7 +73,7 @@ pub(crate) enum RawNode {
     /// physical/output column with the same name.
     RowValueCandidate {
         name: Ident,
-        scope: ScopeId,
+        env: BindingEnv,
         binding: Option<Binding>,
     },
 }

@@ -1,7 +1,7 @@
 use sqlparser::ast::{Query, SetExpr};
 
 use crate::build::LineageBuilder;
-use crate::graph::scope::{Binding, OutputPlan, ScopeKind};
+use crate::graph::scope::{OutputPlan, ScopeKind};
 use crate::types::SemanticError;
 
 impl LineageBuilder {
@@ -35,9 +35,10 @@ impl LineageBuilder {
                 self.recursive_cte_name = None;
                 self.pop_scope();
 
-                self.add_binding(
+                self.graph.scopes.add_cte(
+                    self.current_scope,
                     crate::Ident::from_ast(&cte.alias.name),
-                    Binding::Cte(cte_scope),
+                    cte_scope,
                 );
             }
         }
@@ -45,7 +46,7 @@ impl LineageBuilder {
         // Push a child scope for the body when CTEs exist, so FROM bindings
         // don't mix with CTE registration bindings (avoids false ambiguity).
         if has_ctes {
-            self.push_scope(ScopeKind::Root);
+            self.push_scope(ScopeKind::Body);
         }
 
         self.visit_set_expr(&query.body, target_values);
@@ -126,21 +127,7 @@ impl LineageBuilder {
                         schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
                         table: crate::Ident::unquoted(table_name.as_str()),
                     };
-                    let recursive_self = table_ref.schema.is_none()
-                        && self.recursive_cte_name.as_ref().is_some_and(|name| {
-                            name.column_key(self.dialect)
-                                == table_ref.table.column_key(self.dialect)
-                        });
-                    let cte_ref = table_ref.schema.is_none()
-                        && matches!(
-                            self.graph
-                                .scopes
-                                .lookup(self.current_scope, &table_ref.table),
-                            Some(Binding::Cte(_) | Binding::DerivedTable(_))
-                        );
-                    if !recursive_self && !cte_ref {
-                        self.graph.tables.inputs.push(table_ref);
-                    }
+                    self.bind_relation_reference(table_ref);
                 }
                 self.graph
                     .scopes

@@ -91,11 +91,9 @@ impl LineageBuilder {
                 }
                 SelectItem::Wildcard(options) => {
                     let star_options = self.star_options(options);
-                    let star = self.graph.add_star(
-                        StarBase::Unqualified,
-                        star_options,
-                        self.current_scope,
-                    );
+                    let star = self
+                        .graph
+                        .add_star(StarBase::Unqualified, star_options, self.env());
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
@@ -114,7 +112,7 @@ impl LineageBuilder {
                         }
                     };
                     let star_options = self.star_options(options);
-                    let star = self.graph.add_star(base, star_options, self.current_scope);
+                    let star = self.graph.add_star(base, star_options, self.env());
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
@@ -221,7 +219,13 @@ impl LineageBuilder {
         for join in &table_with_joins.joins {
             let left = self.graph.scopes.bindings_added_since(scope, start);
             let right_start = self.graph.scopes.binding_mark(scope);
-            self.visit_table_factor(&join.relation);
+            // The right side of an APPLY is evaluated per row of the left
+            // side, like a LATERAL item.
+            let applied = matches!(
+                join.join_operator,
+                JoinOperator::CrossApply | JoinOperator::OuterApply
+            );
+            self.visit_table_factor_in(&join.relation, applied);
             let right = self.graph.scopes.bindings_added_since(scope, right_start);
             self.note_join_constraint(join, left, right);
         }
@@ -268,49 +272,40 @@ impl LineageBuilder {
                 right,
                 columns,
                 kind,
+                at: 0,
             },
         );
     }
 
     /// Process a single table factor — register table as input and as scope binding.
     pub(crate) fn visit_table_factor(&mut self, factor: &TableFactor) {
+        self.visit_table_factor_in(factor, false);
+    }
+
+    /// `applied` is set for the right side of an `APPLY` join.
+    fn visit_table_factor_in(&mut self, factor: &TableFactor, applied: bool) {
         match factor {
             TableFactor::Table { name, alias, .. } => {
                 let table_ref = Self::table_ref_from_object_name(name);
-
-                let is_self_ref = self.recursive_cte_name.as_ref().is_some_and(|name| {
-                    name.column_key(self.dialect) == table_ref.table.column_key(self.dialect)
-                });
-
-                let existing = self
-                    .graph
-                    .scopes
-                    .lookup(self.current_scope, &table_ref.table)
-                    .cloned();
-                let is_cte_ref =
-                    matches!(&existing, Some(Binding::Cte(_) | Binding::DerivedTable(_)));
-
-                if !is_self_ref && !is_cte_ref {
-                    self.graph.tables.inputs.push(table_ref.clone());
-                }
-
+                let binding = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
                     .as_ref()
                     .map_or_else(|| table_ref.table.clone(), |a| Ident::from_ast(&a.name));
-
-                if is_cte_ref {
-                    // Always add CTE/DerivedTable binding to current scope
-                    // (needed for correct unqualified column resolution)
-                    self.add_binding(alias_name, existing.unwrap());
-                } else {
-                    self.add_binding(alias_name, Binding::Table(table_ref));
-                }
+                self.add_binding(alias_name, binding);
             }
 
             TableFactor::Derived {
-                subquery, alias, ..
+                lateral,
+                subquery,
+                alias,
+                ..
             } => {
-                let derived_scope = self.push_scope(ScopeKind::DerivedTable);
+                let kind = if *lateral || applied {
+                    ScopeKind::LateralDerivedTable
+                } else {
+                    ScopeKind::DerivedTable
+                };
+                let derived_scope = self.push_scope(kind);
                 self.visit_query(subquery);
                 self.pop_scope();
 

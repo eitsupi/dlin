@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use super::binding::derive_transform;
 use super::catalog;
+use super::context::{EvalContext, EvalKey};
 use super::lineage::collect_output_sources;
 use super::model::{ModelStore, OutputModels};
 use super::star::expand_star;
 
 use crate::Ident;
 use crate::Unresolved;
-use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState};
@@ -67,10 +67,9 @@ pub(super) struct ScopeMappingCache {
     pub(super) models: ModelStore,
 }
 
-enum ScopeMappingEntry {
-    Computing,
-    Resolved(Arc<[ColumnMapping]>),
-}
+/// Mappings already computed for a scope. A scope still being computed is on
+/// the evaluation stack instead, so an entry here is always complete.
+type ScopeMappingEntry = Arc<[ColumnMapping]>;
 
 #[cfg(test)]
 thread_local! {
@@ -90,28 +89,21 @@ pub(super) fn scope_mapping_computations() -> usize {
 /// Resolve a scope's output plan into ordered mappings. Set-operation
 /// branches are resolved independently so catalog expansion happens before
 /// their positional merge.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_scope_mappings(
     scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Arc<[ColumnMapping]> {
-    if let Some(entry) = mapping_cache.entries.get(&scope) {
-        return match entry {
-            ScopeMappingEntry::Resolved(mappings) => mappings.clone(),
-            // A recursive scope cannot safely publish a partially materialized
-            // result. Returning no mappings preserves the existing fallback to
-            // raw output resolution and, importantly, does not cache an
-            // incomplete entry as resolved.
-            ScopeMappingEntry::Computing => Arc::from([]),
-        };
+    if let Some(mappings) = cx.mapping_cache.entries.get(&scope) {
+        return mappings.clone();
     }
-    mapping_cache
-        .entries
-        .insert(scope, ScopeMappingEntry::Computing);
+    // A scope that is being computed cannot safely publish a partially
+    // materialized result. Returning no mappings preserves the existing
+    // fallback to raw output resolution and does not cache an incomplete
+    // entry as resolved.
+    if !cx.enter(EvalKey::Mappings(scope)) {
+        return Arc::from([]);
+    }
+    let graph = cx.graph;
     #[cfg(test)]
     SCOPE_MAPPING_COMPUTATIONS.with(|computations| computations.set(computations.get() + 1));
 
@@ -123,15 +115,7 @@ pub(super) fn resolve_scope_mappings(
                     RawNode::Output { name, .. } => {
                         let mut visited = HashSet::new();
                         let (sources, edge_kinds, has_back, inherited_transform) =
-                            collect_output_sources(
-                                col.node_id,
-                                graph,
-                                resolved,
-                                incoming,
-                                &mut visited,
-                                catalog,
-                                mapping_cache,
-                            );
+                            collect_output_sources(col.node_id, cx, &mut visited);
                         let transform = merge_transform(
                             &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
                             &inherited_transform,
@@ -156,50 +140,34 @@ pub(super) fn resolve_scope_mappings(
                             transform,
                         });
                     }
-                    RawNode::Star { .. } => expand_star(
-                        col.node_id,
-                        graph,
-                        resolved,
-                        incoming,
-                        catalog,
-                        mapping_cache,
-                        &mut mappings,
-                    ),
+                    RawNode::Star { .. } => expand_star(col.node_id, cx, &mut mappings),
                     _ => {}
                 }
             }
-            if let Some(cat) = catalog {
+            if let Some(cat) = cx.catalog {
                 catalog::apply_catalog(&mut mappings, cat);
             }
             mappings
         }
-        OutputPlan::Delegate(child) => {
-            resolve_scope_mappings(child, graph, resolved, incoming, catalog, mapping_cache)
-                .iter()
-                .cloned()
-                .collect()
-        }
+        OutputPlan::Delegate(child) => resolve_scope_mappings(child, cx).iter().cloned().collect(),
         OutputPlan::SetOperation {
             left,
             right,
             recursive,
         } => {
-            let unknown_reasons = OutputModels::new(graph, catalog, &mut mapping_cache.models)
-                .scope(scope)
-                .unknown_reasons
-                .clone();
-            let left_mappings =
-                resolve_scope_mappings(left, graph, resolved, incoming, catalog, mapping_cache)
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>();
+            let unknown_reasons =
+                OutputModels::new(graph, cx.catalog, &mut cx.mapping_cache.models)
+                    .scope(scope)
+                    .unknown_reasons
+                    .clone();
+            let left_mappings = resolve_scope_mappings(left, cx)
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
             let right_mappings = if recursive {
                 Vec::new()
             } else {
-                resolve_scope_mappings(right, graph, resolved, incoming, catalog, mapping_cache)
-                    .iter()
-                    .cloned()
-                    .collect()
+                resolve_scope_mappings(right, cx).iter().cloned().collect()
             };
             // A wildcard without catalog metadata is a variable-width slot.
             // Positional alignment at or after it would fabricate an ordinal
@@ -271,9 +239,8 @@ pub(super) fn resolve_scope_mappings(
         }
     };
     let mappings: Arc<[ColumnMapping]> = mappings.into();
-    mapping_cache
-        .entries
-        .insert(scope, ScopeMappingEntry::Resolved(mappings.clone()));
+    cx.leave(EvalKey::Mappings(scope));
+    cx.mapping_cache.entries.insert(scope, mappings.clone());
     mappings
 }
 

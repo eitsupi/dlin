@@ -184,7 +184,7 @@ fn unnest_unresolved_array_is_ambiguous_not_alias_column() {
     assert!(matches!(
         &mapping.lineage,
         Lineage::Partial { known, unresolved } if known.is_empty()
-            && matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "item")
+            && matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "missing_array")
     ));
 }
 

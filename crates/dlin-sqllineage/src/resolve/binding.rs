@@ -1,32 +1,28 @@
 use std::collections::HashSet;
 
+use super::context::EvalContext;
 use super::lineage::{collect_output_sources, virtual_column_origin};
-use super::mapping::ScopeMappingCache;
 use super::model::InputLookup;
 use super::star::{input_name_sources, lookup_input, named_scope_sources};
 use super::target::effective_bindings;
 
-use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, VirtualSourceId};
+use crate::graph::scope::{Binding, BindingEnv, VirtualSourceId};
 use crate::types::{ColumnOrigin, TransformKind};
 use crate::{Ident, Unresolved};
 
 pub(super) fn resolve_node(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
+    let graph = cx.graph;
     if let Some(origin) = ambiguous_qualified_origin(node_id, graph) {
         return Some(origin);
     }
-    if let Some(ref origin) = resolved[node_id] {
+    if let Some(ref origin) = cx.resolved[node_id] {
         return Some(origin.clone());
     }
 
@@ -34,26 +30,17 @@ pub(super) fn resolve_node(
         RawNode::Ref {
             name,
             qualifier,
-            scope,
+            env,
             binding,
         } => {
             let binding = binding.clone().or_else(|| {
                 qualifier.as_deref().and_then(|parts| match parts {
-                    [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                    [qualifier] => graph.scopes.lookup(*env, qualifier).cloned(),
                     _ => None,
                 })
             });
             if let Some(binding) = binding {
-                resolve_captured_binding(
-                    name,
-                    binding,
-                    graph,
-                    resolved,
-                    incoming,
-                    visited,
-                    catalog,
-                    mapping_cache,
-                )
+                resolve_captured_binding(name, binding, cx, visited)
             } else if qualifier.is_some() {
                 // The qualifier names no relation in scope. Building a table
                 // out of its text would present a guess as a confident
@@ -63,74 +50,31 @@ pub(super) fn resolve_node(
                     candidates: Vec::new(),
                 })
             } else {
-                resolve_unqualified(
-                    name,
-                    *scope,
-                    graph,
-                    resolved,
-                    incoming,
-                    visited,
-                    catalog,
-                    mapping_cache,
-                )
+                resolve_unqualified(name, *env, cx, visited)
             }
         }
 
-        RawNode::Unqualified {
-            name,
-            scope,
-            binding,
-        } => {
+        RawNode::Unqualified { name, env, binding } => {
             if let Some(binding) = binding
                 .clone()
-                .or_else(|| lookup_virtual_binding(*scope, name, graph))
+                .or_else(|| lookup_virtual_binding(*env, name, graph))
             {
-                resolve_captured_binding(
-                    name,
-                    binding,
-                    graph,
-                    resolved,
-                    incoming,
-                    visited,
-                    catalog,
-                    mapping_cache,
-                )
+                resolve_captured_binding(name, binding, cx, visited)
             } else {
-                resolve_unqualified(
-                    name,
-                    *scope,
-                    graph,
-                    resolved,
-                    incoming,
-                    visited,
-                    catalog,
-                    mapping_cache,
-                )
+                resolve_unqualified(name, *env, cx, visited)
             }
         }
 
-        RawNode::RowValueCandidate {
-            name,
-            scope,
-            binding,
-        } => resolve_row_value_candidate(
-            name,
-            *scope,
-            binding.clone(),
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        ),
+        RawNode::RowValueCandidate { name, env, binding } => {
+            resolve_row_value_candidate(name, *env, binding.clone(), cx, visited)
+        }
 
         RawNode::Star { .. } => None,
 
         RawNode::Output { .. } => None,
     };
 
-    resolved[node_id].clone_from(&origin);
+    cx.resolved[node_id].clone_from(&origin);
     origin
 }
 
@@ -138,7 +82,7 @@ pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Opti
     let RawNode::Ref {
         name,
         qualifier: Some(parts),
-        scope,
+        env,
         ..
     } = &graph.nodes[node]
     else {
@@ -149,7 +93,7 @@ pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Opti
     };
     graph
         .scopes
-        .ambiguous_binding_candidates(*scope, qualifier)
+        .ambiguous_binding_candidates(*env, qualifier)
         .map(|candidates| {
             ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                 column: name.clone(),
@@ -162,13 +106,13 @@ pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Opti
 /// `UNNEST(...) AS item`. Compare them with column rules, since SQL engines
 /// apply column-name case behavior to those aliases.
 pub(super) fn lookup_virtual_binding(
-    scope: usize,
+    env: BindingEnv,
     name: &Ident,
     graph: &RawGraph,
 ) -> Option<Binding> {
     graph
         .scopes
-        .visible_bindings(scope)
+        .visible_bindings(env)
         .into_iter()
         .find(|(binding_name, binding)| {
             matches!(binding, Binding::VirtualSource(_))
@@ -177,19 +121,16 @@ pub(super) fn lookup_virtual_binding(
         .map(|(_, binding)| binding)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_row_value_candidate(
     name: &Ident,
-    scope: usize,
+    env: BindingEnv,
     binding: Option<Binding>,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
-    let binding = binding.or_else(|| graph.scopes.lookup(scope, name).cloned());
+    let graph = cx.graph;
+    let catalog = cx.catalog;
+    let binding = binding.or_else(|| graph.scopes.lookup(env, name).cloned());
     let Some(binding) = binding else {
         return Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
             alias: name.clone(),
@@ -220,16 +161,7 @@ fn resolve_row_value_candidate(
                     column.name.column_key(graph.dialect) == name.column_key(graph.dialect)
                 });
             if is_named_column {
-                resolve_through_scope(
-                    name,
-                    target_scope,
-                    graph,
-                    resolved,
-                    incoming,
-                    visited,
-                    catalog,
-                    mapping_cache,
-                )
+                resolve_through_scope(name, target_scope, cx, visited)
             } else {
                 Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
                     alias: name.clone(),
@@ -242,58 +174,46 @@ fn resolve_row_value_candidate(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_captured_binding(
     name: &Ident,
     binding: Binding,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
+    let graph = cx.graph;
     match binding {
         Binding::Table(table) => Some(ColumnOrigin::Concrete {
             table,
             column: name.clone(),
         }),
-        Binding::Cte(scope) | Binding::DerivedTable(scope) => resolve_through_scope(
-            name,
-            scope,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        ),
+        Binding::Cte(scope) | Binding::DerivedTable(scope) => {
+            resolve_through_scope(name, scope, cx, visited)
+        }
         Binding::VirtualSource(source) => virtual_column_origin(name, source, graph),
     }
 }
 
 pub(super) fn find_cte_redirect(
     node_id: NodeId,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(NodeId, usize)> {
+    let graph = cx.graph;
     match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
-            scope,
+            env,
             binding,
         } => {
             let binding = binding
                 .clone()
                 .or_else(|| {
                     qualifier.as_deref().and_then(|parts| match parts {
-                        [qualifier] => graph.scopes.lookup(*scope, qualifier).cloned(),
+                        [qualifier] => graph.scopes.lookup(*env, qualifier).cloned(),
                         _ => None,
                     })
                 })
-                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog, mapping_cache));
+                .or_else(|| find_unqualified_binding(name, *env, cx));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -304,14 +224,10 @@ pub(super) fn find_cte_redirect(
                 _ => None,
             }
         }
-        RawNode::Unqualified {
-            name,
-            scope,
-            binding,
-        } => {
+        RawNode::Unqualified { name, env, binding } => {
             let binding = binding
                 .clone()
-                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog, mapping_cache));
+                .or_else(|| find_unqualified_binding(name, *env, cx));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -330,12 +246,10 @@ pub(super) fn find_cte_redirect(
 /// the folded FROM clause settles on a single one.
 pub(super) fn find_unqualified_binding(
     name: &Ident,
-    scope: usize,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    env: BindingEnv,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<Binding> {
-    lookup_input(scope, name, graph, catalog, mapping_cache).binding()
+    lookup_input(env, name, cx).binding()
 }
 
 /// Resolve an unqualified column that no range variable names, from every
@@ -344,35 +258,23 @@ pub(super) fn find_unqualified_binding(
 /// Returns `None` for any other reference.
 pub(super) fn resolve_input_reference(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let (name, scope) = match &graph.nodes[node_id] {
+    let (name, env) = match &cx.graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier: None,
-            scope,
+            env,
             binding: None,
         }
         | RawNode::Unqualified {
             name,
-            scope,
+            env,
             binding: None,
-        } => (name, *scope),
+        } => (name, *env),
         _ => return None,
     };
-    input_name_sources(
-        scope,
-        name,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    )
+    input_name_sources(env, name, cx)
 }
 
 /// The origin of an unqualified column that `resolve_input_reference` could not
@@ -384,28 +286,16 @@ pub(super) fn resolve_input_reference(
 /// ambiguity, a physical relation) is returned in full by
 /// `resolve_input_reference` before a node is resolved on its own, so no merged
 /// source can reach here to be reduced to its first.
-#[allow(clippy::too_many_arguments)]
 fn resolve_unqualified(
     name: &Ident,
-    scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    env: BindingEnv,
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
-    match lookup_input(scope, name, graph, catalog, mapping_cache) {
-        InputLookup::Scope { scope: target, .. } => resolve_through_scope(
-            name,
-            target,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        ),
+    match lookup_input(env, name, cx) {
+        InputLookup::Scope { scope: target, .. } => {
+            resolve_through_scope(name, target, cx, visited)
+        }
         lookup => {
             debug_assert!(
                 matches!(lookup, InputLookup::NoSource),
@@ -426,11 +316,11 @@ fn virtual_has_column(name: &Ident, source: VirtualSourceId, graph: &RawGraph) -
 }
 
 pub(super) fn find_virtual_sources_for_column(
-    scope: usize,
+    env: BindingEnv,
     name: &Ident,
     graph: &RawGraph,
 ) -> Vec<VirtualSourceId> {
-    effective_bindings(scope, graph)
+    effective_bindings(env, graph)
         .into_iter()
         .filter_map(|(_, binding)| match binding {
             Binding::VirtualSource(source) if virtual_has_column(name, source, graph) => {
@@ -441,28 +331,16 @@ pub(super) fn find_virtual_sources_for_column(
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_through_scope(
     column_name: &Ident,
     target_scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
+    cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
+    let graph = cx.graph;
     // Resolve through the scope's model, which also lists the names a
     // catalog-expanded star introduced.
-    if let Some((origins, has_back, _)) = named_scope_sources(
-        column_name,
-        target_scope,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    ) {
+    if let Some((origins, has_back, _)) = named_scope_sources(column_name, target_scope, cx) {
         return if has_back {
             Some(ColumnOrigin::Recursive {
                 base_sources: origins,
@@ -478,15 +356,7 @@ fn resolve_through_scope(
         .iter()
         .find(|c| c.name.column_key(graph.dialect) == column_name.column_key(graph.dialect))
     {
-        let (origins, _, has_back, _) = collect_output_sources(
-            col.node_id,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        );
+        let (origins, _, has_back, _) = collect_output_sources(col.node_id, cx, visited);
         if has_back {
             Some(ColumnOrigin::Recursive {
                 base_sources: origins,

@@ -332,11 +332,9 @@ impl LineageBuilder {
     /// the same star `SELECT *` produces: left unexpanded without a catalog
     /// and expanded against the source's columns with one.
     fn add_merge_source_star(&mut self) {
-        let star = self.graph.add_star(
-            StarBase::Unqualified,
-            StarOptions::default(),
-            self.current_scope,
-        );
+        let star = self
+            .graph
+            .add_star(StarBase::Unqualified, StarOptions::default(), self.env());
         self.graph.scopes.add_output_column(
             self.current_scope,
             ScopeColumn {
