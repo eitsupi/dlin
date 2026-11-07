@@ -90,22 +90,24 @@ fn physical(names: &[&str]) -> Vec<Candidate> {
         .collect()
 }
 
-fn assert_named_behind_star(sql: &str, relations: &[&str]) {
-    let actual = output_lineage(sql, Dialect::Generic, false);
-    let Lineage::Partial { known, unresolved } = actual else {
-        panic!("{sql}: expected partial lineage, got {actual:?}");
-    };
-    assert!(known.is_empty(), "{sql}: unexpected known {known:?}");
-    assert_eq!(unresolved.len(), relations.len(), "{sql}: {unresolved:?}");
-    for name in relations {
-        assert!(
-            unresolved.iter().any(|item| matches!(
-                item,
-                Unresolved::NamedBehindStar { relation: owner, .. } if *owner == relation(name)
-            )),
-            "{sql}: no unresolved column behind {name} in {unresolved:?}"
-        );
-    }
+fn cases_through_star() -> Vec<(String, Vec<Candidate>)> {
+    vec![
+        (
+            "SELECT id FROM (SELECT * FROM a JOIN (SELECT * FROM b) d ON TRUE) w".to_owned(),
+            vec![
+                Candidate::Relation(relation("a")),
+                Candidate::Derived(Some(Ident::unquoted("d"))),
+            ],
+        ),
+        (
+            "WITH c AS (SELECT * FROM b) SELECT id FROM (SELECT * FROM a JOIN c ON TRUE) w"
+                .to_owned(),
+            vec![
+                Candidate::Relation(relation("a")),
+                Candidate::Cte(Ident::unquoted("c")),
+            ],
+        ),
+    ]
 }
 
 /// A derived table or CTE over an unknown star may publish any name, exactly
@@ -147,30 +149,26 @@ fn unknown_derived_and_cte_ranges_are_possible_providers() {
     for (sql, candidates) in cases {
         assert_candidates(sql, Dialect::Generic, false, &candidates);
     }
-    // Read through a star over the same clause, every unknown relation is a
-    // named column behind a star: the owners are listed rather than named.
-    assert_named_behind_star(
-        "SELECT id FROM (SELECT * FROM a JOIN (SELECT * FROM b) d ON TRUE) w",
-        &["a", "b"],
-    );
-    assert_named_behind_star(
-        "WITH c AS (SELECT * FROM b) SELECT id FROM (SELECT * FROM a JOIN c ON TRUE) w",
-        &["a", "b"],
-    );
+    // Read through a star over the same clause, the owners are the same.
+    for (sql, candidates) in cases_through_star() {
+        assert_candidates(&sql, Dialect::Generic, false, &candidates);
+    }
 }
 
-/// A column that a CTE lists is not hidden by an unknown derived table: the
-/// listed column is the one the name denotes.
+/// A column that a CTE lists does not settle the name when an unknown derived
+/// table is joined: the derived table may publish the name as well.
 #[test]
-fn a_listed_column_still_outranks_unknown_derived_tables() {
+fn a_listed_column_competes_with_an_unknown_derived_table() {
     let sql = "WITH c AS (SELECT x AS id FROM s) \
                SELECT id FROM c JOIN (SELECT * FROM b) d ON TRUE";
-    assert_eq!(
-        output_lineage(sql, Dialect::Generic, false),
-        Lineage::Complete(vec![dlin_sqllineage::SourceColumn {
-            relation: relation("s"),
-            column: Ident::unquoted("x"),
-        }]),
+    assert_candidates(
+        sql,
+        Dialect::Generic,
+        false,
+        &[
+            Candidate::Cte(Ident::unquoted("c")),
+            Candidate::Derived(Some(Ident::unquoted("d"))),
+        ],
     );
 }
 

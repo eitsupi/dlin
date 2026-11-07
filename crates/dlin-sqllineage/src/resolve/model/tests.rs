@@ -390,7 +390,10 @@ fn a_using_key_is_one_column_of_the_relations_that_supply_it() {
 #[test]
 fn a_using_key_competes_with_an_unknown_relation_outside_the_join() {
     let found = lookup("SELECT id FROM a JOIN b USING (id) CROSS JOIN c", &[], "id");
-    let InputLookup::Ambiguous { candidates, typed } = found else {
+    let InputLookup::Ambiguous {
+        candidates, typed, ..
+    } = found
+    else {
         panic!("expected an ambiguity, got {found:?}");
     };
     assert_eq!(candidates.len(), 3);
@@ -404,7 +407,10 @@ fn unknown_derived_tables_are_possible_owners() {
         &[],
         "id",
     );
-    let InputLookup::Ambiguous { candidates, typed } = found else {
+    let InputLookup::Ambiguous {
+        candidates, typed, ..
+    } = found
+    else {
         panic!("expected an ambiguity, got {found:?}");
     };
     assert_eq!(candidates.len(), 2);
@@ -415,8 +421,27 @@ fn unknown_derived_tables_are_possible_owners() {
 }
 
 #[test]
-fn a_listed_column_outranks_an_unknown_relation() {
+fn a_listed_column_competes_with_an_unknown_relation() {
+    // `b` may have an `x` of its own, so the listed `a.x` is not the only
+    // possible owner.
     let found = lookup("SELECT x FROM a JOIN b ON TRUE", &[("a", vec!["x"])], "x");
+    let InputLookup::Ambiguous {
+        candidates, typed, ..
+    } = found
+    else {
+        panic!("expected an ambiguity, got {found:?}");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(typed, "a catalog that lacks `b` cannot settle it");
+}
+
+#[test]
+fn a_relation_the_catalog_knows_to_lack_the_name_is_not_a_provider() {
+    let found = lookup(
+        "SELECT x FROM a JOIN b ON TRUE",
+        &[("a", vec!["x"]), ("b", vec!["y"])],
+        "x",
+    );
     assert_eq!(contributing(&found), ["a"]);
 }
 
@@ -430,7 +455,7 @@ fn range_names_that_repeat_leave_merged_names_ambiguous() {
     // A name no join merges is still decided by what the ranges list.
     let found = lookup(
         "SELECT x FROM a AS t JOIN b AS t USING (id)",
-        &[("a", vec!["x"])],
+        &[("a", vec!["x"]), ("b", vec!["id"])],
         "x",
     );
     assert_eq!(contributing(&found), ["t"]);
@@ -442,7 +467,6 @@ fn a_key_taken_from_several_unknown_relations_is_uncertain() {
     let OutputElement::Column(key) = &model.elements[0] else {
         panic!("the key leads");
     };
-    assert!(key.join_key);
     assert!(matches!(key.value, ValueId::Uncertain { .. }));
     let names: Vec<_> = key
         .candidate_ranges

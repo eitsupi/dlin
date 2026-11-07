@@ -5,14 +5,14 @@
 //! a name reads the same elements through [`InputModel::lookup`]. The join
 //! rules that decide which columns exist live in the fold alone, and the one
 //! function that weighs independent providers of a name against each other is
-//! [`InputModel::choose`].
+//! [`OutputModel::choose`](super::OutputModel::choose).
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::build::{CacheKey, OutputModels, forward_scope};
 use super::join::fold_join_columns;
-use super::{ColumnSlot, Group, NameMatches, OpaqueReason, OutputElement, OutputModel, ValueId};
+use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
 use crate::graph::scope::{Binding, MergedColumns, ScopeId};
 use crate::keys::table_key;
 use crate::types::TableRef;
@@ -84,90 +84,8 @@ pub(in crate::resolve) enum Invalidity {
     /// A join of this model's own FROM clause runs over duplicated range
     /// variables.
     Own(Rc<InvalidRanges>),
-    /// A CTE or derived table that this model reads has such a join inside.
-    /// Its ambiguity stands in for the one range that reads it; the other
-    /// ranges of this model still take part.
-    Range {
-        index: usize,
-        model: Rc<OutputModel>,
-    },
-    /// The whole output is that of another model, which has such a join.
+    /// The output is that of another model, which may have such a join.
     Whole(Rc<OutputModel>),
-}
-
-impl OutputModel {
-    /// Whether `name` has no single owner because of a join over duplicated
-    /// range variables, and the relations that may own it.
-    pub(in crate::resolve) fn ambiguity(&self, name: &Ident) -> Option<Ambiguity> {
-        let dialect = self.names.dialect;
-        let mut scoped: Vec<(usize, Vec<Candidate>)> = Vec::new();
-        for invalid in &self.invalid {
-            match invalid {
-                Invalidity::Own(ranges) if ranges.covers(name, dialect) => {
-                    return Some(Ambiguity {
-                        candidates: ranges.candidates.clone(),
-                        refinable: !ranges.typed(),
-                    });
-                }
-                Invalidity::Whole(model) => {
-                    if let Some(ambiguity) = model.ambiguity(name) {
-                        return Some(ambiguity);
-                    }
-                }
-                Invalidity::Range { index, model } => {
-                    if let Some(inner) = model.ambiguity(name) {
-                        scoped.push((*index, inner.candidates));
-                    }
-                }
-                Invalidity::Own(_) => {}
-            }
-        }
-        if scoped.is_empty() {
-            return None;
-        }
-        // The ranges that can carry the name, and of those only the ones
-        // whose value counts: a preserved side of an outer join.
-        let matches = self.matches(name);
-        let mut involved: Vec<&RangeRef> = Vec::new();
-        for &index in &matches.listed {
-            if let OutputElement::Column(slot) = &self.elements[index] {
-                involved.extend(slot.candidate_ranges.iter());
-            }
-        }
-        for &index in matches.unknown.iter().chain(&matches.tails) {
-            match &self.elements[index] {
-                OutputElement::Unknown(segment) => involved.extend(segment.ranges.iter()),
-                OutputElement::Tail(tail) => involved.extend(tail.ranges.iter()),
-                OutputElement::Column(_) => {}
-            }
-        }
-        let involved = occurrences(involved);
-        if !involved
-            .iter()
-            .any(|range| scoped.iter().any(|(index, _)| *index == range.index))
-        {
-            return None;
-        }
-        let mut candidates = Vec::new();
-        for range in involved {
-            match scoped.iter().find(|(index, _)| *index == range.index) {
-                Some((_, inner)) => candidates.extend(inner.iter().cloned()),
-                None => candidates.extend(range.candidate()),
-            }
-        }
-        Some(Ambiguity {
-            candidates,
-            refinable: false,
-        })
-    }
-}
-
-/// The relations that may own a name that has no single owner.
-pub(in crate::resolve) struct Ambiguity {
-    pub candidates: Vec<Candidate>,
-    /// Whether a catalog may still narrow the candidates down: they are all
-    /// physical relations of one join over duplicated range variables.
-    pub refinable: bool,
 }
 
 /// What the relations of one FROM clause publish together, before any
@@ -198,18 +116,19 @@ pub(in crate::resolve) enum InputLookup {
         value: ValueId,
         contributing: Rc<[RangeRef]>,
     },
-    /// A CTE or derived table decides the name: it is the only range that
-    /// can carry it, or it carries every column of that name there is.
+    /// A CTE or derived table is the only provider of the name, or the only
+    /// relation of the clause: it answers for it.
     Scope { scope: ScopeId, range: RangeRef },
     /// A lone physical relation whose columns the catalog does not list.
     Physical(Rc<TableRef>),
     /// Several relations may carry the name, or several columns do. `typed`
-    /// is set when a catalog must not narrow the candidates down: they are
-    /// not all physical relations, or a join guarantees the name on some of
-    /// them.
+    /// is set when a catalog must not narrow the candidates down. `values`
+    /// are the listed columns among the providers, which decide the
+    /// transform of a value read through the ambiguity.
     Ambiguous {
         candidates: Vec<Candidate>,
         typed: bool,
+        values: Vec<ValueId>,
     },
 }
 
@@ -241,22 +160,8 @@ impl InputLookup {
     }
 }
 
-fn occurrences<'r>(ranges: impl IntoIterator<Item = &'r RangeRef>) -> Vec<&'r RangeRef> {
-    let mut seen = HashSet::new();
-    ranges
-        .into_iter()
-        .filter(|range| seen.insert(range.index))
-        .collect()
-}
-
 fn candidates_of<'r>(ranges: impl IntoIterator<Item = &'r RangeRef>) -> Vec<Candidate> {
     ranges.into_iter().filter_map(RangeRef::candidate).collect()
-}
-
-fn typed(candidates: &[Candidate]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
 }
 
 impl InputModel {
@@ -272,118 +177,37 @@ impl InputModel {
 
     /// Decide what the unqualified `name` denotes among several relations.
     fn lookup(&self, name: &Ident) -> InputLookup {
-        if let Some(ambiguity) = self.model.ambiguity(name) {
-            return InputLookup::Ambiguous {
-                typed: !ambiguity.refinable,
-                candidates: ambiguity.candidates,
-            };
-        }
-        self.choose(&self.model.matches(name))
-    }
-
-    /// The one place that weighs independent providers of a name against each
-    /// other. `matches` holds everything in the folded FROM clause that can
-    /// carry the name.
-    fn choose(&self, matches: &NameMatches) -> InputLookup {
         let elements = &self.model.elements;
-        let slots: Vec<&ColumnSlot> = matches
-            .listed
-            .iter()
-            .filter_map(|&index| match &elements[index] {
-                OutputElement::Column(slot) => Some(slot),
-                _ => None,
-            })
-            .collect();
-        // Segments and tails that cannot be listed. Each relation counts
-        // once, however many of its elements may carry the name.
-        let providers = occurrences(matches.unknown.iter().chain(&matches.tails).flat_map(
-            |&index| match &elements[index] {
-                OutputElement::Unknown(segment) => segment.ranges.iter(),
-                OutputElement::Tail(tail) => tail.ranges.iter(),
-                OutputElement::Column(_) => [].iter(),
-            },
-        ));
-
-        // A CTE or derived table that lists every column of the name decides
-        // for itself, and one it merely may hide the name behind decides the
-        // same way: its own columns come before its own unknown segments.
-        if let Some(range) = sole_scope_range(&slots) {
-            return InputLookup::Scope {
-                scope: scope_of(&range.binding),
-                range,
-            };
-        }
-        match slots.as_slice() {
-            [] => match providers.as_slice() {
-                [] => InputLookup::Absent,
-                [range] => InputLookup::single(range),
-                several => {
-                    let candidates = candidates_of(several.iter().copied());
-                    InputLookup::Ambiguous {
-                        typed: typed(&candidates),
-                        candidates,
-                    }
-                }
-            },
-            [slot] => {
-                // A column that a join guarantees on its sides still
-                // competes with a relation outside that join: the join does
-                // not say the other relation lacks the name.
-                //
-                // A CTE or derived table among the relations the column comes
-                // from outranks the relations of unknown shape outside the
-                // join: it is known to list the name.
-                let backed = slot.candidate_ranges.iter().any(|range| {
-                    matches!(range.binding, Binding::Cte(_) | Binding::DerivedTable(_))
-                });
-                if slot.join_key && !backed && !providers.is_empty() {
-                    let mut candidates = candidates_of(slot.candidate_ranges.iter());
-                    candidates.extend(candidates_of(providers.iter().copied()));
-                    return InputLookup::Ambiguous {
-                        candidates,
-                        typed: true,
-                    };
-                }
-                InputLookup::Column {
+        match self.model.choose(name) {
+            Choice::Absent => InputLookup::Absent,
+            Choice::Column(index) => match &elements[index] {
+                OutputElement::Column(slot) => InputLookup::Column {
                     value: slot.value.clone(),
                     contributing: slot.candidate_ranges.clone(),
-                }
-            }
-            several => {
-                let candidates =
-                    candidates_of(several.iter().flat_map(|slot| slot.candidate_ranges.iter()));
-                InputLookup::Ambiguous {
-                    typed: typed(&candidates) || several.iter().any(|slot| slot.join_key),
-                    candidates,
-                }
-            }
+                },
+                _ => unreachable!("a chosen column is listed"),
+            },
+            Choice::Possible(index) => match &elements[index] {
+                OutputElement::Unknown(segment) => segment
+                    .ranges
+                    .first()
+                    .map_or(InputLookup::Absent, InputLookup::single),
+                _ => unreachable!("a possible provider is an unknown segment"),
+            },
+            Choice::Ambiguous(ambiguity) => InputLookup::Ambiguous {
+                typed: !ambiguity.refinable,
+                values: ambiguity
+                    .listed
+                    .iter()
+                    .filter_map(|&index| match &elements[index] {
+                        OutputElement::Column(slot) => Some(slot.value.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                candidates: ambiguity.candidates,
+            },
         }
     }
-}
-
-fn scope_of(binding: &Binding) -> ScopeId {
-    match binding {
-        Binding::Cte(scope) | Binding::DerivedTable(scope) => *scope,
-        _ => unreachable!("only CTEs and derived tables are scopes"),
-    }
-}
-
-/// The CTE or derived table that lists all of `slots`, if there is exactly
-/// one range and it is not a merge of several.
-fn sole_scope_range(slots: &[&ColumnSlot]) -> Option<RangeRef> {
-    let first = slots.first()?;
-    let [range] = &*first.ranges else {
-        return None;
-    };
-    if !matches!(range.binding, Binding::Cte(_) | Binding::DerivedTable(_)) {
-        return None;
-    }
-    slots
-        .iter()
-        .all(|slot| {
-            !slot.join_key && matches!(&*slot.ranges, [other] if other.index == range.index)
-        })
-        .then(|| range.clone())
 }
 
 impl OutputModels<'_, '_, '_> {
@@ -464,13 +288,11 @@ impl OutputModels<'_, '_, '_> {
             })
             .collect();
         let mut invalid = Vec::new();
+        let mut reads = Vec::new();
         let mut groups = Vec::new();
         for range in &ranges {
-            if let Some(model) = self.binding_invalid(&range.binding) {
-                invalid.push(Invalidity::Range {
-                    index: range.index,
-                    model,
-                });
+            if let Some(model) = self.binding_model(&range.binding) {
+                reads.push((range.index, model));
             }
             groups.push(Group {
                 members: vec![range.name.clone()],
@@ -509,17 +331,14 @@ impl OutputModels<'_, '_, '_> {
         }
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;
+        model.reads = reads;
         InputModel { model, anonymous }
     }
 
-    /// The model of a CTE or derived table that has a join over duplicated
-    /// range variables inside it, if the binding is one.
-    pub(super) fn binding_invalid(&mut self, binding: &Binding) -> Option<Rc<OutputModel>> {
+    /// The model of the CTE or derived table a binding reads, if it is one.
+    pub(super) fn binding_model(&mut self, binding: &Binding) -> Option<Rc<OutputModel>> {
         match binding {
-            Binding::Cte(child) | Binding::DerivedTable(child) => {
-                let model = self.scope(*child);
-                (!model.invalid.is_empty()).then_some(model)
-            }
+            Binding::Cte(child) | Binding::DerivedTable(child) => Some(self.scope(*child)),
             Binding::Table(_) | Binding::VirtualSource(_) => None,
         }
     }

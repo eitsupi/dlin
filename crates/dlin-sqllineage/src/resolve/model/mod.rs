@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod build;
+mod choose;
 mod input;
 mod join;
 mod options;
 
 pub(super) use build::{ModelStore, OutputModels};
+pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::{InputLookup, RangeRef};
 
@@ -155,9 +157,6 @@ pub(super) struct ColumnSlot {
     /// Range variables whose values contribute to the column. Unlike
     /// `ranges`, this excludes sides suppressed by an outer USING join.
     pub candidate_ranges: Rc<[RangeRef]>,
-    /// Whether a USING or NATURAL join merged the column, which guarantees
-    /// that every side it merges has it.
-    pub join_key: bool,
     pub value: ValueId,
 }
 
@@ -207,8 +206,8 @@ pub(super) struct BranchTail {
 pub(super) struct NameIndex {
     dialect: Dialect,
     slots: OnceCell<HashMap<String, Vec<usize>>>,
-    /// Positions of the unknown segments and tails, which may publish any
-    /// name their conditions admit.
+    /// Positions of the unknown segments, which may publish any name their
+    /// conditions admit.
     unlisted: OnceCell<Vec<usize>>,
 }
 
@@ -223,6 +222,10 @@ pub(super) struct OutputModel {
     /// Joins that merge names over a FROM clause in which two ranges share a
     /// name, so which relation a merged name belongs to cannot be told.
     pub invalid: Vec<Invalidity>,
+    /// The models of the CTEs and derived tables this model reads, by the
+    /// index of the range that reads them. The elements a range contributes are
+    /// weighed by the model they came from.
+    pub reads: Vec<(usize, Rc<OutputModel>)>,
 }
 
 /// The elements of a model that may carry one name.
@@ -232,8 +235,6 @@ pub(super) struct NameMatches {
     /// Unknown segments that can still publish the name. A segment the
     /// analysis does not model (VALUES, a nested field) is not one.
     pub unknown: Vec<usize>,
-    /// Set-operation tails that can still publish the name.
-    pub tails: Vec<usize>,
 }
 
 impl OutputModel {
@@ -264,6 +265,7 @@ impl OutputModel {
             width,
             unknown_reasons,
             invalid: Vec::new(),
+            reads: Vec::new(),
         }
     }
 
@@ -289,19 +291,18 @@ impl OutputModel {
     }
 
     /// Everything in the output that may carry `name`: the columns that list
-    /// it and the unlisted segments and tails whose name conditions admit it.
+    /// it and the unknown segments whose name conditions admit it.
     pub(super) fn matches(&self, name: &Ident) -> NameMatches {
         let dialect = self.names.dialect;
         let mut matches = NameMatches {
             listed: self.slots_named(name).to_vec(),
             unknown: Vec::new(),
-            tails: Vec::new(),
         };
         let unlisted = self.names.unlisted.get_or_init(|| {
             self.elements
                 .iter()
                 .enumerate()
-                .filter(|(_, element)| !matches!(element, OutputElement::Column(_)))
+                .filter(|(_, element)| matches!(element, OutputElement::Unknown(_)))
                 .map(|(index, _)| index)
                 .collect()
         });
@@ -312,9 +313,6 @@ impl OutputModel {
                         && segment.domain.admits(name, dialect) =>
                 {
                     matches.unknown.push(index);
-                }
-                OutputElement::Tail(tail) if tail.domain.admits(name, dialect) => {
-                    matches.tails.push(index);
                 }
                 _ => {}
             }

@@ -63,8 +63,11 @@ pub(super) fn apply_options(
         .collect();
 
     for replacement in &options.replace {
+        // A REPLACE target names one column of the star, so no unknown segment
+        // publishes another column under that name next to it.
         if let Some(slot) = first_slot_named(&mut elements, &replacement.column, dialect) {
             slot.value = ValueId::Expr(replacement.node_id);
+            remove_from_segments(&mut elements, &replacement.column, dialect);
             continue;
         }
         let (providers, mut ranges) = unknown_publishers(&elements, &replacement.column, dialect);
@@ -72,7 +75,9 @@ pub(super) fn apply_options(
         if providers.is_empty() && tails.is_empty() {
             continue;
         }
-        // The replacement stands for the tail's column of that name.
+        // The replacement stands for the column of that name in the segments
+        // and the tail it replaces.
+        remove_from_segments(&mut elements, &replacement.column, dialect);
         retire_tail_name(&mut elements, &replacement.column, dialect);
         ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
         let ranges: Rc<[RangeRef]> = ranges.into();
@@ -81,7 +86,6 @@ pub(super) fn apply_options(
             output_name: OutputName::Explicit(replacement.column.clone()),
             ranges: ranges.clone(),
             candidate_ranges: ranges,
-            join_key: false,
             value: ValueId::Expr(replacement.node_id),
         }));
     }
@@ -97,13 +101,7 @@ pub(super) fn apply_options(
         if providers.is_empty() && tails.is_empty() {
             continue;
         }
-        for element in &mut elements {
-            if let OutputElement::Unknown(segment) = element
-                && segment.domain.admits(old, dialect)
-            {
-                segment.domain.removed.push(old.clone());
-            }
-        }
+        remove_from_segments(&mut elements, old, dialect);
         retire_tail_name(&mut elements, old, dialect);
         // The renamed column carries what every publisher of the old name
         // contributes: the unknown segments and the set-operation tails.
@@ -131,11 +129,35 @@ pub(super) fn apply_options(
             output_name: OutputName::Explicit(new.clone()),
             ranges: ranges.clone(),
             candidate_ranges: ranges,
-            join_key: false,
             value,
         }));
     }
+    // A name a RENAME introduces does not collide with a column the star
+    // already has, so no unknown segment publishes it next to the renamed
+    // column. A name that another item renames away is the exception: the
+    // segment's own column of that name is that item's.
+    for (_, new) in &options.rename {
+        if !options
+            .rename
+            .iter()
+            .any(|(old, _)| same_column_name(old, new, dialect))
+        {
+            remove_from_segments(&mut elements, new, dialect);
+        }
+    }
     elements
+}
+
+/// Stop the unknown segments from publishing `name`: a column of the star
+/// stands for it.
+fn remove_from_segments(elements: &mut [OutputElement], name: &Ident, dialect: Dialect) {
+    for element in elements {
+        if let OutputElement::Unknown(segment) = element
+            && segment.domain.admits(name, dialect)
+        {
+            segment.domain.removed.push(name.clone());
+        }
+    }
 }
 
 /// The set-operation tails that may publish `name`, with their range variables.

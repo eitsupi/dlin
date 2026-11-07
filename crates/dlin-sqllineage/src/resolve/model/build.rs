@@ -133,6 +133,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
         let graph = self.graph;
         let mut invalid = Vec::new();
+        let mut reads = Vec::new();
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
@@ -141,6 +142,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         let star = self.star(column.node_id);
                         elements.extend(star.elements.iter().cloned());
                         invalid.extend(star.invalid.iter().cloned());
+                        reads.extend(star.reads.iter().cloned());
                     } else {
                         elements.push(OutputElement::Column(ColumnSlot {
                             name: column.name.clone(),
@@ -151,7 +153,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 .unwrap_or_else(|| OutputName::Explicit(column.name.clone())),
                             ranges: Rc::from([]),
                             candidate_ranges: Rc::from([]),
-                            join_key: false,
                             value: ValueId::Expr(column.node_id),
                         }));
                     }
@@ -160,9 +161,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
-                if !model.invalid.is_empty() {
-                    invalid.push(Invalidity::Whole(model.clone()));
-                }
+                invalid.push(Invalidity::Whole(model.clone()));
                 forward_scope(*child, &model, &Rc::from([]), false)
             }
             // The left operand defines the names of a set operation.
@@ -170,9 +169,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 left, recursive, ..
             } => {
                 let model = self.scope(*left);
-                if !model.invalid.is_empty() {
-                    invalid.push(Invalidity::Whole(model.clone()));
-                }
+                invalid.push(Invalidity::Whole(model.clone()));
                 let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
                 if !recursive {
                     // This operation's tail covers whatever the left operand
@@ -204,6 +201,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             graph.dialect,
         );
         model.invalid = invalid;
+        model.reads = reads;
         model
     }
 
@@ -217,10 +215,12 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let graph = self.graph;
         let opaque = |reason| vec![OutputElement::Unknown(UnknownSegment::opaque(reason))];
         let mut invalid = Vec::new();
+        let mut reads = Vec::new();
         let elements = match resolve_star_target(base, scope, graph) {
             StarTarget::All => {
                 let input = self.input(scope);
                 invalid.extend(input.model.invalid.iter().cloned());
+                reads.extend(input.model.reads.iter().cloned());
                 input.star_elements()
             }
             StarTarget::Binding { name, binding } => {
@@ -229,11 +229,8 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     name,
                     binding,
                 };
-                if let Some(model) = self.binding_invalid(&range.binding) {
-                    invalid.push(Invalidity::Range {
-                        index: range.index,
-                        model,
-                    });
+                if let Some(model) = self.binding_model(&range.binding) {
+                    reads.push((range.index, model));
                 }
                 self.binding_part(&range)
             }
@@ -248,6 +245,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             graph.dialect,
         );
         model.invalid = invalid;
+        model.reads = reads;
         model
     }
 
@@ -272,7 +270,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         output_name: OutputName::Explicit(column.name.clone()),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
-                        join_key: false,
                         value: ValueId::VirtualColumn {
                             source: *source,
                             index,
@@ -293,7 +290,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         output_name: OutputName::Explicit(column.clone()),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
-                        join_key: false,
                         value: ValueId::Physical {
                             table: table.clone(),
                             column,
@@ -328,7 +324,6 @@ pub(super) fn forward_scope(
                 output_name: slot.output_name.clone(),
                 ranges: ranges.clone(),
                 candidate_ranges: ranges.clone(),
-                join_key: false,
                 value: if set_operation {
                     ValueId::SetOperation { scope, index }
                 } else {

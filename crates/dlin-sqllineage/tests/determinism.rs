@@ -239,15 +239,21 @@ fn natural_join_column_is_not_ambiguous() {
     assert_complete_sources(&result, &[("s1", "x"), ("s2", "x")]);
 }
 
-/// A column that only one CTE publishes still resolves through that CTE, even
-/// when a physical table of unknown shape is joined as well.
+/// A physical table of unknown shape may have the column the CTE publishes,
+/// so the name has two possible owners.
 #[test]
-fn single_cte_provider_still_wins_over_tables() {
+fn single_cte_provider_is_ambiguous_with_a_table_of_unknown_shape() {
     let result = stable(
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t2 ON a.id = t2.id",
         Dialect::Generic,
     );
-    assert_complete_sources(&result, &[("s1", "x")]);
+    assert_ambiguous(
+        &result,
+        &[
+            Candidate::Relation(table("t2")),
+            Candidate::Cte(Ident::unquoted("a")),
+        ],
+    );
 }
 
 /// Each alias is a separate relation, even when both read the same CTE.

@@ -286,7 +286,6 @@ fn fold_groups(
                 output_name,
                 ranges,
                 candidate_ranges,
-                join_key: true,
                 value,
             }));
         }

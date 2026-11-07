@@ -3,9 +3,7 @@ use std::collections::HashSet;
 use super::lineage::{collect_output_sources, virtual_column_origin};
 use super::mapping::ScopeMappingCache;
 use super::model::InputLookup;
-use super::star::{
-    Unlisted, input_name_sources, listed_name_sources, lookup_input, unlisted_name_sources,
-};
+use super::star::{input_name_sources, lookup_input, named_scope_sources};
 use super::target::effective_bindings;
 
 use crate::catalog::CatalogContext;
@@ -377,6 +375,15 @@ pub(super) fn resolve_input_reference(
     )
 }
 
+/// The origin of an unqualified column that `resolve_input_reference` could not
+/// answer: the one CTE or derived table that decides the name publishes nothing
+/// under it, so the name falls back to the scope's raw output columns, or a
+/// virtual source that does not publish columns by name.
+///
+/// Every other answer of the input lookup (a column, several merged sources, an
+/// ambiguity, a physical relation) is returned in full by
+/// `resolve_input_reference` before a node is resolved on its own, so no merged
+/// source can reach here to be reduced to its first.
 #[allow(clippy::too_many_arguments)]
 fn resolve_unqualified(
     name: &Ident,
@@ -389,8 +396,6 @@ fn resolve_unqualified(
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     match lookup_input(scope, name, graph, catalog, mapping_cache) {
-        // A CTE or derived table that publishes nothing under the name still
-        // answers for it: through its raw output columns, else unresolved.
         InputLookup::Scope { scope: target, .. } => resolve_through_scope(
             name,
             target,
@@ -401,17 +406,13 @@ fn resolve_unqualified(
             catalog,
             mapping_cache,
         ),
-        InputLookup::NoSource => None,
-        _ => input_name_sources(
-            scope,
-            name,
-            graph,
-            resolved,
-            incoming,
-            catalog,
-            mapping_cache,
-        )
-        .and_then(|(sources, _, _)| sources.into_iter().next()),
+        lookup => {
+            debug_assert!(
+                matches!(lookup, InputLookup::NoSource),
+                "an answered lookup never reaches node resolution: {lookup:?}"
+            );
+            None
+        }
     }
 }
 
@@ -453,9 +454,9 @@ fn resolve_through_scope(
 ) -> Option<ColumnOrigin> {
     // Resolve through the scope's model, which also lists the names a
     // catalog-expanded star introduced.
-    if let Some((origins, has_back, _)) = listed_name_sources(
-        target_scope,
+    if let Some((origins, has_back, _)) = named_scope_sources(
         column_name,
+        target_scope,
         graph,
         resolved,
         incoming,
@@ -469,24 +470,6 @@ fn resolve_through_scope(
         } else {
             origins.into_iter().next()
         };
-    }
-    match unlisted_name_sources(
-        target_scope,
-        column_name,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    ) {
-        Unlisted::Denied => {
-            return Some(ColumnOrigin::Ambiguous {
-                column: column_name.clone(),
-                candidates: Vec::new(),
-            });
-        }
-        Unlisted::Sources(sources) => return sources.into_iter().next(),
-        Unlisted::None => {}
     }
 
     if let Some(col) = graph

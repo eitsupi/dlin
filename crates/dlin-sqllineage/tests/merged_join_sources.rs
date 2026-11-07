@@ -404,20 +404,20 @@ fn natural_join_follows_the_catalog_for_which_tables_hold_the_column() {
 }
 
 /// A table the catalog does not describe is not confirmed to share the column,
-/// so it is not merged; the catalog's single confirmed owner is then picked as
-/// for any ambiguous column.
+/// so it is not merged; it may or may not have the column, so the name stays
+/// ambiguous between it and the confirmed owner.
 #[test]
 fn natural_join_does_not_merge_a_table_the_catalog_does_not_confirm() {
     assert_eq!(
         sources("SELECT x FROM t1 NATURAL JOIN t2", Some(&[("t1", &["x"])])),
-        ["t1.x"]
+        ["?x(t1,t2)"]
     );
     assert_eq!(
         sources(
             "WITH a AS (SELECT x FROM s1) SELECT x FROM a NATURAL JOIN t",
             Some(&[("other", &["x"])])
         ),
-        ["s1.x"]
+        ["?x(t,a)"]
     );
 }
 
@@ -488,16 +488,31 @@ fn table_and_cte_sources_follow_join_kind() {
     );
 }
 
-/// A CTE that publishes the name outranks physical tables of unknown shape,
-/// so a table that is not merged with it does not compete.
+/// A table of unknown shape that is not merged with a CTE may have the CTE's
+/// column too, so it competes with it; a table the catalog describes without
+/// the column does not.
 #[test]
-fn unmerged_table_does_not_compete_with_a_cte_provider() {
+fn unmerged_table_competes_with_a_cte_provider_unless_the_catalog_rules_it_out() {
     assert_eq!(
         plain("WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x), t3"),
-        ["s1.x", "t.x"]
+        ["?x(t,t3,a)"]
     );
     assert_eq!(
         plain("WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t ON a.id = t.id"),
+        ["?x(t,a)"]
+    );
+    assert_eq!(
+        sources(
+            "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x), t3",
+            Some(&[("t3", &["id"])])
+        ),
+        ["s1.x", "t.x"]
+    );
+    assert_eq!(
+        sources(
+            "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t ON a.id = t.id",
+            Some(&[("t", &["id"])])
+        ),
         ["s1.x"]
     );
 }

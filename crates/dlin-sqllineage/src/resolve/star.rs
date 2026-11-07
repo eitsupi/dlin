@@ -15,8 +15,8 @@ use super::mapping::{
     wildcard_mapping,
 };
 use super::model::{
-    BranchTail, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
-    RangeRef, UnknownProvider, UnknownSegment, ValueId,
+    BranchTail, Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
+    OutputModels, RangeRef, UnknownProvider, UnknownSegment, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target, same_column_name};
 
@@ -24,7 +24,6 @@ use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase};
 use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
-use crate::keys::candidate_key;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 use crate::{Candidate, Ident, Unresolved};
 
@@ -79,52 +78,6 @@ pub(super) fn expand_star(
             OutputElement::Tail(tail) => mappings.extend(evaluator.tail_mappings(tail)),
         }
     }
-}
-
-/// The origins of the column a scope lists under `name`, whether they read the
-/// recursive CTE the scope belongs to, and the transform the scope applies.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn listed_name_sources(
-    scope: ScopeId,
-    name: &Ident,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    Evaluator {
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-        active: HashSet::new(),
-    }
-    .listed(scope, name)
-}
-
-/// Look `name` up among the unlisted columns of a scope: whatever unknown
-/// relations may publish under the star modifiers.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn unlisted_name_sources(
-    scope: ScopeId,
-    name: &Ident,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> Unlisted {
-    Evaluator {
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-        active: HashSet::new(),
-    }
-    .unlisted(scope, name)
 }
 
 /// The origins of the column a CTE or derived table publishes under `name`,
@@ -360,7 +313,18 @@ impl Evaluator<'_, '_, '_> {
             )),
             InputLookup::Scope { scope, .. } => self.named(scope, name),
             InputLookup::Column { value, .. } => Some(self.read_value(&value, name)),
-            InputLookup::Ambiguous { candidates, typed } => {
+            InputLookup::Ambiguous {
+                candidates,
+                typed,
+                values,
+            } => {
+                // The value is not known, but what would produce it is: an
+                // aggregate over an ambiguous column is still an aggregation.
+                let mut transform = TransformKind::Direct;
+                for value in &values {
+                    let (_, _, listed) = self.read_value(value, name);
+                    transform = merge_transform(&transform, &listed);
+                }
                 let origin = if typed {
                     ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                         column: name.clone(),
@@ -382,7 +346,7 @@ impl Evaluator<'_, '_, '_> {
                             .collect(),
                     }
                 };
-                Some((vec![origin], false, TransformKind::Direct))
+                Some((vec![origin], false, transform))
             }
         }
     }
@@ -395,8 +359,36 @@ impl Evaluator<'_, '_, '_> {
         scope: ScopeId,
         name: &Ident,
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        if let Some(listed) = self.listed(scope, name) {
-            return Some(listed);
+        let model = self.scope_model(scope);
+        match model.choose(name) {
+            Choice::Column(index) => return Some(self.scope_slot(scope, index, true)),
+            Choice::Ambiguous(ambiguity) => {
+                let mut candidates = ambiguity.candidates;
+                if candidates.is_empty() {
+                    // Columns without a range variable are attributed to the
+                    // scope itself, as the CTE or derived table that is read.
+                    candidates.extend(self.graph.scopes.reading_binding(scope).map(
+                        |(name, binding)| match binding {
+                            Binding::Cte(_) => Candidate::Cte(name),
+                            _ => Candidate::Derived(Some(name)),
+                        },
+                    ));
+                }
+                let mut transform = TransformKind::Direct;
+                for &index in &ambiguity.listed {
+                    let (_, _, listed) = self.scope_slot(scope, index, true);
+                    transform = merge_transform(&transform, &listed);
+                }
+                let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                    column: name.clone(),
+                    candidates,
+                });
+                return Some((vec![ambiguous], false, transform));
+            }
+            Choice::Possible(_) | Choice::Absent => {}
+        }
+        if let Some(tail) = self.tail_named(&model, name) {
+            return Some(tail);
         }
         match self.unlisted(scope, name) {
             Unlisted::Denied => Some((
@@ -469,73 +461,13 @@ impl Evaluator<'_, '_, '_> {
         result
     }
 
-    /// The relations the listed columns that share a name come from, in the
-    /// order the scope lists them, found through the range variables of those
-    /// columns. Columns without a range variable are attributed to the scope
-    /// itself, as the CTE or derived table that is read.
-    fn duplicate_candidates(
-        &self,
-        scope: ScopeId,
-        model: &OutputModel,
-        slots: &[usize],
-    ) -> Vec<Candidate> {
-        let graph = self.graph;
-        let dialect = graph.dialect;
-        let mut candidates = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut push = |candidate: Candidate| {
-            if seen.insert(candidate_key(&candidate, dialect)) {
-                candidates.push(candidate);
-            }
-        };
-        for &index in slots {
-            let OutputElement::Column(slot) = &model.elements[index] else {
-                continue;
-            };
-            for candidate in slot.candidate_ranges.iter().filter_map(RangeRef::candidate) {
-                push(candidate);
-            }
-        }
-        if candidates.is_empty() {
-            candidates.extend(graph.scopes.reading_binding(scope).map(|(name, binding)| {
-                match binding {
-                    Binding::Cte(_) => Candidate::Cte(name),
-                    _ => Candidate::Derived(Some(name)),
-                }
-            }));
-        }
-        candidates
-    }
-
-    /// The origins of the column a scope lists under `name`, or of the
-    /// first right-operand column of a set operation that has that name.
-    fn listed(
+    /// The origins of the first right-operand column of a set operation that
+    /// has the name `name`.
+    fn tail_named(
         &mut self,
-        scope: ScopeId,
+        model: &OutputModel,
         name: &Ident,
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let model = self.scope_model(scope);
-        // A join over duplicated range variables cannot say which relation
-        // owns a name it merges, whatever the relations list.
-        if let Some(ambiguity) = model.ambiguity(name) {
-            let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
-                column: name.clone(),
-                candidates: ambiguity.candidates,
-            });
-            return Some((vec![ambiguous], false, TransformKind::Direct));
-        }
-        match model.slots_named(name) {
-            [] => {}
-            [index] => return Some(self.scope_slot(scope, *index, true)),
-            // Several listed columns carry the name, so it picks none.
-            slots => {
-                let ambiguous = ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
-                    column: name.clone(),
-                    candidates: self.duplicate_candidates(scope, &model, slots),
-                });
-                return Some((vec![ambiguous], false, TransformKind::Direct));
-            }
-        }
         let dialect = self.graph.dialect;
         for element in &model.elements {
             let OutputElement::Tail(tail) = element else {
