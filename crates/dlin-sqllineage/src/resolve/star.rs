@@ -36,6 +36,46 @@ pub(super) fn expand_star(
     visited_scopes: &mut HashSet<usize>,
 ) {
     let start = mappings.len();
+    let range_variables = expand_star_columns(
+        base,
+        scope,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        mappings,
+        visited_scopes,
+    );
+    apply_star_options(
+        mappings,
+        start,
+        &range_variables,
+        base,
+        scope,
+        options,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
+}
+
+/// Expand without modifiers, returning the range variables for each new mapping.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn expand_star_columns(
+    base: &StarBase,
+    scope: usize,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+    mappings: &mut Vec<ColumnMapping>,
+    visited_scopes: &mut HashSet<usize>,
+) -> Vec<Vec<Ident>> {
+    let start = mappings.len();
     let mut range_variables = Vec::new();
     match resolve_star_target(base, scope, graph) {
         StarTarget::Ambiguous(candidates) => mappings.push(ColumnMapping {
@@ -191,19 +231,7 @@ pub(super) fn expand_star(
         }
     }
     range_variables.resize(mappings.len() - start, Vec::new());
-    apply_star_options(
-        mappings,
-        start,
-        &range_variables,
-        base,
-        scope,
-        options,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    );
+    range_variables
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,6 +327,7 @@ fn apply_star_options(
         append_unknown_star_options(
             mappings,
             start,
+            range_variables,
             base,
             scope,
             options,
@@ -363,6 +392,7 @@ fn apply_star_options(
 fn append_unknown_star_options(
     mappings: &mut Vec<ColumnMapping>,
     start: usize,
+    range_variables: &[Vec<Ident>],
     base: &StarBase,
     scope: usize,
     options: &StarOptions,
@@ -404,8 +434,15 @@ fn append_unknown_star_options(
         if !name_passes_star_filters(old, options, base, graph.dialect) {
             continue;
         }
-        let sources =
-            named_wildcard_sources_for_star(&unknown_sources, old, options, base, scope, graph);
+        let sources = named_wildcard_sources_for_star(
+            &unknown_sources,
+            range_variables,
+            old,
+            options,
+            base,
+            scope,
+            graph,
+        );
         if !sources
             .iter()
             .any(|source| matches!(source, ColumnOrigin::NamedWildcard { .. }))
@@ -461,35 +498,6 @@ pub(super) fn excluded_matches_name(
                 },
                 _ => false,
             }))
-}
-
-pub(super) fn table_matches_qualifier(
-    table: &TableRef,
-    qualifier: &[Ident],
-    dialect: Dialect,
-) -> bool {
-    match qualifier {
-        [name] => table.table.relation_key(dialect) == name.relation_key(dialect),
-        [schema, name] => {
-            table
-                .schema
-                .as_ref()
-                .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
-                && table.table.relation_key(dialect) == name.relation_key(dialect)
-        }
-        [catalog, schema, name] => {
-            table
-                .catalog
-                .as_ref()
-                .is_some_and(|c| c.relation_key(dialect) == catalog.relation_key(dialect))
-                && table
-                    .schema
-                    .as_ref()
-                    .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
-                && table.table.relation_key(dialect) == name.relation_key(dialect)
-        }
-        _ => false,
-    }
 }
 
 #[derive(Clone)]

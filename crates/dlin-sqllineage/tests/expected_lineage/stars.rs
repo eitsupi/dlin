@@ -691,6 +691,90 @@ pub fn cases() -> Vec<Case> {
         )
         .catalog(vec![(schema_table, vec![u("id"), u("left_value")])]),
     );
+    for (name, from, excluded, denied) in [
+        (
+            "unknown_exclude_derived_range_variable",
+            "(SELECT * FROM a) x",
+            "x.id",
+            true,
+        ),
+        (
+            "unknown_exclude_hidden_physical_name",
+            "a AS x",
+            "a.id",
+            false,
+        ),
+        ("unknown_exclude_implicit_range_variable", "a", "a.id", true),
+    ] {
+        let unresolved = if denied {
+            Unresolved::Unbound { column: u("id") }
+        } else {
+            Unresolved::NamedBehindStar {
+                relation: relation("a"),
+                column: u("id"),
+            }
+        };
+        cases.push(
+            Case::new(
+                name,
+                &format!("SELECT id FROM (SELECT * EXCLUDE ({excluded}) FROM {from}) d"),
+                Dialect::Generic,
+                vec![partial_col(0, u("id"), vec![], vec![unresolved.clone()])],
+            )
+            .unresolved_stars(true),
+        );
+        let mut columns = Vec::new();
+        if !denied {
+            let mut renamed = partial_col(0, u("kept"), vec![], vec![unresolved]);
+            renamed.ordinal = None;
+            columns.push(renamed);
+        }
+        cases.push(
+            Case::new(
+                &format!("{name}_rename"),
+                &format!("SELECT * EXCLUDE ({excluded}) RENAME (id AS kept) FROM {from}"),
+                Dialect::Generic,
+                columns,
+            )
+            .shape(open_star("a", None))
+            .unresolved_stars(true),
+        );
+    }
+    for (name, join) in [
+        ("inner", "JOIN"),
+        ("left", "LEFT JOIN"),
+        ("right", "RIGHT JOIN"),
+        ("full", "FULL JOIN"),
+    ] {
+        for qualifier in ["x", "y"] {
+            cases.push(Case::new(&format!("unknown_using_{name}_exclude_{qualifier}"),
+                &format!("SELECT id FROM (SELECT * EXCLUDE ({qualifier}.id) FROM a x {join} b y USING (id)) d"),
+                Dialect::Generic,
+                vec![partial_col(0, u("id"), vec![], vec![Unresolved::Unbound { column: u("id") }])],
+            ).unresolved_stars(true));
+            cases.push(Case::new(&format!("unknown_using_{name}_exclude_{qualifier}_rename"),
+                &format!("SELECT * EXCLUDE ({qualifier}.id) RENAME (id AS kept) FROM a x {join} b y USING (id)"),
+                Dialect::Generic, vec![],
+            ).shape(Shape::Open { unexpanded: ["a", "b"].into_iter().map(|table| UnexpandedStar {
+                relation: Some(relation(table)), after_ordinal: None,
+                lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] },
+            }).collect() }).unresolved_stars(true));
+        }
+    }
+    let mut other = physical(0, "c", "other");
+    other.ordinal = None;
+    cases.push(Case::new("unknown_using_chain_skips_known_non_owner",
+        "SELECT * EXCLUDE (x.id) RENAME (id AS kept) FROM a x JOIN b y USING (id) JOIN c z ON TRUE JOIN d w USING (id)",
+        Dialect::Generic, vec![other],
+    ).catalog(vec![(relation("c"), vec![u("other")])])
+     .shape(Shape::Open { unexpanded: ["a", "b", "d"].into_iter().map(|table| UnexpandedStar {
+        relation: Some(relation(table)), after_ordinal: None,
+        lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] },
+     }).collect() }).unresolved_stars(true));
+    cases.push(Case::new("unknown_using_chain_named_read_skips_known_non_owner",
+        "SELECT id FROM (SELECT * EXCLUDE (x.id) FROM a x JOIN b y USING (id) JOIN c z ON TRUE JOIN d w USING (id)) result",
+        Dialect::Generic, vec![partial_col(0, u("id"), vec![], vec![Unresolved::Unbound { column: u("id") }])],
+    ).catalog(vec![(relation("c"), vec![u("other")])]).unresolved_stars(true));
     cases
 }
 
