@@ -2,7 +2,7 @@
 
 use crate::Dialect;
 use crate::build::LineageBuilder;
-use crate::graph::scope::{Binding, ScopeId};
+use crate::graph::scope::{Binding, ScopeId, ScopeKind};
 use crate::types::TableRef;
 
 /// What a CTE's reference to its own name means.
@@ -86,20 +86,31 @@ pub(crate) fn cte_list_rule(dialect: Dialect, recursive: bool) -> CteListRule {
     }
 }
 
-/// The CTE whose body is being visited.
-#[derive(Debug, Clone)]
-pub(crate) struct OwnCte {
-    pub name: crate::Ident,
+/// A CTE whose body is being visited.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DefiningCte {
     pub scope: ScopeId,
-    pub rule: OwnName,
+    /// What a reference to the CTE's own name means in its body.
+    pub own_name: OwnName,
 }
 
 impl LineageBuilder {
-    /// Whether the CTE being defined reads itself.
-    pub(crate) fn defining_recursive_cte(&self) -> bool {
-        self.own_cte
-            .as_ref()
-            .is_some_and(|own| own.rule == OwnName::Recursive)
+    /// The CTE scope a set operation built in `scope` is the body of, when it
+    /// is one: the scope itself, or the scopes a body is split into (the
+    /// body of a nested WITH, an operand of an enclosing set operation).
+    /// A set operation inside a derived table or an expression subquery of
+    /// the CTE is an ordinary one.
+    pub(crate) fn cte_of_body_scope(&self, scope: ScopeId) -> Option<ScopeId> {
+        let mut scope = scope;
+        loop {
+            match self.graph.scopes.kind(scope) {
+                ScopeKind::Cte => return Some(scope),
+                ScopeKind::Body | ScopeKind::SetOperation => {
+                    scope = self.graph.scopes.parent(scope)?;
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Bind the relation named by a FROM item (or a `TABLE` query) and record
@@ -109,9 +120,11 @@ impl LineageBuilder {
     ///
     /// - A name written with a schema or catalog is always a physical
     ///   relation. CTEs have no schema, so `public.c` never reads the CTE `c`.
-    /// - A bare name is the CTE being defined if it reads itself, then the
-    ///   nearest CTE visible at this position, and otherwise a physical
-    ///   relation.
+    /// - A bare name is the nearest CTE visible at this position, and
+    ///   otherwise a physical relation. A WITH nested in a CTE body therefore
+    ///   shadows the CTE being defined like any other outer CTE. Whether a CTE
+    ///   is visible in its own body is decided when the WITH list is defined,
+    ///   by the dialect's rule.
     /// - A bare name that matches a CTE the position cannot see (a later one,
     ///   or the CTE itself) is a physical relation where the dialect's rule is
     ///   known. Where it is not, or where the query is not valid, the name is
@@ -119,36 +132,41 @@ impl LineageBuilder {
     ///   variable twice, which makes any use of it ambiguous between them.
     /// - Only a physical relation is recorded as read; a CTE's own definition
     ///   records what it reads.
+    /// - A name that is bound to a CTE whose body is being visited is that
+    ///   CTE reading itself. It is recorded, so that the set operation it
+    ///   appears in is known to be recursive, and it binds a relation that is
+    ///   not read, since the recursive term is not evaluated.
     ///
     /// The result is the bindings the FROM item's range variable takes.
     pub(crate) fn bind_relation_reference(&mut self, table: TableRef) -> Vec<Binding> {
         if table.catalog.is_some() || table.schema.is_some() {
             return vec![self.read_physical(table)];
         }
-        if let Some(own) = &self.own_cte
-            && own.name.column_key(self.dialect) == table.table.column_key(self.dialect)
-        {
-            match own.rule {
-                OwnName::Recursive => return vec![Binding::Table(table)],
-                OwnName::Unresolved => {
-                    let scope = own.scope;
-                    return vec![Binding::Cte(scope), self.read_physical(table)];
-                }
-                OwnName::Physical => {}
-            }
-        }
+        let modelled = cte_list_rule(self.dialect, false).modelled;
         let found = self.graph.scopes.lookup_cte(self.env(), &table.table);
         if let Some(scope) = found.visible
-            && (found.hidden.is_none() || cte_list_rule(self.dialect, false).modelled)
+            && (found.hidden.is_none() || modelled)
         {
+            if self.defining_ctes.iter().any(|cte| cte.scope == scope) {
+                self.self_references.push(scope);
+                return vec![Binding::Table(table)];
+            }
             return vec![Binding::Cte(scope)];
         }
         match found.hidden {
-            Some(scope) if !cte_list_rule(self.dialect, false).modelled => {
+            Some(scope) if !modelled || self.cte_own_name_is_unresolved(scope) => {
                 vec![Binding::Cte(scope), self.read_physical(table)]
             }
             _ => vec![self.read_physical(table)],
         }
+    }
+
+    /// Whether `scope` is a CTE being defined whose own name cannot be told
+    /// from a physical relation.
+    fn cte_own_name_is_unresolved(&self, scope: ScopeId) -> bool {
+        self.defining_ctes
+            .iter()
+            .any(|cte| cte.scope == scope && cte.own_name == OwnName::Unresolved)
     }
 
     fn read_physical(&mut self, table: TableRef) -> Binding {

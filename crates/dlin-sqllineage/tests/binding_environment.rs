@@ -955,3 +955,170 @@ fn self_reference_without_the_keyword_follows_the_dialect() {
         );
     }
 }
+
+fn has_recursive_marker(column: &dlin_sqllineage::OutputColumn) -> bool {
+    matches!(&column.lineage, Lineage::Partial { unresolved, .. }
+        if unresolved.iter().any(|item| matches!(item, Unresolved::Recursive)))
+}
+
+const UNION_CTE: &str = "WITH RECURSIVE c AS (SELECT x FROM t UNION ALL SELECT y FROM u) \
+     SELECT x FROM c";
+
+// Being allowed to read itself does not make a CTE recursive: only a CTE that
+// does read itself is. A UNION inside a CTE that never mentions its own name
+// keeps both operands.
+#[test]
+fn a_union_cte_that_does_not_read_itself_keeps_both_operands() {
+    let both = [pair("t", "x"), pair("u", "y")];
+    // Dialects where the keyword allows a CTE to read itself.
+    for dialect in [
+        Dialect::PostgreSql,
+        Dialect::BigQuery,
+        Dialect::Generic,
+        Dialect::Ansi,
+        Dialect::DuckDb,
+    ] {
+        let result = analyze(UNION_CTE, dialect, false);
+        assert_eq!(sources(&result, "x"), both, "{dialect:?}");
+        assert_eq!(read_names(&result), ["t", "u"], "{dialect:?}");
+    }
+    // Dialects where a CTE may read itself with or without the keyword.
+    for dialect in [Dialect::Snowflake, Dialect::SQLite, Dialect::MsSql] {
+        for sql in [
+            UNION_CTE.to_owned(),
+            UNION_CTE.replace("WITH RECURSIVE", "WITH"),
+        ] {
+            let result = analyze(&sql, dialect, false);
+            assert_eq!(sources(&result, "x"), both, "{dialect:?} {sql}");
+            assert_eq!(read_names(&result), ["t", "u"], "{dialect:?} {sql}");
+        }
+    }
+    // Without the keyword the other dialects never allowed self-reference.
+    for dialect in [Dialect::PostgreSql, Dialect::Generic, Dialect::DuckDb] {
+        let result = analyze(&UNION_CTE.replace("WITH RECURSIVE", "WITH"), dialect, false);
+        assert_eq!(sources(&result, "x"), both, "{dialect:?}");
+    }
+}
+
+#[test]
+fn a_union_cte_that_does_not_read_itself_keeps_both_operands_with_a_catalog() {
+    for dialect in [Dialect::PostgreSql, Dialect::Snowflake] {
+        let result = analyze(UNION_CTE, dialect, true);
+        assert_eq!(
+            sources(&result, "x"),
+            [pair("t", "x"), pair("u", "y")],
+            "{dialect:?}"
+        );
+    }
+}
+
+// A set operation nested in a recursive CTE's body that does not contain the
+// self-reference is an ordinary set operation.
+#[test]
+fn a_nested_union_in_a_recursive_cte_is_not_recursive() {
+    let sql = "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL \
+         SELECT d.n + 1 FROM c JOIN (SELECT n FROM t UNION ALL SELECT x FROM u) AS d ON TRUE) \
+         SELECT n FROM c";
+    let result = analyze(sql, Dialect::PostgreSql, false);
+    let column = &result.output.columns[0];
+    assert_eq!(known_sources(column), [source("t", "n")]);
+    assert!(has_recursive_marker(column), "{:?}", column.lineage);
+    // The derived table's own union is still read in full.
+    assert_eq!(read_names(&result), ["t", "u"]);
+}
+
+#[test]
+fn a_cte_that_reads_itself_is_recursive() {
+    for dialect in [
+        Dialect::PostgreSql,
+        Dialect::BigQuery,
+        Dialect::Generic,
+        Dialect::Ansi,
+        Dialect::DuckDb,
+        Dialect::Snowflake,
+        Dialect::SQLite,
+        Dialect::MsSql,
+    ] {
+        let result = analyze(
+            "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) \
+             SELECT n FROM c",
+            dialect,
+            false,
+        );
+        let column = &result.output.columns[0];
+        assert_eq!(known_sources(column), [source("t", "n")], "{dialect:?}");
+        assert!(
+            has_recursive_marker(column),
+            "{dialect:?}: {:?}",
+            column.lineage
+        );
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+    }
+}
+
+// A WITH nested inside a CTE body shadows the CTE being defined, like any
+// nearer CTE of the same name.
+#[test]
+fn a_nested_with_shadows_the_cte_being_defined() {
+    let recursive = "WITH RECURSIVE c AS (SELECT v FROM \
+         (WITH c AS (SELECT x AS v FROM t) SELECT v FROM c) AS d) SELECT v FROM c";
+    let plain = recursive.replace("WITH RECURSIVE", "WITH");
+    for (sql, dialect) in [
+        (recursive, Dialect::PostgreSql),
+        (recursive, Dialect::Generic),
+        (recursive, Dialect::DuckDb),
+        (&plain[..], Dialect::Snowflake),
+        (recursive, Dialect::Snowflake),
+        (&plain[..], Dialect::SQLite),
+        (&plain[..], Dialect::MsSql),
+    ] {
+        let result = analyze(sql, dialect, false);
+        assert_eq!(sources(&result, "v"), [pair("t", "x")], "{dialect:?} {sql}");
+        assert_eq!(read_names(&result), ["t"], "{dialect:?} {sql}");
+    }
+}
+
+// Without a nearer CTE of that name, a reference from a nested query is the
+// CTE being defined, and so recursive only when it really is.
+#[test]
+fn a_nested_with_reading_the_cte_being_defined_is_recursive() {
+    let sql = "WITH RECURSIVE c AS (SELECT x AS v FROM t UNION ALL \
+         SELECT v FROM (WITH d AS (SELECT v FROM c) SELECT v FROM d) AS e) SELECT v FROM c";
+    for dialect in [Dialect::PostgreSql, Dialect::Generic, Dialect::DuckDb] {
+        let result = analyze(sql, dialect, false);
+        let column = &result.output.columns[0];
+        assert_eq!(known_sources(column), [source("t", "x")], "{dialect:?}");
+        assert!(
+            has_recursive_marker(column),
+            "{dialect:?}: {:?}",
+            column.lineage
+        );
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+    }
+}
+
+#[test]
+fn a_nested_with_reading_a_finished_cte_is_an_ordinary_reference() {
+    let sql = "WITH c AS (SELECT x AS v FROM t UNION ALL SELECT y FROM u) \
+         SELECT v FROM (WITH d AS (SELECT v FROM c) SELECT v FROM d) AS e";
+    for dialect in [Dialect::PostgreSql, Dialect::Snowflake, Dialect::DuckDb] {
+        let result = analyze(sql, dialect, false);
+        assert_eq!(
+            sources(&result, "v"),
+            [pair("t", "x"), pair("u", "y")],
+            "{dialect:?}"
+        );
+    }
+}
+
+// A nested query that reads the outer CTE by the name an inner CTE of the
+// same name is still being defined is not the outer one: the inner is a
+// different CTE, hidden from its own body in PostgreSQL.
+#[test]
+fn an_inner_cte_reading_its_own_name_does_not_read_the_outer_cte() {
+    let sql = "WITH c AS (SELECT x AS v FROM t) \
+         SELECT v FROM (WITH c AS (SELECT v FROM c) SELECT v FROM c) AS e";
+    let result = analyze(sql, Dialect::PostgreSql, false);
+    assert_eq!(sources(&result, "v"), [pair("t", "x")]);
+    assert_eq!(read_names(&result), ["t"]);
+}

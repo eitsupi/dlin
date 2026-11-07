@@ -13,8 +13,12 @@ use sqlparser::ast::Statement;
 pub(crate) struct LineageBuilder {
     pub(crate) graph: RawGraph,
     pub(crate) current_scope: ScopeId,
-    /// The CTE whose body is being visited.
-    pub(crate) own_cte: Option<relation::OwnCte>,
+    /// The CTEs whose bodies are being visited, outermost first.
+    pub(crate) defining_ctes: Vec<relation::DefiningCte>,
+    /// The CTE scope each reference to a CTE being defined was bound to, in
+    /// the order the references were met. A set operation is recursive when
+    /// its recursive term added its CTE here.
+    pub(crate) self_references: Vec<ScopeId>,
     pub(crate) warnings: Vec<Warning>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
@@ -30,7 +34,8 @@ impl LineageBuilder {
         Self {
             graph,
             current_scope: root,
-            own_cte: None,
+            defining_ctes: Vec::new(),
+            self_references: Vec::new(),
             warnings: Vec::new(),
             inner_statement_type: None,
             dialect,

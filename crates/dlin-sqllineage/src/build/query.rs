@@ -45,21 +45,22 @@ impl LineageBuilder {
                 .iter()
                 .map(|cte| crate::Ident::from_ast(&cte.alias.name))
                 .collect();
-            let scopes = self
-                .graph
-                .scopes
-                .define_ctes(self.current_scope, names, rule.forward);
+            let scopes = self.graph.scopes.define_ctes(
+                self.current_scope,
+                names,
+                rule.forward,
+                rule.own_name == relation::OwnName::Recursive,
+            );
             for (cte, cte_scope) in with.cte_tables.iter().zip(scopes) {
                 self.current_scope = cte_scope;
-                let outer = self.own_cte.replace(relation::OwnCte {
-                    name: crate::Ident::from_ast(&cte.alias.name),
+                self.defining_ctes.push(relation::DefiningCte {
                     scope: cte_scope,
-                    rule: rule.own_name,
+                    own_name: rule.own_name,
                 });
 
                 self.visit_query(&cte.query);
 
-                self.own_cte = outer;
+                self.defining_ctes.pop();
                 self.pop_scope();
             }
         }
@@ -108,11 +109,17 @@ impl LineageBuilder {
                     .collect();
                 self.pop_scope();
 
+                let references_before = self.self_references.len();
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(right, target_values);
                 self.pop_scope();
 
-                let is_recursive = self.defining_recursive_cte();
+                // The operation is recursive when it is the body of a CTE and
+                // its right term reads that CTE. A CTE that merely may read
+                // itself is an ordinary one.
+                let is_recursive = self
+                    .cte_of_body_scope(self.current_scope)
+                    .is_some_and(|cte| self.self_references[references_before..].contains(&cte));
                 self.graph.scopes.set_output_plan(
                     self.current_scope,
                     OutputPlan::SetOperation {

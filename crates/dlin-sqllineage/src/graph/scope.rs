@@ -282,6 +282,10 @@ impl ScopeTree {
         }
     }
 
+    pub fn kind(&self, scope: ScopeId) -> ScopeKind {
+        self.scopes[scope].kind
+    }
+
     pub fn parent(&self, scope: ScopeId) -> Option<ScopeId> {
         self.scopes[scope].parent
     }
@@ -330,19 +334,25 @@ impl ScopeTree {
     /// is visited, so a body can refer to a CTE that comes later.
     ///
     /// With `forward`, a body sees every CTE of the list, itself and later
-    /// ones included. Without it, a body sees only the CTEs before it. Either
-    /// way it sees what the holder's own surroundings allow at its position.
+    /// ones included. Without it, a body sees only the CTEs before it, and
+    /// itself when `own_visible` lets it read its own name. Either way it sees
+    /// what the holder's own surroundings allow at its position.
     pub fn define_ctes(
         &mut self,
         holder: ScopeId,
         names: Vec<Ident>,
         forward: bool,
+        own_visible: bool,
     ) -> Vec<ScopeId> {
         let base = self.scopes[holder].binding_log.len();
         let total = names.len();
         let mut scopes = Vec::with_capacity(total);
         for (index, name) in names.into_iter().enumerate() {
-            let visible = if forward { base + total } else { base + index };
+            let visible = if forward {
+                base + total
+            } else {
+                base + index + usize::from(own_visible)
+            };
             let id = self.scopes.len();
             self.scopes
                 .push(Scope::new(Some(holder), ScopeKind::Cte, visible));
@@ -802,6 +812,7 @@ mod tests {
             root,
             vec![Ident::unquoted("c1"), Ident::unquoted("c2")],
             false,
+            false,
         );
         let (first, second) = (ctes[0], ctes[1]);
         let first_env = tree.env(first);
@@ -834,6 +845,7 @@ mod tests {
             root,
             vec![Ident::unquoted("c1"), Ident::unquoted("c2")],
             true,
+            false,
         );
         for &scope in &ctes {
             assert_eq!(
@@ -847,5 +859,33 @@ mod tests {
                 Some(ctes[1])
             );
         }
+    }
+
+    #[test]
+    fn a_cte_sees_itself_but_not_later_ones_when_it_may_read_its_own_name() {
+        let mut tree = ScopeTree::new(Dialect::Generic);
+        let root = ScopeTree::root();
+        let ctes = tree.define_ctes(
+            root,
+            vec![Ident::unquoted("c1"), Ident::unquoted("c2")],
+            false,
+            true,
+        );
+        let c1 = Ident::unquoted("c1");
+        let c2 = Ident::unquoted("c2");
+        assert_eq!(
+            tree.lookup_cte(tree.env(ctes[0]), &c1).visible,
+            Some(ctes[0])
+        );
+        let later = tree.lookup_cte(tree.env(ctes[0]), &c2);
+        assert_eq!((later.visible, later.hidden), (None, Some(ctes[1])));
+        assert_eq!(
+            tree.lookup_cte(tree.env(ctes[1]), &c1).visible,
+            Some(ctes[0])
+        );
+        assert_eq!(
+            tree.lookup_cte(tree.env(ctes[1]), &c2).visible,
+            Some(ctes[1])
+        );
     }
 }
