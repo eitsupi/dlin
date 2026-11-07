@@ -414,7 +414,8 @@ fn table_has_column(
 /// The name is one column when all competing relations share a group. When a
 /// CTE or derived table publishes the name it outranks physical tables
 /// (their columns are unknown), so only relations merged with such a provider
-/// count; otherwise the physical tables compete.
+/// count, except that a guaranteed USING group outside that provider's group
+/// remains a competing source.
 fn unqualified_choice(
     name: &Ident,
     bindings: &[(Ident, Binding)],
@@ -552,10 +553,40 @@ fn unqualified_choice(
         .filter(|&index| relations[index].scope.is_some())
         .collect();
     if let Some(&first) = providers.first() {
-        if providers
+        let provider_groups: HashSet<usize> =
+            providers.iter().map(|&index| groups[index]).collect();
+        let using_groups: HashSet<usize> = relations
             .iter()
-            .any(|&index| groups[index] != groups[first])
-        {
+            .enumerate()
+            .filter(|(_, relation)| {
+                using_members.contains(relation.name.column_key(graph.dialect).as_ref())
+            })
+            .map(|(index, _)| groups[index])
+            .collect();
+        let has_competing_using_group = using_groups
+            .iter()
+            .any(|group| provider_groups.iter().any(|provider| provider != group));
+        if has_competing_using_group {
+            let candidates = (0..relations.len())
+                .filter(|&index| {
+                    providers.contains(&index) || using_groups.contains(&groups[index])
+                })
+                .filter_map(|index| match relations[index].binding {
+                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
+                        catalog: table.catalog.clone(),
+                        schema: table.schema.clone(),
+                        name: table.table.clone(),
+                    })),
+                    Binding::Cte(_) => Some(Candidate::Cte(relations[index].name.clone())),
+                    Binding::DerivedTable(_) => {
+                        Some(Candidate::Derived(Some(relations[index].name.clone())))
+                    }
+                    Binding::VirtualSource(_) => None,
+                })
+                .collect();
+            return UnqualifiedChoice::Ambiguous(candidates, true);
+        }
+        if provider_groups.len() > 1 {
             return UnqualifiedChoice::Ambiguous(
                 providers
                     .iter()

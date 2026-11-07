@@ -1150,6 +1150,21 @@ fn using_key_position_and_ambiguity_cases() -> Vec<Case> {
             }],
         )
     };
+    let ambiguous_named_provider = |provider: dlin_sqllineage::Candidate| {
+        partial_col(
+            0,
+            u("id"),
+            vec![],
+            vec![Unresolved::Ambiguous {
+                column: u("id"),
+                candidates: vec![
+                    dlin_sqllineage::Candidate::Relation(relation("a")),
+                    dlin_sqllineage::Candidate::Relation(relation("b")),
+                    provider,
+                ],
+            }],
+        )
+    };
     let c_only = || vec![(relation("c"), vec![u("id"), u("y")])];
     let a_and_c = || {
         vec![
@@ -1200,6 +1215,90 @@ fn using_key_position_and_ambiguity_cases() -> Vec<Case> {
         )
         .catalog(c_only())
         .unresolved_stars(true),
+        Case::new(
+            "using_key_and_cross_joined_cte_column_are_ambiguous_directly",
+            "WITH c AS (SELECT id FROM source) SELECT id FROM a JOIN b USING (id) CROSS JOIN c",
+            Dialect::Generic,
+            vec![ambiguous_named_provider(dlin_sqllineage::Candidate::Cte(u("c")))],
+        ),
+        Case::new(
+            "using_key_and_cross_joined_cte_column_are_ambiguous_through_star",
+            "WITH c AS (SELECT id FROM source) SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN c) d",
+            Dialect::Generic,
+            vec![ambiguous_named_provider(dlin_sqllineage::Candidate::Cte(u("c")))],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "using_key_and_cross_joined_derived_column_are_ambiguous_directly",
+            "SELECT id FROM a JOIN b USING (id) CROSS JOIN (SELECT id FROM source) c",
+            Dialect::Generic,
+            vec![ambiguous_named_provider(dlin_sqllineage::Candidate::Derived(Some(u("c"))))],
+        ),
+        Case::new(
+            "using_key_and_cross_joined_derived_column_are_ambiguous_through_star",
+            "SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN (SELECT id FROM source) c) d",
+            Dialect::Generic,
+            vec![ambiguous_named_provider(dlin_sqllineage::Candidate::Derived(Some(u("c"))))],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "competing_using_groups_keep_each_provider_and_range_candidate",
+            "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM a JOIN t USING (x), b JOIN u USING (x)",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("t")),
+                        dlin_sqllineage::Candidate::Relation(relation("u")),
+                        dlin_sqllineage::Candidate::Cte(u("a")),
+                        dlin_sqllineage::Candidate::Cte(u("b")),
+                    ],
+                }],
+            )],
+        ),
+        Case::new(
+            "competing_using_groups_keep_each_provider_and_range_candidate_through_star",
+            "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM (SELECT * FROM a JOIN t USING (x), b JOIN u USING (x)) d",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("t")),
+                        dlin_sqllineage::Candidate::Relation(relation("u")),
+                        dlin_sqllineage::Candidate::Cte(u("a")),
+                        dlin_sqllineage::Candidate::Cte(u("b")),
+                    ],
+                }],
+            )],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "single_provider_competing_using_groups_keep_provider_group_ranges",
+            "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x), b JOIN u USING (x)",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("b")),
+                        dlin_sqllineage::Candidate::Relation(relation("t")),
+                        dlin_sqllineage::Candidate::Relation(relation("u")),
+                        dlin_sqllineage::Candidate::Cte(u("a")),
+                    ],
+                }],
+            )],
+        ),
         Case::new(
             "duplicate_column_is_ambiguous_directly",
             "SELECT id FROM a CROSS JOIN c",
@@ -1282,6 +1381,36 @@ fn ambiguous_name_reads_the_same_directly_and_through_a_star() {
         assert_eq!(
             direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
             "{catalog_name} {from}"
+        );
+    }
+}
+
+#[test]
+fn named_provider_outside_using_group_matches_direct_and_star_candidates() {
+    for (direct_sql, star_sql) in [
+        (
+            "WITH c AS (SELECT id FROM source) SELECT id FROM a JOIN b USING (id) CROSS JOIN c",
+            "WITH c AS (SELECT id FROM source) SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN c) d",
+        ),
+        (
+            "SELECT id FROM a JOIN b USING (id) CROSS JOIN (SELECT id FROM source) c",
+            "SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN (SELECT id FROM source) c) d",
+        ),
+        (
+            "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM a JOIN t USING (x), b JOIN u USING (x)",
+            "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) SELECT x FROM (SELECT * FROM a JOIN t USING (x), b JOIN u USING (x)) d",
+        ),
+        (
+            "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x), b JOIN u USING (x)",
+            "WITH a AS (SELECT x FROM s1) SELECT x FROM (SELECT * FROM a JOIN t USING (x), b JOIN u USING (x)) d",
+        ),
+    ] {
+        let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![]);
+        let direct = case.analyze_sql(direct_sql, true).unwrap();
+        let through_star = case.analyze_sql(star_sql, true).unwrap();
+        assert_eq!(
+            direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
+            "{direct_sql}"
         );
     }
 }

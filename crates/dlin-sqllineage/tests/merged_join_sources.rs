@@ -509,7 +509,7 @@ fn second_cte_outside_the_merge_keeps_the_name_ambiguous() {
             "WITH a AS (SELECT x FROM s1), b AS (SELECT x FROM s2) \
              SELECT x FROM t JOIN a USING (x), b"
         ),
-        ["?x(a,b)"]
+        ["?x(t,a,b)"]
     );
 }
 
