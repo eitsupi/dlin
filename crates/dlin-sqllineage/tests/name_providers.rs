@@ -296,3 +296,104 @@ fn a_plain_cte_star_beside_an_unknown_relation_stays_ambiguous() {
         );
     }
 }
+
+/// The candidates of the one ambiguity `lineage` consists of.
+fn ambiguity_of(sql: &str, lineage: Lineage) -> Vec<Candidate> {
+    let Lineage::Partial { known, unresolved } = lineage else {
+        panic!("{sql}: expected an ambiguity");
+    };
+    assert!(known.is_empty(), "{sql}: {known:?}");
+    let [Unresolved::Ambiguous { candidates, .. }] = unresolved.as_slice() else {
+        panic!("{sql}: expected one ambiguity, got {unresolved:?}");
+    };
+    candidates.clone()
+}
+
+/// A REPLACE defines the column in the derived table that holds the star, so
+/// whether the CTE the star reads is ambiguous about that name does not apply:
+/// the name has one provider there, the derived table. Another relation of the
+/// clause competes with it only if it may publish the name too. The CTE and the
+/// derived-table spellings of the inner scope agree, directly and through
+/// `SELECT *` wrappers.
+#[test]
+fn a_replaced_column_does_not_inherit_the_ambiguity_of_the_scope_it_replaces_in() {
+    const E_LACKS_IT: &[(&str, &[&str])] = &[("e", &["other"])];
+    const NO_CATALOG: &[(&str, &[&str])] = &[];
+    for (with, inner) in [
+        ("WITH c AS (SELECT * FROM a CROSS JOIN b) ", "c"),
+        ("", "(SELECT * FROM a CROSS JOIN b) AS c"),
+    ] {
+        let derived = format!("(SELECT * REPLACE (1 AS kept) FROM {inner}) AS d");
+        for (from, catalog) in [
+            (derived.clone(), NO_CATALOG),
+            (format!("{derived} CROSS JOIN e"), E_LACKS_IT),
+        ] {
+            for sql in kept_readings(with, &from) {
+                assert_eq!(
+                    lineage_in(&sql, Dialect::DuckDb, catalog),
+                    Lineage::Complete(vec![]),
+                    "{sql}"
+                );
+            }
+        }
+        // Beside a relation that may have the name too, the derived table is
+        // one of two providers, not the relations behind it.
+        for sql in kept_readings(with, &format!("{derived} CROSS JOIN e")) {
+            let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::DuckDb, NO_CATALOG));
+            assert_eq!(candidates.len(), 2, "{sql}: {candidates:?}");
+            assert!(candidates.contains(&Candidate::Derived(Some(Ident::unquoted("d")))));
+            assert!(candidates.contains(&physical("e")));
+        }
+    }
+}
+
+/// The same holds when the CTE lists a column of that name next to a star of
+/// unknown columns: the REPLACE value is the derived table's own, and the CTE's
+/// competition between its listed `kept` and the star does not reach it.
+#[test]
+fn a_replaced_column_ignores_a_competition_between_a_listed_column_and_a_star() {
+    for sql in kept_readings(
+        "WITH c AS (SELECT a.kept, b.* FROM a, b) ",
+        "(SELECT * REPLACE (1 AS kept) FROM c) AS d",
+    ) {
+        assert_eq!(
+            lineage_in(&sql, Dialect::DuckDb, &[]),
+            Lineage::Complete(vec![]),
+            "{sql}"
+        );
+    }
+}
+
+/// A RENAME changes the name a column is published under, not the column. The
+/// CTE publishes it as `id`, so that is the name its ambiguity is looked up
+/// under: a column renamed to `kept` is exactly what `SELECT id FROM c` reads,
+/// whatever the CTE holds under the name `kept`.
+#[test]
+fn a_renamed_column_takes_the_resolution_of_its_old_name_in_the_scope_it_renames_in() {
+    // `id` has one provider: the listed `s.id`, the stars exclude it.
+    let with = "WITH c AS (SELECT s.id, a.* EXCLUDE (id), b.* EXCLUDE (id) FROM s, a, b) ";
+    let direct = format!("{with}SELECT id FROM c");
+    let expected = lineage_in(&direct, Dialect::Snowflake, &[]);
+    assert_eq!(expected, Lineage::Complete(vec![source("s", "id")]));
+    for sql in kept_readings(with, "(SELECT * RENAME (id AS kept) FROM c) AS d") {
+        assert_eq!(lineage_in(&sql, Dialect::Snowflake, &[]), expected, "{sql}");
+    }
+}
+
+/// A renamed column keeps its old name's providers even when the CTE excludes
+/// the new name from one of its stars: the lookup under `kept` would see only
+/// one star, the lookup under `id` sees both.
+#[test]
+fn a_renamed_column_keeps_the_providers_of_its_old_name_when_the_new_name_is_excluded() {
+    // `id` may come from either star, while `kept` is excluded from `b`.
+    let with = "WITH c AS (SELECT a.*, b.* EXCLUDE (kept) FROM a, b) ";
+    let direct = format!("{with}SELECT id FROM c");
+    let expected = ambiguity_of(&direct, lineage_in(&direct, Dialect::Snowflake, &[]));
+    assert_eq!(expected.len(), 2, "{expected:?}");
+    assert!(expected.contains(&physical("a")));
+    assert!(expected.contains(&physical("b")));
+    for sql in kept_readings(with, "(SELECT * RENAME (id AS kept) FROM c) AS d") {
+        let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::Snowflake, &[]));
+        assert_eq!(candidates, expected, "{sql}");
+    }
+}

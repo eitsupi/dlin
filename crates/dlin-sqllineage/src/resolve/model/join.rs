@@ -6,7 +6,8 @@ use std::rc::Rc;
 
 use super::super::target::same_column_name;
 use super::{
-    ColumnSlot, Group, OutputElement, RangeRef, UnknownProvider, ValueId, unknown_publishers,
+    ColumnSlot, Group, OutputElement, RangeRef, SlotOrigin, UnknownProvider, ValueId,
+    unknown_publishers,
 };
 use crate::graph::scope::{JoinMerge, JoinMergeKind, MergedColumns};
 use crate::{Dialect, Ident, OutputName};
@@ -82,28 +83,14 @@ fn take_key(
 ) -> KeySide {
     match at {
         KeyAt::Slot(index) => {
-            match elements.remove(index) {
-                OutputElement::Column(slot) => KeySide {
-                    value: slot.value,
-                    candidate_ranges: slot.candidate_ranges,
-                    ranges: slot.ranges,
-                    names: Some((slot.name, slot.output_name)),
-                },
-                // `find_key` only points at columns of this very list; if it
-                // ever pointed elsewhere the key would come from nowhere known.
-                other => {
-                    debug_assert!(false, "a key slot is a column");
-                    elements.insert(index, other);
-                    KeySide {
-                        value: ValueId::Uncertain {
-                            column: key.clone(),
-                            candidates: Rc::from([]),
-                        },
-                        ranges: Rc::from([]),
-                        candidate_ranges: Rc::from([]),
-                        names: None,
-                    }
-                }
+            let OutputElement::Column(slot) = elements.remove(index) else {
+                unreachable!("a key slot is a column");
+            };
+            KeySide {
+                value: slot.value,
+                candidate_ranges: slot.candidate_ranges,
+                ranges: slot.ranges,
+                names: Some((slot.name, slot.output_name)),
             }
         }
         // The key is guaranteed to exist on every joined relation, so a
@@ -156,19 +143,16 @@ fn take_key(
                 distinct.insert(range.index);
                 distinct.len() > 1
             });
-            // An unlisted key has a publisher, so there is a value to merge;
-            // without one the key comes from nowhere known.
-            let uncertain = || ValueId::Uncertain {
-                column: key.clone(),
-                candidates: ranges.clone().into(),
-            };
             let value = if several {
-                uncertain()
+                ValueId::Uncertain {
+                    column: key.clone(),
+                    candidates: ranges.clone().into(),
+                }
             } else {
                 values
                     .into_iter()
                     .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-                    .unwrap_or_else(uncertain)
+                    .expect("an unlisted key has a publisher")
             };
             KeySide {
                 value,
@@ -304,6 +288,8 @@ fn fold_groups(
                 ranges,
                 candidate_ranges,
                 value,
+                // Both sides carry the key under its name, as USING requires.
+                origin: SlotOrigin::Forwarded(key.clone()),
             }));
         }
         output.extend(left_elements);

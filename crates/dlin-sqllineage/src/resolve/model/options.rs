@@ -4,7 +4,9 @@
 use std::rc::Rc;
 
 use super::super::target::{excluded_matches_name, ilike_matches, same_column_name};
-use super::{ColumnSlot, OutputElement, RangeRef, StarFilter, ValueId, unknown_publishers};
+use super::{
+    ColumnSlot, OutputElement, RangeRef, SlotOrigin, StarFilter, ValueId, unknown_publishers,
+};
 use crate::graph::node::{StarBase, StarOptions};
 use crate::graph::scope::ScopeId;
 use crate::{Dialect, Ident, OutputName};
@@ -67,6 +69,7 @@ pub(super) fn apply_options(
         // publishes another column under that name next to it.
         if let Some(slot) = first_slot_named(&mut elements, &replacement.column, dialect) {
             slot.value = ValueId::Expr(replacement.node_id);
+            slot.origin = SlotOrigin::Defined;
             remove_from_segments(&mut elements, &replacement.column, dialect);
             continue;
         }
@@ -87,6 +90,7 @@ pub(super) fn apply_options(
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value: ValueId::Expr(replacement.node_id),
+            origin: SlotOrigin::Defined,
         }));
     }
 
@@ -119,13 +123,10 @@ pub(super) fn apply_options(
                 column: old.clone(),
             });
         }
-        // A publisher was found above, so there is a value to merge.
-        let Some(value) = values
+        let value = values
             .into_iter()
             .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-        else {
-            continue;
-        };
+            .expect("a renamed column has a publisher");
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
@@ -133,6 +134,8 @@ pub(super) fn apply_options(
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value,
+            // The segments know the column under its old name.
+            origin: SlotOrigin::Forwarded(old.clone()),
         }));
     }
     // A name a RENAME introduces does not collide with a column the star

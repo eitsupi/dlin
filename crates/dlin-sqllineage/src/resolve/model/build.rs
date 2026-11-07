@@ -10,7 +10,7 @@ use super::input::{InputModel, Invalidity};
 use super::options::apply_options;
 use super::{
     BranchTail, ColumnSlot, NameDomain, OpaqueReason, OutputElement, OutputModel, RangeRef,
-    UnknownProvider, UnknownSegment, ValueId,
+    SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::OutputName;
 use crate::catalog::CatalogContext;
@@ -154,6 +154,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             ranges: Rc::from([]),
                             candidate_ranges: Rc::from([]),
                             value: ValueId::Expr(column.node_id),
+                            origin: SlotOrigin::Defined,
                         }));
                     }
                 }
@@ -274,6 +275,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             source: *source,
                             index,
                         },
+                        origin: SlotOrigin::Forwarded(column.name.clone()),
                     })
                 })
                 .collect(),
@@ -292,8 +294,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         candidate_ranges: ranges.clone(),
                         value: ValueId::Physical {
                             table: table.clone(),
-                            column,
+                            column: column.clone(),
                         },
+                        origin: SlotOrigin::Forwarded(column),
                     })
                 })
                 .collect(),
@@ -329,6 +332,7 @@ pub(super) fn forward_scope(
                 } else {
                     ValueId::ScopeSlot { scope, index }
                 },
+                origin: SlotOrigin::Forwarded(slot.name.clone()),
             }),
             OutputElement::Unknown(segment) => OutputElement::Unknown(UnknownSegment {
                 provider: UnknownProvider::Scope { scope, index },

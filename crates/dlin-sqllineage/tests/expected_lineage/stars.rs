@@ -1027,6 +1027,77 @@ fn modifier_over_cte_star_cases() -> Vec<Case> {
             );
         }
     }
+    cases.extend(modifier_over_cte_of_several_stars_cases());
+    cases
+}
+
+/// REPLACE and RENAME over a CTE that holds several unknown stars. The CTE is
+/// ambiguous about a name that two of its relations may publish, but a REPLACE
+/// defines its column in the derived table and a RENAME moves the CTE's column
+/// of the old name, so neither takes the CTE's view of the new name. `kept`
+/// is the derived table's alone, and the renamed column resolves as `id` does
+/// in the CTE.
+fn modifier_over_cte_of_several_stars_cases() -> Vec<Case> {
+    let kept_ambiguous = |candidates: &[&str]| {
+        partial_col(
+            0,
+            u("kept"),
+            vec![],
+            vec![Unresolved::Ambiguous {
+                column: u("kept"),
+                candidates: candidates
+                    .iter()
+                    .map(|table| dlin_sqllineage::Candidate::Relation(relation(table)))
+                    .collect(),
+            }],
+        )
+    };
+    let mut cases = Vec::new();
+    for (name, with, modifier, dialect, expected) in [
+        (
+            "replace_over_a_cte_of_two_unknown_stars",
+            "WITH c AS (SELECT * FROM a CROSS JOIN b) ",
+            "REPLACE (1 AS kept)",
+            Dialect::DuckDb,
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "replace_over_a_cte_of_a_listed_column_and_a_star",
+            "WITH c AS (SELECT a.kept, b.* FROM a, b) ",
+            "REPLACE (1 AS kept)",
+            Dialect::DuckDb,
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "rename_over_a_cte_whose_stars_exclude_the_old_name",
+            "WITH c AS (SELECT s.id, a.* EXCLUDE (id), b.* EXCLUDE (id) FROM s, a, b) ",
+            "RENAME (id AS kept)",
+            Dialect::Snowflake,
+            col(0, u("kept"), vec![source(relation("s"), u("id"))]),
+        ),
+        (
+            "rename_over_a_cte_whose_stars_both_publish_the_old_name",
+            "WITH c AS (SELECT a.*, b.* EXCLUDE (kept) FROM a, b) ",
+            "RENAME (id AS kept)",
+            Dialect::Snowflake,
+            kept_ambiguous(&["a", "b"]),
+        ),
+    ] {
+        for (suffix, join) in [("", ""), ("_beside_a_relation_without_it", " CROSS JOIN e")] {
+            // Beside `e`, the name has a second provider only when the old
+            // name's ambiguity is not already the answer.
+            cases.push(
+                Case::new(
+                    &format!("{name}{suffix}"),
+                    &format!("{with}SELECT kept FROM (SELECT * {modifier} FROM c) AS d{join}"),
+                    dialect,
+                    vec![expected.clone()],
+                )
+                .catalog(vec![(relation("e"), vec![u("other")])])
+                .unresolved_stars(true),
+            );
+        }
+    }
     cases
 }
 

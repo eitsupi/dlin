@@ -599,20 +599,12 @@ impl Evaluator<'_, '_, '_> {
     /// A star the analysis cannot attribute to a relation: an ambiguous
     /// qualifier, a field path or an expression.
     fn opaque_star(&mut self, star: NodeId, reason: OpaqueReason) -> ColumnMapping {
+        let RawNode::Star { base, scope, .. } = &self.graph.nodes[star] else {
+            unreachable!("only star models contain opaque stars");
+        };
         let star_name = || ColumnRef {
             table: None,
             column: Ident::unquoted("*"),
-        };
-        let RawNode::Star { base, scope, .. } = &self.graph.nodes[star] else {
-            // Only star models hold opaque stars; if that ever failed, the
-            // columns behind it are simply unknown.
-            debug_assert!(false, "an opaque star names a star node");
-            return ColumnMapping {
-                output_name: None,
-                target: star_name(),
-                sources: vec![ColumnOrigin::UnknownStar],
-                transform: TransformKind::Direct,
-            };
         };
         let sources = match (reason, resolve_star_target(base, *scope, self.graph)) {
             (OpaqueReason::Ambiguous(_), StarTarget::Ambiguous(candidates)) => {

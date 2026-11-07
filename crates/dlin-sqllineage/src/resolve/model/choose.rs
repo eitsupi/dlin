@@ -14,9 +14,17 @@
 //! CTE or derived table keeps that model, and the elements the reader sees under
 //! one range variable are weighed by the model they came from. A competition
 //! inside a CTE therefore survives any number of `SELECT *` wrappers.
+//!
+//! The model is asked under the name it knows the element by, which is not
+//! always the name the reader publishes it under. A listed column carries that
+//! relation as its [`SlotOrigin`]: a column forwarded under another name (a
+//! RENAME) asks for the old name, and a column the reader defines (a REPLACE)
+//! does not ask at all, because the model's competition over the name concerns
+//! a different value. Unknown segments are asked under the name being chosen,
+//! since a RENAME only removes names from their domain.
 
 use super::input::Invalidity;
-use super::{ColumnSlot, OutputElement, OutputModel, UnknownSegment};
+use super::{ColumnSlot, OutputElement, OutputModel, SlotOrigin, UnknownSegment};
 use crate::{Candidate, Ident};
 
 /// The relations that may own a name that has no single owner.
@@ -85,6 +93,7 @@ impl OutputModel {
                 OutputElement::Unknown(segment) => (&segment.ranges, &segment.ranges),
                 OutputElement::Tail(_) => continue, // never matched
             };
+            let asked = asked_name(&self.elements[index], name);
             // The elements of a CTE or derived table are weighed by the model
             // they were forwarded from, so one relation is one provider no
             // matter how many elements it contributes.
@@ -98,19 +107,22 @@ impl OutputModel {
                 // The model the elements came from only says whether the
                 // range provides the name at all and whether it is ambiguous
                 // inside; what the reader's own element is, a listed column or
-                // a segment, is the reader's.
-                let unit = match child.choose(name) {
-                    Choice::Absent => None,
-                    Choice::Ambiguous(inner) => Some(Unit {
+                // a segment, is the reader's. An element the reader defines
+                // asks nothing and is its own provider.
+                let own = || Unit {
+                    elements: vec![index],
+                    candidates: range.candidate().into_iter().collect(),
+                    ambiguous: false,
+                };
+                let unit = match asked.map(|asked| child.choose(asked)) {
+                    None => Some(own()),
+                    Some(Choice::Absent) => None,
+                    Some(Choice::Ambiguous(inner)) => Some(Unit {
                         elements: vec![index],
                         candidates: inner.candidates,
                         ambiguous: true,
                     }),
-                    Choice::Column(..) | Choice::Possible(..) => Some(Unit {
-                        elements: vec![index],
-                        candidates: range.candidate().into_iter().collect(),
-                        ambiguous: false,
-                    }),
+                    Some(Choice::Column(..) | Choice::Possible(..)) => Some(own()),
                 };
                 if let Some(unit) = unit {
                     collapsed.push((range.index, units.len()));
@@ -127,7 +139,8 @@ impl OutputModel {
                     .reads
                     .iter()
                     .find(|(at, _)| *at == range.index)
-                    .and_then(|(_, child)| match child.choose(name) {
+                    .zip(asked)
+                    .and_then(|((_, child), asked)| match child.choose(asked) {
                         Choice::Ambiguous(inner) => Some(inner),
                         _ => None,
                     });
@@ -215,5 +228,18 @@ impl OutputModel {
             }
         }
         None
+    }
+}
+
+/// The name to ask the model an element was forwarded from about, when
+/// `name` is what the reader looks for. `None` for a column the reader
+/// defines: the model's view of the name does not apply to it.
+fn asked_name<'n>(element: &'n OutputElement, name: &'n Ident) -> Option<&'n Ident> {
+    match element {
+        OutputElement::Column(slot) => match &slot.origin {
+            SlotOrigin::Forwarded(forwarded) => Some(forwarded),
+            SlotOrigin::Defined => None,
+        },
+        _ => Some(name),
     }
 }

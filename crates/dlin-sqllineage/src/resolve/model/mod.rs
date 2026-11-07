@@ -146,9 +146,22 @@ impl NameDomain {
     }
 }
 
+/// How a column relates to the model of the CTE or derived table it is read
+/// from. The name a column is published under can differ from the name that
+/// model knows it by: a RENAME changes only the former.
+#[derive(Debug, Clone)]
+pub(super) enum SlotOrigin {
+    /// Forwards the column the range's child model publishes under this name.
+    Forwarded(Ident),
+    /// Defined by this model (a projection expression, a REPLACE item); the
+    /// child's view of the name does not apply.
+    Defined,
+}
+
 /// A column with a known name.
 #[derive(Debug, Clone)]
 pub(super) struct ColumnSlot {
+    /// The name the column is published under.
     pub name: Ident,
     pub output_name: OutputName,
     /// Range variables the column is visible under. A merged column keeps
@@ -158,6 +171,7 @@ pub(super) struct ColumnSlot {
     /// `ranges`, this excludes sides suppressed by an outer USING join.
     pub candidate_ranges: Rc<[RangeRef]>,
     pub value: ValueId,
+    pub origin: SlotOrigin,
 }
 
 /// Columns the analysis cannot enumerate, with the names they may still
