@@ -1,51 +1,40 @@
 use std::collections::HashSet;
 
-use super::star::excluded_matches_name;
+use super::model::OutputModels;
 
-use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
-use crate::graph::node::{RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
-use crate::keys::ident_parts_equal;
-use crate::types::{SemanticError, TableRef};
-use crate::{Dialect, Ident};
+use crate::graph::node::RawNode;
+use crate::graph::scope::{OutputPlan, ScopeTree};
+use crate::types::SemanticError;
 
 /// Inspect the complete graph rather than only the root projection. A star
 /// under a JOIN/CTE/derived-table boundary is still an unresolved schema
 /// dependency and must be visible to consumers of the public result.
 pub(super) fn graph_has_unresolved_stars(
     graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
+    models: &mut OutputModels<'_, '_>,
 ) -> bool {
-    graph.nodes.iter().any(|node| {
-        let RawNode::Star {
-            base,
-            options,
-            scope,
-        } = node
-        else {
-            return false;
-        };
-        star_arity(base, options, *scope, graph, catalog, &mut HashSet::new()).is_none()
+    (0..graph.nodes.len()).any(|node_id| {
+        matches!(graph.nodes[node_id], RawNode::Star { .. })
+            && models.star(node_id).has_unknown_segment()
     })
 }
 
 pub(super) fn validate_set_arities(
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
+    models: &mut OutputModels<'_, '_>,
 ) -> Result<Option<usize>, SemanticError> {
     let mut active = HashSet::new();
-    scope_arity(ScopeTree::root(), graph, catalog, &mut active)
+    scope_arity(ScopeTree::root(), models, &mut active)
 }
 
 /// Return an exact output width when every star in a scope can be expanded;
 /// otherwise return `None` and leave the eventual merge conservative.
 fn scope_arity(
     scope: usize,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
+    models: &mut OutputModels<'_, '_>,
     active: &mut HashSet<usize>,
 ) -> Result<Option<usize>, SemanticError> {
+    let graph = models.graph();
     if graph.scopes.output_width_unknown(scope) {
         return Ok(None);
     }
@@ -53,30 +42,11 @@ fn scope_arity(
         return Ok(None);
     }
     let result = match graph.scopes.output_plan(scope).clone() {
-        OutputPlan::Projection => {
-            let mut width = 0;
-            let mut exact = true;
-            for col in graph.scopes.output_columns(scope) {
-                if let RawNode::Star {
-                    base,
-                    options,
-                    scope: star_scope,
-                } = &graph.nodes[col.node_id]
-                {
-                    match star_arity(base, options, *star_scope, graph, catalog, active) {
-                        Some(star_width) => width += star_width,
-                        None => exact = false,
-                    }
-                } else {
-                    width += 1;
-                }
-            }
-            exact.then_some(width)
-        }
-        OutputPlan::Delegate(child) => scope_arity(child, graph, catalog, active)?,
+        OutputPlan::Projection => models.scope(scope).width.exact(),
+        OutputPlan::Delegate(child) => scope_arity(child, models, active)?,
         OutputPlan::SetOperation { left, right, .. } => {
-            let left_width = scope_arity(left, graph, catalog, active)?;
-            let right_width = scope_arity(right, graph, catalog, active)?;
+            let left_width = scope_arity(left, models, active)?;
+            let right_width = scope_arity(right, models, active)?;
             match (left_width, right_width) {
                 (Some(left), Some(right)) if left != right => {
                     return Err(SemanticError::SetOperationArityMismatch { left, right });
@@ -88,363 +58,4 @@ fn scope_arity(
     };
     active.remove(&scope);
     Ok(result)
-}
-
-fn star_arity(
-    base: &StarBase,
-    options: &StarOptions,
-    scope: usize,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    active: &mut HashSet<usize>,
-) -> Option<usize> {
-    let target = resolve_star_target(base, scope, graph);
-    let names = match target {
-        StarTarget::All => all_star_names(scope, options, base, graph, catalog, active),
-        StarTarget::Binding { name, binding } => {
-            binding_column_names(&binding, graph, catalog, active).map(|names| {
-                apply_name_options(
-                    names,
-                    options,
-                    Some(base),
-                    Some(std::slice::from_ref(&name)),
-                    graph.dialect,
-                )
-            })
-        }
-        StarTarget::Unknown(table) => catalog
-            .and_then(|catalog| catalog.list_columns(&table))
-            .map(|names| apply_name_options(names, options, Some(base), None, graph.dialect)),
-        StarTarget::FieldPath { .. } | StarTarget::Expr | StarTarget::Ambiguous(_) => None,
-    };
-    names.map(|names| names.len())
-}
-
-fn all_star_names(
-    scope: usize,
-    options: &StarOptions,
-    base: &StarBase,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    active: &mut HashSet<usize>,
-) -> Option<Vec<Ident>> {
-    let mut groups = Vec::new();
-    for (binding_name, binding) in effective_bindings(scope, graph) {
-        let names = binding_column_names(&binding, graph, catalog, active)?;
-        groups.push((
-            vec![binding_name.clone()],
-            names
-                .into_iter()
-                .map(|name| (name, vec![binding_name.clone()]))
-                .collect::<Vec<_>>(),
-        ));
-    }
-    let original = groups.clone();
-    let columns = super::join::merge_join_columns(
-        groups,
-        graph.scopes.join_merges(scope),
-        graph.dialect,
-        |column| &column.0,
-        |left, right, _kind| {
-            (
-                left.0.clone(),
-                left.1.iter().chain(&right.1).cloned().collect(),
-            )
-        },
-    );
-    let mut names = if graph.scopes.join_merges(scope).is_empty() || columns.is_none() {
-        original
-            .into_iter()
-            .flat_map(|(qualifier, columns)| {
-                apply_name_options(
-                    columns.into_iter().map(|column| column.0).collect(),
-                    options,
-                    Some(base),
-                    Some(&qualifier),
-                    graph.dialect,
-                )
-            })
-            .collect()
-    } else {
-        let retained = columns?
-            .into_iter()
-            .filter_map(|(name, qualifiers)| {
-                let excluded = qualifiers.iter().any(|qualifier| {
-                    options.exclude.iter().any(|excluded| {
-                        excluded_matches_name(
-                            excluded,
-                            &name,
-                            Some(base),
-                            std::slice::from_ref(qualifier),
-                            graph.dialect,
-                        )
-                    })
-                });
-                (!excluded).then_some(name)
-            })
-            .collect();
-        apply_name_options(retained, options, Some(base), None, graph.dialect)
-    };
-    for &child in graph.scopes.anonymous_derived(scope) {
-        names.extend(apply_name_options(
-            scope_output_names(child, graph, catalog, active)?,
-            options,
-            Some(base),
-            None,
-            graph.dialect,
-        ));
-    }
-    Some(names)
-}
-
-pub(super) enum StarTarget {
-    Ambiguous(Vec<crate::Candidate>),
-    All,
-    Binding { name: Ident, binding: Binding },
-    Unknown(TableRef),
-    FieldPath { binding: Binding, path: Vec<Ident> },
-    Expr,
-}
-
-fn binding_column_names(
-    binding: &Binding,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    active: &mut HashSet<usize>,
-) -> Option<Vec<Ident>> {
-    match binding {
-        Binding::Table(table) => catalog.and_then(|catalog| catalog.list_columns(table)),
-        Binding::Cte(child) | Binding::DerivedTable(child) => {
-            scope_output_names(*child, graph, catalog, active)
-        }
-        Binding::VirtualSource(source) => Some(
-            graph
-                .scopes
-                .virtual_source(*source)
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect(),
-        ),
-    }
-}
-
-fn scope_output_names(
-    scope: usize,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    active: &mut HashSet<usize>,
-) -> Option<Vec<Ident>> {
-    if graph.scopes.has_unknown_output_width(scope) {
-        return None;
-    }
-    if !active.insert(scope) {
-        return None;
-    }
-    let result = match graph.scopes.output_plan(scope) {
-        OutputPlan::Projection => {
-            let mut names = Vec::new();
-            for column in graph.scopes.output_columns(scope) {
-                match &graph.nodes[column.node_id] {
-                    RawNode::Star {
-                        base,
-                        options,
-                        scope: star_scope,
-                    } => {
-                        let target = resolve_star_target(base, *star_scope, graph);
-                        let child_names = match target {
-                            StarTarget::All => {
-                                all_star_names(*star_scope, options, base, graph, catalog, active)
-                            }
-                            StarTarget::Binding { name, binding } => binding_column_names(
-                                &binding, graph, catalog, active,
-                            )
-                            .map(|names| {
-                                apply_name_options(
-                                    names,
-                                    options,
-                                    Some(base),
-                                    Some(std::slice::from_ref(&name)),
-                                    graph.dialect,
-                                )
-                            }),
-                            StarTarget::Unknown(table) => catalog
-                                .and_then(|catalog| catalog.list_columns(&table))
-                                .map(|names| {
-                                    apply_name_options(
-                                        names,
-                                        options,
-                                        Some(base),
-                                        None,
-                                        graph.dialect,
-                                    )
-                                }),
-                            StarTarget::FieldPath { .. }
-                            | StarTarget::Expr
-                            | StarTarget::Ambiguous(_) => None,
-                        }?;
-                        names.extend(child_names);
-                    }
-                    _ => names.push(column.name.clone()),
-                }
-            }
-            Some(names)
-        }
-        OutputPlan::Delegate(child) => scope_output_names(*child, graph, catalog, active),
-        OutputPlan::SetOperation { left, .. } => scope_output_names(*left, graph, catalog, active),
-    };
-    active.remove(&scope);
-    result
-}
-
-fn apply_name_options(
-    mut names: Vec<Ident>,
-    options: &StarOptions,
-    base: Option<&StarBase>,
-    relation_qualifier: Option<&[Ident]>,
-    dialect: Dialect,
-) -> Vec<Ident> {
-    names.retain(|name| {
-        !options.exclude.iter().any(|excluded| {
-            excluded_matches_name(
-                excluded,
-                name,
-                base,
-                relation_qualifier.unwrap_or_default(),
-                dialect,
-            )
-        }) && options
-            .ilike
-            .as_deref()
-            .is_none_or(|pattern| ilike_matches(pattern, &name.value))
-    });
-    for (old, new) in &options.rename {
-        if let Some(name) = names
-            .iter_mut()
-            .find(|name| same_column_name(name, old, dialect))
-        {
-            name.clone_from(new);
-        }
-    }
-    names
-}
-
-pub(super) fn same_column_name(left: &Ident, right: &Ident, dialect: Dialect) -> bool {
-    left.column_key(dialect) == right.column_key(dialect)
-}
-
-pub(super) fn ilike_matches(pattern: &str, value: &str) -> bool {
-    fn matches(pattern: &[char], value: &[char]) -> bool {
-        match pattern.split_first() {
-            None => value.is_empty(),
-            Some(('%', rest)) => {
-                matches(rest, value) || value.first().is_some_and(|_| matches(pattern, &value[1..]))
-            }
-            Some(('_', rest)) => value
-                .split_first()
-                .is_some_and(|(_, tail)| matches(rest, tail)),
-            Some((part, rest)) => value.split_first().is_some_and(|(value, tail)| {
-                part.eq_ignore_ascii_case(value) && matches(rest, tail)
-            }),
-        }
-    }
-    matches(
-        &pattern.chars().collect::<Vec<_>>(),
-        &value.chars().collect::<Vec<_>>(),
-    )
-}
-
-pub(super) fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGraph) -> StarTarget {
-    match base {
-        StarBase::Unqualified => StarTarget::All,
-        StarBase::Expr(_) => StarTarget::Expr,
-        StarBase::Qualified(parts) => {
-            let mut best: Option<(usize, Ident, Binding)> = None;
-            for (name, binding) in graph.scopes.visible_bindings(scope) {
-                let candidates = match &binding {
-                    Binding::Table(table) => {
-                        let mut values = Vec::new();
-                        if let Some(catalog) = &table.catalog {
-                            values.push(catalog.clone());
-                        }
-                        if let Some(schema) = &table.schema {
-                            values.push(schema.clone());
-                        }
-                        values.push(table.table.clone());
-                        vec![values, vec![name.clone()]]
-                    }
-                    _ => vec![vec![name.clone()]],
-                };
-                for candidate in candidates {
-                    if parts.len() >= candidate.len()
-                        && if candidate.len() == 1 {
-                            parts[0].column_key(graph.dialect)
-                                == candidate[0].column_key(graph.dialect)
-                        } else {
-                            ident_parts_equal(&parts[..candidate.len()], &candidate, graph.dialect)
-                        }
-                    {
-                        let matched = candidate.len();
-                        if best.as_ref().is_none_or(|(length, _, _)| matched > *length) {
-                            best = Some((matched, name.clone(), binding.clone()));
-                        }
-                    }
-                }
-            }
-            if let Some((matched, name, binding)) = best {
-                if matched == 1
-                    && let Some(candidates) =
-                        graph.scopes.ambiguous_binding_candidates(scope, &parts[0])
-                {
-                    return StarTarget::Ambiguous(candidates);
-                }
-                if matched == parts.len() {
-                    StarTarget::Binding { name, binding }
-                } else {
-                    StarTarget::FieldPath {
-                        binding,
-                        path: parts[matched..].to_vec(),
-                    }
-                }
-            } else {
-                StarTarget::Unknown(table_ref_from_parts(parts))
-            }
-        }
-    }
-}
-
-fn table_ref_from_parts(parts: &[Ident]) -> TableRef {
-    match parts {
-        [table] => TableRef {
-            catalog: None,
-            schema: None,
-            table: table.clone(),
-        },
-        [schema, table] => TableRef {
-            catalog: None,
-            schema: Some(schema.clone()),
-            table: table.clone(),
-        },
-        [catalog, schema, table] => TableRef {
-            catalog: Some(catalog.clone()),
-            schema: Some(schema.clone()),
-            table: table.clone(),
-        },
-        _ => TableRef::new(
-            parts
-                .iter()
-                .map(|part| part.value.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-        ),
-    }
-}
-
-pub(super) fn effective_bindings(scope: usize, graph: &RawGraph) -> Vec<(Ident, Binding)> {
-    let immediate = graph.scopes.immediate_bindings(scope);
-    if immediate.is_empty() {
-        graph.scopes.visible_bindings(scope)
-    } else {
-        immediate
-    }
 }

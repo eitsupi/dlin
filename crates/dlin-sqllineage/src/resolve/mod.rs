@@ -5,11 +5,14 @@ mod catalog;
 mod join;
 mod lineage;
 mod mapping;
+mod model;
 mod star;
+mod target;
 mod topo;
 
 use arity::{graph_has_unresolved_stars, validate_set_arities};
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
+use model::OutputModels;
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
@@ -66,8 +69,10 @@ pub(crate) fn resolve(
         ));
     }
 
-    let output_width = validate_set_arities(&graph, catalog)?;
-    let has_unresolved_stars = graph_has_unresolved_stars(&graph, catalog);
+    let mut models = OutputModels::new(&graph, catalog);
+    let output_width = validate_set_arities(&mut models)?;
+    let has_unresolved_stars = graph_has_unresolved_stars(&graph, &mut models);
+    drop(models);
 
     let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
     for (idx, edge) in graph.edges.iter().enumerate() {

@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use super::arity::effective_bindings;
 use super::lineage::{
     collect_output_sources, flatten_mapping_sources, named_scope_sources,
     named_wildcard_sources_for_scope, virtual_column_origin,
 };
 use super::mapping::{ScopeMappingCache, merge_transform, resolve_scope_mappings};
 use super::star::{StarNameDecision, scope_star_name_decision};
+use super::target::effective_bindings;
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;

@@ -1,8 +1,5 @@
 use std::collections::HashSet;
 
-use super::arity::{
-    StarTarget, effective_bindings, ilike_matches, resolve_star_target, same_column_name,
-};
 use super::binding::{derive_transform, resolve_captured_binding};
 use super::lineage::{
     collect_leaf_origins, collect_output_sources, expand_scope_columns,
@@ -12,12 +9,15 @@ use super::mapping::{
     ScopeMappingCache, expand_virtual_source, mappings_have_unknown_shape, merge_transform,
     wildcard_mapping,
 };
+use super::target::{
+    StarTarget, effective_bindings, excluded_matches_name, ilike_matches, resolve_star_target,
+    same_column_name,
+};
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
-use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
+use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, JoinMergeKind, OutputPlan};
-use crate::keys::ident_parts_equal;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 use crate::{Dialect, Ident};
 
@@ -540,29 +540,6 @@ fn name_passes_unknown_star_filters(
                 excluded_matches_name(excluded, name, Some(base), &qualifiers, graph.dialect)
             })
     })
-}
-
-/// EXCLUDE resolves range variables, independently of value lineage.
-pub(super) fn excluded_matches_name(
-    excluded: &StarColumnName,
-    name: &Ident,
-    base: Option<&StarBase>,
-    range_variables: &[Ident],
-    dialect: Dialect,
-) -> bool {
-    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
-        return false;
-    };
-    same_column_name(name, excluded_column, dialect)
-        && (qualifier.is_empty()
-            || matches!(qualifier, [name] if range_variables.iter().any(|variable| same_column_name(variable, name, dialect)))
-            || base.is_some_and(|base| match base {
-                StarBase::Qualified(parts) => match (parts.as_slice(), qualifier) {
-                    ([left], [right]) => same_column_name(left, right, dialect),
-                    _ => ident_parts_equal(parts, qualifier, dialect),
-                },
-                _ => false,
-            }))
 }
 
 #[derive(Clone)]

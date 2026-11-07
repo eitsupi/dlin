@@ -8,9 +8,10 @@ use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
 };
 use super::star::{
-    StarNameDecision, excluded_matches_name, expand_star, expand_star_columns,
-    scope_star_name_decision, star_name_decision,
+    StarNameDecision, expand_star, expand_star_columns, scope_star_name_decision,
+    star_name_decision,
 };
+use super::target::excluded_matches_name;
 
 use crate::Ident;
 use crate::catalog::CatalogContext;
