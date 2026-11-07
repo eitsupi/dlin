@@ -61,6 +61,9 @@ pub(super) enum ValueId {
         source: VirtualSourceId,
         index: usize,
     },
+    /// A column of the right operand of a set operation, found by name among
+    /// the mappings the operation merges in beyond its left operand.
+    Tail { scope: ScopeId, column: Ident },
     /// A column that is named but sits behind segments the analysis cannot
     /// enumerate.
     Named {
@@ -208,7 +211,6 @@ pub(super) struct OutputModel {
     pub width: Width,
     /// Why the width of a scope is unknown, following only the scopes that
     /// produce its output.
-    #[allow(dead_code)]
     pub unknown_reasons: Vec<&'static str>,
 }
 
@@ -264,8 +266,34 @@ impl OutputModel {
         self.width == Width::Unknown
     }
 
+    /// Whether the output has a column called `name` for certain: it is
+    /// listed or it is a merged key.
+    pub(super) fn publishes(&self, name: &Ident) -> bool {
+        let dialect = self.names.dialect;
+        !self.slots_named(name).is_empty()
+            || self
+                .names
+                .symbolic
+                .iter()
+                .any(|symbolic| same_column_name(&symbolic.name, name, dialect))
+    }
+
+    /// Whether the output may have a column called `name`: it publishes it,
+    /// or a segment or tail that is not listed admits it.
+    pub(super) fn may_publish(&self, name: &Ident) -> bool {
+        let dialect = self.names.dialect;
+        self.publishes(name)
+            || self.elements.iter().any(|element| match element {
+                OutputElement::Unknown(segment) => {
+                    !matches!(segment.provider, UnknownProvider::Opaque(_))
+                        && segment.domain.admits(name, dialect)
+                }
+                OutputElement::Tail(tail) => tail.domain.admits(name, dialect),
+                OutputElement::Column(_) => false,
+            })
+    }
+
     /// Indexes of the enumerated columns named `name`, in output order.
-    #[allow(dead_code)]
     pub(super) fn slots_named(&self, name: &Ident) -> &[usize] {
         let dialect = self.names.dialect;
         let index = self.names.slots.get_or_init(|| {
@@ -1030,10 +1058,15 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
         {
             symbolic.remove(position).ranges
         } else {
-            let (providers, ranges) = unknown_publishers(&elements, &replacement.column, dialect);
-            if providers.is_empty() {
+            let (providers, mut ranges) =
+                unknown_publishers(&elements, &replacement.column, dialect);
+            let tails = tail_publishers(&elements, &replacement.column, dialect);
+            if providers.is_empty() && tails.is_empty() {
                 continue;
             }
+            // The replacement stands for the tail's column of that name.
+            retire_tail_name(&mut elements, &replacement.column, dialect);
+            ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
             ranges.into()
         };
         elements.push(OutputElement::Column(ColumnSlot {
@@ -1057,8 +1090,9 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
             let symbolic = symbolic.remove(position);
             (symbolic.ranges, symbolic.value)
         } else {
-            let (providers, ranges) = unknown_publishers(&elements, old, dialect);
-            if providers.is_empty() {
+            let (providers, mut ranges) = unknown_publishers(&elements, old, dialect);
+            let tails = tail_publishers(&elements, old, dialect);
+            if providers.is_empty() && tails.is_empty() {
                 continue;
             }
             for element in &mut elements {
@@ -1068,13 +1102,29 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
                     segment.domain.removed.push(old.clone());
                 }
             }
-            (
-                ranges.into(),
-                ValueId::Named {
+            retire_tail_name(&mut elements, old, dialect);
+            // The renamed column carries what every publisher of the old
+            // name contributes: the unknown segments and the set-operation
+            // tails.
+            let mut values = Vec::new();
+            if !providers.is_empty() {
+                values.push(ValueId::Named {
                     providers,
                     column: old.clone(),
-                },
-            )
+                });
+            }
+            for (scope, tail_ranges) in tails {
+                ranges.extend(tail_ranges.iter().cloned());
+                values.push(ValueId::Tail {
+                    scope,
+                    column: old.clone(),
+                });
+            }
+            let value = values
+                .into_iter()
+                .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
+                .expect("a renamed column has a publisher");
+            (ranges.into(), value)
         };
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
@@ -1084,6 +1134,35 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
         }));
     }
     Part { elements, symbolic }
+}
+
+/// The set-operation tails that may publish `name`, with their range variables.
+fn tail_publishers(
+    elements: &[OutputElement],
+    name: &Ident,
+    dialect: Dialect,
+) -> Vec<(ScopeId, Rc<[Ident]>)> {
+    elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Tail(tail) if tail.domain.admits(name, dialect) => {
+                Some((tail.scope, tail.ranges.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A column that replaced or renamed a tail's column of the same name is the
+/// only one left under that name.
+fn retire_tail_name(elements: &mut [OutputElement], name: &Ident, dialect: Dialect) {
+    for element in elements {
+        if let OutputElement::Tail(tail) = element
+            && tail.domain.admits(name, dialect)
+        {
+            tail.domain.removed.push(name.clone());
+        }
+    }
 }
 
 fn first_slot_named<'e>(
@@ -1377,6 +1456,30 @@ mod tests {
     fn replace_of_an_excluded_unlisted_column_adds_nothing() {
         let model = first_star("SELECT * EXCLUDE (a) REPLACE (1 AS a) FROM t", &[]);
         assert_eq!(layout(&model), ["?"]);
+    }
+
+    #[test]
+    fn replace_and_rename_take_over_the_name_of_a_set_operation_tail() {
+        let set_operation = "SELECT * FROM t1 UNION ALL SELECT a, b FROM t2";
+        for (modifier, new_name) in [("REPLACE (1 AS b)", "b"), ("RENAME (b AS kept)", "kept")] {
+            let graph = graph(&format!("SELECT * {modifier} FROM ({set_operation}) s"));
+            let node = graph
+                .nodes
+                .iter()
+                .position(|node| {
+                    matches!(node, RawNode::Star { scope, .. } if *scope == ScopeTree::root())
+                })
+                .expect("the root projection has a star");
+            let mut store = ModelStore::default();
+            let model = OutputModels::new(&graph, None, &mut store).star(node);
+            assert_eq!(layout(&model), ["?", "~", new_name], "{modifier}");
+            let OutputElement::Tail(tail) = &model.elements[1] else {
+                unreachable!();
+            };
+            // The tail no longer publishes `b`; the new column stands for it.
+            assert!(!tail.domain.admits(&Ident::unquoted("b"), Dialect::Generic));
+            assert!(tail.domain.admits(&Ident::unquoted("a"), Dialect::Generic));
+        }
     }
 
     #[test]

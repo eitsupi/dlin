@@ -1006,6 +1006,29 @@ fn set_operation_tail_cases() -> Vec<Case> {
         expected.ordinal = None;
         expected
     };
+    // The replacement replaces the tail's `b` instead of joining it.
+    let replaced_b = || {
+        let mut expected = col(0, u("b"), vec![]);
+        expected.ordinal = None;
+        expected
+    };
+    // The renamed column is the right operand's `b`, or whatever `t1` hides
+    // under that name.
+    let renamed_b = |ordinal| {
+        let mut expected = partial_col(
+            0,
+            u("kept"),
+            vec![source(relation("t2"), u("b"))],
+            vec![
+                behind("t1", "b"),
+                Unresolved::BehindStar {
+                    relation: relation("t1"),
+                },
+            ],
+        );
+        expected.ordinal = ordinal;
+        expected
+    };
     vec![
         Case::new(
             "set_operation_right_column_read_directly",
@@ -1028,6 +1051,58 @@ fn set_operation_tail_cases() -> Vec<Case> {
             vec![unpositioned("a"), unpositioned("b")],
         )
         .shape(open_star("t1", None))
+        .unresolved_stars(true),
+        // REPLACE and RENAME act on the right operand's column as well: the
+        // old column is not published next to the new one.
+        Case::new(
+            "set_operation_right_column_replaced",
+            &format!("SELECT * REPLACE (1 AS b) FROM ({set_operation}) s"),
+            Dialect::Generic,
+            vec![unpositioned("a"), replaced_b()],
+        )
+        .shape(open_star("t1", None))
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_replaced_read_back",
+            &format!("SELECT b FROM (SELECT * REPLACE (1 AS b) FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![col(0, u("b"), vec![])],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_replaced_and_expanded_again",
+            &format!("SELECT * FROM (SELECT * REPLACE (1 AS b) FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![unpositioned("a"), replaced_b()],
+        )
+        .shape(open_star("t1", None))
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_renamed",
+            &format!("SELECT * RENAME (b AS kept) FROM ({set_operation}) s"),
+            Dialect::Generic,
+            vec![unpositioned("a"), renamed_b(None)],
+        )
+        .shape(open_star("t1", None))
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_renamed_read_back",
+            &format!("SELECT kept FROM (SELECT * RENAME (b AS kept) FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![renamed_b(Some(0))],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_renamed_away_name_is_not_read_back",
+            &format!("SELECT b FROM (SELECT * RENAME (b AS kept) FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("b"),
+                vec![],
+                vec![Unresolved::Unbound { column: u("b") }],
+            )],
+        )
         .unresolved_stars(true),
         Case::new(
             "set_operation_right_columns_respect_star_exclude",
@@ -1142,6 +1217,24 @@ fn unknown_using_key_cases() -> Vec<Case> {
         };
         cases.push(
             Case::new(
+                &format!("using_{name}_key_unknown_cte_direct_reference"),
+                &format!("WITH c AS (SELECT * FROM t) SELECT id FROM c {join} b USING (id)"),
+                Dialect::Generic,
+                vec![key(0)],
+            )
+            .unresolved_stars(true),
+        );
+        cases.push(
+            Case::new(
+                &format!("using_{name}_key_unknown_derived_table_direct_reference"),
+                &format!("SELECT id FROM (SELECT * FROM t) c {join} b USING (id)"),
+                Dialect::Generic,
+                vec![key(0)],
+            )
+            .unresolved_stars(true),
+        );
+        cases.push(
+            Case::new(
                 &format!("using_{name}_key_unknown_cte_read_through_star"),
                 &format!(
                     "WITH c AS (SELECT * FROM t) SELECT id FROM (SELECT * FROM c {join} b USING (id)) d"
@@ -1157,23 +1250,44 @@ fn unknown_using_key_cases() -> Vec<Case> {
 
 #[test]
 fn using_key_read_through_star_equals_direct_reference() {
+    // Each side is a physical table, or a CTE or derived table whose columns
+    // are hidden behind a star.
+    let relations = [
+        ("", "a", "b"),
+        ("WITH c AS (SELECT * FROM t) ", "c", "b"),
+        ("", "(SELECT * FROM t) c", "b"),
+        ("WITH c AS (SELECT * FROM t) ", "a", "c"),
+        ("", "a", "(SELECT * FROM t) c"),
+        (
+            "WITH c AS (SELECT * FROM t), e AS (SELECT * FROM s) ",
+            "c",
+            "e",
+        ),
+    ];
     for (catalog_name, catalog) in using_catalogs() {
         for (name, join) in JOIN_KINDS {
-            let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![])
-                .catalog(catalog.clone());
-            let direct = case
-                .analyze_sql(&format!("SELECT id FROM a {join} b USING (id)"), true)
-                .unwrap();
-            let through_star = case
-                .analyze_sql(
-                    &format!("SELECT id FROM (SELECT * FROM a {join} b USING (id)) d"),
-                    true,
-                )
-                .unwrap();
-            assert_eq!(
-                direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
-                "{catalog_name} {name}"
-            );
+            for (prefix, left, right) in relations {
+                let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![])
+                    .catalog(catalog.clone());
+                let direct = case
+                    .analyze_sql(
+                        &format!("{prefix}SELECT id FROM {left} {join} {right} USING (id)"),
+                        true,
+                    )
+                    .unwrap();
+                let through_star = case
+                    .analyze_sql(
+                        &format!(
+                            "{prefix}SELECT id FROM (SELECT * FROM {left} {join} {right} USING (id)) d"
+                        ),
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
+                    "{catalog_name} {name} {left} {right}"
+                );
+            }
         }
     }
 }

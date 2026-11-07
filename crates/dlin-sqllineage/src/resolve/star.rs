@@ -9,7 +9,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
-use super::lineage::{collect_leaf_origins, collect_output_sources, named_scope_sources};
+use super::lineage::{
+    collect_leaf_origins, collect_output_sources, flatten_mapping_sources, named_scope_sources,
+};
 use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
     wildcard_mapping,
@@ -78,6 +80,29 @@ pub(super) fn expand_star(
             OutputElement::Tail(tail) => mappings.extend(evaluator.tail_mappings(tail)),
         }
     }
+}
+
+/// The origins of the column a scope lists under `name`, whether they read the
+/// recursive CTE the scope belongs to, and the transform the scope applies.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn listed_name_sources(
+    scope: ScopeId,
+    name: &Ident,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    Evaluator {
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        active: HashSet::new(),
+    }
+    .listed(scope, name)
 }
 
 /// Look `name` up among the unlisted columns of a scope: names that are
@@ -154,7 +179,8 @@ impl Evaluator<'_, '_, '_> {
                 (sources, transform)
             }
             ValueId::ScopeSlot { scope, index } | ValueId::SetOperation { scope, index } => {
-                self.scope_slot(*scope, *index)
+                let (sources, _, transform) = self.scope_slot(*scope, *index, false);
+                (sources, transform)
             }
             // The same lookup a direct reference to the name in that scope makes.
             ValueId::ScopeName { scope, column } => named_scope_sources(
@@ -178,6 +204,9 @@ impl Evaluator<'_, '_, '_> {
                 },
                 |(sources, _, transform)| (sources, transform),
             ),
+            ValueId::Tail { scope, column } => {
+                (self.tail_column(*scope, column), TransformKind::Direct)
+            }
             ValueId::VirtualColumn { source, index } => {
                 (self.virtual_column(*source, *index), TransformKind::Direct)
             }
@@ -198,12 +227,19 @@ impl Evaluator<'_, '_, '_> {
     }
 
     /// The value of a scope's output column at the position its model lists
-    /// it. A set operation can merge more or fewer mappings than its left
-    /// operand lists columns, so its mappings are matched by name instead.
-    fn scope_slot(&mut self, scope: ScopeId, index: usize) -> (Vec<ColumnOrigin>, TransformKind) {
+    /// it, with whether it reads the recursive CTE it belongs to. A set
+    /// operation can merge more or fewer mappings than its left operand lists
+    /// columns, so its mappings are matched by name instead. `flatten` unwraps
+    /// the recursive marker of a set operation's mapping.
+    fn scope_slot(
+        &mut self,
+        scope: ScopeId,
+        index: usize,
+        flatten: bool,
+    ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
         let model = self.scope_model(scope);
         let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
-            return (Vec::new(), TransformKind::Direct);
+            return (Vec::new(), false, TransformKind::Direct);
         };
         let ambiguous = || {
             (
@@ -211,6 +247,7 @@ impl Evaluator<'_, '_, '_> {
                     column: slot.name.clone(),
                     candidates: Vec::new(),
                 }],
+                false,
                 TransformKind::Direct,
             )
         };
@@ -231,13 +268,46 @@ impl Evaluator<'_, '_, '_> {
                 })
             };
             found.map_or_else(ambiguous, |mapping| {
-                (mapping.sources.clone(), mapping.transform.clone())
+                if flatten {
+                    let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
+                    (sources, has_back, mapping.transform.clone())
+                } else {
+                    (mapping.sources.clone(), false, mapping.transform.clone())
+                }
             })
         } else {
-            self.value(&slot.value)
+            let (sources, transform) = self.value(&slot.value);
+            (sources, false, transform)
         };
         self.active.remove(&(scope, index));
         result
+    }
+
+    /// The origins of the column a scope lists under `name`, or of the
+    /// first right-operand column of a set operation that has that name.
+    fn listed(
+        &mut self,
+        scope: ScopeId,
+        name: &Ident,
+    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+        let model = self.scope_model(scope);
+        if let Some(&index) = model.slots_named(name).first() {
+            return Some(self.scope_slot(scope, index, true));
+        }
+        let dialect = self.graph.dialect;
+        for element in &model.elements {
+            let OutputElement::Tail(tail) = element else {
+                continue;
+            };
+            if let Some(mapping) = self.tail_mappings(tail).into_iter().find(|mapping| {
+                mapping.output_name.is_some()
+                    && same_column_name(&mapping.target.column, name, dialect)
+            }) {
+                let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
+                return Some((sources, has_back, mapping.transform));
+            }
+        }
+        None
     }
 
     /// The mappings a set operation merges in beyond those its left operand
@@ -253,6 +323,37 @@ impl Evaluator<'_, '_, '_> {
             })
             .cloned()
             .collect()
+    }
+
+    /// What the right operand of a set operation merges in under `column`:
+    /// the origins of mappings with that name, and a named wildcard for each
+    /// relation it hides behind a star. A tail that has neither leaves the
+    /// column unresolved.
+    fn tail_column(&mut self, scope: ScopeId, column: &Ident) -> Vec<ColumnOrigin> {
+        let aligned = self.aligned_len(scope);
+        let dialect = self.graph.dialect;
+        let mut sources = Vec::new();
+        for mapping in self.scope_mappings(scope).iter().skip(aligned) {
+            if mapping.output_name.is_none() {
+                for source in &mapping.sources {
+                    if let ColumnOrigin::Wildcard { table } = source {
+                        sources.push(ColumnOrigin::NamedWildcard {
+                            table: table.clone(),
+                            column: column.clone(),
+                        });
+                    }
+                }
+            } else if same_column_name(&mapping.target.column, column, dialect) {
+                sources.extend(mapping.sources.iter().cloned());
+            }
+        }
+        if sources.is_empty() {
+            sources.push(ColumnOrigin::Ambiguous {
+                column: column.clone(),
+                candidates: Vec::new(),
+            });
+        }
+        sources
     }
 
     /// How many leading mappings of a scope stand for the columns its model

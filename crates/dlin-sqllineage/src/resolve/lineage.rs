@@ -7,7 +7,7 @@ use super::binding::{
 use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
 };
-use super::star::{Unlisted, unlisted_name_sources};
+use super::star::{Unlisted, listed_name_sources, unlisted_name_sources};
 
 use crate::Ident;
 use crate::catalog::CatalogContext;
@@ -121,7 +121,8 @@ pub(super) fn collect_leaf_origins(
         return (sources, has_back, transform);
     }
 
-    if let Some((target_output, scope)) = find_cte_redirect(node_id, graph, catalog) {
+    if let Some((target_output, scope)) = find_cte_redirect(node_id, graph, catalog, mapping_cache)
+    {
         if let Some(index) = graph
             .scopes
             .output_columns(scope)
@@ -352,7 +353,7 @@ fn resolve_named_scope_reference(
             _ => None,
         })
     })
-    .or_else(|| find_unqualified_binding(name, scope, graph, catalog));
+    .or_else(|| find_unqualified_binding(name, scope, graph, catalog, mapping_cache));
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
     };
@@ -379,19 +380,16 @@ pub(super) fn named_scope_sources(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let mappings = resolve_scope_mappings(
+    if let Some(listed) = listed_name_sources(
         target_scope,
+        name,
         graph,
         resolved,
         incoming,
         catalog,
         mapping_cache,
-    );
-    if let Some(mapping) = mappings.iter().find(|mapping| {
-        mapping.target.column.column_key(graph.dialect) == name.column_key(graph.dialect)
-    }) {
-        let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-        return Some((sources, has_back, mapping.transform.clone()));
+    ) {
+        return Some(listed);
     }
     match unlisted_name_sources(
         target_scope,

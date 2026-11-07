@@ -1,5 +1,4 @@
 pub(crate) mod analysis;
-mod arity;
 mod binding;
 mod catalog;
 mod lineage;
@@ -8,10 +7,11 @@ mod model;
 mod star;
 mod target;
 mod topo;
+mod width;
 
-use arity::{graph_has_unresolved_stars, validate_set_arities};
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
 use model::OutputModels;
+use width::{graph_has_unresolved_stars, validate_set_arities};
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;

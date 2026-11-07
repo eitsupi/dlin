@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::binding::derive_transform;
 use super::catalog;
 use super::lineage::collect_output_sources;
-use super::model::ModelStore;
+use super::model::{ModelStore, OutputModels};
 use super::star::expand_star;
 
 use crate::Ident;
@@ -184,7 +184,10 @@ pub(super) fn resolve_scope_mappings(
             right,
             recursive,
         } => {
-            let unknown_reasons = graph.scopes.unknown_output_reasons(scope);
+            let unknown_reasons = OutputModels::new(graph, catalog, &mut mapping_cache.models)
+                .scope(scope)
+                .unknown_reasons
+                .clone();
             let left_mappings =
                 resolve_scope_mappings(left, graph, resolved, incoming, catalog, mapping_cache)
                     .iter()

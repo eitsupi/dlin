@@ -1,3 +1,7 @@
+//! Output widths read from the output models: whether every star of a
+//! statement can be expanded, and whether the branches of a set operation have
+//! the same number of columns.
+
 use std::collections::HashSet;
 
 use super::model::OutputModels;
