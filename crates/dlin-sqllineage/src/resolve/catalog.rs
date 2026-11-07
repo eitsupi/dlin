@@ -26,16 +26,23 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &Catalog
     // wildcard it replaces; appending would move all expanded columns behind
     // the columns that were written after the star.
     let mut result = Vec::with_capacity(mappings.len());
+    let mut position = Some(0usize);
     for mapping in mappings.drain(..) {
         if let [ColumnOrigin::Wildcard { table }] = mapping.sources.as_slice()
             && let Some(entry) = catalog.entry(table)
             && entry.coverage == crate::SchemaCoverage::Exhaustive
             && entry.order == crate::SchemaOrder::Proven
         {
-            for col_name in entry.columns.iter().map(|column| column.name.clone()) {
+            let base = mapping.ordinal.or(position);
+            let mut columns = entry.columns.iter().collect::<Vec<_>>();
+            columns.sort_by_key(|column| column.ordinal);
+            for column in columns {
+                let col_name = column.name.clone();
                 result.push(ColumnMapping {
                     star_position: crate::types::StarPosition::Inferred,
-                    ordinal: None,
+                    ordinal: column
+                        .ordinal
+                        .and_then(|ordinal| base.and_then(|base| base.checked_add(ordinal))),
                     output_name: Some(crate::OutputName::Explicit(col_name.clone())),
                     target: ColumnRef {
                         table: mapping.target.table.clone(),
@@ -48,7 +55,13 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &Catalog
                     transform: TransformKind::Direct,
                 });
             }
+            position = base.and_then(|base| base.checked_add(entry.columns.len()));
         } else {
+            position = if mapping.output_name.is_some() {
+                position.and_then(|position| position.checked_add(1))
+            } else {
+                None
+            };
             result.push(mapping);
         }
     }
@@ -163,5 +176,30 @@ mod tests {
             mappings[1].sources.as_slice(),
             [ColumnOrigin::Wildcard { table }] if table.table == crate::Ident::unquoted("unknown")
         ));
+    }
+    #[test]
+    fn fallback_catalog_expansion_offsets_proven_positions_by_the_known_prefix() {
+        let mut prefix = named("prefix");
+        prefix.ordinal = Some(0);
+        let mut mappings = vec![prefix, star("t")];
+        apply_catalog(
+            &mut mappings,
+            &CatalogContext::new(&Columns, crate::Dialect::Generic),
+        );
+        assert_eq!(
+            mappings
+                .iter()
+                .map(|mapping| mapping.ordinal)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+
+        // A preceding unknown width must not become a guessed offset.
+        let mut mappings = vec![star("unknown"), star("t")];
+        apply_catalog(
+            &mut mappings,
+            &CatalogContext::new(&Columns, crate::Dialect::Generic),
+        );
+        assert!(mappings.iter().all(|mapping| mapping.ordinal.is_none()));
     }
 }
