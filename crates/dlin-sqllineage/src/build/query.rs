@@ -6,6 +6,12 @@ use crate::types::SemanticError;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
+        self.visit_query_with_target(query, false);
+    }
+
+    /// Target-specific VALUES/TABLE handling follows only the query body and
+    /// its set-operation branches; nested queries use ordinary analysis.
+    pub(crate) fn visit_query_with_target(&mut self, query: &Query, target_values: bool) {
         // Pipe operators (`FROM t |> SELECT a`) reshape the result of the
         // query after its body. Ignoring them would report the lineage of the
         // unpiped body as if it were the query's output, so refuse instead.
@@ -42,7 +48,7 @@ impl LineageBuilder {
             self.push_scope(ScopeKind::Root);
         }
 
-        self.visit_set_expr(&query.body);
+        self.visit_set_expr(&query.body, target_values);
 
         if has_ctes {
             let body_outputs: Vec<_> = self
@@ -63,14 +69,14 @@ impl LineageBuilder {
         }
     }
 
-    pub(crate) fn visit_set_expr(&mut self, body: &SetExpr) {
+    fn visit_set_expr(&mut self, body: &SetExpr, target_values: bool) {
         match body {
             SetExpr::Select(select) => {
                 self.visit_select(select);
             }
             SetExpr::SetOperation { left, right, .. } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
-                self.visit_set_expr(left);
+                self.visit_set_expr(left, target_values);
                 let left_outputs: Vec<(crate::Ident, crate::graph::node::NodeId)> = self
                     .graph
                     .scopes
@@ -81,7 +87,7 @@ impl LineageBuilder {
                 self.pop_scope();
 
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
-                self.visit_set_expr(right);
+                self.visit_set_expr(right, target_values);
                 self.pop_scope();
 
                 let is_recursive = self.recursive_cte_name.is_some();
@@ -105,9 +111,41 @@ impl LineageBuilder {
                 }
             }
             SetExpr::Query(q) => {
-                self.visit_query(q);
+                self.visit_query_with_target(q, target_values);
             }
-            SetExpr::Values(_) | SetExpr::Table(_) => {}
+            SetExpr::Values(values) if target_values => self.visit_target_values(values),
+            SetExpr::Values(_) => {
+                self.graph
+                    .scopes
+                    .mark_unknown_output_width(self.current_scope, "VALUES source");
+            }
+            SetExpr::Table(table) => {
+                if let Some(table_name) = &table.table_name {
+                    let table_ref = crate::types::TableRef {
+                        catalog: None,
+                        schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
+                        table: crate::Ident::unquoted(table_name.as_str()),
+                    };
+                    let recursive_self = table_ref.schema.is_none()
+                        && self.recursive_cte_name.as_ref().is_some_and(|name| {
+                            name.column_key(self.dialect)
+                                == table_ref.table.column_key(self.dialect)
+                        });
+                    let cte_ref = table_ref.schema.is_none()
+                        && matches!(
+                            self.graph
+                                .scopes
+                                .lookup(self.current_scope, &table_ref.table),
+                            Some(Binding::Cte(_) | Binding::DerivedTable(_))
+                        );
+                    if !recursive_self && !cte_ref {
+                        self.graph.tables.inputs.push(table_ref);
+                    }
+                }
+                self.graph
+                    .scopes
+                    .mark_unknown_output_width(self.current_scope, "TABLE source");
+            }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
             | SetExpr::Delete(stmt)
@@ -115,6 +153,52 @@ impl LineageBuilder {
                 let st = self.visit_statement(stmt);
                 self.inner_statement_type = Some(st);
             }
+        }
+    }
+
+    fn visit_target_values(&mut self, values: &sqlparser::ast::Values) {
+        let Some(first) = values.rows.first() else {
+            return;
+        };
+        if values.rows.iter().any(|row| row.len() != first.len()) {
+            self.graph
+                .scopes
+                .mark_unknown_output_width(self.current_scope, "VALUES source");
+            return;
+        }
+        for index in 0..first.len() {
+            let name = crate::Ident::unquoted(format!("column{}", index + 1));
+            let intrinsic = values
+                .rows
+                .iter()
+                .map(|row| crate::build::expr::determine_edge_kind(&row[index]))
+                .max_by_key(|kind| match kind {
+                    crate::graph::edge::EdgeKind::Direct => 0,
+                    crate::graph::edge::EdgeKind::ViaExpression => 1,
+                    crate::graph::edge::EdgeKind::ViaConditional => 2,
+                    crate::graph::edge::EdgeKind::ViaAggregation => 3,
+                })
+                .unwrap_or(crate::graph::edge::EdgeKind::Direct);
+            let output = self.graph.add_output(name.clone(), intrinsic.clone());
+            self.graph
+                .set_output_name(output, crate::OutputName::Anonymous);
+            for row in &values.rows {
+                let expr = &row[index];
+                let kind = crate::build::expr::determine_edge_kind(expr);
+                let ancestors = self.collect_ancestors(expr);
+                let value = self.graph.add_output(name.clone(), kind.clone());
+                for ancestor in ancestors {
+                    self.graph.add_edge(ancestor, value, kind.clone());
+                }
+                self.graph.add_edge(value, output, intrinsic.clone());
+            }
+            self.graph.scopes.add_output_column(
+                self.current_scope,
+                crate::graph::scope::ScopeColumn {
+                    name,
+                    node_id: output,
+                },
+            );
         }
     }
 }

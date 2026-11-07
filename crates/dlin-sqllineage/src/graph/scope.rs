@@ -56,6 +56,8 @@ struct Scope {
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
+    unknown_output_width: bool,
+    unknown_output_reasons: Vec<&'static str>,
     virtual_sources: Vec<VirtualSource>,
 }
 
@@ -138,6 +140,8 @@ impl ScopeTree {
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
+                unknown_output_width: false,
+                unknown_output_reasons: Vec::new(),
                 virtual_sources: Vec::new(),
             }],
         }
@@ -158,6 +162,8 @@ impl ScopeTree {
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
+            unknown_output_width: false,
+            unknown_output_reasons: Vec::new(),
             virtual_sources: Vec::new(),
         });
         id
@@ -293,6 +299,56 @@ impl ScopeTree {
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {
         &self.scopes[scope].output_columns
+    }
+
+    pub fn mark_unknown_output_width(&mut self, scope: ScopeId, reason: &'static str) {
+        self.scopes[scope].unknown_output_width = true;
+        if !self.scopes[scope].unknown_output_reasons.contains(&reason) {
+            self.scopes[scope].unknown_output_reasons.push(reason);
+        }
+    }
+
+    pub fn output_width_unknown(&self, scope: ScopeId) -> bool {
+        self.scopes[scope].unknown_output_width
+    }
+
+    /// Follow only the output plan, not nested FROM bindings or CTE definitions.
+    pub fn has_unknown_output_width(&self, scope: ScopeId) -> bool {
+        self.output_width_unknown(scope)
+            || match self.output_plan(scope) {
+                OutputPlan::Projection => false,
+                OutputPlan::Delegate(child) => self.has_unknown_output_width(*child),
+                OutputPlan::SetOperation { left, right, .. } => {
+                    self.has_unknown_output_width(*left) || self.has_unknown_output_width(*right)
+                }
+            }
+    }
+
+    /// Reasons an output's width is unknown, following only output-producing
+    /// scopes so unrelated nested queries do not taint this result.
+    pub fn unknown_output_reasons(&self, scope: ScopeId) -> Vec<&'static str> {
+        let current = &self.scopes[scope];
+        let mut reasons = current.unknown_output_reasons.clone();
+        match &current.output_plan {
+            OutputPlan::Projection => {}
+            OutputPlan::Delegate(child) => {
+                for reason in self.unknown_output_reasons(*child) {
+                    if !reasons.contains(&reason) {
+                        reasons.push(reason);
+                    }
+                }
+            }
+            OutputPlan::SetOperation { left, right, .. } => {
+                let mut branches = self.unknown_output_reasons(*left);
+                branches.extend(self.unknown_output_reasons(*right));
+                for reason in branches {
+                    if !reasons.contains(&reason) {
+                        reasons.push(reason);
+                    }
+                }
+            }
+        }
+        reasons
     }
 
     pub fn set_output_plan(&mut self, scope: ScopeId, plan: OutputPlan) {

@@ -176,6 +176,9 @@ fn semantic_error(statement: &sqllineage::StatementAnalysis) -> Option<String> {
                 "SQL parse error: set operation arity mismatch: left has {left} columns, \
                  right has {right} columns"
             )),
+            DiagnosticKind::TargetColumnCountMismatch { target, source } => Some(format!(
+                "SQL parse error: target column count mismatch: target has {target} columns, source has {source} columns"
+            )),
             DiagnosticKind::UnsupportedSyntax { what } => Some(match *what {
                 "pipe operators" => "SQL parse error: pipe operators are not supported".to_string(),
                 other => format!("SQL parse error: {other} is not supported"),

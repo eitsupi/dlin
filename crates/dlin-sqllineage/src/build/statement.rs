@@ -16,7 +16,21 @@ impl LineageBuilder {
             Statement::Insert(insert) => {
                 self.graph.tables.output = Some(Self::table_ref_from_table_object(&insert.table));
                 if let Some(ref source) = insert.source {
-                    self.visit_query(source);
+                    let columns = insert
+                        .columns
+                        .iter()
+                        .map(|column| {
+                            column
+                                .0
+                                .last()
+                                .and_then(|part| part.as_ident())
+                                .map_or_else(
+                                    || crate::Ident::unquoted(column.to_string()),
+                                    crate::Ident::from_ast,
+                                )
+                        })
+                        .collect();
+                    self.visit_target_query(source, columns);
                 }
                 StatementType::Insert
             }
@@ -24,7 +38,12 @@ impl LineageBuilder {
             Statement::CreateTable(ct) => {
                 if let Some(ref query) = ct.query {
                     self.graph.tables.output = Some(Self::table_ref_from_object_name(&ct.name));
-                    self.visit_query(query);
+                    let columns = ct
+                        .columns
+                        .iter()
+                        .map(|column| crate::Ident::from_ast(&column.name))
+                        .collect();
+                    self.visit_target_query(query, columns);
                     StatementType::CreateTable
                 } else {
                     StatementType::Other
@@ -299,6 +318,11 @@ impl LineageBuilder {
             | Statement::WaitFor { .. }
             | Statement::While { .. } => StatementType::Other,
         }
+    }
+
+    fn visit_target_query(&mut self, query: &ast::Query, columns: Vec<crate::Ident>) {
+        self.visit_query_with_target(query, !columns.is_empty());
+        self.graph.target_columns = columns;
     }
 
     /// Record `MERGE ... UPDATE SET *`, `INSERT *` and `INSERT ROW`, which copy
