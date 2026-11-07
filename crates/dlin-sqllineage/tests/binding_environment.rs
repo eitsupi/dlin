@@ -657,3 +657,84 @@ fn duplicate_range_variables_list_only_the_relations_that_can_carry_the_name() {
         );
     }
 }
+
+// In a WITH RECURSIVE list every CTE is visible to every other, itself and the
+// later ones included; without RECURSIVE a CTE sees only the ones before it,
+// and a later name is a physical relation.
+#[test]
+fn recursive_with_list_lets_a_cte_read_a_later_one() {
+    for dialect in [Dialect::Generic, Dialect::PostgreSql] {
+        let result = analyze(
+            "WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x",
+            dialect,
+            false,
+        );
+        assert_eq!(sources(&result, "id"), [pair("t", "id")], "{dialect:?}");
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+    }
+}
+
+#[test]
+fn non_recursive_with_list_binds_a_later_name_to_the_physical_relation() {
+    for dialect in ALL_DIALECTS {
+        let result = analyze(
+            "WITH x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x",
+            dialect,
+            false,
+        );
+        assert_eq!(sources(&result, "id"), [pair("y", "id")], "{dialect:?}");
+        let mut read = read_names(&result);
+        read.sort();
+        assert_eq!(read, ["t", "y"], "{dialect:?}");
+    }
+}
+
+isolated_test!(recursive_ctes_that_read_each_other_terminate, || {
+    for sql in [
+        "WITH RECURSIVE a AS (SELECT id FROM b), b AS (SELECT id FROM a) SELECT id FROM a",
+        "WITH RECURSIVE a AS (SELECT id FROM b), b AS (SELECT id FROM a) SELECT id FROM b",
+        "WITH RECURSIVE a AS (SELECT id FROM b UNION ALL SELECT id FROM t), \
+         b AS (SELECT id FROM a) SELECT id FROM a",
+        "WITH RECURSIVE a AS (SELECT id FROM b), b AS (SELECT id FROM c), \
+         c AS (SELECT id FROM a) SELECT * FROM a",
+    ] {
+        for dialect in [Dialect::Generic, Dialect::PostgreSql] {
+            let result = analyze(sql, dialect, false);
+            // The cycle is reported as not fully known, never as a source-free
+            // or complete answer.
+            for column in &result.output.columns {
+                assert!(
+                    matches!(&column.lineage, Lineage::Partial { unresolved, .. }
+                        if !unresolved.is_empty()),
+                    "{dialect:?} {sql}: {:?}",
+                    column.lineage
+                );
+            }
+        }
+    }
+});
+
+// A CTE inside a LATERAL subquery sees the FROM items before the subquery.
+#[test]
+fn cte_inside_a_lateral_subquery_sees_the_outer_from_items() {
+    for dialect in LATERAL_DIALECTS {
+        for sql in [
+            "SELECT d.v FROM t, LATERAL (WITH c AS (SELECT t.x AS v) SELECT v FROM c) AS d",
+            "SELECT d.v FROM t, LATERAL (WITH c AS (SELECT x AS v) SELECT v FROM c) AS d",
+        ] {
+            let result = analyze(sql, dialect, false);
+            assert_eq!(sources(&result, "v"), [pair("t", "x")], "{dialect:?} {sql}");
+        }
+    }
+}
+
+// The same CTE in an ordinary derived table does not.
+#[test]
+fn cte_inside_an_ordinary_derived_table_does_not_see_sibling_items() {
+    let result = analyze(
+        "SELECT d.v FROM t, (WITH c AS (SELECT t.x AS v) SELECT v FROM c) AS d",
+        Dialect::PostgreSql,
+        false,
+    );
+    assert!(known_sources(&result.output.columns[0]).is_empty());
+}

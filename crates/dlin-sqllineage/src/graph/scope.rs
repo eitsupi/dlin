@@ -315,15 +315,40 @@ impl ScopeTree {
         });
     }
 
-    /// Define a CTE in `scope`.
-    pub fn add_cte(&mut self, scope: ScopeId, name: Ident, cte_scope: ScopeId) {
-        let seq = self.scopes[scope].binding_log.len();
-        self.scopes[scope].binding_log.push(name.clone());
-        self.scopes[scope].ctes.push(CteEntry {
-            name,
-            scope: cte_scope,
-            seq,
-        });
+    /// Define the CTEs of one WITH list in `holder`, in source order, and
+    /// create a scope for each body. All of them are defined before any body
+    /// is visited, so a body can refer to a CTE that comes later.
+    ///
+    /// Without `recursive` a body sees only the CTEs before it. With it, a
+    /// body sees every CTE of the list, itself and later ones included. Either
+    /// way it sees what the holder's own surroundings allow at its position.
+    pub fn define_ctes(
+        &mut self,
+        holder: ScopeId,
+        names: Vec<Ident>,
+        recursive: bool,
+    ) -> Vec<ScopeId> {
+        let base = self.scopes[holder].binding_log.len();
+        let total = names.len();
+        let mut scopes = Vec::with_capacity(total);
+        for (index, name) in names.into_iter().enumerate() {
+            let visible = if recursive {
+                base + total
+            } else {
+                base + index
+            };
+            let id = self.scopes.len();
+            self.scopes
+                .push(Scope::new(Some(holder), ScopeKind::Cte, visible));
+            self.scopes[holder].binding_log.push(name.clone());
+            self.scopes[holder].ctes.push(CteEntry {
+                name,
+                scope: id,
+                seq: base + index,
+            });
+            scopes.push(id);
+        }
+        scopes
     }
 
     /// The CTE a relation name written without a schema reads, if one is
@@ -705,11 +730,13 @@ mod tests {
     fn ctes_are_a_namespace_of_their_own() {
         let mut tree = ScopeTree::new(Dialect::Generic);
         let root = ScopeTree::root();
-        let first = tree.push(root, ScopeKind::Cte);
+        let ctes = tree.define_ctes(
+            root,
+            vec![Ident::unquoted("c1"), Ident::unquoted("c2")],
+            false,
+        );
+        let (first, second) = (ctes[0], ctes[1]);
         let first_env = tree.env(first);
-        tree.add_cte(root, Ident::unquoted("c1"), first);
-        let second = tree.push(root, ScopeKind::Cte);
-        tree.add_cte(root, Ident::unquoted("c2"), second);
         let body = tree.push(root, ScopeKind::Body);
 
         let c1 = Ident::unquoted("c1");
@@ -725,5 +752,26 @@ mod tests {
         // A range variable in the body does not hide a CTE.
         tree.add_binding(body, Ident::unquoted("c1"), table("t2"));
         assert_eq!(tree.lookup_cte(tree.env(body), &c1), Some(first));
+    }
+
+    #[test]
+    fn a_recursive_list_makes_every_cte_visible_to_every_body() {
+        let mut tree = ScopeTree::new(Dialect::Generic);
+        let root = ScopeTree::root();
+        let ctes = tree.define_ctes(
+            root,
+            vec![Ident::unquoted("c1"), Ident::unquoted("c2")],
+            true,
+        );
+        for &scope in &ctes {
+            assert_eq!(
+                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c1")),
+                Some(ctes[0])
+            );
+            assert_eq!(
+                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c2")),
+                Some(ctes[1])
+            );
+        }
     }
 }

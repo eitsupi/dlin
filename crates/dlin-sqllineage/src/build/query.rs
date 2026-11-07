@@ -23,8 +23,19 @@ impl LineageBuilder {
 
         let has_ctes = query.with.is_some();
         if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                let cte_scope = self.push_scope(ScopeKind::Cte);
+            // Every CTE of the list is defined before any body is visited, so
+            // that a RECURSIVE list can refer forward.
+            let names = with
+                .cte_tables
+                .iter()
+                .map(|cte| crate::Ident::from_ast(&cte.alias.name))
+                .collect();
+            let scopes = self
+                .graph
+                .scopes
+                .define_ctes(self.current_scope, names, with.recursive);
+            for (cte, cte_scope) in with.cte_tables.iter().zip(scopes) {
+                self.current_scope = cte_scope;
 
                 if with.recursive {
                     self.recursive_cte_name = Some(crate::Ident::from_ast(&cte.alias.name));
@@ -34,12 +45,6 @@ impl LineageBuilder {
 
                 self.recursive_cte_name = None;
                 self.pop_scope();
-
-                self.graph.scopes.add_cte(
-                    self.current_scope,
-                    crate::Ident::from_ast(&cte.alias.name),
-                    cte_scope,
-                );
             }
         }
 
