@@ -775,6 +775,48 @@ pub fn cases() -> Vec<Case> {
         "SELECT id FROM (SELECT * EXCLUDE (x.id) FROM a x JOIN b y USING (id) JOIN c z ON TRUE JOIN d w USING (id)) result",
         Dialect::Generic, vec![partial_col(0, u("id"), vec![], vec![Unresolved::Unbound { column: u("id") }])],
     ).catalog(vec![(relation("c"), vec![u("other")])]).unresolved_stars(true));
+    for qualifier in ["x", "y"] {
+        cases.push(Case::new(&format!("partial_catalog_using_exclude_{qualifier}"),
+            &format!("SELECT id FROM (SELECT * EXCLUDE ({qualifier}.id) FROM a AS x JOIN b AS y USING (id)) AS d"),
+            Dialect::Generic,
+            vec![partial_col(0, u("id"), vec![], vec![Unresolved::Unbound { column: u("id") }])],
+        ).catalog(vec![(relation("a"), vec![u("id"), u("left_value")])]).unresolved_stars(true));
+    }
+    cases.push(Case::new("partial_catalog_cross_exclude_known_column",
+        "SELECT left_value FROM (SELECT * EXCLUDE (x.left_value) FROM a AS x CROSS JOIN b AS y) AS d",
+        Dialect::Generic,
+        vec![partial_col(0, u("left_value"), vec![], vec![Unresolved::NamedBehindStar { relation: relation("b"), column: u("left_value") }])],
+    ).catalog(vec![(relation("a"), vec![u("id"), u("left_value")])]).unresolved_stars(true));
+    cases.push(
+        Case::new(
+            "partial_catalog_ilike_filters_known_column",
+            "SELECT left_value FROM (SELECT * ILIKE 'id' FROM a AS x CROSS JOIN b AS y) AS d",
+            Dialect::Snowflake,
+            vec![partial_col(
+                0,
+                u("left_value"),
+                vec![],
+                vec![Unresolved::Unbound {
+                    column: u("left_value"),
+                }],
+            )],
+        )
+        .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])])
+        .unresolved_stars(true),
+    );
+    for modifier in ["REPLACE (1 AS id)", "RENAME (id AS kept)"] {
+        cases.push(
+            Case::new(
+                &format!("partial_catalog_exclude_prevents_{modifier}"),
+                &format!("SELECT * EXCLUDE (y.id) {modifier} FROM a AS x JOIN b AS y USING (id)"),
+                Dialect::Generic,
+                vec![physical(0, "a", "left_value")],
+            )
+            .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])])
+            .shape(open_star("b", Some(0)))
+            .unresolved_stars(true),
+        );
+    }
     cases
 }
 
