@@ -147,9 +147,11 @@ one place, not from the `RECURSIVE` keyword alone.
 
 | Dialect | Without `RECURSIVE` | With `RECURSIVE` |
 | --- | --- | --- |
-| PostgreSQL, BigQuery, Generic (SQL standard) | Earlier CTEs only, no self-reference | Every CTE of the list, including itself and later ones (B4) |
+| PostgreSQL, BigQuery, Generic, ANSI (SQL standard) | Earlier CTEs only, no self-reference | Every CTE of the list, including itself and later ones (B4) |
 | DuckDB | Earlier CTEs only, no self-reference | Earlier CTEs and itself. A later CTE is not visible (B6) |
 | Snowflake | Earlier CTEs and itself: self-reference does not need the keyword (B5) | Same |
+| SQLite | Every CTE of the list, including itself and later ones: neither needs the keyword (B7) | Same |
+| SQL Server | Earlier CTEs and itself: T-SQL has no `RECURSIVE` keyword (B7) | Not applicable |
 | Any other dialect | Earlier CTEs only | Earlier CTEs and itself |
 
 A name that matches a CTE of the list the rule does not make visible, in a
@@ -166,7 +168,7 @@ without writing `LATERAL`. That implicit lateral reference is a dialect
 extension the engine does not model yet. A reference that depends on it is
 reported as unresolved. It is never bound to a wrong object.
 
-Cases: B1, B2, B3, B4, B5, B6, I5.
+Cases: B1, B2, B3, B4, B5, B6, B7, I5.
 
 ## 4. Evaluation context and cycles
 
@@ -538,6 +540,7 @@ proven.
 | B4 | PostgreSQL | `WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x` | none | `id` = `C[t.id]`. Under `RECURSIVE` the later CTE `y` is visible inside `x`, so `y` is never read as a physical relation. Without `RECURSIVE`, the same `y` inside `x` is the physical relation `y`. BigQuery and Generic give the same results |
 | B5 | Snowflake | `WITH c(n) AS (SELECT t.n FROM t UNION ALL SELECT c.n + 1 FROM c WHERE c.n < 3) SELECT n FROM c` | none | A recursive CTE without the keyword. `c` inside its body is the CTE itself, never a physical relation `c`. `t.n` stays known, and the recursive part is reported as recursive |
 | B6 | DuckDB | The B4 query | none | `id` = `C[y.id]`, `y` read as a physical relation: DuckDB does not make later CTEs visible even under `RECURSIVE` |
+| B7 | SQLite, SQL Server | `WITH c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c`, and the B4 query without `RECURSIVE` | none | In both dialects `c` inside its body is the CTE itself, a recursive CTE without the keyword, never a physical relation `c`. The B4 query without `RECURSIVE` gives `C[t.id]` in SQLite, where later CTEs are visible, and the physical `y.id` in SQL Server |
 
 ### Set operations
 
