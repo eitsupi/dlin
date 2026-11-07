@@ -517,14 +517,10 @@ impl Evaluator<'_, '_, '_> {
         let model = self.scope_model(scope);
         // A join over duplicated range variables cannot say which relation
         // owns a name it merges, whatever the relations list.
-        if let Some(invalid) = model
-            .invalid
-            .iter()
-            .find(|invalid| invalid.covers(name, self.graph.dialect))
-        {
+        if let Some(ambiguity) = model.ambiguity(name) {
             let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                 column: name.clone(),
-                candidates: invalid.candidates.clone(),
+                candidates: ambiguity.candidates,
             });
             return Some((vec![ambiguous], false, TransformKind::Direct));
         }

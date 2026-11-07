@@ -307,3 +307,69 @@ fn unknown_natural_then_using_names_one_of_the_natural_relations() {
         Lineage::Complete(vec![]),
     );
 }
+
+/// A CTE or derived table whose own FROM clause joins two ranges of one name
+/// has no single owner for the key it merges. That ambiguity stands in for the
+/// one range that reads it: the other relations of the outer clause can own the
+/// name too, so they stay candidates, read directly or through a star.
+#[test]
+fn inherited_duplicate_range_ambiguity_keeps_the_outer_candidates() {
+    let inner = "SELECT * FROM a AS x JOIN b AS x USING (id)";
+    let all = [
+        Candidate::Relation(relation("a")),
+        Candidate::Relation(relation("b")),
+        Candidate::Relation(relation("c_source")),
+    ];
+    let cases = [
+        ("", format!("({inner}) d JOIN c_source USING (id)")),
+        ("", format!("({inner}) d JOIN c_source ON TRUE")),
+        ("", format!("({inner}) d, c_source")),
+        ("", format!("c_source JOIN ({inner}) d USING (id)")),
+        ("", format!("({inner}) d FULL JOIN c_source USING (id)")),
+        (
+            &format!("WITH d AS ({inner}) ") as &str,
+            "d JOIN c_source USING (id)".to_owned(),
+        ),
+        (
+            &format!("WITH d AS ({inner}) ") as &str,
+            "d JOIN c_source ON TRUE".to_owned(),
+        ),
+    ];
+    for (with, from) in cases {
+        let direct = format!("{with}SELECT id FROM {from}");
+        let through_star = format!("{with}SELECT id FROM (SELECT * FROM {from}) AS boundary");
+        for catalog in [false, true] {
+            assert_candidates(&direct, Dialect::PostgreSql, catalog, &all);
+            assert_candidates(&through_star, Dialect::PostgreSql, catalog, &all);
+        }
+    }
+}
+
+/// Only the relations whose value the outer join keeps join the inherited
+/// candidates: a LEFT JOIN keeps the duplicated side alone, a RIGHT JOIN keeps
+/// the other relation, which then owns the name outright.
+#[test]
+fn inherited_duplicate_range_ambiguity_follows_the_outer_join_kind() {
+    let inner = "SELECT * FROM a AS x JOIN b AS x USING (id)";
+    let left = format!("({inner}) d LEFT JOIN c_source USING (id)");
+    for sql in [
+        format!("SELECT id FROM {left}"),
+        format!("SELECT id FROM (SELECT * FROM {left}) AS boundary"),
+    ] {
+        assert_candidates(&sql, Dialect::PostgreSql, false, &physical(&["a", "b"]));
+    }
+    let right = format!("({inner}) d RIGHT JOIN c_source USING (id)");
+    for sql in [
+        format!("SELECT id FROM {right}"),
+        format!("SELECT id FROM (SELECT * FROM {right}) AS boundary"),
+    ] {
+        assert_eq!(
+            output_lineage(&sql, Dialect::PostgreSql, false),
+            Lineage::Complete(vec![dlin_sqllineage::SourceColumn {
+                relation: relation("c_source"),
+                column: Ident::unquoted("id"),
+            }]),
+            "{sql}"
+        );
+    }
+}

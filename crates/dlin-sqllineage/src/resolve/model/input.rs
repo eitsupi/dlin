@@ -79,6 +79,98 @@ impl InvalidRanges {
     }
 }
 
+/// Why a model cannot attribute some names to one relation.
+#[derive(Debug, Clone)]
+pub(in crate::resolve) enum Invalidity {
+    /// A join of this model's own FROM clause runs over duplicated range
+    /// variables.
+    Own(Rc<InvalidRanges>),
+    /// A CTE or derived table that this model reads has such a join inside.
+    /// Its ambiguity stands in for the one range that reads it; the other
+    /// ranges of this model still take part.
+    Range {
+        index: usize,
+        model: Rc<OutputModel>,
+    },
+    /// The whole output is that of another model, which has such a join.
+    Whole(Rc<OutputModel>),
+}
+
+impl OutputModel {
+    /// Whether `name` has no single owner because of a join over duplicated
+    /// range variables, and the relations that may own it.
+    pub(in crate::resolve) fn ambiguity(&self, name: &Ident) -> Option<Ambiguity> {
+        let dialect = self.names.dialect;
+        let mut scoped: Vec<(usize, Vec<Candidate>)> = Vec::new();
+        for invalid in &self.invalid {
+            match invalid {
+                Invalidity::Own(ranges) if ranges.covers(name, dialect) => {
+                    return Some(Ambiguity {
+                        candidates: ranges.candidates.clone(),
+                        refinable: !ranges.typed(),
+                    });
+                }
+                Invalidity::Whole(model) => {
+                    if let Some(ambiguity) = model.ambiguity(name) {
+                        return Some(ambiguity);
+                    }
+                }
+                Invalidity::Range { index, model } => {
+                    if let Some(inner) = model.ambiguity(name) {
+                        scoped.push((*index, inner.candidates));
+                    }
+                }
+                Invalidity::Own(_) => {}
+            }
+        }
+        if scoped.is_empty() {
+            return None;
+        }
+        // The ranges that can carry the name, and of those only the ones
+        // whose value counts: a preserved side of an outer join.
+        let matches = self.matches(name);
+        let mut involved: Vec<&RangeRef> = Vec::new();
+        for &index in &matches.listed {
+            if let OutputElement::Column(slot) = &self.elements[index] {
+                involved.extend(slot.candidate_ranges.iter());
+            }
+        }
+        for &index in matches.unknown.iter().chain(&matches.tails) {
+            match &self.elements[index] {
+                OutputElement::Unknown(segment) => involved.extend(segment.ranges.iter()),
+                OutputElement::Tail(tail) => involved.extend(tail.ranges.iter()),
+                OutputElement::Column(_) => {}
+            }
+        }
+        let involved = occurrences(involved);
+        if !involved
+            .iter()
+            .any(|range| scoped.iter().any(|(index, _)| *index == range.index))
+        {
+            return None;
+        }
+        let mut candidates = Vec::new();
+        for range in involved {
+            match scoped.iter().find(|(index, _)| *index == range.index) {
+                Some((_, inner)) => candidates.extend(inner.iter().cloned()),
+                None => candidates.extend(range.candidate()),
+            }
+        }
+        Some(Ambiguity {
+            candidates,
+            refinable: false,
+        })
+    }
+}
+
+/// The relations that may own a name that has no single owner.
+pub(in crate::resolve) struct Ambiguity {
+    pub candidates: Vec<Candidate>,
+    /// Whether a catalog may still narrow the candidates down: they are all
+    /// physical relations of one join over duplicated range variables.
+    pub refinable: bool,
+}
+
 /// What the relations of one FROM clause publish together, before any
 /// projection: every binding in order, with USING and NATURAL joins folded.
 ///
@@ -92,7 +184,6 @@ pub(in crate::resolve) struct InputModel {
     /// Columns of derived tables without a range variable. A star publishes
     /// them after the relations; a name is never looked up in them.
     pub(super) anonymous: Vec<OutputElement>,
-    pub(super) invalid: Vec<Rc<InvalidRanges>>,
 }
 
 /// What an unqualified name denotes among the relations of a FROM clause.
@@ -181,15 +272,11 @@ impl InputModel {
     }
 
     /// Decide what the unqualified `name` denotes among several relations.
-    fn lookup(&self, name: &Ident, dialect: Dialect) -> InputLookup {
-        if let Some(invalid) = self
-            .invalid
-            .iter()
-            .find(|invalid| invalid.covers(name, dialect))
-        {
+    fn lookup(&self, name: &Ident) -> InputLookup {
+        if let Some(ambiguity) = self.model.ambiguity(name) {
             return InputLookup::Ambiguous {
-                candidates: invalid.candidates.clone(),
-                typed: invalid.typed(),
+                typed: !ambiguity.refinable,
+                candidates: ambiguity.candidates,
             };
         }
         self.choose(&self.model.matches(name))
@@ -312,7 +399,6 @@ impl OutputModels<'_, '_, '_> {
             return Rc::new(InputModel {
                 model: OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect),
                 anonymous: Vec::new(),
-                invalid: Vec::new(),
             });
         }
         let model = Rc::new(self.build_input(scope));
@@ -334,7 +420,7 @@ impl OutputModels<'_, '_, '_> {
                 name: range_name.clone(),
                 binding: binding.clone(),
             }),
-            _ => self.input(scope).lookup(name, self.graph.dialect),
+            _ => self.input(scope).lookup(name),
         }
     }
 
@@ -381,7 +467,12 @@ impl OutputModels<'_, '_, '_> {
         let mut invalid = Vec::new();
         let mut groups = Vec::new();
         for range in &ranges {
-            invalid.extend(self.binding_invalid(&range.binding));
+            if let Some(model) = self.binding_invalid(&range.binding) {
+                invalid.push(Invalidity::Range {
+                    index: range.index,
+                    model,
+                });
+            }
             groups.push(Group {
                 members: vec![range.name.clone()],
                 elements: self.binding_part(range),
@@ -396,7 +487,7 @@ impl OutputModels<'_, '_, '_> {
         {
             // Join sides are named by range variable, so two ranges with one
             // name leave every merged name without an owner.
-            invalid.push(Rc::new(InvalidRanges {
+            invalid.push(Invalidity::Own(Rc::new(InvalidRanges {
                 using: merges
                     .iter()
                     .filter_map(|merge| match &merge.columns {
@@ -409,7 +500,7 @@ impl OutputModels<'_, '_, '_> {
                     .iter()
                     .any(|merge| matches!(merge.columns, MergedColumns::Natural)),
                 candidates: candidates_of(&ranges),
-            }));
+            })));
         }
         let elements = fold_join_columns(groups, merges, dialect);
         let mut anonymous = Vec::new();
@@ -417,21 +508,20 @@ impl OutputModels<'_, '_, '_> {
             let model = self.scope(child);
             anonymous.extend(forward_scope(child, &model, &Rc::from([]), false));
         }
-        InputModel {
-            model: OutputModel::new(elements, Vec::new(), dialect),
-            anonymous,
-            invalid,
-        }
+        let mut model = OutputModel::new(elements, Vec::new(), dialect);
+        model.invalid = invalid;
+        InputModel { model, anonymous }
     }
 
-    /// The name conditions a CTE or derived table carries from joins over
-    /// duplicated range variables inside it.
-    pub(super) fn binding_invalid(&mut self, binding: &Binding) -> Vec<Rc<InvalidRanges>> {
+    /// The model of a CTE or derived table that has a join over duplicated
+    /// range variables inside it, if the binding is one.
+    pub(super) fn binding_invalid(&mut self, binding: &Binding) -> Option<Rc<OutputModel>> {
         match binding {
             Binding::Cte(child) | Binding::DerivedTable(child) => {
-                self.scope(*child).invalid.clone()
+                let model = self.scope(*child);
+                (!model.invalid.is_empty()).then_some(model)
             }
-            Binding::Table(_) | Binding::VirtualSource(_) => Vec::new(),
+            Binding::Table(_) | Binding::VirtualSource(_) => None,
         }
     }
 }

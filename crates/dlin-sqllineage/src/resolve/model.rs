@@ -14,7 +14,7 @@ use std::rc::Rc;
 mod input;
 
 pub(super) use input::{InputLookup, RangeRef};
-use input::{InputModel, InvalidRanges};
+use input::{InputModel, Invalidity};
 
 use super::target::{
     StarTarget, excluded_matches_name, ilike_matches, resolve_star_target, same_column_name,
@@ -224,7 +224,7 @@ pub(super) struct OutputModel {
     pub unknown_reasons: Vec<&'static str>,
     /// Joins that merge names over a FROM clause in which two ranges share a
     /// name, so which relation a merged name belongs to cannot be told.
-    pub invalid: Vec<Rc<InvalidRanges>>,
+    pub invalid: Vec<Invalidity>,
 }
 
 /// The elements of a model that may carry one name.
@@ -493,7 +493,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
-                invalid.extend(model.invalid.iter().cloned());
+                if !model.invalid.is_empty() {
+                    invalid.push(Invalidity::Whole(model.clone()));
+                }
                 forward_scope(*child, &model, &Rc::from([]), false)
             }
             // The left operand defines the names of a set operation.
@@ -501,7 +503,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 left, recursive, ..
             } => {
                 let model = self.scope(*left);
-                invalid.extend(model.invalid.iter().cloned());
+                if !model.invalid.is_empty() {
+                    invalid.push(Invalidity::Whole(model.clone()));
+                }
                 let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
                 if !recursive {
                     // This operation's tail covers whatever the left operand
@@ -549,16 +553,21 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let elements = match resolve_star_target(base, scope, graph) {
             StarTarget::All => {
                 let input = self.input(scope);
-                invalid.extend(input.invalid.iter().cloned());
+                invalid.extend(input.model.invalid.iter().cloned());
                 input.star_elements()
             }
             StarTarget::Binding { name, binding } => {
-                invalid.extend(self.binding_invalid(&binding));
                 let range = RangeRef {
                     index: self.range_index(scope, &name, &binding),
                     name,
                     binding,
                 };
+                if let Some(model) = self.binding_invalid(&range.binding) {
+                    invalid.push(Invalidity::Range {
+                        index: range.index,
+                        model,
+                    });
+                }
                 self.binding_part(&range)
             }
             StarTarget::Unknown(table) => self.relation_part(&Rc::new(table), &Rc::from([])),
