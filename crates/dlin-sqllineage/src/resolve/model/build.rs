@@ -42,7 +42,7 @@ pub(in crate::resolve) struct ModelStore {
 /// Builds models for a statement into a [`ModelStore`].
 pub(in crate::resolve) struct OutputModels<'a, 'c, 's> {
     pub(super) graph: &'a RawGraph,
-    catalog: Option<&'a CatalogContext<'c>>,
+    pub(super) catalog: Option<&'a CatalogContext<'c>>,
     pub(super) store: &'s mut ModelStore,
 }
 

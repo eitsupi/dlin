@@ -1,12 +1,26 @@
 use sqlparser::ast::{Query, SetExpr};
 
 use crate::build::{LineageBuilder, relation};
-use crate::graph::scope::{OutputPlan, ScopeKind};
+use crate::graph::scope::{OutputPlan, ScopeId, ScopeKind};
 use crate::types::SemanticError;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
         self.visit_query_with_target(query, false);
+    }
+
+    /// Visit a query that crosses a query boundary: a subquery in an
+    /// expression, a derived table, an argument of a function. It gets a scope
+    /// of its own, of the given kind, so the range variables and the outputs
+    /// it introduces never reach the enclosing query. Every walk that enters
+    /// such a query goes through here, whatever it collects, so that the
+    /// walks cannot disagree about where a query's names end. Returns the
+    /// scope, whose output columns are the query's.
+    pub(crate) fn visit_subquery(&mut self, kind: ScopeKind, query: &Query) -> ScopeId {
+        let scope = self.push_scope(kind);
+        self.visit_query(query);
+        self.pop_scope();
+        scope
     }
 
     /// Target-specific VALUES/TABLE handling follows only the query body and

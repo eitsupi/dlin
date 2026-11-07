@@ -100,6 +100,8 @@ pub(super) fn resolve_scope_mappings(
     // materialized result. Returning no mappings preserves the existing
     // fallback to raw output resolution and does not cache an incomplete
     // entry as resolved.
+    // TODO: re-entry or an exhausted budget must surface as an unresolved
+    // value, not as an empty list that readers treat as "no dependencies".
     if !cx.enter(EvalKey::Mappings(scope)) {
         return Arc::from([]);
     }

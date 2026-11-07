@@ -357,6 +357,8 @@ impl Evaluator<'_, '_, '_> {
         flatten: bool,
     ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
         let model = self.scope_model(scope);
+        // TODO: an index that names no listed column must surface as an
+        // unresolved value, not as an empty, direct source list.
         let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
             return (Vec::new(), false, TransformKind::Direct);
         };
@@ -499,6 +501,8 @@ impl Evaluator<'_, '_, '_> {
             self.cx.graph.scopes.output_plan(scope),
             OutputPlan::SetOperation { .. }
         ) {
+            // TODO: re-entry must surface as an unresolved value, not as a
+            // missing mapping that reads as "nothing published".
             if !self.cx.enter(EvalKey::Slot { scope, index }) {
                 return None;
             }
@@ -626,6 +630,8 @@ impl Evaluator<'_, '_, '_> {
                 column: column.clone(),
             }],
             UnknownProvider::Scope { scope, index } => {
+                // TODO: re-entry must surface as an unresolved value, not as
+                // an empty source list.
                 if !self.cx.enter(EvalKey::Slot {
                     scope: *scope,
                     index: *index,

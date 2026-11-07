@@ -104,7 +104,7 @@ pub(in crate::resolve) struct InputModel {
 }
 
 /// What an unqualified name denotes among the relations of a FROM clause.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::resolve) enum InputLookup {
     /// Nothing is known to publish the name.
     Absent,
@@ -176,19 +176,24 @@ impl InputModel {
     }
 
     /// Decide what the unqualified `name` denotes among several relations.
-    fn lookup(&self, name: &Ident) -> InputLookup {
+    fn standing(&self, name: &Ident) -> Standing {
         let elements = &self.model.elements;
         match self.model.choose(name) {
-            Choice::Absent => InputLookup::Absent,
-            Choice::Column(_, slot) => InputLookup::Column {
+            Choice::Absent => Standing::Absent,
+            Choice::Column(_, slot) => Standing::Present(InputLookup::Column {
                 value: slot.value.clone(),
                 contributing: slot.candidate_ranges.clone(),
-            },
-            Choice::Possible(segment) => segment
-                .ranges
-                .first()
-                .map_or(InputLookup::Absent, InputLookup::single),
-            Choice::Ambiguous(ambiguity) => InputLookup::Ambiguous {
+            }),
+            Choice::Possible(segment) => {
+                segment
+                    .ranges
+                    .first()
+                    .map_or(Standing::Absent, |first| Standing::Possible {
+                        answer: InputLookup::single(first),
+                        candidates: candidates_of(segment.ranges.iter()),
+                    })
+            }
+            Choice::Ambiguous(ambiguity) => Standing::Present(InputLookup::Ambiguous {
                 typed: !ambiguity.refinable,
                 values: ambiguity
                     .listed
@@ -199,8 +204,132 @@ impl InputModel {
                     })
                     .collect(),
                 candidates: ambiguity.candidates,
-            },
+            }),
         }
+    }
+}
+
+/// What one FROM clause says about an unqualified name.
+enum Standing {
+    /// No relation of the clause can be shown to publish the name.
+    Absent,
+    /// The clause settles the name, to a column or to an ambiguity inside it.
+    Present(InputLookup),
+    /// Exactly one relation of the clause may publish the name, but its
+    /// columns are not listed, so nothing proves it does. `answer` is what
+    /// the name denotes if the clause is all there is; `candidates` are the
+    /// relations that may carry it.
+    Possible {
+        answer: InputLookup,
+        candidates: Vec<Candidate>,
+    },
+}
+
+/// What an unqualified name denotes after the clauses of the scopes around the
+/// reference have been weighed, nearest first.
+enum Walk {
+    Absent,
+    Present(InputLookup),
+    Possible {
+        answer: InputLookup,
+        candidates: Vec<Candidate>,
+    },
+    /// Relations of different clauses may each carry the name, and the
+    /// nearer ones cannot be shown to hide the farther ones.
+    Several {
+        answer: InputLookup,
+        candidates: Vec<Candidate>,
+        values: Vec<ValueId>,
+    },
+}
+
+impl Walk {
+    /// Add the nearer clause's possible providers in front of what the
+    /// farther clauses answered.
+    fn behind(answer: InputLookup, mut candidates: Vec<Candidate>, farther: Self) -> Self {
+        let mut values = Vec::new();
+        match farther {
+            Self::Absent => return Self::Possible { answer, candidates },
+            Self::Present(lookup) => {
+                let (more, listed) = providers_of(&lookup);
+                candidates.extend(more);
+                values.extend(listed);
+            }
+            Self::Possible {
+                candidates: more, ..
+            } => candidates.extend(more),
+            Self::Several {
+                candidates: more,
+                values: listed,
+                ..
+            } => {
+                candidates.extend(more);
+                values.extend(listed);
+            }
+        }
+        Self::Several {
+            answer,
+            candidates,
+            values,
+        }
+    }
+
+    fn into_lookup(self) -> Option<InputLookup> {
+        match self {
+            Self::Absent => None,
+            Self::Present(lookup) | Self::Possible { answer: lookup, .. } => Some(lookup),
+            Self::Several {
+                answer,
+                mut candidates,
+                values,
+            } => {
+                let mut seen = Vec::new();
+                candidates.retain(|candidate| {
+                    let new = !seen.contains(candidate);
+                    if new {
+                        seen.push(candidate.clone());
+                    }
+                    new
+                });
+                // The same physical relation at both levels supplies the
+                // same column either way.
+                if let [Candidate::Relation(_)] = candidates.as_slice() {
+                    return Some(answer);
+                }
+                Some(InputLookup::Ambiguous {
+                    candidates,
+                    // The clauses were weighed against the catalog already,
+                    // which must not narrow the candidates down again.
+                    typed: true,
+                    values,
+                })
+            }
+        }
+    }
+}
+
+fn table_candidate(table: &TableRef) -> Candidate {
+    Candidate::Relation(Relation {
+        catalog: table.catalog.clone(),
+        schema: table.schema.clone(),
+        name: table.table.clone(),
+    })
+}
+
+/// The relations a lookup answer reads from, and the listed columns among
+/// them.
+fn providers_of(lookup: &InputLookup) -> (Vec<Candidate>, Vec<ValueId>) {
+    match lookup {
+        InputLookup::Absent | InputLookup::NoSource => (Vec::new(), Vec::new()),
+        InputLookup::Column {
+            value,
+            contributing,
+        } => (candidates_of(contributing.iter()), vec![value.clone()]),
+        InputLookup::Scope { range, .. } => (candidates_of([range]), Vec::new()),
+        InputLookup::Physical(table) => (vec![table_candidate(table)], Vec::new()),
+        InputLookup::Ambiguous {
+            candidates, values, ..
+        } => (candidates.clone(), values.clone()),
     }
 }
 
@@ -227,23 +356,109 @@ impl OutputModels<'_, '_, '_> {
         model
     }
 
-    /// Decide what the unqualified `name` denotes in the FROM clause of
-    /// `scope`. A clause with a single relation needs no model: the name is
-    /// that relation's.
+    /// Decide what the unqualified `name` denotes at `env`.
+    ///
+    /// The FROM clauses around the reference are weighed one at a time, the
+    /// innermost first, and a clause is never pooled with another. A clause
+    /// that provides the name settles it, and so does an ambiguity inside it.
+    /// A clause that cannot be shown to publish it leaves the name to the
+    /// clauses around. A clause that may publish it, because it reads a
+    /// relation whose columns are not listed, competes with whatever the
+    /// clauses around provide. When no clause provides the name at all, it is
+    /// the innermost clause's: a clause with a single relation answers for any
+    /// name.
     pub(in crate::resolve) fn lookup_input(
         &mut self,
         env: BindingEnv,
         name: &Ident,
     ) -> InputLookup {
+        let clauses = self.graph.scopes.clause_envs(env);
+        let Some((&first, rest)) = clauses.split_first() else {
+            return InputLookup::Absent;
+        };
+        let (standing, fallback) = self.clause_standing(first, name);
+        let walk = self.settle(standing, rest, name);
+        walk.into_lookup().unwrap_or(fallback)
+    }
+
+    fn settle(&mut self, standing: Standing, farther: &[BindingEnv], name: &Ident) -> Walk {
+        match standing {
+            Standing::Present(lookup) => Walk::Present(lookup),
+            Standing::Absent => self.walk_outward(farther, name),
+            Standing::Possible { answer, candidates } => {
+                let outer = self.walk_outward(farther, name);
+                Walk::behind(answer, candidates, outer)
+            }
+        }
+    }
+
+    fn walk_outward(&mut self, clauses: &[BindingEnv], name: &Ident) -> Walk {
+        let Some((&next, rest)) = clauses.split_first() else {
+            return Walk::Absent;
+        };
+        let (standing, _) = self.clause_standing(next, name);
+        self.settle(standing, rest, name)
+    }
+
+    /// What the FROM clause `env` says about `name`, with the answer the name
+    /// gets from that clause when nothing provides it anywhere. A clause with
+    /// a single relation needs no model of its own: the name is that
+    /// relation's.
+    fn clause_standing(&mut self, env: BindingEnv, name: &Ident) -> (Standing, InputLookup) {
+        let dialect = self.graph.dialect;
         let bindings = effective_bindings(env, self.graph);
         match bindings.as_slice() {
-            [] => InputLookup::Absent,
-            [(range_name, binding)] => InputLookup::single(&RangeRef {
-                index: 0,
-                name: range_name.clone(),
-                binding: binding.clone(),
-            }),
-            _ => self.input(env).lookup(name),
+            [] => (Standing::Absent, InputLookup::Absent),
+            [(range_name, binding)] => {
+                let range = RangeRef {
+                    index: 0,
+                    name: range_name.clone(),
+                    binding: binding.clone(),
+                };
+                let single = InputLookup::single(&range);
+                let standing = match binding {
+                    Binding::Table(table) => {
+                        match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
+                            Some(columns) => {
+                                if columns
+                                    .iter()
+                                    .any(|column| same_column_name(column, name, dialect))
+                                {
+                                    Standing::Present(single.clone())
+                                } else {
+                                    Standing::Absent
+                                }
+                            }
+                            None => Standing::Possible {
+                                answer: single.clone(),
+                                candidates: candidates_of([&range]),
+                            },
+                        }
+                    }
+                    Binding::Cte(child) | Binding::DerivedTable(child) => {
+                        let model = self.scope(*child);
+                        match model.choose(name) {
+                            Choice::Column(..) | Choice::Ambiguous(_) => {
+                                Standing::Present(single.clone())
+                            }
+                            Choice::Possible(_) => Standing::Possible {
+                                answer: single.clone(),
+                                candidates: candidates_of([&range]),
+                            },
+                            // Columns the analysis cannot list may still
+                            // carry the name.
+                            Choice::Absent if model.has_unknown_segment() => Standing::Possible {
+                                answer: single.clone(),
+                                candidates: candidates_of([&range]),
+                            },
+                            Choice::Absent => Standing::Absent,
+                        }
+                    }
+                    Binding::VirtualSource(_) => Standing::Absent,
+                };
+                (standing, single)
+            }
+            _ => (self.input(env).standing(name), InputLookup::Absent),
         }
     }
 

@@ -269,9 +269,7 @@ impl LineageBuilder {
                     ancestors.extend(self.collect_ancestors(&order.expr));
                 }
                 if let FunctionArguments::Subquery(q) = &func.args {
-                    let _sub = self.push_scope(ScopeKind::Subquery);
-                    self.visit_query(q);
-                    self.pop_scope();
+                    self.visit_subquery(ScopeKind::Subquery, q);
                 }
                 if let Some(WindowType::WindowSpec(spec)) = &func.over {
                     for expr in &spec.partition_by {
@@ -305,9 +303,7 @@ impl LineageBuilder {
             }
 
             Expr::Subquery(query) => {
-                let scope = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(query);
-                self.pop_scope();
+                let scope = self.visit_subquery(ScopeKind::Subquery, query);
                 let [column] = self.graph.scopes.output_columns(scope) else {
                     return vec![];
                 };
@@ -331,16 +327,12 @@ impl LineageBuilder {
 
             Expr::InSubquery { expr, subquery, .. } => {
                 let v = self.collect_ancestors(expr);
-                let _sub = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(ScopeKind::Subquery, subquery);
                 v
             }
 
             Expr::Exists { subquery, .. } => {
-                let _sub = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(ScopeKind::Subquery, subquery);
                 vec![]
             }
 

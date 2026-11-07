@@ -24,6 +24,8 @@ fn scope_column_sources(
     cx: &mut EvalContext<'_, '_>,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     let mappings = resolve_scope_mappings(scope, cx);
+    // TODO: a missing mapping (a cycle or an unevaluated scope) must surface
+    // as an unresolved value, not as an empty, direct dependency set.
     let Some(mapping) = mappings.get(index) else {
         return (vec![], vec![], false, TransformKind::Direct);
     };
@@ -46,6 +48,8 @@ pub(super) fn collect_output_sources(
     cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
+    // TODO: tell "already visited by this walk" apart from "currently being
+    // evaluated" (checked below); a cycle must not become an empty source set.
     if !visited.insert(node_id) {
         return (vec![], vec![], false, TransformKind::Direct);
     }

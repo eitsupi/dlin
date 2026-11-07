@@ -307,9 +307,7 @@ impl LineageBuilder {
                 } else {
                     ScopeKind::DerivedTable
                 };
-                let derived_scope = self.push_scope(kind);
-                self.visit_query(subquery);
-                self.pop_scope();
+                let derived_scope = self.visit_subquery(kind, subquery);
 
                 if let Some(a) = alias {
                     self.add_binding(

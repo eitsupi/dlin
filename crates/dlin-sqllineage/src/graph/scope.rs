@@ -267,6 +267,9 @@ impl ScopeTree {
         let parent = this.parent?;
         match this.kind {
             ScopeKind::Root => None,
+            // TODO: DuckDB lets a plain derived table see the FROM items
+            // before it (implicit LATERAL). Decide this per dialect instead
+            // of denying sibling visibility for every dialect.
             ScopeKind::DerivedTable => self.outer(parent),
             ScopeKind::Cte
             | ScopeKind::Body
@@ -404,37 +407,64 @@ impl ScopeTree {
             .any(|id| !self.scopes[id].bindings.is_empty())
     }
 
-    /// The extent of the FROM clause that decides unqualified names at `env`.
-    /// Two environments that see the same range variables of the same scope
-    /// have the same FROM environment, so it can key a cache. A scope with no
-    /// visible range variable of its own is normalized to none, and falls back
-    /// to its surroundings.
+    /// How much of `step`'s scope its FROM clause covers, when the scope has
+    /// one visible at `step`: the position after the last range variable or
+    /// derived table without a range variable. `None` for a scope that
+    /// introduces no FROM item there.
+    fn clause_extent(&self, step: BindingEnv) -> Option<usize> {
+        let scope = &self.scopes[step.scope];
+        let entries = scope
+            .visible_entries(step.visible)
+            .map(|entry| entry.seq + 1);
+        let anonymous = scope
+            .anonymous_derived
+            .iter()
+            .filter(|(at, _)| *at <= step.visible)
+            .map(|(at, _)| *at);
+        entries.chain(anonymous).max()
+    }
+
+    /// The FROM clauses an unqualified name is looked up in, one per scope
+    /// that has a FROM clause at its position, nearest first. A name is
+    /// settled by the nearest clause that provides it, so each clause is kept
+    /// apart instead of pooled with the ones around it. Each environment is
+    /// normalized to the extent of its clause: two environments that see the
+    /// same range variables of the same scope are the same clause and can key
+    /// a cache.
+    pub fn clause_envs(&self, env: BindingEnv) -> Vec<BindingEnv> {
+        self.chain(env)
+            .filter_map(|step| {
+                self.clause_extent(step).map(|visible| BindingEnv {
+                    scope: step.scope,
+                    visible,
+                })
+            })
+            .collect()
+    }
+
+    /// The nearest FROM clause at `env`, which is what an unqualified star
+    /// expands. When no scope around `env` has one, an empty clause of the
+    /// scope of `env`.
     pub fn clause_env(&self, env: BindingEnv) -> BindingEnv {
-        let visible = self.scopes[env.scope]
-            .visible_entries(env.visible)
-            .map(|entry| entry.seq + 1)
-            .max()
-            .unwrap_or(0);
-        BindingEnv {
-            scope: env.scope,
-            visible,
-        }
+        self.clause_envs(env)
+            .into_iter()
+            .next()
+            .unwrap_or(BindingEnv {
+                scope: env.scope,
+                visible: 0,
+            })
     }
 
     /// Joins that merge columns among the relations an unqualified name is
     /// looked up in: those of the nearest scope with a FROM clause, in source
     /// order.
     pub fn join_merges(&self, env: BindingEnv) -> &[JoinMerge] {
-        for step in self.chain(env) {
-            let scope = &self.scopes[step.scope];
-            if scope.visible_entries(step.visible).next().is_some() {
-                let count = scope
-                    .join_merges
-                    .partition_point(|merge| merge.at <= step.visible);
-                return &scope.join_merges[..count];
-            }
-        }
-        &[]
+        let clause = self.clause_env(env);
+        let scope = &self.scopes[clause.scope];
+        let count = scope
+            .join_merges
+            .partition_point(|merge| merge.at <= clause.visible);
+        &scope.join_merges[..count]
     }
 
     pub fn add_virtual_source(
@@ -607,19 +637,17 @@ impl ScopeTree {
             .collect()
     }
 
-    /// Range variables of the FROM clause that decides unqualified names at
-    /// `env`: those of the scope itself when it has any visible, otherwise
-    /// everything its surroundings make visible.
+    /// Range variables of one FROM clause: those of the scope of `env` that
+    /// are visible at `env`, or, when the scope has none, those of the nearest
+    /// scope around it that does. Clauses are never pooled; a caller that
+    /// looks a name up walks them one at a time (see
+    /// [`Self::clause_envs`]).
     pub fn clause_bindings(&self, env: BindingEnv) -> Vec<(Ident, Binding)> {
-        let own: Vec<_> = self.scopes[env.scope]
-            .visible_entries(env.visible)
+        let clause = self.clause_env(env);
+        self.scopes[clause.scope]
+            .visible_entries(clause.visible)
             .map(|entry| (entry.name.clone(), entry.binding.clone()))
-            .collect();
-        if own.is_empty() {
-            self.visible_bindings(env)
-        } else {
-            own
-        }
+            .collect()
     }
 
     /// The first range variable, in scope creation order, that reads `target`
@@ -705,6 +733,30 @@ mod tests {
         let derived = tree.push(subquery, ScopeKind::DerivedTable);
         assert!(sees(&tree, tree.env(derived), "outer"));
         assert!(!sees(&tree, tree.env(derived), "sibling"));
+    }
+
+    #[test]
+    fn clauses_are_kept_apart_instead_of_pooled() {
+        let mut tree = ScopeTree::new(Dialect::Generic);
+        let root = ScopeTree::root();
+        tree.add_binding(root, Ident::unquoted("outer"), table("outer"));
+        let middle = tree.push(root, ScopeKind::Subquery);
+        tree.add_binding(middle, Ident::unquoted("middle"), table("middle"));
+        let inner = tree.push(middle, ScopeKind::Subquery);
+
+        // A scope without a FROM item is not a clause of its own.
+        let clauses = tree.clause_envs(tree.env(inner));
+        assert_eq!(
+            clauses.iter().map(|env| env.scope).collect::<Vec<_>>(),
+            [middle, root]
+        );
+        // The clause of a reference is the nearest one, alone.
+        let names: Vec<_> = tree
+            .clause_bindings(tree.env(inner))
+            .into_iter()
+            .map(|(name, _)| name.value)
+            .collect();
+        assert_eq!(names, ["middle"]);
     }
 
     #[test]
