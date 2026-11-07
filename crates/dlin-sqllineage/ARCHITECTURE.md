@@ -139,7 +139,7 @@ CTE with the same name, and does not take its place.
 | `LATERAL` derived table, `APPLY` | The FROM items before it. Never a later item, and never the derived table being defined |
 | Argument of a FROM item such as `UNNEST` | The FROM items before it. The alias being defined does not exist yet |
 | Expression subquery (`IN`, `EXISTS`, scalar, `ARRAY(...)`) | The enclosing query as it stands at the position of the subquery |
-| CTE | Only the CTEs defined before it. A recursive self-reference follows the rules of the dialect |
+| CTE | The ancestor environment allowed at its position (a CTE inside a `LATERAL` subquery can reference the outer FROM items before it). Within its own `WITH` list: only the CTEs defined before it, or, under `RECURSIVE`, every CTE of the list including itself and later ones (B4) |
 
 **Structural walks share the scope rules.** Any walk that crosses query
 boundaries, for example one that collects the relations a statement reads or the
@@ -151,7 +151,7 @@ without writing `LATERAL`. That implicit lateral reference is a dialect
 extension the engine does not model yet. A reference that depends on it is
 reported as unresolved. It is never bound to a wrong object.
 
-Cases: B1, B2, B3, I5.
+Cases: B1, B2, B3, B4, I5.
 
 ## 4. Evaluation context and cycles
 
@@ -334,14 +334,23 @@ the mode and the list:
 - Strict `BY NAME` without a mode or a column list: names and order follow the
   left operand (S4).
 - `FULL OUTER`: the columns of the left operand, then the columns only the right
-  operand has. A column present on one side only takes its value from that side
-  (O2).
+  operand has. An operand that lacks a column contributes a padded `NULL` slot
+  with no input dependency (O2).
 - `INNER` and `LEFT OUTER`: the columns the mode keeps, in the order of the left
   operand.
 - `ON (...)`: the list fixes the columns and their order (O3).
 
 A form the engine does not model is `Unsupported`. It is never processed as a
 plain `BY NAME`.
+
+Correspondence and dependency propagation are separate steps. `BY NAME` and its
+mode first align the slots of both operands, padding missing columns with
+`NULL` slots. The per-operator rules above then decide value and row
+dependencies on the aligned slots. With `FULL OUTER UNION ALL BY NAME`, a
+right-only column therefore takes its value from the right operand. With
+`FULL OUTER EXCEPT DISTINCT BY NAME`, the same column takes its value from the
+left operand's padded `NULL`, and the right operand's column is a row
+dependency only (O5).
 
 *Shape.* The shape of a set operation result is derived from the same slot model
 as every other query, not computed separately from lineage. An inner set
@@ -351,7 +360,7 @@ operation can be `Open` while the final output stays `Closed` (K3).
 of proven facts. It may shrink or disappear when more schema information
 arrives.
 
-Cases: P2, P4, S2, S4, K3, K4, U2, U3, O1, O2, O3, O4.
+Cases: P2, P4, S2, S4, K3, K4, U2, U3, O1, O2, O3, O4, O5.
 
 ## 8. Lowering and Unsupported
 
@@ -386,9 +395,12 @@ dependencies. Subqueries in expressions (`ARRAY(SELECT ...)`, scalar subqueries,
 them contribute row dependencies. A subquery used only for existence (`EXISTS`)
 contributes row dependencies, not value dependencies (R3). A table-valued
 expression in a FROM clause, such as `UNNEST`, supplies the value lineage of its
-arguments to the columns it produces, never an empty set (V1).
+arguments to the columns it produces (V1). Dependencies that exist or are
+unresolved are never turned into an empty set. An argument built only from
+constants, such as `UNNEST([1, 2])`, has no input dependency, and `C[]` is the
+correct result for it.
 
-Cases: Z3, Z4, U1, U2, U3, U4, R1, R2, R3, R4, V1.
+Cases: Z3, Z4, U1, U2, U3, U4, R1, R2, R3, R4, V1, V2.
 
 ## 9. Invariants and their preconditions
 
@@ -508,6 +520,7 @@ proven.
 | B1 | PostgreSQL | `WITH c AS (SELECT x FROM t1) SELECT p.x FROM public.c AS p` | none | `x` = `C[public.c.x]`, Closed. `public.c` is a physical relation, not the CTE `c`, and the relations read include `public.c` |
 | B2 | PostgreSQL | `SELECT d.x FROM t CROSS JOIN LATERAL (SELECT x) AS d` | catalog `t(x)` | `x` = `C[t.x]`. Analysis terminates normally. The inner `x` cannot see `d`, so `d` is not a candidate |
 | B3 | BigQuery | `SELECT a FROM t WHERE ARRAY_LENGTH(ARRAY(SELECT b FROM u)) > 0` | none | One output `a` = `C[t.a]`, Closed. The binding and the output of the inner `SELECT b FROM u` do not leak into the outer query |
+| B4 | PostgreSQL | `WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x` | none | `id` = `C[t.id]`. Under `RECURSIVE` the later CTE `y` is visible inside `x`, so `y` is never read as a physical relation. Without `RECURSIVE`, the same `y` inside `x` is the physical relation `y` |
 
 ### Set operations
 
@@ -517,6 +530,7 @@ proven.
 | O2 | BigQuery | `SELECT x.a AS a FROM x FULL OUTER UNION ALL BY NAME SELECT y.b AS b FROM y` | none | Outputs `a` and `b`, in that order, Closed. `a` = `C[x.a]` and `b` = `C[y.b]`, each from the side that has the column |
 | O3 | BigQuery | `SELECT a, b FROM x UNION ALL BY NAME ON (b, a) SELECT a, b FROM y` | none | Outputs in the order `b`, `a`, Closed. `b` = `C[x.b, y.b]` and `a` = `C[x.a, y.a]` |
 | O4 | PostgreSQL | `SELECT t.id AS k, t.* FROM t UNION ALL SELECT u.id AS k, u.* FROM u` | no catalog | `k` = `C[t.id, u.id]`. Position 0 is proven in both operands, before the unknown segments. The shape is `Open` |
+| O5 | BigQuery | `SELECT x.a AS a FROM x FULL OUTER EXCEPT DISTINCT BY NAME SELECT y.b AS b FROM y` | none | Outputs `a` and `b`. `a` = `C[x.a]`. `b` = `C[]`, the left operand's padded `NULL`. `y.b` (and the compared slots of both operands) are row dependencies only. Correspondence is decided first, then the `EXCEPT` rule applies |
 
 ### Value dependency, column use and row dependency
 
@@ -527,6 +541,7 @@ proven.
 | R3 | PostgreSQL | `SELECT EXISTS (SELECT 1 FROM u WHERE u.b > 0) AS p` | none | Value lineage of `p` is `C[]`, Closed. Row dependency on `u` and `u.b` |
 | R4 | PostgreSQL | `SELECT CAST(t.x AS BIGINT) AS x FROM t` | none | Value lineage `C[t.x]`, Closed. The transform is classified as a cast in the target design |
 | V1 | BigQuery | `SELECT item.x AS x FROM t CROSS JOIN UNNEST(t.items) AS item` | none | `x` has at least `t.items` in its value lineage, and is never `C[]`. The field `x` of the unnested element does not make a separate source |
+| V2 | BigQuery | `SELECT item FROM UNNEST([1, 2]) AS item` | none | `item` = `C[]`. The argument is built only from constants, so the empty set is correct here |
 
 R3 differs from R2 on purpose. `IN` compares the projected values of the right
 side. `EXISTS` only tests whether rows exist and does not read the projected
@@ -605,7 +620,7 @@ stays optional.
 
 **`Shape::Open`.** The current list of unexpanded stars generalizes to a list of
 unknown output segments. Each segment has an id, a reason (unexpanded star,
-`TABLE`, unsupported output, unknown order, and so on), an optional relation,
+`TABLE`, unsupported output, and so on), an optional relation,
 its own `Lineage`, its evidence, and any known constraint on its position or
 width. The current `UnexpandedStar` is one kind of segment. Reasons are about
 enumeration only. Order uncertainty is not a reason, because a `Closed` shape
