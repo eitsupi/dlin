@@ -127,6 +127,7 @@ fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )]
         .into_iter()
@@ -163,6 +164,7 @@ fn assert_star_passthrough_shapes_are_indeterminate(cases: &[&str]) {
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )]
         .into_iter()
@@ -237,6 +239,7 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
             column.to_string(),
             ManifestColumn {
                 name: column.to_string(),
+                quote: None,
             },
         )]
         .into_iter()
@@ -291,6 +294,7 @@ fn test_set_operation_duplicate_leading_output_name_is_not_detected() {
         "a".to_string(),
         ManifestColumn {
             name: "a".to_string(),
+            quote: None,
         },
     )]
     .into_iter()
@@ -488,6 +492,7 @@ fn test_set_operations_with_unresolved_star_branches_are_conservative() {
                     name.to_string(),
                     ManifestColumn {
                         name: name.to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -547,6 +552,7 @@ fn test_set_operations_match_unresolved_stars_by_ordinal() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -588,6 +594,7 @@ fn test_set_operation_star_only_branch_keeps_explicit_left_names() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -626,6 +633,7 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -672,6 +680,7 @@ fn test_nested_set_operations_with_unresolved_star_branch_are_conservative() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -739,6 +748,7 @@ fn compute_star_shape(sql: &str, columns: &[&str]) -> ModelColumnLineage {
                 (*name).to_string(),
                 ManifestColumn {
                     name: (*name).to_string(),
+                    quote: None,
                 },
             )
         })

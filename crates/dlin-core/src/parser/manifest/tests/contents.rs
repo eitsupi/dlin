@@ -16,7 +16,7 @@ fn test_collect_file_paths() {
                     description: None,
                     path: Some("models/staging/stg_orders.sql".to_string()),
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: None,
                     database: None,
                     schema: None,
@@ -34,7 +34,7 @@ fn test_collect_file_paths() {
                     description: None,
                     path: Some("models/marts/orders.sql".to_string()),
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: None,
                     database: None,
                     schema: None,
@@ -52,7 +52,7 @@ fn test_collect_file_paths() {
                     description: None,
                     path: None,
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: None,
                     database: None,
                     schema: None,
@@ -69,7 +69,7 @@ fn test_collect_file_paths() {
                 description: None,
                 path: Some("models/staging/schema.yml".to_string()),
                 original_file_path: None,
-                columns: HashMap::new(),
+                columns: Default::default(),
                 database: None,
                 schema: None,
                 identifier: None,
@@ -103,7 +103,7 @@ fn test_collect_file_paths_deduplicates() {
                     description: None,
                     path: Some("models/staging/schema.yml".to_string()),
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     database: None,
                     schema: None,
                     identifier: None,
@@ -119,7 +119,7 @@ fn test_collect_file_paths_deduplicates() {
                     description: None,
                     path: Some("models/staging/schema.yml".to_string()),
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     database: None,
                     schema: None,
                     identifier: None,
@@ -163,7 +163,7 @@ fn test_collect_sql_contents_from_manifest() {
                     description: None,
                     path: None,
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: Some("select * from raw.orders".to_string()),
                     database: None,
                     schema: None,
@@ -181,7 +181,7 @@ fn test_collect_sql_contents_from_manifest() {
                     description: None,
                     path: None,
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: Some("select count(*) from orders where id is null".to_string()),
                     database: None,
                     schema: None,
@@ -199,7 +199,7 @@ fn test_collect_sql_contents_from_manifest() {
                     description: None,
                     path: None,
                     original_file_path: None,
-                    columns: HashMap::new(),
+                    columns: Default::default(),
                     compiled_code: None,
                     database: None,
                     schema: None,
@@ -252,4 +252,69 @@ fn test_collect_sql_contents_from_fixture() {
         !sql_contents.contains_key("model.simple_project.customers"),
         "customers has no compiled_code in fixture"
     );
+}
+
+#[test]
+fn test_manifest_columns_keep_declaration_order_quote_and_contract() {
+    let manifest: Manifest = serde_json::from_str(
+        r#"{
+            "nodes": {
+                "model.proj.m": {
+                    "unique_id": "model.proj.m",
+                    "name": "m",
+                    "resource_type": "model",
+                    "config": {"contract": {"enforced": true}},
+                    "columns": {
+                        "z": {"name": "z"},
+                        "a": {"name": "a", "quote": false},
+                        "m": {"name": "m", "quote": true}
+                    }
+                },
+                "model.proj.plain": {
+                    "unique_id": "model.proj.plain",
+                    "name": "plain",
+                    "resource_type": "model",
+                    "config": {"contract": {}}
+                },
+                "model.proj.no_contract": {
+                    "unique_id": "model.proj.no_contract",
+                    "name": "no_contract",
+                    "resource_type": "model"
+                }
+            },
+            "sources": {
+                "source.proj.raw.s": {
+                    "unique_id": "source.proj.raw.s",
+                    "name": "s",
+                    "source_name": "raw",
+                    "columns": {"y": {"name": "y"}, "b": {"name": "b"}}
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let node = &manifest.nodes["model.proj.m"];
+    assert_eq!(node.columns.keys().collect::<Vec<_>>(), ["z", "a", "m"]);
+    let quotes: Vec<_> = node.columns.values().map(|column| column.quote).collect();
+    assert_eq!(quotes, [None, Some(false), Some(true)]);
+    assert!(node.config.contract.as_ref().unwrap().enforced);
+
+    assert!(
+        !manifest.nodes["model.proj.plain"]
+            .config
+            .contract
+            .as_ref()
+            .unwrap()
+            .enforced
+    );
+    assert!(
+        manifest.nodes["model.proj.no_contract"]
+            .config
+            .contract
+            .is_none()
+    );
+
+    let source = &manifest.sources["source.proj.raw.s"];
+    assert_eq!(source.columns.keys().collect::<Vec<_>>(), ["y", "b"]);
 }

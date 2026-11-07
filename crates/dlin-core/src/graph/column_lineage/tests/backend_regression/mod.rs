@@ -37,7 +37,7 @@ const STAR_HINT: &str = "column may be introduced via SELECT * that could not be
 /// them, so their columns become the catalog its SQL is analyzed against.
 type Upstream<'a> = &'a [(&'a str, &'a [&'a str])];
 
-fn manifest_columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+fn manifest_columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
     names
         .iter()
         .map(|name| {
@@ -45,6 +45,7 @@ fn manifest_columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })

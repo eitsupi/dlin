@@ -1,5 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+pub(super) mod evidence;
+
+pub(super) use evidence::SchemaEvidence;
+use evidence::yaml_schema_evidence;
+
 use super::backend::{DlinDialect, catalog::CatalogSnapshot};
 use super::relation::RelationRef;
 
@@ -23,33 +28,20 @@ pub(super) fn build_schema_from_manifest(
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
                     dep_node.relation_name(),
-                    &col_names,
+                    SchemaEvidence::merged_node_columns(dep_id, col_names),
                 );
             }
             continue;
         }
 
-        if let Some(dep_source) = manifest.sources.get(dep_id)
-            && !dep_source.columns.is_empty()
-        {
-            let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
-            source_col_names.sort_unstable();
-            let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
-            has_entries |= register_source_relation(
-                &mut schema,
-                dep_source.database.as_deref(),
-                dep_source.schema.as_deref(),
-                physical_identifier,
-                &dep_source.source_name,
-                &dep_source.name,
-                source_col_names.iter().cloned().cloned().collect(),
-            );
-        }
+        has_entries |= register_yaml_source(&mut schema, manifest, dep_id, dialect);
     }
 
     if has_entries { Some(schema) } else { None }
 }
 
+/// The sorted union of YAML and SQL-inferred column names of a dependency
+/// model. It is replaced by the model's SQL-output schema.
 fn resolve_node_columns(
     dep_node: &crate::parser::manifest::ManifestNode,
     manifest: &Manifest,
@@ -60,7 +52,7 @@ fn resolve_node_columns(
         .compiled_code
         .as_ref()
         .map(|code| {
-            let schema = build_yaml_schema_for_node(manifest, dep_node);
+            let schema = build_yaml_schema_for_node(manifest, dep_node, dialect);
             super::discover_named_output_columns(code, dialect, schema.as_ref())
         })
         .unwrap_or_default()
@@ -75,45 +67,60 @@ fn resolve_node_columns(
 pub(super) fn build_yaml_schema_for_node(
     manifest: &Manifest,
     node: &crate::parser::manifest::ManifestNode,
+    dialect: DlinDialect,
 ) -> Option<CatalogSnapshot> {
     let mut schema = CatalogSnapshot::new();
     let mut has_entries = false;
 
     for dep_id in &node.depends_on.nodes {
         if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            if !dep_node.columns.is_empty() {
-                let mut node_col_names: Vec<&String> = dep_node.columns.keys().collect();
-                node_col_names.sort_unstable();
+            if let Some(evidence) = yaml_schema_evidence(
+                dep_id,
+                &dep_node.columns,
+                dep_node.config.contract.as_ref(),
+                dialect,
+            ) {
                 has_entries |= register_model_relation(
                     &mut schema,
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
                     dep_node.relation_name(),
-                    &node_col_names.iter().cloned().cloned().collect::<Vec<_>>(),
+                    evidence,
                 );
             }
             continue;
         }
 
-        if let Some(dep_source) = manifest.sources.get(dep_id)
-            && !dep_source.columns.is_empty()
-        {
-            let mut source_col_names: Vec<&String> = dep_source.columns.keys().collect();
-            source_col_names.sort_unstable();
-            let physical_identifier = dep_source.identifier.as_deref().unwrap_or(&dep_source.name);
-            has_entries |= register_source_relation(
-                &mut schema,
-                dep_source.database.as_deref(),
-                dep_source.schema.as_deref(),
-                physical_identifier,
-                &dep_source.source_name,
-                &dep_source.name,
-                source_col_names.iter().cloned().cloned().collect(),
-            );
-        }
+        has_entries |= register_yaml_source(&mut schema, manifest, dep_id, dialect);
     }
 
     if has_entries { Some(schema) } else { None }
+}
+
+/// Register a source's YAML-declared columns. Returns whether a new relation
+/// was added.
+fn register_yaml_source(
+    schema: &mut CatalogSnapshot,
+    manifest: &Manifest,
+    source_id: &str,
+    dialect: DlinDialect,
+) -> bool {
+    let Some(source) = manifest.sources.get(source_id) else {
+        return false;
+    };
+    let Some(evidence) = yaml_schema_evidence(source_id, &source.columns, None, dialect) else {
+        return false;
+    };
+    let physical_identifier = source.identifier.as_deref().unwrap_or(&source.name);
+    register_source_relation(
+        schema,
+        source.database.as_deref(),
+        source.schema.as_deref(),
+        physical_identifier,
+        &source.source_name,
+        &source.name,
+        evidence,
+    )
 }
 
 fn register_model_relation(
@@ -121,11 +128,11 @@ fn register_model_relation(
     database: Option<&str>,
     schema_name: Option<&str>,
     relation_name: &str,
-    columns: &[String],
+    evidence: SchemaEvidence,
 ) -> bool {
     let relation = RelationRef::from_manifest(database, schema_name, relation_name);
     let was_present = schema.contains_relation(&relation);
-    schema.add_relation(relation.clone(), relation.render(), columns.iter().cloned());
+    schema.add_relation(relation.clone(), relation.render(), evidence);
     if relation.qualification_len() > 1 {
         schema.add_alias(
             RelationRef::from_manifest(None, None, relation_name),
@@ -142,11 +149,11 @@ fn register_source_relation(
     physical_identifier: &str,
     source_name: &str,
     logical_name: &str,
-    columns: Vec<String>,
+    evidence: SchemaEvidence,
 ) -> bool {
     let physical = RelationRef::from_manifest(database, schema_name, physical_identifier);
     let was_present = schema.contains_relation(&physical);
-    schema.add_relation(physical.clone(), physical.render(), columns);
+    schema.add_relation(physical.clone(), physical.render(), evidence);
 
     let aliases = [
         RelationRef::from_manifest(None, schema_name, physical_identifier),
@@ -319,7 +326,7 @@ fn append_source_local_parts(
 
 fn append_columns(
     parts: &mut Vec<String>,
-    columns: &HashMap<String, crate::parser::manifest::ManifestColumn>,
+    columns: &indexmap::IndexMap<String, crate::parser::manifest::ManifestColumn>,
 ) {
     let mut names = columns.keys().collect::<Vec<_>>();
     names.sort_unstable();

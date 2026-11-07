@@ -170,6 +170,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -285,10 +286,11 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
     let source_id = "model.proj.source_model";
     let downstream_id = "model.proj.downstream_model";
     let columns = || {
-        HashMap::from([(
+        indexmap::IndexMap::from([(
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )])
     };
@@ -361,10 +363,11 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
     let source_id = "model.proj.source_model";
     let downstream_id = "model.proj.downstream_model";
     let columns = || {
-        HashMap::from([(
+        indexmap::IndexMap::from([(
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )])
     };
@@ -431,10 +434,11 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
 #[test]
 fn test_column_impact_does_not_attribute_ambiguous_bare_source() {
     let columns = || {
-        HashMap::from([(
+        indexmap::IndexMap::from([(
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )])
     };

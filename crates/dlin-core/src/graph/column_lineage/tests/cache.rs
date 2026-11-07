@@ -603,7 +603,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         description: None,
         path: None,
         original_file_path: None,
-        columns: HashMap::new(),
+        columns: Default::default(),
         compiled_code: Some("select * from orders".to_string()),
         database: None,
         schema: None,

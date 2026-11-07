@@ -9,6 +9,7 @@ fn test_partial_failure_summary() {
         "nonexistent_col".to_string(),
         ManifestColumn {
             name: "nonexistent_col".to_string(),
+            quote: None,
         },
     );
     let result = compute_column_lineage(
@@ -87,6 +88,7 @@ fn test_count_star_has_no_sources() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -143,6 +145,7 @@ fn test_unattributable_leaves_never_publish_empty_tables() {
                     name.to_string(),
                     ManifestColumn {
                         name: name.to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -318,6 +321,7 @@ fn test_traced_total_columns_partial_failure() {
         "nonexistent_col".to_string(),
         ManifestColumn {
             name: "nonexistent_col".to_string(),
+            quote: None,
         },
     );
     let result = compute_column_lineage(
@@ -365,11 +369,12 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
     // A source-free BigQuery UNNEST projection remains a valid output while
     // exposing no physical source columns.
     let mut nodes = HashMap::new();
-    let mut columns = HashMap::new();
+    let mut columns = indexmap::IndexMap::new();
     columns.insert(
         "week_start".to_string(),
         ManifestColumn {
             name: "week_start".to_string(),
+            quote: None,
         },
     );
     nodes.insert(

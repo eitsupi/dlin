@@ -55,11 +55,12 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
     // Add a model that depends on source_model but has no compiled_code.
     // It references col_x (same column we track), but we can never confirm this
     // because the model can't be analyzed.
-    let mut cols = std::collections::HashMap::new();
+    let mut cols = indexmap::IndexMap::new();
     cols.insert(
         "col_x".to_string(),
         crate::parser::manifest::ManifestColumn {
             name: "col_x".to_string(),
+            quote: None,
         },
     );
     manifest.nodes.insert(

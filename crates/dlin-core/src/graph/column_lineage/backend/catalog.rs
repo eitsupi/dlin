@@ -1,19 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::relation::{RelationRef, RelationResolution};
+use super::super::schema::SchemaEvidence;
 use super::dialect::DlinDialect;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogSnapshot {
     /// Physical relations are keyed by their structural identity. Lookup
     /// aliases are kept separately so an alias collision cannot overwrite a
-    /// different physical relation.
+    /// different physical relation. An alias is always resolved to its
+    /// physical entry at lookup time and never holds a copy of the schema.
     tables: BTreeMap<RelationRef, CatalogTable>,
     aliases: BTreeMap<RelationRef, BTreeSet<RelationRef>>,
-    /// Compatibility views for backend adapters that still consume the
-    /// legacy string-facing `tables()` iterator. These are never identity
-    /// storage; their `relation` points back to the physical entry.
-    alias_views: Vec<(RelationRef, CatalogTable)>,
     conflicted: BTreeSet<RelationRef>,
 }
 
@@ -21,23 +19,54 @@ pub struct CatalogSnapshot {
 pub struct CatalogTable {
     /// Preferred display spelling, normally derived from the manifest.
     pub name: String,
-    pub columns: Vec<String>,
     pub(crate) relation: RelationRef,
+    /// The typed schema: column spellings and ordinals, coverage, order,
+    /// unknown segments and the evidence it rests on.
+    pub(crate) schema: SchemaEvidence,
+}
+
+impl CatalogTable {
+    /// Column names in the order the schema lists them. Listing order is not
+    /// evidence of physical order.
+    pub fn column_names(&self) -> Vec<&str> {
+        self.schema
+            .columns
+            .iter()
+            .map(|column| column.name.value.as_str())
+            .collect()
+    }
+}
+
+/// A table or a lookup alias that resolves to one.
+pub struct CatalogTableView<'a> {
+    /// The spelling this entry is looked up by.
+    pub name: String,
+    table: &'a CatalogTable,
+}
+
+impl CatalogTableView<'_> {
+    /// The physical relation this entry resolves to.
+    #[cfg(test)]
+    pub(crate) fn relation(&self) -> &RelationRef {
+        &self.table.relation
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.table.column_names()
+    }
 }
 
 impl CatalogSnapshot {
     pub fn new() -> Self {
-        Self {
-            tables: BTreeMap::new(),
-            aliases: BTreeMap::new(),
-            alias_views: Vec::new(),
-            conflicted: BTreeSet::new(),
-        }
+        Self::default()
     }
 
     /// Compatibility entry point for callers that only have a relation
     /// string. New manifest code should use [`Self::add_relation`] and
     /// [`Self::add_alias`] so dots inside an identifier remain one component.
+    ///
+    /// A user-typed column list is an explicit, ordered enumeration, so it is
+    /// registered with proven ordinals.
     pub fn add_table(
         &mut self,
         name: impl Into<String>,
@@ -47,19 +76,20 @@ impl CatalogSnapshot {
         let relation = RelationRef::parse(&name)
             .map(|relation| relation.as_manifest())
             .unwrap_or_else(|_| RelationRef::bare(&name).as_manifest());
-        self.add_relation(relation, name, columns);
+        let schema = SchemaEvidence::user_enumeration(&name, columns);
+        self.add_relation(relation, name, schema);
     }
 
-    /// Register one physical relation and its columns.
+    /// Register one physical relation and its schema. Registering the same
+    /// relation again with a different schema marks it as conflicted.
     pub(crate) fn add_relation(
         &mut self,
         relation: RelationRef,
         preferred_name: impl Into<String>,
-        columns: impl IntoIterator<Item = String>,
+        schema: SchemaEvidence,
     ) {
-        let cols = columns.into_iter().collect::<Vec<_>>();
         if let Some(existing) = self.tables.get(&relation)
-            && existing.columns != cols
+            && existing.schema != schema
         {
             self.conflicted.insert(relation.clone());
         }
@@ -67,15 +97,10 @@ impl CatalogSnapshot {
             relation.clone(),
             CatalogTable {
                 name: preferred_name.into(),
-                columns: cols.clone(),
                 relation: relation.clone(),
+                schema,
             },
         );
-        for (_, view) in &mut self.alias_views {
-            if view.relation == relation {
-                view.columns = cols.clone();
-            }
-        }
         self.aliases
             .entry(relation.clone())
             .or_default()
@@ -85,29 +110,16 @@ impl CatalogSnapshot {
     /// Register a non-physical lookup alias for a physical relation.
     pub(crate) fn add_alias(&mut self, alias: RelationRef, relation: RelationRef) {
         debug_assert!(self.tables.contains_key(&relation));
-        let inserted = self
-            .aliases
-            .entry(alias.clone())
-            .or_default()
-            .insert(relation.clone());
-        if inserted {
-            let physical = self
-                .tables
-                .get(&relation)
-                .expect("catalog alias points at a registered relation");
-            self.alias_views.push((
-                alias.clone(),
-                CatalogTable {
-                    name: alias.render(),
-                    columns: physical.columns.clone(),
-                    relation,
-                },
-            ));
-        }
+        self.aliases.entry(alias).or_default().insert(relation);
     }
 
     pub(crate) fn contains_relation(&self, relation: &RelationRef) -> bool {
         self.tables.contains_key(relation)
+    }
+
+    /// Whether a relation was registered more than once with different schemas.
+    pub(crate) fn is_conflicted(&self, relation: &RelationRef) -> bool {
+        self.conflicted.contains(relation)
     }
 
     pub(crate) fn resolve_exact(
@@ -181,44 +193,26 @@ impl CatalogSnapshot {
         self.tables.get(*relation)
     }
 
-    pub(crate) fn unambiguous_columns_for_relation(
-        &self,
-        relation: &RelationRef,
-    ) -> Option<&[String]> {
-        if self.conflicted.contains(relation) {
-            return None;
-        }
-        self.tables
-            .get(relation)
-            .map(|table| table.columns.as_slice())
-    }
-
-    pub fn table_columns(&self, name: &str) -> Option<&[String]> {
-        let relation = RelationRef::parse(name).ok()?.as_manifest();
-        let targets = self.aliases.get(&relation)?;
-        if targets.len() != 1 {
-            return None;
-        }
-        let target = targets.iter().next().expect("length checked above");
-        self.tables
-            .get(target)
-            .map(|table| table.columns.as_slice())
+    pub fn table_columns(&self, name: &str) -> Option<Vec<&str>> {
+        self.single_target_table(name)
+            .map(CatalogTable::column_names)
     }
 
     #[cfg(test)]
-    pub(crate) fn unambiguous_table_columns(&self, name: &str) -> Option<&[String]> {
+    pub(crate) fn unambiguous_table_columns(&self, name: &str) -> Option<Vec<&str>> {
+        self.single_target_table(name)
+            .filter(|table| !self.is_conflicted(&table.relation))
+            .map(CatalogTable::column_names)
+    }
+
+    fn single_target_table(&self, name: &str) -> Option<&CatalogTable> {
         let relation = RelationRef::parse(name).ok()?.as_manifest();
         let targets = self.aliases.get(&relation)?;
         if targets.len() != 1 {
             return None;
         }
-        let target = targets.iter().next().expect("length checked above");
-        if self.conflicted.contains(target) {
-            return None;
-        }
         self.tables
-            .get(target)
-            .map(|table| table.columns.as_slice())
+            .get(targets.iter().next().expect("length checked above"))
     }
 
     fn has_single_target(&self, key: &RelationRef) -> bool {
@@ -227,22 +221,160 @@ impl CatalogSnapshot {
             .is_some_and(|targets| targets.len() == 1)
     }
 
-    pub fn tables(&self) -> impl Iterator<Item = &CatalogTable> {
-        self.tables
+    /// Physical tables, followed by lookup aliases, that resolve to exactly
+    /// one physical table. Aliases are resolved to the current physical entry.
+    pub fn tables(&self) -> impl Iterator<Item = CatalogTableView<'_>> {
+        let physical = self
+            .tables
             .iter()
             .filter(|(relation, _)| self.has_single_target(relation))
-            .map(|(_, table)| table)
-            .chain(
-                self.alias_views
+            .map(|(_, table)| CatalogTableView {
+                name: table.name.clone(),
+                table,
+            });
+        let aliased = self
+            .aliases
+            .iter()
+            .filter(|(alias, _)| self.has_single_target(alias))
+            .flat_map(|(alias, targets)| {
+                targets
                     .iter()
-                    .filter_map(|(alias, view)| self.has_single_target(alias).then_some(view)),
-            )
+                    .filter(move |target| *target != alias)
+                    .filter_map(|target| self.tables.get(target))
+                    .map(move |table| CatalogTableView {
+                        name: alias.render(),
+                        table,
+                    })
+            });
+        physical.chain(aliased)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::column_lineage::schema::evidence::{EvidencedColumn, yaml_schema_evidence};
+    use crate::parser::manifest::ManifestColumn;
+
+    fn schema(names: &[&str]) -> SchemaEvidence {
+        SchemaEvidence::user_enumeration("t", names.iter().map(|name| (*name).to_string()))
+    }
+
+    fn yaml(names: &[(&str, Option<bool>)]) -> SchemaEvidence {
+        let columns = names
+            .iter()
+            .map(|(name, quote)| {
+                (
+                    (*name).to_string(),
+                    ManifestColumn {
+                        name: (*name).to_string(),
+                        quote: *quote,
+                    },
+                )
+            })
+            .collect();
+        yaml_schema_evidence("source.p.s.t", &columns, None, DlinDialect::Generic).unwrap()
+    }
+
+    fn register(catalog: &mut CatalogSnapshot, schema: SchemaEvidence) {
+        let relation = RelationRef::from_manifest(None, None, "t");
+        catalog.add_relation(relation.clone(), relation.render(), schema);
+    }
+
+    fn is_conflicted(catalog: &CatalogSnapshot) -> bool {
+        catalog.is_conflicted(&RelationRef::from_manifest(None, None, "t"))
+    }
+
+    #[test]
+    fn identical_typed_reregistration_is_not_a_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None), ("b", Some(true))]));
+        register(&mut catalog, yaml(&[("a", None), ("b", Some(true))]));
+        assert!(!is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn same_names_with_different_quoting_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None)]));
+        register(&mut catalog, yaml(&[("a", Some(true))]));
+        assert!(is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn same_names_with_different_quote_specification_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None)]));
+        register(&mut catalog, yaml(&[("a", Some(false))]));
+        assert!(is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn same_names_with_different_order_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None), ("b", None)]));
+        register(&mut catalog, yaml(&[("b", None), ("a", None)]));
+        assert!(is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn same_names_with_different_coverage_order_or_ordinals_conflict() {
+        let base = yaml(&[("a", None)]);
+        let variants: Vec<SchemaEvidence> = vec![
+            SchemaEvidence {
+                coverage: sqllineage::SchemaCoverage::Partial,
+                ..base.clone()
+            },
+            SchemaEvidence {
+                order: sqllineage::SchemaOrder::Proven,
+                ..base.clone()
+            },
+            SchemaEvidence {
+                columns: vec![EvidencedColumn {
+                    ordinal: Some(0),
+                    ..base.columns[0].clone()
+                }],
+                ..base.clone()
+            },
+            SchemaEvidence {
+                unknown_segments: vec![sqllineage::CatalogUnknownSegment {
+                    after_ordinal: None,
+                }],
+                ..base.clone()
+            },
+        ];
+        for variant in variants {
+            let mut catalog = CatalogSnapshot::new();
+            register(&mut catalog, base.clone());
+            register(&mut catalog, variant);
+            assert!(is_conflicted(&catalog));
+        }
+    }
+
+    #[test]
+    fn duplicate_output_names_are_not_deduplicated() {
+        let mut catalog = CatalogSnapshot::new();
+        catalog.add_table("t", ["id".to_string(), "id".to_string()]);
+        assert_eq!(catalog.table_columns("t"), Some(vec!["id", "id"]));
+    }
+
+    #[test]
+    fn alias_lookup_sees_the_physical_entry_after_reregistration() {
+        let mut catalog = CatalogSnapshot::new();
+        let physical = RelationRef::from_manifest(Some("db"), Some("raw"), "orders");
+        let alias = RelationRef::from_manifest(None, None, "orders");
+        catalog.add_relation(physical.clone(), physical.render(), schema(&["a"]));
+        catalog.add_alias(alias.clone(), physical.clone());
+        catalog.add_relation(physical.clone(), physical.render(), schema(&["b", "c"]));
+
+        let view = catalog
+            .tables()
+            .find(|table| table.name == alias.render())
+            .expect("alias is listed");
+        assert_eq!(view.relation(), &physical);
+        assert_eq!(view.column_names(), vec!["b", "c"]);
+        assert_eq!(catalog.table_columns("orders"), Some(vec!["b", "c"]));
+    }
 
     #[test]
     fn catalog_snapshot_add_table_preserves_column_order() {
@@ -252,12 +384,8 @@ mod tests {
 
         let cols = catalog
             .table_columns("model_a")
-            .expect("table should exist")
-            .to_vec();
-        assert_eq!(
-            cols,
-            vec!["z".to_string(), "a".to_string(), "m".to_string()]
-        );
+            .expect("table should exist");
+        assert_eq!(cols, vec!["z", "a", "m"]);
     }
 
     #[test]
@@ -269,9 +397,8 @@ mod tests {
 
         let cols = catalog
             .table_columns("model_a")
-            .expect("table should exist")
-            .to_vec();
-        assert_eq!(cols, vec!["b".to_string(), "a".to_string()]);
+            .expect("table should exist");
+        assert_eq!(cols, vec!["b", "a"]);
     }
 
     #[test]
@@ -282,7 +409,7 @@ mod tests {
 
         assert_eq!(
             catalog.unambiguous_table_columns("model_a"),
-            Some(["a".to_string()].as_slice())
+            Some(vec!["a"])
         );
     }
 
@@ -292,10 +419,7 @@ mod tests {
         catalog.add_table("model_a", vec!["a".into()]);
         catalog.add_table("model_a", vec!["b".into()]);
 
-        assert_eq!(
-            catalog.table_columns("model_a"),
-            Some(["b".to_string()].as_slice())
-        );
+        assert_eq!(catalog.table_columns("model_a"), Some(vec!["b"]));
         assert_eq!(catalog.unambiguous_table_columns("model_a"), None);
     }
 
@@ -321,10 +445,10 @@ mod tests {
     fn structural_registration_keeps_dots_inside_aliases() {
         let mut catalog = CatalogSnapshot::new();
         let relation = RelationRef::from_manifest(Some("warehouse"), Some("raw"), "orders.v2");
-        catalog.add_relation(relation.clone(), relation.render(), ["id".to_string()]);
+        catalog.add_relation(relation.clone(), relation.render(), schema(&["id"]));
 
         assert!(catalog.contains_relation(&relation));
-        assert_eq!(catalog.tables().next().unwrap().relation, relation);
+        assert_eq!(catalog.tables().next().unwrap().relation(), &relation);
     }
 
     #[test]
@@ -333,14 +457,14 @@ mod tests {
         let first = RelationRef::from_manifest(Some("db_a"), Some("raw"), "orders");
         let second = RelationRef::from_manifest(Some("db_b"), Some("raw"), "orders");
         let alias = RelationRef::from_manifest(None, None, "orders");
-        catalog.add_relation(first.clone(), first.render(), ["id".to_string()]);
-        catalog.add_relation(second.clone(), second.render(), ["id".to_string()]);
+        catalog.add_relation(first.clone(), first.render(), schema(&["id"]));
+        catalog.add_relation(second.clone(), second.render(), schema(&["id"]));
         catalog.add_alias(alias.clone(), first);
         catalog.add_alias(alias.clone(), second);
 
         assert_eq!(catalog.table_columns("orders"), None);
-        let names: Vec<_> = catalog.tables().map(|table| table.name.as_str()).collect();
-        assert!(!names.contains(&"orders"));
+        let names: Vec<String> = catalog.tables().map(|table| table.name).collect();
+        assert!(!names.iter().any(|name| name == "orders"));
     }
 
     #[test]
@@ -348,12 +472,12 @@ mod tests {
         let mut catalog = CatalogSnapshot::new();
         let bare = RelationRef::from_manifest(None, None, "orders");
         let qualified = RelationRef::from_manifest(Some("db_a"), Some("raw"), "orders");
-        catalog.add_relation(bare.clone(), bare.render(), ["id".to_string()]);
-        catalog.add_relation(qualified.clone(), qualified.render(), ["id".to_string()]);
+        catalog.add_relation(bare.clone(), bare.render(), schema(&["id"]));
+        catalog.add_relation(qualified.clone(), qualified.render(), schema(&["id"]));
         catalog.add_alias(bare, qualified.clone());
 
-        let names: Vec<_> = catalog.tables().map(|table| table.name.as_str()).collect();
+        let names: Vec<String> = catalog.tables().map(|table| table.name).collect();
         assert_eq!(names, vec![qualified.render()]);
-        assert!(!names.contains(&"orders"));
+        assert!(!names.iter().any(|name| name == "orders"));
     }
 }

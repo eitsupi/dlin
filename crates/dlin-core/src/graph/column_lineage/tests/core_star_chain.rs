@@ -7,12 +7,13 @@ fn test_cte_alias_resolution() {
     let mut sources = HashMap::new();
 
     // Source table
-    let mut src_cols = HashMap::new();
+    let mut src_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "status"] {
         src_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -34,12 +35,13 @@ fn test_cte_alias_resolution() {
     );
 
     // stg_items: simple staging model
-    let mut stg_cols = HashMap::new();
+    let mut stg_cols = indexmap::IndexMap::new();
     for name in ["item_id", "name", "status"] {
         stg_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -65,12 +67,13 @@ fn test_cte_alias_resolution() {
     );
 
     // mart_items: uses FROM cte AS alias pattern
-    let mut mart_cols = HashMap::new();
+    let mut mart_cols = indexmap::IndexMap::new();
     for name in ["item_id", "status"] {
         mart_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -146,12 +149,13 @@ fn test_select_star_chain_with_join() {
     let mut sources = HashMap::new();
 
     // Source: raw.users
-    let mut user_cols = HashMap::new();
+    let mut user_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area"] {
         user_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -173,12 +177,13 @@ fn test_select_star_chain_with_join() {
     );
 
     // Source: raw.regions
-    let mut region_cols = HashMap::new();
+    let mut region_cols = indexmap::IndexMap::new();
     for name in ["id", "region_name"] {
         region_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -200,12 +205,13 @@ fn test_select_star_chain_with_join() {
     );
 
     // stg_users: SELECT * from raw
-    let mut stg_user_cols = HashMap::new();
+    let mut stg_user_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area"] {
         stg_user_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -231,12 +237,13 @@ fn test_select_star_chain_with_join() {
     );
 
     // stg_regions
-    let mut stg_region_cols = HashMap::new();
+    let mut stg_region_cols = indexmap::IndexMap::new();
     for name in ["id", "region_name"] {
         stg_region_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -263,12 +270,13 @@ fn test_select_star_chain_with_join() {
 
     // mart_users: multi-level SELECT * chain + JOIN
     // Uses backtick-quoted 3-part names like real dbt BigQuery compiled SQL
-    let mut mart_cols = HashMap::new();
+    let mut mart_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area", "region_name"] {
         mart_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -373,12 +381,13 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     let mut sources = HashMap::new();
 
     // Source: raw.users
-    let mut user_cols = HashMap::new();
+    let mut user_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area"] {
         user_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -400,12 +409,13 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     );
 
     // Source: raw.regions
-    let mut region_cols = HashMap::new();
+    let mut region_cols = indexmap::IndexMap::new();
     for name in ["id", "region_name"] {
         region_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -427,12 +437,13 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     );
 
     // stg_users
-    let mut stg_user_cols = HashMap::new();
+    let mut stg_user_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area"] {
         stg_user_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -458,12 +469,13 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     );
 
     // stg_regions
-    let mut stg_region_cols = HashMap::new();
+    let mut stg_region_cols = indexmap::IndexMap::new();
     for name in ["id", "region_name"] {
         stg_region_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -490,12 +502,13 @@ fn test_select_star_chain_with_cte_alias_and_join() {
 
     // mart_users: SELECT * chain + CTE alias + JOIN
     // Pattern from mml.7 description but with CTE aliases (mml.6)
-    let mut mart_cols = HashMap::new();
+    let mut mart_cols = indexmap::IndexMap::new();
     for name in ["id", "name", "area", "region_name"] {
         mart_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }

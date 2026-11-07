@@ -288,7 +288,7 @@ pub(super) fn compute_column_lineage_internal(
             return parse_failure(display_name, node.columns.len(), message);
         }
     };
-    let yaml_schema = build_yaml_schema_for_node(manifest, node);
+    let yaml_schema = build_yaml_schema_for_node(manifest, node, dialect);
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
     let discovered = if yaml_schema.as_ref() == catalog.as_ref() {
         discovered_output_names(&analyzed, dialect)

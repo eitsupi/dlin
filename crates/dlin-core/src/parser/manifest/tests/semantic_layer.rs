@@ -15,7 +15,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
                 description: None,
                 path: None,
                 original_file_path: None,
-                columns: HashMap::new(),
+                columns: Default::default(),
                 compiled_code: None,
                 database: None,
                 schema: None,

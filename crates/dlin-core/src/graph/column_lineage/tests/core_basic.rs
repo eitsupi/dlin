@@ -162,6 +162,7 @@ fn test_yaml_and_sql_output_names_are_unioned() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -205,6 +206,7 @@ fn test_parse_failure_keeps_yaml_output_names() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })

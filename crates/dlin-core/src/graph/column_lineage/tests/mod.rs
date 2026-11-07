@@ -12,12 +12,13 @@ fn make_test_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
     // stg_orders: SELECT id as order_id, user_id as customer_id, order_date, status FROM raw.orders
-    let mut stg_orders_cols = HashMap::new();
+    let mut stg_orders_cols = indexmap::IndexMap::new();
     for name in ["order_id", "customer_id", "order_date", "status"] {
         stg_orders_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -46,12 +47,13 @@ fn make_test_manifest() -> Manifest {
     );
 
     // orders: SELECT o.order_id, o.customer_id, p.amount as total_amount FROM stg_orders o LEFT JOIN stg_payments p ON o.order_id = p.order_id
-    let mut orders_cols = HashMap::new();
+    let mut orders_cols = indexmap::IndexMap::new();
     for name in ["order_id", "customer_id", "total_amount"] {
         orders_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -75,12 +77,13 @@ fn make_test_manifest() -> Manifest {
         });
 
     // stg_payments (upstream, for schema)
-    let mut stg_payments_cols = HashMap::new();
+    let mut stg_payments_cols = indexmap::IndexMap::new();
     for name in ["payment_id", "order_id", "amount", "payment_method"] {
         stg_payments_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -107,12 +110,13 @@ fn make_test_manifest() -> Manifest {
     );
 
     // Source: raw.orders
-    let mut source_cols = HashMap::new();
+    let mut source_cols = indexmap::IndexMap::new();
     for name in ["id", "user_id", "order_date", "status"] {
         source_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -146,12 +150,13 @@ fn make_cross_model_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
     // Source: raw.orders
-    let mut raw_orders_cols = HashMap::new();
+    let mut raw_orders_cols = indexmap::IndexMap::new();
     for name in ["id", "user_id", "order_date", "status"] {
         raw_orders_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -174,12 +179,13 @@ fn make_cross_model_manifest() -> Manifest {
     );
 
     // Source: raw.payments
-    let mut raw_payments_cols = HashMap::new();
+    let mut raw_payments_cols = indexmap::IndexMap::new();
     for name in ["id", "order_id", "amount", "payment_method"] {
         raw_payments_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -201,12 +207,13 @@ fn make_cross_model_manifest() -> Manifest {
     );
 
     // stg_orders: renames id→order_id, user_id→customer_id
-    let mut stg_orders_cols = HashMap::new();
+    let mut stg_orders_cols = indexmap::IndexMap::new();
     for name in ["order_id", "customer_id", "order_date", "status"] {
         stg_orders_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -235,12 +242,13 @@ fn make_cross_model_manifest() -> Manifest {
     );
 
     // stg_payments: renames id→payment_id
-    let mut stg_payments_cols = HashMap::new();
+    let mut stg_payments_cols = indexmap::IndexMap::new();
     for name in ["payment_id", "order_id", "amount", "payment_method"] {
         stg_payments_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -269,12 +277,13 @@ fn make_cross_model_manifest() -> Manifest {
     );
 
     // orders: joins stg_orders + stg_payments (CTE pattern like real dbt compiled SQL)
-    let mut orders_cols = HashMap::new();
+    let mut orders_cols = indexmap::IndexMap::new();
     for name in ["order_id", "customer_id", "total_amount"] {
         orders_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -313,12 +322,13 @@ fn make_cross_model_manifest() -> Manifest {
     );
 
     // customers: aggregates from orders model (CTE pattern)
-    let mut customers_cols = HashMap::new();
+    let mut customers_cols = indexmap::IndexMap::new();
     for name in ["customer_id", "order_count"] {
         customers_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -374,11 +384,12 @@ fn make_duplicate_name_manifest() -> Manifest {
             path: None,
             original_file_path: None,
             columns: {
-                let mut cols = HashMap::new();
+                let mut cols = indexmap::IndexMap::new();
                 cols.insert(
                     "customer_id".to_string(),
                     ManifestColumn {
                         name: "customer_id".to_string(),
+                        quote: None,
                     },
                 );
                 cols
@@ -405,11 +416,12 @@ fn make_duplicate_name_manifest() -> Manifest {
             path: None,
             original_file_path: None,
             columns: {
-                let mut cols = HashMap::new();
+                let mut cols = indexmap::IndexMap::new();
                 cols.insert(
                     "customer_id".to_string(),
                     ManifestColumn {
                         name: "customer_id".to_string(),
+                        quote: None,
                     },
                 );
                 cols
@@ -436,11 +448,12 @@ fn make_duplicate_name_manifest() -> Manifest {
             path: None,
             original_file_path: None,
             columns: {
-                let mut cols = HashMap::new();
+                let mut cols = indexmap::IndexMap::new();
                 cols.insert(
                     "customer_id".to_string(),
                     ManifestColumn {
                         name: "customer_id".to_string(),
+                        quote: None,
                     },
                 );
                 cols
@@ -512,12 +525,13 @@ fn make_diamond_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
     // raw_data: source with columns x, y
-    let mut raw_cols = HashMap::new();
+    let mut raw_cols = indexmap::IndexMap::new();
     for name in ["x", "y"] {
         raw_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -541,12 +555,13 @@ fn make_diamond_manifest() -> Manifest {
     );
 
     // shared: passes x and y through from raw_data
-    let mut shared_cols = HashMap::new();
+    let mut shared_cols = indexmap::IndexMap::new();
     for name in ["x", "y"] {
         shared_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -572,11 +587,12 @@ fn make_diamond_manifest() -> Manifest {
     );
 
     // left: uses column x from shared
-    let mut left_cols = HashMap::new();
+    let mut left_cols = indexmap::IndexMap::new();
     left_cols.insert(
         "x".to_string(),
         ManifestColumn {
             name: "x".to_string(),
+            quote: None,
         },
     );
     nodes.insert(
@@ -601,11 +617,12 @@ fn make_diamond_manifest() -> Manifest {
     );
 
     // right: uses column y from shared
-    let mut right_cols = HashMap::new();
+    let mut right_cols = indexmap::IndexMap::new();
     right_cols.insert(
         "y".to_string(),
         ManifestColumn {
             name: "y".to_string(),
+            quote: None,
         },
     );
     nodes.insert(
@@ -630,12 +647,13 @@ fn make_diamond_manifest() -> Manifest {
     );
 
     // diamond_out: combines left.x and right.y
-    let mut out_cols = HashMap::new();
+    let mut out_cols = indexmap::IndexMap::new();
     for name in ["lx", "ry"] {
         out_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -679,12 +697,13 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     let mut nodes = HashMap::new();
     let mut sources = HashMap::new();
 
-    let mut raw_cols = HashMap::new();
+    let mut raw_cols = indexmap::IndexMap::new();
     for name in ["id", "status", "name"] {
         raw_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -706,12 +725,13 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     );
 
     // scalar_funcs: tests Bug 1 — general function calls (UPPER, CONCAT, generic Function)
-    let mut scalar_cols = HashMap::new();
+    let mut scalar_cols = indexmap::IndexMap::new();
     for name in ["col_upper", "col_concat", "col_coalesce"] {
         scalar_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -746,12 +766,13 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     );
 
     // passthrough_upper: tests Bug 2 — CTE computes UPPER, next SELECT passes through
-    let mut pt_upper_cols = HashMap::new();
+    let mut pt_upper_cols = indexmap::IndexMap::new();
     for name in ["id", "status_upper"] {
         pt_upper_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -785,12 +806,13 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     );
 
     // passthrough_coalesce: tests Bug 2 — CTE computes COALESCE, next SELECT passes through
-    let mut pt_coalesce_cols = HashMap::new();
+    let mut pt_coalesce_cols = indexmap::IndexMap::new();
     for name in ["id", "status_coalesced"] {
         pt_coalesce_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -864,11 +886,12 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         path: None,
         original_file_path: None,
         columns: {
-            let mut cols = HashMap::new();
+            let mut cols = indexmap::IndexMap::new();
             cols.insert(
                 "x".to_string(),
                 ManifestColumn {
                     name: "x".to_string(),
+                    quote: None,
                 },
             );
             cols
@@ -955,3 +978,4 @@ mod core_util;
 mod impact;
 mod production_output;
 mod regression_fixtures;
+mod yaml_schema;

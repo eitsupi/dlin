@@ -19,6 +19,7 @@ fn analyze(sql: &str, yaml_columns: &[&str], dialect: DlinDialect) -> ModelColum
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
