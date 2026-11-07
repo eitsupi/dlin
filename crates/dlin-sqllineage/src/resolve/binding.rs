@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::lineage::{
-    collect_output_sources, flatten_mapping_sources, named_scope_sources,
-    named_wildcard_sources_for_scope, virtual_column_origin,
+    collect_output_sources, flatten_mapping_sources, named_scope_sources, virtual_column_origin,
 };
 use super::mapping::{ScopeMappingCache, merge_transform, resolve_scope_mappings};
-use super::star::{StarNameDecision, scope_star_name_decision};
+use super::star::{Unlisted, unlisted_name_sources};
 use super::target::effective_bindings;
 
 use crate::catalog::CatalogContext;
@@ -873,53 +872,23 @@ fn resolve_through_scope(
             origins.into_iter().next()
         };
     }
-    let requested_name =
-        match scope_star_name_decision(target_scope, column_name, graph, &mut HashSet::new()) {
-            StarNameDecision::Denied | StarNameDecision::Ambiguous => {
-                return Some(ColumnOrigin::Ambiguous {
-                    column: column_name.clone(),
-                    candidates: Vec::new(),
-                });
-            }
-            StarNameDecision::Replaced(node_id) => {
-                let (sources, _, has_back, _) = collect_output_sources(
-                    node_id,
-                    graph,
-                    resolved,
-                    incoming,
-                    &mut HashSet::new(),
-                    catalog,
-                    mapping_cache,
-                );
-                return if has_back {
-                    Some(ColumnOrigin::Recursive {
-                        base_sources: sources,
-                    })
-                } else if sources.len() == 1 {
-                    sources.into_iter().next()
-                } else {
-                    Some(ColumnOrigin::Ambiguous {
-                        column: column_name.clone(),
-                        candidates: Vec::new(),
-                    })
-                };
-            }
-            StarNameDecision::Renamed(old) => old,
-            StarNameDecision::Allowed => column_name.clone(),
-        };
-    if let Some(source) = named_wildcard_sources_for_scope(
+    match unlisted_name_sources(
         target_scope,
-        &requested_name,
+        column_name,
         graph,
         resolved,
         incoming,
         catalog,
         mapping_cache,
-    )
-    .into_iter()
-    .next()
-    {
-        return Some(source);
+    ) {
+        Unlisted::Denied => {
+            return Some(ColumnOrigin::Ambiguous {
+                column: column_name.clone(),
+                candidates: Vec::new(),
+            });
+        }
+        Unlisted::Sources(sources) => return sources.into_iter().next(),
+        Unlisted::None => {}
     }
 
     if let Some(col) = graph

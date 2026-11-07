@@ -1,665 +1,526 @@
+//! Evaluation of star models into column mappings and name lookups.
+//!
+//! A star's model already records which columns it publishes, in which order
+//! and under which names. This module only turns the lazy values of that model
+//! into lineage: it never re-reads EXCLUDE/ILIKE/REPLACE/RENAME or join
+//! merges.
+
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
-use super::lineage::{
-    collect_leaf_origins, collect_output_sources, expand_scope_columns,
-    named_wildcard_sources_for_star,
-};
+use super::lineage::{collect_leaf_origins, collect_output_sources, named_scope_sources};
 use super::mapping::{
-    ScopeMappingCache, expand_virtual_source, mappings_have_unknown_shape, merge_transform,
+    ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
     wildcard_mapping,
 };
-use super::target::{
-    StarTarget, effective_bindings, excluded_matches_name, ilike_matches, resolve_star_target,
-    same_column_name,
+use super::model::{
+    BranchTail, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
+    UnknownProvider, UnknownSegment, ValueId,
 };
+use super::target::{StarTarget, resolve_star_target, same_column_name};
 
+use crate::Ident;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
-use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, JoinMergeKind, OutputPlan};
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
-use crate::{Dialect, Ident};
+use crate::graph::node::{NodeId, RawNode, StarBase};
+use crate::graph::scope::{OutputPlan, ScopeId, VirtualColumnState};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 
-/// Expand a Star node (qualified or unqualified) into `ColumnMapping`s.
+/// What a scope publishes under a name that none of its listed columns has.
+pub(super) enum Unlisted {
+    /// Nothing unlisted could carry the name.
+    None,
+    /// Unlisted columns exist, but the star modifiers rule the name out.
+    Denied,
+    /// Origins of the unlisted columns that may carry the name.
+    Sources(Vec<ColumnOrigin>),
+}
+
+/// Expand a Star node (qualified or unqualified) into `ColumnMapping`s, one
+/// per element of its model.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn expand_star(
-    base: &StarBase,
-    options: &StarOptions,
-    scope: usize,
+    node_id: NodeId,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
-    visited_scopes: &mut HashSet<usize>,
 ) {
-    let start = mappings.len();
-    let range_variables = expand_star_columns(
-        base,
-        scope,
+    let mut evaluator = Evaluator {
         graph,
         resolved,
         incoming,
         catalog,
         mapping_cache,
-        mappings,
-        visited_scopes,
-    );
-    apply_star_options(
-        mappings,
-        start,
-        &range_variables,
-        base,
-        scope,
-        options,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    );
-}
-
-/// Expand without modifiers, returning the range variables for each new mapping.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn expand_star_columns(
-    base: &StarBase,
-    scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-    mappings: &mut Vec<ColumnMapping>,
-    visited_scopes: &mut HashSet<usize>,
-) -> Vec<Vec<Ident>> {
-    let start = mappings.len();
-    let mut range_variables = Vec::new();
-    match resolve_star_target(base, scope, graph) {
-        StarTarget::Ambiguous(candidates) => mappings.push(ColumnMapping {
-            output_name: None,
-            target: ColumnRef {
-                table: None,
-                column: Ident::unquoted("*"),
-            },
-            sources: vec![ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
-                column: Ident::unquoted("*"),
-                candidates,
-            })],
-            transform: TransformKind::Direct,
-        }),
-        StarTarget::All => {
-            let mut groups = Vec::new();
-            for (name, binding) in effective_bindings(scope, graph) {
-                let binding_start = mappings.len();
-                expand_star_binding(
-                    &binding,
-                    graph,
-                    resolved,
-                    incoming,
-                    catalog,
-                    mapping_cache,
-                    mappings,
-                    visited_scopes,
-                );
-                let columns = mappings[binding_start..]
-                    .iter()
-                    .map(|column| (column.clone(), vec![name.clone()]))
-                    .collect();
-                range_variables.extend((binding_start..mappings.len()).map(|_| vec![name.clone()]));
-                groups.push((vec![name], columns));
-            }
-            if !graph.scopes.join_merges(scope).is_empty()
-                && !mappings_have_unknown_shape(&mappings[start..])
-                && let Some(merged) = super::join::merge_join_columns(
-                    groups,
-                    graph.scopes.join_merges(scope),
-                    graph.dialect,
-                    |column| &column.0.target.column,
-                    |left, right, kind| {
-                        let mut column = left.0.clone();
-                        match kind {
-                            JoinMergeKind::Left => {}
-                            JoinMergeKind::Right => {
-                                column.sources.clone_from(&right.0.sources);
-                                column.transform.clone_from(&right.0.transform);
-                            }
-                            JoinMergeKind::Inner | JoinMergeKind::Full => {
-                                column.sources.extend(right.0.sources.clone());
-                                column.transform =
-                                    merge_transform(&left.0.transform, &right.0.transform);
-                            }
-                        }
-                        (
-                            column,
-                            left.1.iter().chain(&right.1).cloned().collect::<Vec<_>>(),
-                        )
-                    },
-                )
-            {
-                mappings.truncate(start);
-                range_variables.clear();
-                for (column, qualifiers) in merged {
-                    mappings.push(column);
-                    range_variables.push(qualifiers);
-                }
-            }
-            for &child in graph.scopes.anonymous_derived(scope) {
-                expand_scope_columns(
-                    child,
-                    graph,
-                    resolved,
-                    incoming,
-                    catalog,
-                    mapping_cache,
-                    mappings,
-                    visited_scopes,
-                );
-            }
-        }
-        StarTarget::Binding { name, binding } => {
-            expand_star_binding(
-                &binding,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-                mappings,
-                visited_scopes,
-            );
-            range_variables.resize(mappings.len() - start, vec![name]);
-        }
-        StarTarget::Unknown(table) => expand_unknown_relation(table, catalog, mappings),
-        StarTarget::FieldPath { binding, path } => {
-            let mut sources = Vec::new();
-            if let Some(field) = path.first()
-                && let Some(origin) = resolve_captured_binding(
-                    field,
-                    binding,
-                    graph,
-                    resolved,
-                    incoming,
-                    &mut HashSet::new(),
-                    catalog,
-                    mapping_cache,
-                )
-            {
-                sources.push(origin);
-            }
-            sources.push(ColumnOrigin::UnknownStar);
-            mappings.push(ColumnMapping {
-                output_name: None,
-                target: ColumnRef {
-                    table: None,
-                    column: Ident::unquoted("*"),
-                },
-                sources,
-                transform: TransformKind::Direct,
-            });
-        }
-        StarTarget::Expr => {
-            let mut sources = Vec::new();
-            if let StarBase::Expr(dependencies) = base {
-                for &dependency in dependencies {
-                    let (origins, _, _) = collect_leaf_origins(
-                        dependency,
-                        graph,
-                        resolved,
-                        incoming,
-                        &mut HashSet::new(),
-                        catalog,
-                        mapping_cache,
-                    );
-                    sources.extend(origins);
-                }
-            }
-            if !sources.iter().any(ColumnOrigin::is_unknown_star) {
-                sources.push(ColumnOrigin::UnknownStar);
-            }
-            mappings.push(ColumnMapping {
-                output_name: None,
-                target: ColumnRef {
-                    table: None,
-                    column: Ident::unquoted("*"),
-                },
-                sources,
-                transform: TransformKind::Direct,
-            });
-        }
-    }
-    range_variables.resize(mappings.len() - start, Vec::new());
-    range_variables
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand_star_binding(
-    binding: &Binding,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-    mappings: &mut Vec<ColumnMapping>,
-    visited_scopes: &mut HashSet<usize>,
-) {
-    match binding {
-        Binding::Table(table) => {
-            if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(table)) {
-                mappings.extend(columns.into_iter().map(|column| ColumnMapping {
-                    output_name: Some(crate::OutputName::Explicit(column.clone())),
+        active: HashSet::new(),
+    };
+    let model = evaluator.star_model(node_id);
+    for element in &model.elements {
+        match element {
+            OutputElement::Column(slot) => {
+                let (sources, transform) = evaluator.value(&slot.value);
+                mappings.push(ColumnMapping {
+                    output_name: Some(slot.output_name.clone()),
                     target: ColumnRef {
                         table: None,
-                        column: column.clone(),
+                        column: slot.name.clone(),
                     },
-                    sources: vec![ColumnOrigin::Concrete {
-                        table: table.clone(),
-                        column,
-                    }],
-                    transform: TransformKind::Direct,
-                }));
-            } else {
-                mappings.push(wildcard_mapping(None, table.clone()));
+                    sources,
+                    transform,
+                });
             }
+            OutputElement::Unknown(segment) => {
+                mappings.extend(evaluator.unknown_mapping(segment));
+            }
+            OutputElement::Tail(tail) => mappings.extend(evaluator.tail_mappings(tail)),
         }
-        Binding::Cte(scope) | Binding::DerivedTable(scope) => expand_scope_columns(
-            *scope,
-            graph,
-            resolved,
-            incoming,
-            catalog,
-            mapping_cache,
-            mappings,
-            visited_scopes,
-        ),
-        Binding::VirtualSource(source) => expand_virtual_source(
-            *source,
-            graph,
-            resolved,
-            incoming,
-            catalog,
-            mapping_cache,
-            mappings,
-        ),
     }
 }
 
-fn expand_unknown_relation(
-    table: TableRef,
-    catalog: Option<&CatalogContext<'_>>,
-    mappings: &mut Vec<ColumnMapping>,
-) {
-    if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(&table)) {
-        mappings.extend(columns.into_iter().map(|column| ColumnMapping {
-            output_name: Some(crate::OutputName::Explicit(column.clone())),
-            target: ColumnRef {
-                table: None,
-                column: column.clone(),
-            },
-            sources: vec![ColumnOrigin::Concrete {
-                table: table.clone(),
-                column,
-            }],
-            transform: TransformKind::Direct,
-        }));
-    } else {
-        mappings.push(wildcard_mapping(None, table));
-    }
-}
-
+/// Look `name` up among the unlisted columns of a scope: names that are
+/// merged by a join of unknown relations, and whatever unknown relations may
+/// publish under the star modifiers.
 #[allow(clippy::too_many_arguments)]
-fn apply_star_options(
-    mappings: &mut Vec<ColumnMapping>,
-    start: usize,
-    range_variables: &[Vec<Ident>],
-    base: &StarBase,
-    scope: usize,
-    options: &StarOptions,
+pub(super) fn unlisted_name_sources(
+    scope: ScopeId,
+    name: &Ident,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
-) {
-    if mappings_have_unknown_shape(&mappings[start..]) {
-        append_unknown_star_options(
-            mappings,
-            start,
-            range_variables,
-            base,
-            scope,
-            options,
-            graph,
-            resolved,
-            incoming,
-            catalog,
-            mapping_cache,
-        );
-        return;
+) -> Unlisted {
+    Evaluator {
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        active: HashSet::new(),
     }
-    let original = mappings.split_off(start);
-    let mut retained = Vec::with_capacity(original.len());
-    for (mapping, qualifiers) in original.into_iter().zip(range_variables) {
-        let name = &mapping.target.column;
-        let excluded = options.exclude.iter().any(|excluded| {
-            excluded_matches_name(excluded, name, Some(base), qualifiers, graph.dialect)
-        });
-        let ilike_mismatch = options
-            .ilike
-            .as_deref()
-            .is_some_and(|pattern| !ilike_matches(pattern, &name.value));
-        if !excluded && !ilike_mismatch {
-            retained.push(mapping);
-        }
-    }
-    for replacement in &options.replace {
-        let Some(index) = retained.iter().position(|mapping| {
-            same_column_name(&mapping.target.column, &replacement.column, graph.dialect)
-        }) else {
-            continue;
-        };
-        let mut visited = HashSet::new();
-        let (sources, edge_kinds, _, inherited_transform) = collect_output_sources(
-            replacement.node_id,
-            graph,
-            resolved,
-            incoming,
-            &mut visited,
-            catalog,
-            mapping_cache,
-        );
-        retained[index].sources = sources;
-        retained[index].transform = merge_transform(
-            &derive_transform(&graph.nodes[replacement.node_id], &edge_kinds),
-            &inherited_transform,
-        );
-    }
-    for (old, new) in &options.rename {
-        if let Some(mapping) = retained
-            .iter_mut()
-            .find(|mapping| same_column_name(&mapping.target.column, old, graph.dialect))
-        {
-            mapping.target.column.clone_from(new);
-            mapping.output_name = Some(crate::OutputName::Explicit(new.clone()));
-        }
-    }
-    mappings.extend(retained);
+    .unlisted(scope, name)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_unknown_star_options(
-    mappings: &mut Vec<ColumnMapping>,
-    start: usize,
-    range_variables: &[Vec<Ident>],
-    base: &StarBase,
-    scope: usize,
-    options: &StarOptions,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) {
-    // Keep the raw expansion for wildcard lookups and USING membership: removing
-    // a known column must not remove its range variable from the merged key.
-    let unknown_sources = mappings[start..].to_vec();
-    let original = mappings.split_off(start);
-    for (index, mapping) in original.into_iter().enumerate() {
-        if mapping.output_name.is_some() {
-            let name = &mapping.target.column;
-            let merged_ranges = super::join::merged_star_range_variables(
-                &unknown_sources,
-                range_variables,
-                name,
-                graph.scopes.join_merges(scope),
-                graph.dialect,
-            );
-            let excluded = options.exclude.iter().any(|excluded| {
-                excluded_matches_name(
-                    excluded,
-                    name,
-                    Some(base),
-                    &merged_ranges[index],
-                    graph.dialect,
-                )
-            });
-            let ilike_mismatch = options
-                .ilike
-                .as_deref()
-                .is_some_and(|pattern| !ilike_matches(pattern, &name.value));
-            if excluded || ilike_mismatch {
-                continue;
-            }
-        }
-        mappings.push(mapping);
+struct Evaluator<'a, 'c, 'm> {
+    graph: &'a RawGraph,
+    resolved: &'m mut Vec<Option<ColumnOrigin>>,
+    incoming: &'a [Vec<usize>],
+    catalog: Option<&'a CatalogContext<'c>>,
+    mapping_cache: &'m mut ScopeMappingCache,
+    /// Scope outputs being evaluated, which cuts a scope that reads itself.
+    active: HashSet<(ScopeId, usize)>,
+}
+
+impl Evaluator<'_, '_, '_> {
+    fn models(&mut self) -> OutputModels<'_, '_, '_> {
+        let store: &mut ModelStore = &mut self.mapping_cache.models;
+        OutputModels::new(self.graph, self.catalog, store)
     }
-    for replacement in &options.replace {
-        if !name_passes_unknown_star_filters(
-            &replacement.column,
-            options,
-            base,
-            scope,
-            &unknown_sources,
-            range_variables,
-            graph,
-        ) {
-            continue;
-        }
-        let mut visited = HashSet::new();
-        let (sources, edge_kinds, _, inherited_transform) = collect_output_sources(
-            replacement.node_id,
-            graph,
-            resolved,
-            incoming,
-            &mut visited,
-            catalog,
-            mapping_cache,
-        );
-        mappings.push(ColumnMapping {
-            output_name: Some(crate::OutputName::Explicit(replacement.column.clone())),
-            target: ColumnRef {
-                table: None,
-                column: replacement.column.clone(),
-            },
-            sources,
-            transform: merge_transform(
-                &derive_transform(&graph.nodes[replacement.node_id], &edge_kinds),
-                &inherited_transform,
+
+    fn star_model(&mut self, node_id: NodeId) -> Rc<OutputModel> {
+        self.models().star(node_id)
+    }
+
+    fn scope_model(&mut self, scope: ScopeId) -> Rc<OutputModel> {
+        self.models().scope(scope)
+    }
+
+    fn value(&mut self, value: &ValueId) -> (Vec<ColumnOrigin>, TransformKind) {
+        match value {
+            ValueId::Physical { table, column } => (
+                vec![ColumnOrigin::Concrete {
+                    table: (**table).clone(),
+                    column: column.clone(),
+                }],
+                TransformKind::Direct,
             ),
-        });
+            ValueId::Expr(node_id) => {
+                let (sources, edge_kinds, _, inherited) = collect_output_sources(
+                    *node_id,
+                    self.graph,
+                    self.resolved,
+                    self.incoming,
+                    &mut HashSet::new(),
+                    self.catalog,
+                    self.mapping_cache,
+                );
+                let transform = merge_transform(
+                    &derive_transform(&self.graph.nodes[*node_id], &edge_kinds),
+                    &inherited,
+                );
+                (sources, transform)
+            }
+            ValueId::ScopeSlot { scope, index } | ValueId::SetOperation { scope, index } => {
+                self.scope_slot(*scope, *index)
+            }
+            // The same lookup a direct reference to the name in that scope makes.
+            ValueId::ScopeName { scope, column } => named_scope_sources(
+                column,
+                *scope,
+                self.graph,
+                self.resolved,
+                self.incoming,
+                self.catalog,
+                self.mapping_cache,
+            )
+            .map_or_else(
+                || {
+                    (
+                        vec![ColumnOrigin::Ambiguous {
+                            column: column.clone(),
+                            candidates: Vec::new(),
+                        }],
+                        TransformKind::Direct,
+                    )
+                },
+                |(sources, _, transform)| (sources, transform),
+            ),
+            ValueId::VirtualColumn { source, index } => {
+                (self.virtual_column(*source, *index), TransformKind::Direct)
+            }
+            ValueId::Named { providers, column } => (
+                providers
+                    .iter()
+                    .flat_map(|provider| self.provider_sources(provider, column))
+                    .collect(),
+                TransformKind::Direct,
+            ),
+            ValueId::Merged(left, right) => {
+                let (mut sources, left_transform) = self.value(left);
+                let (right_sources, right_transform) = self.value(right);
+                sources.extend(right_sources);
+                (sources, merge_transform(&left_transform, &right_transform))
+            }
+        }
     }
-    for (old, new) in &options.rename {
-        if !name_passes_unknown_star_filters(
-            old,
-            options,
-            base,
-            scope,
-            &unknown_sources,
-            range_variables,
-            graph,
+
+    /// The value of a scope's output column at the position its model lists
+    /// it. A set operation can merge more or fewer mappings than its left
+    /// operand lists columns, so its mappings are matched by name instead.
+    fn scope_slot(&mut self, scope: ScopeId, index: usize) -> (Vec<ColumnOrigin>, TransformKind) {
+        let model = self.scope_model(scope);
+        let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
+            return (Vec::new(), TransformKind::Direct);
+        };
+        let ambiguous = || {
+            (
+                vec![ColumnOrigin::Ambiguous {
+                    column: slot.name.clone(),
+                    candidates: Vec::new(),
+                }],
+                TransformKind::Direct,
+            )
+        };
+        if !self.active.insert((scope, index)) {
+            return ambiguous();
+        }
+        let result = if matches!(
+            self.graph.scopes.output_plan(scope),
+            OutputPlan::SetOperation { .. }
         ) {
-            continue;
-        }
-        let sources = named_wildcard_sources_for_star(
-            &unknown_sources,
-            range_variables,
-            old,
-            options,
-            base,
-            scope,
-            graph,
-        );
-        if !sources
+            let mappings = self.scope_mappings(scope);
+            let found = if mappings.len() >= model.listed_len() {
+                mappings.get(index)
+            } else {
+                mappings.iter().find(|mapping| {
+                    mapping.output_name.is_some()
+                        && same_column_name(&mapping.target.column, &slot.name, self.graph.dialect)
+                })
+            };
+            found.map_or_else(ambiguous, |mapping| {
+                (mapping.sources.clone(), mapping.transform.clone())
+            })
+        } else {
+            self.value(&slot.value)
+        };
+        self.active.remove(&(scope, index));
+        result
+    }
+
+    /// The mappings a set operation merges in beyond those its left operand
+    /// lists, minus the names the star's modifiers rule out.
+    fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
+        let aligned = self.aligned_len(tail.scope);
+        let dialect = self.graph.dialect;
+        self.scope_mappings(tail.scope)
             .iter()
-            .any(|source| matches!(source, ColumnOrigin::NamedWildcard { .. }))
-        {
-            continue;
+            .skip(aligned)
+            .filter(|mapping| {
+                mapping.output_name.is_none() || tail.domain.admits(&mapping.target.column, dialect)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// How many leading mappings of a scope stand for the columns its model
+    /// lists; a set operation appends what its right operand adds after them.
+    fn aligned_len(&mut self, scope: ScopeId) -> usize {
+        match self.graph.scopes.output_plan(scope) {
+            OutputPlan::Projection => self.scope_mappings(scope).len(),
+            OutputPlan::Delegate(child) => self.aligned_len(*child),
+            OutputPlan::SetOperation { left, .. } => self.aligned_len(*left),
         }
-        mappings.push(ColumnMapping {
-            output_name: Some(crate::OutputName::Explicit(new.clone())),
-            target: ColumnRef {
-                table: None,
-                column: new.clone(),
-            },
+    }
+
+    fn scope_mappings(&mut self, scope: ScopeId) -> std::sync::Arc<[ColumnMapping]> {
+        resolve_scope_mappings(
+            scope,
+            self.graph,
+            self.resolved,
+            self.incoming,
+            self.catalog,
+            self.mapping_cache,
+        )
+    }
+
+    /// The mapping standing for an unknown element of a scope's output.
+    fn unknown_slot(&mut self, scope: ScopeId, index: usize) -> Option<ColumnMapping> {
+        let model = self.scope_model(scope);
+        let Some(OutputElement::Unknown(segment)) = model.elements.get(index) else {
+            return None;
+        };
+        if !matches!(
+            self.graph.scopes.output_plan(scope),
+            OutputPlan::SetOperation { .. }
+        ) {
+            if !self.active.insert((scope, index)) {
+                return None;
+            }
+            let mapping = self.unknown_mapping(segment);
+            self.active.remove(&(scope, index));
+            return mapping;
+        }
+        let mappings = self.scope_mappings(scope);
+        if mappings.len() >= model.listed_len() {
+            return mappings.get(index).cloned();
+        }
+        let ordinal = model.elements[..index]
+            .iter()
+            .filter(|element| matches!(element, OutputElement::Unknown(_)))
+            .count();
+        mappings
+            .iter()
+            .filter(|mapping| mapping.output_name.is_none())
+            .nth(ordinal)
+            .cloned()
+    }
+
+    fn unknown_mapping(&mut self, segment: &UnknownSegment) -> Option<ColumnMapping> {
+        match &segment.provider {
+            UnknownProvider::Relation(table) => Some(wildcard_mapping(None, (**table).clone())),
+            UnknownProvider::Scope { scope, index } => self.unknown_slot(*scope, *index),
+            UnknownProvider::Opaque(
+                reason @ (OpaqueReason::FieldPath(star)
+                | OpaqueReason::Expression(star)
+                | OpaqueReason::Ambiguous(star)),
+            ) => Some(self.opaque_star(*star, *reason)),
+            UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
+        }
+    }
+
+    /// A star the analysis cannot attribute to a relation: an ambiguous
+    /// qualifier, a field path or an expression.
+    fn opaque_star(&mut self, star: NodeId, reason: OpaqueReason) -> ColumnMapping {
+        let RawNode::Star { base, scope, .. } = &self.graph.nodes[star] else {
+            unreachable!("only star models contain opaque stars");
+        };
+        let star_name = || ColumnRef {
+            table: None,
+            column: Ident::unquoted("*"),
+        };
+        let sources = match (reason, resolve_star_target(base, *scope, self.graph)) {
+            (OpaqueReason::Ambiguous(_), StarTarget::Ambiguous(candidates)) => {
+                vec![ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
+                    column: Ident::unquoted("*"),
+                    candidates,
+                })]
+            }
+            (OpaqueReason::FieldPath(_), StarTarget::FieldPath { binding, path }) => {
+                let mut sources = Vec::new();
+                if let Some(field) = path.first()
+                    && let Some(origin) = resolve_captured_binding(
+                        field,
+                        binding,
+                        self.graph,
+                        self.resolved,
+                        self.incoming,
+                        &mut HashSet::new(),
+                        self.catalog,
+                        self.mapping_cache,
+                    )
+                {
+                    sources.push(origin);
+                }
+                sources.push(ColumnOrigin::UnknownStar);
+                sources
+            }
+            _ => {
+                let mut sources = Vec::new();
+                if let StarBase::Expr(dependencies) = base {
+                    for &dependency in dependencies {
+                        let (origins, _, _) = collect_leaf_origins(
+                            dependency,
+                            self.graph,
+                            self.resolved,
+                            self.incoming,
+                            &mut HashSet::new(),
+                            self.catalog,
+                            self.mapping_cache,
+                        );
+                        sources.extend(origins);
+                    }
+                }
+                if !sources.iter().any(ColumnOrigin::is_unknown_star) {
+                    sources.push(ColumnOrigin::UnknownStar);
+                }
+                sources
+            }
+        };
+        ColumnMapping {
+            output_name: None,
+            target: star_name(),
             sources,
             transform: TransformKind::Direct,
-        });
+        }
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn name_passes_unknown_star_filters(
-    name: &Ident,
-    options: &StarOptions,
-    base: &StarBase,
-    scope: usize,
-    mappings: &[ColumnMapping],
-    range_variables: &[Vec<Ident>],
-    graph: &RawGraph,
-) -> bool {
-    if options
-        .ilike
-        .as_deref()
-        .is_some_and(|pattern| !ilike_matches(pattern, &name.value))
-    {
-        return false;
-    }
-    let ranges = super::join::merged_star_range_variables(
-        mappings,
-        range_variables,
-        name,
-        graph.scopes.join_merges(scope),
-        graph.dialect,
-    );
-    mappings.iter().zip(ranges).any(|(mapping, qualifiers)| {
-        (mapping.output_name.is_none()
-            || same_column_name(&mapping.target.column, name, graph.dialect))
-            && !options.exclude.iter().any(|excluded| {
-                excluded_matches_name(excluded, name, Some(base), &qualifiers, graph.dialect)
-            })
-    })
-}
-
-#[derive(Clone)]
-pub(super) enum StarNameDecision {
-    Allowed,
-    Denied,
-    Renamed(Ident),
-    Replaced(NodeId),
-    Ambiguous,
-}
-
-pub(super) fn star_name_decision(
-    options: &StarOptions,
-    name: &Ident,
-    base: Option<&StarBase>,
-    dialect: Dialect,
-) -> StarNameDecision {
-    if options.exclude.iter().any(|excluded| {
-        excluded.parts.len() == 1 && same_column_name(name, &excluded.parts[0], dialect)
-            || base
-                .is_some_and(|base| excluded_matches_name(excluded, name, Some(base), &[], dialect))
-    }) || options
-        .ilike
-        .as_deref()
-        .is_some_and(|pattern| !ilike_matches(pattern, &name.value))
-    {
-        return StarNameDecision::Denied;
-    }
-    if let Some(replacement) = options
-        .replace
-        .iter()
-        .find(|replacement| same_column_name(name, &replacement.column, dialect))
-    {
-        return StarNameDecision::Replaced(replacement.node_id);
-    }
-    if let Some((old, _)) = options
-        .rename
-        .iter()
-        .find(|(_, new)| same_column_name(name, new, dialect))
-    {
-        return StarNameDecision::Renamed(old.clone());
-    }
-    if options
-        .rename
-        .iter()
-        .any(|(old, _)| same_column_name(name, old, dialect))
-    {
-        return StarNameDecision::Denied;
-    }
-    StarNameDecision::Allowed
-}
-
-pub(super) fn scope_star_name_decision(
-    scope: usize,
-    name: &Ident,
-    graph: &RawGraph,
-    visited: &mut HashSet<usize>,
-) -> StarNameDecision {
-    if !visited.insert(scope) {
-        return StarNameDecision::Allowed;
-    }
-    match graph.scopes.output_plan(scope) {
-        OutputPlan::Projection => combine_star_name_decisions(
-            graph
-                .scopes
-                .output_columns(scope)
+    fn virtual_column(
+        &mut self,
+        source: crate::graph::scope::VirtualSourceId,
+        index: usize,
+    ) -> Vec<ColumnOrigin> {
+        let graph = self.graph;
+        let column = &graph.scopes.virtual_source(source).columns[index];
+        let mut origins = Vec::new();
+        let mut visited = HashSet::new();
+        for &dependency in &column.dependencies {
+            let (dependency_origins, _, _) = collect_leaf_origins(
+                dependency,
+                graph,
+                self.resolved,
+                self.incoming,
+                &mut visited,
+                self.catalog,
+                self.mapping_cache,
+            );
+            origins.extend(dependency_origins);
+        }
+        if origins.is_empty()
+            && matches!(column.state, VirtualColumnState::Unknown)
+            && !column
+                .dependencies
                 .iter()
-                .filter_map(|column| {
-                    if let RawNode::Star { base, options, .. } = &graph.nodes[column.node_id] {
-                        Some(star_name_decision(options, name, Some(base), graph.dialect))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            graph.dialect,
-        ),
-        OutputPlan::Delegate(child) => scope_star_name_decision(*child, name, graph, visited),
-        // The left branch defines set-operation output names and modifiers.
-        OutputPlan::SetOperation { left, .. } => {
-            scope_star_name_decision(*left, name, graph, visited)
+                .all(|&dependency| known_empty_dependency(dependency, graph))
+        {
+            origins.push(ColumnOrigin::Ambiguous {
+                column: column.name.clone(),
+                candidates: Vec::new(),
+            });
         }
+        origins
     }
-}
 
-fn combine_star_name_decisions(
-    decisions: Vec<StarNameDecision>,
-    dialect: Dialect,
-) -> StarNameDecision {
-    let mut has_allowed = false;
-    let mut has_denied = false;
-    let mut specific: Option<StarNameDecision> = None;
-    for decision in decisions {
-        match decision {
-            StarNameDecision::Allowed => has_allowed = true,
-            StarNameDecision::Denied => has_denied = true,
-            StarNameDecision::Ambiguous => return StarNameDecision::Ambiguous,
-            StarNameDecision::Renamed(old) => match &specific {
-                None => specific = Some(StarNameDecision::Renamed(old)),
-                Some(StarNameDecision::Renamed(existing))
-                    if same_column_name(existing, &old, dialect) => {}
-                Some(_) => return StarNameDecision::Ambiguous,
-            },
-            StarNameDecision::Replaced(node_id) => match specific {
-                None => specific = Some(StarNameDecision::Replaced(node_id)),
-                Some(StarNameDecision::Replaced(existing)) if existing == node_id => {}
-                Some(_) => return StarNameDecision::Ambiguous,
-            },
+    /// The wildcard origins a segment contributes to `column`.
+    fn provider_sources(
+        &mut self,
+        provider: &UnknownProvider,
+        column: &Ident,
+    ) -> Vec<ColumnOrigin> {
+        match provider {
+            UnknownProvider::Relation(table) => vec![ColumnOrigin::NamedWildcard {
+                table: (**table).clone(),
+                column: column.clone(),
+            }],
+            UnknownProvider::Scope { scope, index } => {
+                if !self.active.insert((*scope, *index)) {
+                    return Vec::new();
+                }
+                let model = self.scope_model(*scope);
+                let mut sources = match model.elements.get(*index) {
+                    Some(OutputElement::Unknown(segment)) => {
+                        self.provider_sources(&segment.provider, column)
+                    }
+                    _ => Vec::new(),
+                };
+                // The right operand of a set operation contributes to every
+                // position, though the model lists only the left one.
+                if let OutputPlan::SetOperation { right, .. } =
+                    self.graph.scopes.output_plan(*scope)
+                    && let Unlisted::Sources(more) = self.unlisted(*right, column)
+                {
+                    sources.extend(more);
+                }
+                self.active.remove(&(*scope, *index));
+                sources
+            }
+            UnknownProvider::Opaque(_) => Vec::new(),
         }
     }
-    if has_allowed && specific.is_some() {
-        return StarNameDecision::Ambiguous;
-    }
-    if has_allowed {
-        StarNameDecision::Allowed
-    } else if let Some(specific) = specific {
-        specific
-    } else if has_denied {
-        StarNameDecision::Denied
-    } else {
-        StarNameDecision::Allowed
+
+    fn unlisted(&mut self, scope: ScopeId, name: &Ident) -> Unlisted {
+        let graph = self.graph;
+        match graph.scopes.output_plan(scope) {
+            OutputPlan::Projection => {
+                let model = self.scope_model(scope);
+                let mut admitted = false;
+                let mut unknown_seen = false;
+                let mut sources = Vec::new();
+                for symbolic in &model.names.symbolic {
+                    if same_column_name(&symbolic.name, name, graph.dialect) {
+                        admitted = true;
+                        sources.extend(self.value(&symbolic.value).0);
+                    }
+                }
+                for element in &model.elements {
+                    let OutputElement::Unknown(segment) = element else {
+                        continue;
+                    };
+                    unknown_seen = true;
+                    if segment.domain.admits(name, graph.dialect) {
+                        admitted = true;
+                        sources.extend(self.provider_sources(&segment.provider, name));
+                    }
+                }
+                if admitted {
+                    if sources.is_empty() {
+                        Unlisted::None
+                    } else {
+                        Unlisted::Sources(sources)
+                    }
+                } else if unknown_seen {
+                    Unlisted::Denied
+                } else {
+                    Unlisted::None
+                }
+            }
+            OutputPlan::Delegate(child) => self.unlisted(*child, name),
+            // The left operand defines the names of a set operation, but
+            // provenance is collected from both operands. An operand that
+            // rules the name out stays an explicit uncertainty marker because
+            // its unknown-width slot cannot be aligned safely.
+            OutputPlan::SetOperation { left, right, .. } => {
+                let mut sources = match self.unlisted(*left, name) {
+                    Unlisted::Denied => return Unlisted::Denied,
+                    Unlisted::Sources(sources) => sources,
+                    Unlisted::None => Vec::new(),
+                };
+                match self.unlisted(*right, name) {
+                    Unlisted::Sources(more) => sources.extend(more),
+                    Unlisted::Denied => sources.push(ColumnOrigin::Ambiguous {
+                        column: name.clone(),
+                        candidates: Vec::new(),
+                    }),
+                    Unlisted::None => {}
+                }
+                if sources.is_empty() {
+                    Unlisted::None
+                } else {
+                    Unlisted::Sources(sources)
+                }
+            }
+        }
     }
 }

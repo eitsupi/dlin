@@ -43,10 +43,8 @@ impl Width {
 
 /// A lazy reference to the value an output column takes. It is evaluated
 /// only when lineage is needed, which keeps model construction free of
-/// column resolution and of cycles between widths, mappings and names. The
-/// payloads are read when lineage is evaluated from a model.
+/// column resolution and of cycles between widths, mappings and names.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) enum ValueId {
     /// A column the catalog lists for a physical relation.
     Physical { table: Rc<TableRef>, column: Ident },
@@ -75,7 +73,6 @@ pub(super) enum ValueId {
 
 /// Why a segment of columns cannot be enumerated.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) enum UnknownProvider {
     /// A physical relation without catalog columns.
     Relation(Rc<TableRef>),
@@ -87,10 +84,15 @@ pub(super) enum UnknownProvider {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OpaqueReason {
-    FieldPath,
-    Expression,
-    Ambiguous,
+    /// A star over a nested field of a relation, named by the star node.
+    FieldPath(NodeId),
+    /// A star over an expression, named by the star node.
+    Expression(NodeId),
+    /// A star whose qualifier names several relations.
+    Ambiguous(NodeId),
+    /// A source whose columns are not modeled, such as VALUES.
     UnknownWidth,
+    /// A scope that reads itself.
     Recursive,
 }
 
@@ -164,6 +166,21 @@ impl UnknownSegment {
 pub(super) enum OutputElement {
     Column(ColumnSlot),
     Unknown(UnknownSegment),
+    /// Columns a set operation merges in from its right operand beyond the
+    /// ones its left operand lists. They are not listed, so they do not count
+    /// towards the width, but a star over the set operation still publishes
+    /// them.
+    Tail(BranchTail),
+}
+
+/// The right-operand columns of a set operation, subject to the same name
+/// conditions as an unknown segment.
+#[derive(Debug, Clone)]
+pub(super) struct BranchTail {
+    /// The set operation that merges them in.
+    pub scope: ScopeId,
+    pub ranges: Rc<[Ident]>,
+    pub domain: NameDomain,
 }
 
 /// A name that can be referenced but is not listed as an output column: the
@@ -197,6 +214,11 @@ pub(super) struct OutputModel {
 
 impl OutputModel {
     fn new(part: Part, unknown_reasons: Vec<&'static str>, dialect: Dialect) -> Self {
+        let listed = part
+            .elements
+            .iter()
+            .filter(|element| !matches!(element, OutputElement::Tail(_)))
+            .count();
         let width = if part
             .elements
             .iter()
@@ -204,7 +226,7 @@ impl OutputModel {
         {
             Width::Unknown
         } else {
-            Width::Exact(part.elements.len())
+            Width::Exact(listed)
         };
         Self {
             elements: part.elements,
@@ -227,6 +249,15 @@ impl OutputModel {
             Vec::new(),
             dialect,
         )
+    }
+
+    /// The number of elements that stand for a column or a segment of the
+    /// output, as opposed to merged-in tails.
+    pub(super) fn listed_len(&self) -> usize {
+        self.elements
+            .iter()
+            .filter(|element| !matches!(element, OutputElement::Tail(_)))
+            .count()
     }
 
     pub(super) fn has_unknown_segment(&self) -> bool {
@@ -275,27 +306,35 @@ enum CacheKey {
     Star(NodeId),
 }
 
-/// Models of the scopes and stars of one statement, each built at most once.
+/// The models built so far for one statement, each built at most once.
 ///
 /// A model that was built while a cycle was cut (a recursive CTE reading
 /// itself) is not kept, because it depends on where the walk started.
-pub(super) struct OutputModels<'a, 'c> {
-    graph: &'a RawGraph,
-    catalog: Option<&'a CatalogContext<'c>>,
+#[derive(Default)]
+pub(super) struct ModelStore {
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
     /// Models under construction, each flagged when a cycle was cut beneath it.
     active: Vec<(CacheKey, bool)>,
 }
 
-impl<'a, 'c> OutputModels<'a, 'c> {
-    pub(super) fn new(graph: &'a RawGraph, catalog: Option<&'a CatalogContext<'c>>) -> Self {
+/// Builds models for a statement into a [`ModelStore`].
+pub(super) struct OutputModels<'a, 'c, 's> {
+    graph: &'a RawGraph,
+    catalog: Option<&'a CatalogContext<'c>>,
+    store: &'s mut ModelStore,
+}
+
+impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
+    pub(super) fn new(
+        graph: &'a RawGraph,
+        catalog: Option<&'a CatalogContext<'c>>,
+        store: &'s mut ModelStore,
+    ) -> Self {
         Self {
             graph,
             catalog,
-            scopes: HashMap::new(),
-            stars: HashMap::new(),
-            active: Vec::new(),
+            store,
         }
     }
 
@@ -304,7 +343,7 @@ impl<'a, 'c> OutputModels<'a, 'c> {
     }
 
     pub(super) fn scope(&mut self, scope: ScopeId) -> Rc<OutputModel> {
-        if let Some(model) = self.scopes.get(&scope) {
+        if let Some(model) = self.store.scopes.get(&scope) {
             return model.clone();
         }
         if self.enter(CacheKey::Scope(scope)) {
@@ -315,13 +354,13 @@ impl<'a, 'c> OutputModels<'a, 'c> {
         }
         let model = Rc::new(self.build_scope(scope));
         if self.leave() {
-            self.scopes.insert(scope, model.clone());
+            self.store.scopes.insert(scope, model.clone());
         }
         model
     }
 
     pub(super) fn star(&mut self, node_id: NodeId) -> Rc<OutputModel> {
-        if let Some(model) = self.stars.get(&node_id) {
+        if let Some(model) = self.store.stars.get(&node_id) {
             return model.clone();
         }
         if self.enter(CacheKey::Star(node_id)) {
@@ -336,12 +375,12 @@ impl<'a, 'c> OutputModels<'a, 'c> {
                 base,
                 options,
                 scope,
-            } => self.build_star(base, options, *scope),
-            _ => OutputModel::opaque(OpaqueReason::Expression, graph.dialect),
+            } => self.build_star(node_id, base, options, *scope),
+            _ => OutputModel::opaque(OpaqueReason::Recursive, graph.dialect),
         };
         let model = Rc::new(model);
         if self.leave() {
-            self.stars.insert(node_id, model.clone());
+            self.store.stars.insert(node_id, model.clone());
         }
         model
     }
@@ -350,19 +389,24 @@ impl<'a, 'c> OutputModels<'a, 'c> {
     /// construction: the cycle is cut and every model built since then is
     /// marked as not reusable.
     fn enter(&mut self, key: CacheKey) -> bool {
-        if let Some(position) = self.active.iter().position(|(active, _)| *active == key) {
-            for (_, tainted) in &mut self.active[position + 1..] {
+        if let Some(position) = self
+            .store
+            .active
+            .iter()
+            .position(|(active, _)| *active == key)
+        {
+            for (_, tainted) in &mut self.store.active[position + 1..] {
                 *tainted = true;
             }
             return true;
         }
-        self.active.push((key, false));
+        self.store.active.push((key, false));
         false
     }
 
     /// Finish the innermost model; returns whether it may be reused.
     fn leave(&mut self) -> bool {
-        self.active.pop().is_some_and(|(_, tainted)| !tainted)
+        self.store.active.pop().is_some_and(|(_, tainted)| !tainted)
     }
 
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
@@ -395,9 +439,23 @@ impl<'a, 'c> OutputModels<'a, 'c> {
                 forward_scope(*child, &model, &Rc::from([]), false)
             }
             // The left operand defines the names of a set operation.
-            OutputPlan::SetOperation { left, .. } => {
+            OutputPlan::SetOperation {
+                left, recursive, ..
+            } => {
                 let model = self.scope(*left);
-                forward_scope(*left, &model, &Rc::from([]), true)
+                let mut part = forward_scope(*left, &model, &Rc::from([]), true);
+                if !recursive {
+                    // This operation's tail covers whatever the left operand
+                    // already carried.
+                    part.elements
+                        .retain(|element| !matches!(element, OutputElement::Tail(_)));
+                    part.elements.push(OutputElement::Tail(BranchTail {
+                        scope,
+                        ranges: Rc::from([]),
+                        domain: NameDomain::default(),
+                    }));
+                }
+                part
             }
         };
         // Only the output plan is followed, so a flagged operand shows up here
@@ -422,6 +480,7 @@ impl<'a, 'c> OutputModels<'a, 'c> {
 
     fn build_star(
         &mut self,
+        node_id: NodeId,
         base: &StarBase,
         options: &StarOptions,
         scope: ScopeId,
@@ -435,9 +494,9 @@ impl<'a, 'c> OutputModels<'a, 'c> {
             StarTarget::All => self.all_bindings(scope),
             StarTarget::Binding { name, binding } => self.binding_part(&binding, &Rc::from([name])),
             StarTarget::Unknown(table) => self.relation_part(&Rc::new(table), &Rc::from([])),
-            StarTarget::FieldPath { .. } => opaque(OpaqueReason::FieldPath),
-            StarTarget::Expr => opaque(OpaqueReason::Expression),
-            StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous),
+            StarTarget::FieldPath { .. } => opaque(OpaqueReason::FieldPath(node_id)),
+            StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
+            StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
         OutputModel::new(
             apply_options(base, options, part, graph.dialect),
@@ -557,6 +616,11 @@ fn forward_scope(
                 ranges: ranges.clone(),
                 domain: segment.domain.clone(),
             }),
+            OutputElement::Tail(tail) => OutputElement::Tail(BranchTail {
+                scope: tail.scope,
+                ranges: ranges.clone(),
+                domain: tail.domain.clone(),
+            }),
         })
         .collect();
     let symbolic = model
@@ -599,34 +663,110 @@ fn concat_groups(groups: Vec<Group>) -> Part {
     result
 }
 
-/// What a USING key matched on one side of a join.
-enum KeyMatch {
-    Slot(ColumnSlot),
-    Symbolic(SymbolicColumn),
+/// Where a USING key sits on one side of a join.
+#[derive(Clone, Copy)]
+enum KeyAt {
+    Slot(usize),
+    Symbolic(usize),
     /// No column is listed, but unknown segments may publish the key.
-    Unknown {
-        providers: Vec<UnknownProvider>,
-        ranges: Vec<Ident>,
-    },
+    Unlisted,
 }
 
-impl KeyMatch {
-    fn ranges(&self) -> &[Ident] {
-        match self {
-            Self::Slot(slot) => &slot.ranges,
-            Self::Symbolic(symbolic) => &symbolic.ranges,
-            Self::Unknown { ranges, .. } => ranges,
-        }
+/// Locate the column a USING key names on one side. A key matching several
+/// columns, or none that could exist, makes the join unfoldable.
+fn find_key(part: &Part, key: &Ident, dialect: Dialect) -> Option<KeyAt> {
+    let slots: Vec<usize> = part
+        .elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| {
+            matches!(element, OutputElement::Column(slot) if same_column_name(&slot.name, key, dialect))
+                .then_some(index)
+        })
+        .collect();
+    let symbolic: Vec<usize> = part
+        .symbolic
+        .iter()
+        .enumerate()
+        .filter_map(|(index, symbolic)| {
+            same_column_name(&symbolic.name, key, dialect).then_some(index)
+        })
+        .collect();
+    match (slots.as_slice(), symbolic.as_slice()) {
+        ([index], []) => Some(KeyAt::Slot(*index)),
+        ([], [index]) => Some(KeyAt::Symbolic(*index)),
+        ([], []) => (!unknown_publishers(&part.elements, key, dialect)
+            .0
+            .is_empty())
+        .then_some(KeyAt::Unlisted),
+        _ => None,
     }
+}
 
-    fn into_value(self, key: &Ident) -> ValueId {
-        match self {
-            Self::Slot(slot) => slot.value,
-            Self::Symbolic(symbolic) => symbolic.value,
-            Self::Unknown { providers, .. } => ValueId::Named {
-                providers,
-                column: key.clone(),
-            },
+/// The value and range variables a side contributes to a merged key. Unknown
+/// segments that may publish the key stop doing so: the merged column
+/// replaces it.
+fn key_contribution(
+    part: &mut Part,
+    at: KeyAt,
+    key: &Ident,
+    dialect: Dialect,
+) -> (ValueId, Rc<[Ident]>) {
+    match at {
+        KeyAt::Slot(index) => match &part.elements[index] {
+            OutputElement::Column(slot) => (slot.value.clone(), slot.ranges.clone()),
+            _ => unreachable!("a key slot is a column"),
+        },
+        KeyAt::Symbolic(index) => {
+            let symbolic = &part.symbolic[index];
+            (symbolic.value.clone(), symbolic.ranges.clone())
+        }
+        // The key is guaranteed to exist on every joined relation, so a
+        // physical relation contributes the column itself and a CTE or
+        // derived table contributes whatever a direct reference to the name
+        // would find in it.
+        KeyAt::Unlisted => {
+            let mut values: Vec<ValueId> = Vec::new();
+            let mut opaque = Vec::new();
+            let mut ranges: Vec<Ident> = Vec::new();
+            for element in &mut part.elements {
+                let OutputElement::Unknown(segment) = element else {
+                    continue;
+                };
+                if !segment.domain.admits(key, dialect) {
+                    continue;
+                }
+                segment.domain.removed.push(key.clone());
+                ranges.extend(segment.ranges.iter().cloned());
+                match &segment.provider {
+                    UnknownProvider::Relation(table) => values.push(ValueId::Physical {
+                        table: table.clone(),
+                        column: key.clone(),
+                    }),
+                    UnknownProvider::Scope { scope, .. } => {
+                        if !values.iter().any(
+                            |value| matches!(value, ValueId::ScopeName { scope: seen, .. } if seen == scope),
+                        ) {
+                            values.push(ValueId::ScopeName {
+                                scope: *scope,
+                                column: key.clone(),
+                            });
+                        }
+                    }
+                    provider @ UnknownProvider::Opaque(_) => opaque.push(provider.clone()),
+                }
+            }
+            if !opaque.is_empty() {
+                values.push(ValueId::Named {
+                    providers: opaque,
+                    column: key.clone(),
+                });
+            }
+            let value = values
+                .into_iter()
+                .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
+                .expect("an unlisted key has a publisher");
+            (value, ranges.into())
         }
     }
 }
@@ -707,40 +847,60 @@ fn fold_groups(
         let mut selected_keys = HashSet::new();
         let mut symbolic = Vec::new();
         for key in keys {
-            let left_match = take_key(&mut left_part, &key, dialect)?;
-            let right_match = take_key(&mut right_part, &key, dialect)?;
+            let left_at = find_key(&left_part, &key, dialect)?;
+            let right_at = find_key(&right_part, &key, dialect)?;
             if !selected_keys.insert(key.column_key(dialect).into_owned()) {
                 return None;
             }
-            let ranges = union_ranges(left_match.ranges(), right_match.ranges());
-            // The name and output name come from the left column; a side
-            // without a listed column falls back to the other one.
-            let owner = match (&left_match, &right_match) {
-                (KeyMatch::Slot(slot), _) | (_, KeyMatch::Slot(slot)) => {
-                    Some((slot.name.clone(), slot.output_name.clone()))
-                }
-                _ => None,
-            };
+            let (left_value, left_ranges) =
+                key_contribution(&mut left_part, left_at, &key, dialect);
+            let (right_value, right_ranges) =
+                key_contribution(&mut right_part, right_at, &key, dialect);
+            let ranges = union_ranges(&left_ranges, &right_ranges);
+            // An outer join takes the value from the preserved side; an inner
+            // or full join may take it from either.
             let value = match merge.kind {
-                JoinMergeKind::Left => left_match.into_value(&key),
-                JoinMergeKind::Right => right_match.into_value(&key),
-                JoinMergeKind::Inner | JoinMergeKind::Full => ValueId::Merged(
-                    Box::new(left_match.into_value(&key)),
-                    Box::new(right_match.into_value(&key)),
-                ),
+                JoinMergeKind::Left => left_value,
+                JoinMergeKind::Right => right_value,
+                JoinMergeKind::Inner | JoinMergeKind::Full => {
+                    ValueId::Merged(Box::new(left_value), Box::new(right_value))
+                }
             };
-            match owner {
-                Some((name, output_name)) => output.push(OutputElement::Column(ColumnSlot {
-                    name,
-                    output_name,
-                    ranges,
-                    value,
-                })),
-                None => symbolic.push(SymbolicColumn {
-                    name: key,
-                    ranges,
-                    value,
-                }),
+            match (left_at, right_at) {
+                (KeyAt::Slot(left_index), KeyAt::Slot(right_index)) => {
+                    // The merged column leads the output and takes the left
+                    // column's names.
+                    let OutputElement::Column(left_slot) = left_part.elements.remove(left_index)
+                    else {
+                        unreachable!("a key slot is a column");
+                    };
+                    right_part.elements.remove(right_index);
+                    output.push(OutputElement::Column(ColumnSlot {
+                        name: left_slot.name,
+                        output_name: left_slot.output_name,
+                        ranges,
+                        value,
+                    }));
+                }
+                // Only one side lists the column, so it stays where it is and
+                // only gains the other side's range variables and value.
+                (KeyAt::Slot(index), other) => {
+                    retarget_slot(&mut left_part, index, ranges, value);
+                    drop_symbolic(&mut right_part, other);
+                }
+                (other, KeyAt::Slot(index)) => {
+                    retarget_slot(&mut right_part, index, ranges, value);
+                    drop_symbolic(&mut left_part, other);
+                }
+                (left_other, right_other) => {
+                    drop_symbolic(&mut left_part, left_other);
+                    drop_symbolic(&mut right_part, right_other);
+                    symbolic.push(SymbolicColumn {
+                        name: key,
+                        ranges,
+                        value,
+                    });
+                }
             }
         }
         output.extend(left_part.elements);
@@ -772,47 +932,16 @@ fn take_parts(groups: &mut [Group], indexes: &[usize]) -> Part {
     part
 }
 
-/// Take the column a USING key names out of one side. A key matching several
-/// columns, or none that could exist, makes the join unfoldable.
-fn take_key(part: &mut Part, key: &Ident, dialect: Dialect) -> Option<KeyMatch> {
-    let slots: Vec<usize> = part
-        .elements
-        .iter()
-        .enumerate()
-        .filter_map(|(index, element)| {
-            matches!(element, OutputElement::Column(slot) if same_column_name(&slot.name, key, dialect))
-                .then_some(index)
-        })
-        .collect();
-    let symbolic: Vec<usize> = part
-        .symbolic
-        .iter()
-        .enumerate()
-        .filter_map(|(index, symbolic)| {
-            same_column_name(&symbolic.name, key, dialect).then_some(index)
-        })
-        .collect();
-    match (slots.as_slice(), symbolic.as_slice()) {
-        ([index], []) => match part.elements.remove(*index) {
-            OutputElement::Column(slot) => Some(KeyMatch::Slot(slot)),
-            OutputElement::Unknown(_) => None,
-        },
-        ([], [index]) => Some(KeyMatch::Symbolic(part.symbolic.remove(*index))),
-        ([], []) => {
-            let (providers, ranges) = unknown_publishers(&part.elements, key, dialect);
-            if providers.is_empty() {
-                return None;
-            }
-            for element in &mut part.elements {
-                if let OutputElement::Unknown(segment) = element
-                    && segment.domain.admits(key, dialect)
-                {
-                    segment.domain.removed.push(key.clone());
-                }
-            }
-            Some(KeyMatch::Unknown { providers, ranges })
-        }
-        _ => None,
+fn retarget_slot(part: &mut Part, index: usize, ranges: Rc<[Ident]>, value: ValueId) {
+    if let OutputElement::Column(slot) = &mut part.elements[index] {
+        slot.ranges = ranges;
+        slot.value = value;
+    }
+}
+
+fn drop_symbolic(part: &mut Part, at: KeyAt) {
+    if let KeyAt::Symbolic(index) = at {
+        part.symbolic.remove(index);
     }
 }
 
@@ -873,6 +1002,14 @@ fn apply_options(base: &StarBase, options: &StarOptions, part: Part, dialect: Di
                         .push((filter.clone(), segment.ranges.clone()));
                 }
                 Some(OutputElement::Unknown(segment))
+            }
+            OutputElement::Tail(mut tail) => {
+                if let Some(filter) = &filter {
+                    tail.domain
+                        .filters
+                        .push((filter.clone(), tail.ranges.clone()));
+                }
+                Some(OutputElement::Tail(tail))
             }
         })
         .collect();
@@ -964,7 +1101,9 @@ fn first_slot_named<'e>(
 mod tests {
     use std::rc::Rc;
 
-    use super::{OutputElement, OutputModel, OutputModels, UnknownProvider, ValueId, Width};
+    use super::{
+        ModelStore, OutputElement, OutputModel, OutputModels, UnknownProvider, ValueId, Width,
+    };
     use crate::catalog::CatalogContext;
     use crate::graph::RawGraph;
     use crate::graph::node::RawNode;
@@ -1011,7 +1150,8 @@ mod tests {
         let graph = graph(sql);
         let catalog = Tables(tables.to_vec());
         let context = CatalogContext::new(&catalog, Dialect::Generic);
-        let mut models = OutputModels::new(&graph, Some(&context));
+        let mut store = ModelStore::default();
+        let mut models = OutputModels::new(&graph, Some(&context), &mut store);
         let node = graph
             .nodes
             .iter()
@@ -1028,6 +1168,7 @@ mod tests {
             .map(|element| match element {
                 OutputElement::Column(slot) => slot.name.value.clone(),
                 OutputElement::Unknown(_) => "?".to_owned(),
+                OutputElement::Tail(_) => "~".to_owned(),
             })
             .collect()
     }
@@ -1137,13 +1278,15 @@ mod tests {
             "SELECT * FROM a JOIN b USING (id)",
             &[("b", vec!["id", "y"])],
         );
-        assert_eq!(layout(&model), ["id", "?", "y"]);
+        // The listed column keeps its position. An inner join takes the key
+        // from both sides, and the unknown relation supplies it as a column.
+        assert_eq!(layout(&model), ["?", "id", "y"]);
         assert_eq!(ranges(&model, "id"), ["a", "b"]);
-        let OutputElement::Column(slot) = &model.elements[0] else {
+        let OutputElement::Column(slot) = &model.elements[1] else {
             unreachable!();
         };
         assert!(matches!(slot.value, ValueId::Merged(..)));
-        let OutputElement::Unknown(segment) = &model.elements[1] else {
+        let OutputElement::Unknown(segment) = &model.elements[0] else {
             unreachable!();
         };
         assert!(
@@ -1157,6 +1300,44 @@ mod tests {
                 .admits(&Ident::unquoted("name"), Dialect::Generic)
         );
         assert!(model.names.symbolic.is_empty());
+    }
+
+    #[test]
+    fn using_value_follows_the_join_kind_when_one_side_is_unknown() {
+        // The unknown `a` supplies `id` as a column of its own; `b` lists it.
+        for (join, expected) in [
+            ("JOIN", "merged"),
+            ("LEFT JOIN", "a"),
+            ("RIGHT JOIN", "b"),
+            ("FULL JOIN", "merged"),
+        ] {
+            let model = first_star(
+                &format!("SELECT * FROM a {join} b USING (id)"),
+                &[("b", vec!["id", "y"])],
+            );
+            assert_eq!(layout(&model), ["?", "id", "y"], "{join}");
+            let OutputElement::Column(slot) = &model.elements[1] else {
+                unreachable!();
+            };
+            match (&slot.value, expected) {
+                (ValueId::Merged(..), "merged") => {}
+                (ValueId::Physical { table, .. }, owner) => {
+                    assert_eq!(table.table.value, owner, "{join}");
+                }
+                (value, _) => panic!("{join}: unexpected {value:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn set_operation_keeps_the_columns_its_right_operand_adds_as_a_tail() {
+        let graph = graph("SELECT * FROM t1 UNION ALL SELECT a, b FROM t2");
+        let mut store = ModelStore::default();
+        let mut models = OutputModels::new(&graph, None, &mut store);
+        let model = models.scope(ScopeTree::root());
+        assert_eq!(layout(&model), ["?", "~"]);
+        assert_eq!(model.listed_len(), 1);
+        assert_eq!(model.width, Width::Unknown);
     }
 
     #[test]
@@ -1201,7 +1382,8 @@ mod tests {
     #[test]
     fn scope_models_are_built_once_and_forward_child_slots() {
         let graph = graph("WITH c AS (SELECT x, y FROM t) SELECT * FROM c");
-        let mut models = OutputModels::new(&graph, None);
+        let mut store = ModelStore::default();
+        let mut models = OutputModels::new(&graph, None, &mut store);
         let root = models.scope(ScopeTree::root());
         assert!(Rc::ptr_eq(&root, &models.scope(ScopeTree::root())));
         assert_eq!(layout(&root), ["x", "y"]);
@@ -1215,7 +1397,8 @@ mod tests {
     fn a_cycle_is_cut_to_an_unknown_segment() {
         let graph =
             graph("WITH RECURSIVE t AS (SELECT * FROM t UNION ALL SELECT 1) SELECT * FROM t");
-        let mut models = OutputModels::new(&graph, None);
+        let mut store = ModelStore::default();
+        let mut models = OutputModels::new(&graph, None, &mut store);
         assert!(models.scope(ScopeTree::root()).has_unknown_segment());
     }
 }

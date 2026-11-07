@@ -487,16 +487,33 @@ pub fn cases() -> Vec<Case> {
             (relation("b"), vec![u("id")]),
         ]),
     );
-    for (name, join) in [
-        ("partial_catalog_using_star", "JOIN b USING (id)"),
-        ("partial_catalog_natural_star", "NATURAL JOIN b"),
+    // USING guarantees that `b` has `id`, so the merged key also comes from
+    // `b`. NATURAL cannot name a shared column without knowing `b`.
+    for (name, join, id) in [
+        (
+            "partial_catalog_using_star",
+            "JOIN b USING (id)",
+            col(
+                1,
+                u("id"),
+                vec![
+                    source(relation("a"), u("id")),
+                    source(relation("b"), u("id")),
+                ],
+            ),
+        ),
+        (
+            "partial_catalog_natural_star",
+            "NATURAL JOIN b",
+            physical(1, "a", "id"),
+        ),
     ] {
         cases.push(
             Case::new(
                 name,
                 &format!("SELECT * FROM a {join}"),
                 Dialect::Generic,
-                vec![physical(0, "a", "left_value"), physical(1, "a", "id")],
+                vec![physical(0, "a", "left_value"), id],
             )
             .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
             .shape(open_star("b", Some(1)))
@@ -817,7 +834,348 @@ pub fn cases() -> Vec<Case> {
             .unresolved_stars(true),
         );
     }
+    cases.extend(partial_catalog_modifier_cases());
+    cases.extend(unknown_using_key_cases());
+    cases.extend(set_operation_tail_cases());
     cases
+}
+
+fn behind(table: &str, column: &str) -> Unresolved {
+    Unresolved::NamedBehindStar {
+        relation: relation(table),
+        column: u(column),
+    }
+}
+
+/// `a` is known, `b` has no catalog entry. Modifiers apply to the known
+/// columns of `a`; a column that only `b` may publish becomes an explicit
+/// column whose position among the unknown columns is not known.
+fn partial_catalog_modifier_cases() -> Vec<Case> {
+    let a_columns = vec![(relation("a"), vec![u("id"), u("left_value")])];
+    let from = "FROM a CROSS JOIN b";
+    let mut explicit_flag = col(0, u("flag"), vec![]);
+    explicit_flag.ordinal = None;
+    let mut renamed_flag = partial_col(0, u("kept"), vec![], vec![behind("b", "flag")]);
+    renamed_flag.ordinal = None;
+    vec![
+        // REPLACE keeps the position and name of the known column and only
+        // changes where its value comes from.
+        Case::new(
+            "partial_catalog_replace_known_column",
+            &format!("SELECT * REPLACE (a.left_value || 'x' AS left_value) {from}"),
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "id"),
+                col(
+                    1,
+                    u("left_value"),
+                    vec![source(relation("a"), u("left_value"))],
+                ),
+            ],
+        )
+        .catalog(a_columns.clone())
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+        // `a` has no `flag`, so only `b` can have the column being replaced.
+        Case::new(
+            "partial_catalog_replace_column_only_unknown_side_publishes",
+            &format!("SELECT * REPLACE (1 AS flag) {from}"),
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "id"),
+                physical(1, "a", "left_value"),
+                explicit_flag,
+            ],
+        )
+        .catalog(a_columns.clone())
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+        Case::new(
+            "partial_catalog_rename_known_column",
+            &format!("SELECT * RENAME (left_value AS renamed) {from}"),
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "id"),
+                col(
+                    1,
+                    u("renamed"),
+                    vec![source(relation("a"), u("left_value"))],
+                ),
+            ],
+        )
+        .catalog(a_columns.clone())
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+        Case::new(
+            "partial_catalog_rename_column_only_unknown_side_publishes",
+            &format!("SELECT * RENAME (flag AS kept) {from}"),
+            Dialect::Generic,
+            vec![
+                physical(0, "a", "id"),
+                physical(1, "a", "left_value"),
+                renamed_flag,
+            ],
+        )
+        .catalog(a_columns.clone())
+        .shape(open_star("b", Some(1)))
+        .unresolved_stars(true),
+        // The same results are read back through a derived table.
+        Case::new(
+            "partial_catalog_replaced_known_column_read_through_derived_table",
+            &format!("SELECT left_value FROM (SELECT * REPLACE (a.id AS left_value) {from}) d"),
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("left_value"),
+                vec![source(relation("a"), u("id"))],
+            )],
+        )
+        .catalog(a_columns.clone())
+        .unresolved_stars(true),
+        Case::new(
+            "partial_catalog_renamed_known_column_read_through_derived_table",
+            &format!("SELECT renamed FROM (SELECT * RENAME (left_value AS renamed) {from}) d"),
+            Dialect::Generic,
+            vec![col(
+                0,
+                u("renamed"),
+                vec![source(relation("a"), u("left_value"))],
+            )],
+        )
+        .catalog(a_columns.clone())
+        .unresolved_stars(true),
+        Case::new(
+            "partial_catalog_renamed_unknown_column_read_through_derived_table",
+            &format!("SELECT kept FROM (SELECT * RENAME (flag AS kept) {from}) d"),
+            Dialect::Generic,
+            vec![partial_col(0, u("kept"), vec![], vec![behind("b", "flag")])],
+        )
+        .catalog(a_columns.clone())
+        .unresolved_stars(true),
+        // `a` renamed its `left_value`, but `b` may still have a column of
+        // that name.
+        Case::new(
+            "partial_catalog_renamed_known_name_may_come_from_unknown_side",
+            &format!("SELECT left_value FROM (SELECT * RENAME (left_value AS renamed) {from}) d"),
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("left_value"),
+                vec![],
+                vec![behind("b", "left_value")],
+            )],
+        )
+        .catalog(a_columns.clone())
+        .unresolved_stars(true),
+        // Only `b` could have had `flag`, and it is now called `kept`.
+        Case::new(
+            "partial_catalog_renamed_unknown_name_is_not_read_back",
+            &format!("SELECT flag FROM (SELECT * RENAME (flag AS kept) {from}) d"),
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("flag"),
+                vec![],
+                vec![Unresolved::Unbound { column: u("flag") }],
+            )],
+        )
+        .catalog(a_columns)
+        .unresolved_stars(true),
+    ]
+}
+
+/// The left operand of the set operation is `t1.*` with unknown columns and
+/// the right one lists `a, b`. Names and positions of the unknown columns are
+/// not known, so the right operand's columns stay reachable by name, each
+/// with the right branch's source and the left operand's unresolved star.
+/// A star over the set operation must not lose them.
+fn set_operation_tail_cases() -> Vec<Case> {
+    let set_operation = "SELECT * FROM t1 UNION ALL SELECT a, b FROM t2";
+    let right_branch = |column: &str| {
+        partial_col(
+            0,
+            u(column),
+            vec![source(relation("t2"), u(column))],
+            vec![Unresolved::BehindStar {
+                relation: relation("t1"),
+            }],
+        )
+    };
+    let unpositioned = |column: &str| {
+        let mut expected = right_branch(column);
+        expected.ordinal = None;
+        expected
+    };
+    vec![
+        Case::new(
+            "set_operation_right_column_read_directly",
+            &format!("SELECT b FROM ({set_operation}) s"),
+            Dialect::Generic,
+            vec![right_branch("b")],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_column_read_through_star",
+            &format!("SELECT b FROM (SELECT * FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![right_branch("b")],
+        )
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_columns_expanded_by_star",
+            &format!("SELECT * FROM (SELECT * FROM ({set_operation}) s) d"),
+            Dialect::Generic,
+            vec![unpositioned("a"), unpositioned("b")],
+        )
+        .shape(open_star("t1", None))
+        .unresolved_stars(true),
+        Case::new(
+            "set_operation_right_columns_respect_star_exclude",
+            &format!("SELECT * EXCLUDE (b) FROM ({set_operation}) s"),
+            Dialect::Generic,
+            vec![unpositioned("a")],
+        )
+        .shape(open_star("t1", None))
+        .unresolved_stars(true),
+    ]
+}
+
+const JOIN_KINDS: [(&str, &str); 4] = [
+    ("inner", "JOIN"),
+    ("left", "LEFT JOIN"),
+    ("right", "RIGHT JOIN"),
+    ("full", "FULL JOIN"),
+];
+
+/// Where the merged `USING (id)` key of `a <join> b` gets its value: both
+/// sides for INNER and FULL, the preserved side for LEFT and RIGHT.
+fn using_key_sources(kind: &str) -> Vec<dlin_sqllineage::SourceColumn> {
+    let a = source(relation("a"), u("id"));
+    let b = source(relation("b"), u("id"));
+    match kind {
+        "left" => vec![a],
+        "right" => vec![b],
+        _ => vec![a, b],
+    }
+}
+
+/// The catalogs `USING` is checked under: none, only `a`, only `b`.
+fn using_catalogs() -> Vec<(
+    &'static str,
+    Vec<(dlin_sqllineage::Relation, Vec<dlin_sqllineage::Ident>)>,
+)> {
+    vec![
+        ("no_catalog", vec![]),
+        (
+            "known_left",
+            vec![(relation("a"), vec![u("id"), u("left_value")])],
+        ),
+        (
+            "known_right",
+            vec![(relation("b"), vec![u("id"), u("right_value")])],
+        ),
+    ]
+}
+
+/// `USING (id)` guarantees that every joined relation has `id`, so a relation
+/// without catalog columns still supplies the key as a column of its own. The
+/// join kind decides which sides supply the merged value. A key read through a
+/// star must resolve exactly like a direct reference to it.
+fn unknown_using_key_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    for (catalog_name, catalog) in using_catalogs() {
+        for (name, join) in JOIN_KINDS {
+            let key = || col(0, u("id"), using_key_sources(name));
+            cases.push(
+                Case::new(
+                    &format!("using_{name}_key_direct_reference_{catalog_name}"),
+                    &format!("SELECT id FROM a {join} b USING (id)"),
+                    Dialect::Generic,
+                    vec![key()],
+                )
+                .catalog(catalog.clone()),
+            );
+            cases.push(
+                Case::new(
+                    &format!("using_{name}_key_read_through_star_{catalog_name}"),
+                    &format!("SELECT id FROM (SELECT * FROM a {join} b USING (id)) d"),
+                    Dialect::Generic,
+                    vec![key()],
+                )
+                .catalog(catalog.clone())
+                .unresolved_stars(true),
+            );
+        }
+    }
+    // `a` is known and `b` is not: the key stays where `a` lists it.
+    for (name, join) in JOIN_KINDS {
+        if name == "inner" {
+            continue; // Covered by partial_catalog_using_star.
+        }
+        cases.push(
+            Case::new(
+                &format!("known_left_unknown_right_using_{name}_star"),
+                &format!("SELECT * FROM a {join} b USING (id)"),
+                Dialect::Generic,
+                vec![
+                    col(0, u("id"), using_key_sources(name)),
+                    physical(1, "a", "left_value"),
+                ],
+            )
+            .catalog(vec![(relation("a"), vec![u("id"), u("left_value")])])
+            .shape(open_star("b", Some(1)))
+            .unresolved_stars(true),
+        );
+    }
+    // A CTE side that publishes `id` only behind its own star supplies the
+    // column the way a reference to `id` in that CTE finds it.
+    for (name, join) in JOIN_KINDS {
+        let behind_t = Unresolved::NamedBehindStar {
+            relation: relation("t"),
+            column: u("id"),
+        };
+        let b = source(relation("b"), u("id"));
+        let key = |index| match name {
+            "left" => partial_col(index, u("id"), vec![], vec![behind_t.clone()]),
+            "right" => col(index, u("id"), vec![b.clone()]),
+            _ => partial_col(index, u("id"), vec![b.clone()], vec![behind_t.clone()]),
+        };
+        cases.push(
+            Case::new(
+                &format!("using_{name}_key_unknown_cte_read_through_star"),
+                &format!(
+                    "WITH c AS (SELECT * FROM t) SELECT id FROM (SELECT * FROM c {join} b USING (id)) d"
+                ),
+                Dialect::Generic,
+                vec![key(0)],
+            )
+            .unresolved_stars(true),
+        );
+    }
+    cases
+}
+
+#[test]
+fn using_key_read_through_star_equals_direct_reference() {
+    for (catalog_name, catalog) in using_catalogs() {
+        for (name, join) in JOIN_KINDS {
+            let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![])
+                .catalog(catalog.clone());
+            let direct = case
+                .analyze_sql(&format!("SELECT id FROM a {join} b USING (id)"), true)
+                .unwrap();
+            let through_star = case
+                .analyze_sql(
+                    &format!("SELECT id FROM (SELECT * FROM a {join} b USING (id)) d"),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
+                "{catalog_name} {name}"
+            );
+        }
+    }
 }
 
 #[test]

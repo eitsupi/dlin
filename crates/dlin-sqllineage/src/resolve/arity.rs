@@ -12,7 +12,7 @@ use crate::types::SemanticError;
 /// dependency and must be visible to consumers of the public result.
 pub(super) fn graph_has_unresolved_stars(
     graph: &RawGraph,
-    models: &mut OutputModels<'_, '_>,
+    models: &mut OutputModels<'_, '_, '_>,
 ) -> bool {
     (0..graph.nodes.len()).any(|node_id| {
         matches!(graph.nodes[node_id], RawNode::Star { .. })
@@ -21,7 +21,7 @@ pub(super) fn graph_has_unresolved_stars(
 }
 
 pub(super) fn validate_set_arities(
-    models: &mut OutputModels<'_, '_>,
+    models: &mut OutputModels<'_, '_, '_>,
 ) -> Result<Option<usize>, SemanticError> {
     let mut active = HashSet::new();
     scope_arity(ScopeTree::root(), models, &mut active)
@@ -31,7 +31,7 @@ pub(super) fn validate_set_arities(
 /// otherwise return `None` and leave the eventual merge conservative.
 fn scope_arity(
     scope: usize,
-    models: &mut OutputModels<'_, '_>,
+    models: &mut OutputModels<'_, '_, '_>,
     active: &mut HashSet<usize>,
 ) -> Result<Option<usize>, SemanticError> {
     let graph = models.graph();
