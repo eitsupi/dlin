@@ -77,6 +77,11 @@ pub(super) enum ValueId {
     },
     /// A column merged by USING/NATURAL whose value both sides contribute to.
     Merged(Box<ValueId>, Box<ValueId>),
+    /// A proven value whose completeness depends on the listed schemas.
+    SchemaDependent {
+        value: Option<Box<ValueId>>,
+        relations: Vec<crate::Relation>,
+    },
     /// A column that exactly one of several unknown relations supplies, with
     /// no way to tell which. Naming one of them would invent a source.
     Uncertain {
@@ -164,6 +169,8 @@ pub(super) struct ColumnSlot {
     /// The name the column is published under.
     pub name: Ident,
     pub output_name: OutputName,
+    /// Proven zero-based position in this model's output, when available.
+    pub ordinal: Option<usize>,
     /// Range variables the column is visible under. A merged column keeps
     /// the range variables of both sides, whatever the join kind.
     pub ranges: Rc<[RangeRef]>,
@@ -178,6 +185,9 @@ pub(super) struct ColumnSlot {
 /// publish.
 #[derive(Debug, Clone)]
 pub(super) struct UnknownSegment {
+    /// Physical schemas responsible for this interval, retained across scopes.
+    pub schema_relations: Vec<crate::Relation>,
+    pub position: crate::types::StarPosition,
     pub provider: UnknownProvider,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
@@ -186,6 +196,8 @@ pub(super) struct UnknownSegment {
 impl UnknownSegment {
     fn opaque(reason: OpaqueReason) -> Self {
         Self {
+            schema_relations: Vec::new(),
+            position: crate::types::StarPosition::Inferred,
             provider: UnknownProvider::Opaque(reason),
             ranges: Rc::from([]),
             domain: NameDomain::default(),

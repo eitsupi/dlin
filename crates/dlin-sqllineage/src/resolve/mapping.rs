@@ -7,7 +7,7 @@ use super::binding::derive_transform;
 use super::catalog;
 use super::context::{EvalContext, EvalKey};
 use super::lineage::collect_output_sources;
-use super::model::{ModelStore, OutputModels};
+use super::model::{ModelStore, OutputModels, Width};
 use super::star::expand_star;
 
 use crate::Ident;
@@ -22,7 +22,9 @@ pub(super) fn wildcard_mapping(
     source_table: TableRef,
 ) -> ColumnMapping {
     ColumnMapping {
+        star_position: crate::types::StarPosition::Inferred,
         output_name: None,
+        ordinal: None,
         target: ColumnRef {
             table: output_table.cloned(),
             column: Ident::unquoted("*"),
@@ -112,6 +114,7 @@ pub(super) fn resolve_scope_mappings(
     let mappings = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => {
             let mut mappings = Vec::new();
+            let mut next_ordinal = Some(0usize);
             for col in graph.scopes.output_columns(scope) {
                 match &graph.nodes[col.node_id] {
                     RawNode::Output { name, .. } => {
@@ -123,6 +126,8 @@ pub(super) fn resolve_scope_mappings(
                             &inherited_transform,
                         );
                         mappings.push(ColumnMapping {
+                            star_position: crate::types::StarPosition::Inferred,
+                            ordinal: next_ordinal,
                             output_name: graph
                                 .output_names
                                 .get(&col.node_id)
@@ -141,8 +146,27 @@ pub(super) fn resolve_scope_mappings(
                             },
                             transform,
                         });
+                        next_ordinal = next_ordinal.map(|ordinal| ordinal + 1);
                     }
-                    RawNode::Star { .. } => expand_star(col.node_id, cx, &mut mappings),
+                    RawNode::Star { .. } => {
+                        let start = mappings.len();
+                        let star_width =
+                            OutputModels::new(graph, cx.catalog, &mut cx.mapping_cache.models)
+                                .star(col.node_id)
+                                .width;
+                        expand_star(col.node_id, cx, &mut mappings);
+                        let base = next_ordinal;
+                        for mapping in &mut mappings[start..] {
+                            mapping.star_position = mapping.star_position.shifted(base);
+                            mapping.ordinal = mapping
+                                .ordinal
+                                .and_then(|ordinal| base.map(|base| base + ordinal));
+                        }
+                        next_ordinal = match (base, star_width) {
+                            (Some(base), Width::Exact(width)) => Some(base + width),
+                            _ => None,
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -171,17 +195,14 @@ pub(super) fn resolve_scope_mappings(
             } else {
                 resolve_scope_mappings(right, cx).iter().cloned().collect()
             };
-            // A wildcard without catalog metadata is a variable-width slot.
-            // Positional alignment at or after it would fabricate an ordinal
-            // and lose the remaining branch columns. Merge only the exact
-            // prefix before the first wildcard, then retain both tails and
-            // expose the Wildcard origin.
             let mut merged = if !recursive
                 && (mappings_have_unknown_shape(&left_mappings)
                     || mappings_have_unknown_shape(&right_mappings)
                     || !unknown_reasons.is_empty())
             {
                 merge_unknown_shape_mappings(left_mappings, right_mappings)
+            } else if !recursive {
+                merge_proven_positions(left_mappings, &right_mappings)
             } else {
                 // The branch resolvers expand stars independently. Preserve the
                 // left branch's names and order, as SQL set operations do.
@@ -192,6 +213,8 @@ pub(super) fn resolve_scope_mappings(
                             merge_branch_sources(&left_mapping, right_mapping);
                         if recursive {
                             merged.push(ColumnMapping {
+                                star_position: crate::types::StarPosition::Inferred,
+                                ordinal: left_mapping.ordinal,
                                 output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources: vec![ColumnOrigin::Recursive {
@@ -201,6 +224,8 @@ pub(super) fn resolve_scope_mappings(
                             });
                         } else {
                             merged.push(ColumnMapping {
+                                star_position: crate::types::StarPosition::Inferred,
+                                ordinal: left_mapping.ordinal,
                                 output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources,
@@ -212,6 +237,8 @@ pub(super) fn resolve_scope_mappings(
                         let transform = left_mapping.transform;
                         if recursive {
                             merged.push(ColumnMapping {
+                                star_position: crate::types::StarPosition::Inferred,
+                                ordinal: left_mapping.ordinal,
                                 output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources: vec![ColumnOrigin::Recursive {
@@ -221,6 +248,8 @@ pub(super) fn resolve_scope_mappings(
                             });
                         } else {
                             merged.push(ColumnMapping {
+                                star_position: crate::types::StarPosition::Inferred,
+                                ordinal: left_mapping.ordinal,
                                 output_name: left_mapping.output_name.clone(),
                                 target: left_mapping.target,
                                 sources,
@@ -246,6 +275,30 @@ pub(super) fn resolve_scope_mappings(
     mappings
 }
 
+/// Align set-operation contributions only where both mappings carry the same
+/// proven ordinal. Display order is not evidence of correspondence.
+fn merge_proven_positions(left: Vec<ColumnMapping>, right: &[ColumnMapping]) -> Vec<ColumnMapping> {
+    left.into_iter()
+        .map(|mut left_mapping| {
+            let aligned = left_mapping.ordinal.and_then(|ordinal| {
+                right
+                    .iter()
+                    .find(|mapping| mapping.ordinal == Some(ordinal))
+            });
+            if let Some(right_mapping) = aligned {
+                let (sources, transform) = merge_branch_sources(&left_mapping, right_mapping);
+                left_mapping.sources = sources;
+                left_mapping.transform = transform;
+            } else if left_mapping.output_name.is_some() {
+                left_mapping
+                    .sources
+                    .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
+            }
+            left_mapping
+        })
+        .collect()
+}
+
 pub(super) fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
     mappings.iter().any(|mapping| mapping.output_name.is_none())
 }
@@ -265,7 +318,17 @@ fn merge_unknown_shape_mappings(
     // two-branch `SELECT * UNION SELECT a, b` still retains the right branch
     // names because there are no prior named slots to preserve.
     if left_barrier == 0 && left.len() > 1 && right_barrier == right.len() {
-        return left;
+        return left
+            .into_iter()
+            .map(|mut mapping| {
+                if mapping.output_name.is_some() && mapping.ordinal.is_none() {
+                    mapping
+                        .sources
+                        .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
+                }
+                mapping
+            })
+            .collect();
     }
 
     let prefix_len = left_barrier.min(right_barrier);
@@ -274,23 +337,44 @@ fn merge_unknown_shape_mappings(
     let mut merged = Vec::with_capacity(left.len() + right.len() - prefix_len);
 
     for (left_mapping, right_mapping) in left.iter().zip(right.iter()).take(prefix_len) {
-        let (sources, transform) = merge_branch_sources(left_mapping, right_mapping);
-        merged.push(ColumnMapping {
-            output_name: left_mapping.output_name.clone(),
-            target: left_mapping.target.clone(),
-            sources,
-            transform,
-        });
+        let mut mapping = left_mapping.clone();
+        if left_mapping.ordinal.is_some() && left_mapping.ordinal == right_mapping.ordinal {
+            let (sources, transform) = merge_branch_sources(left_mapping, right_mapping);
+            mapping.sources = sources;
+            mapping.transform = transform;
+        } else if left_mapping.output_name.is_some() {
+            mapping
+                .sources
+                .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
+        }
+        merged.push(mapping);
     }
-    merged.extend(
-        left.into_iter()
-            .skip(prefix_len)
-            .map(|mapping| append_unknown_sources(mapping, &right_unknown)),
-    );
+    // Catalog evidence can prove an individual position beyond an unknown
+    // interval. Such a slot still aligns with exactly that position, rather
+    // than losing a guaranteed branch contribution at the prefix barrier.
+    let proven_left: Vec<_> = left.iter().filter_map(|mapping| mapping.ordinal).collect();
+    merged.extend(left.into_iter().skip(prefix_len).map(|mut mapping| {
+        if let Some(other) = mapping
+            .ordinal
+            .and_then(|ordinal| right.iter().find(|other| other.ordinal == Some(ordinal)))
+        {
+            let (sources, transform) = merge_branch_sources(&mapping, other);
+            mapping.sources = sources;
+            mapping.transform = transform;
+            mapping
+        } else {
+            append_unknown_sources(mapping, &right_unknown)
+        }
+    }));
     merged.extend(
         right
             .into_iter()
             .skip(prefix_len)
+            .filter(|mapping| {
+                !mapping
+                    .ordinal
+                    .is_some_and(|ordinal| proven_left.contains(&ordinal))
+            })
             .map(|mapping| append_unknown_sources(mapping, &left_unknown)),
     );
     merged
@@ -356,6 +440,9 @@ fn append_unknown_sources(
     mut mapping: ColumnMapping,
     unknown_sources: &[ColumnOrigin],
 ) -> ColumnMapping {
+    if !unknown_sources.is_empty() {
+        mapping.ordinal = None;
+    }
     if mapping.sources.is_empty() && !unknown_sources.is_empty() {
         mapping.sources.push(ColumnOrigin::SourceFree {
             column: mapping.target.column.clone(),
@@ -415,6 +502,8 @@ mod tests {
                     origin
                 };
                 let mappings = [ColumnMapping {
+                    star_position: crate::types::StarPosition::Inferred,
+                    ordinal: None,
                     output_name: if quoted {
                         Some(crate::OutputName::Explicit(name.clone()))
                     } else {

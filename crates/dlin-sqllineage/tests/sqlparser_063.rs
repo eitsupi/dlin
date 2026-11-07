@@ -134,13 +134,19 @@ impl Catalog for AbcCatalog {
         };
         let columns = valid
             .iter()
-            .map(|name| CatalogColumn {
+            .enumerate()
+            .map(|(ordinal, name)| CatalogColumn {
+                ordinal: Some(ordinal),
                 name: Ident::unquoted(*name),
                 data_type: None,
                 fields: None,
             })
             .collect();
         Some(CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: Cow::Owned(columns),
         })
@@ -605,11 +611,17 @@ struct SourceCatalog;
 impl Catalog for SourceCatalog {
     fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
         (relation.name.value == "source").then(|| CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: Cow::Owned(
                 ["id", "val"]
                     .into_iter()
-                    .map(|name| CatalogColumn {
+                    .enumerate()
+                    .map(|(ordinal, name)| CatalogColumn {
+                        ordinal: Some(ordinal),
                         name: Ident::unquoted(name),
                         data_type: None,
                         fields: None,

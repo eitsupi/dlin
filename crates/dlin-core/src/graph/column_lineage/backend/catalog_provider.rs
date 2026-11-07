@@ -30,12 +30,21 @@ impl sqllineage::Catalog for CatalogAdapter<'_> {
             .snapshot
             .unambiguous_columns_for_relation(&table.relation)
             .filter(|columns| !columns.is_empty())?;
+        // TODO: derive coverage, order, ordinals and evidence references from the
+        // schema evidence. YAML-only column lists use AssumedByYamlPolicy and
+        // must not claim a proven order; these fixed claims are provisional.
         Some(sqllineage::CatalogEntry {
+            coverage: sqllineage::SchemaCoverage::Exhaustive,
+            order: sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation_from_ref(&table.relation),
             columns: Cow::Owned(
                 columns
                     .iter()
-                    .map(|name| sqllineage::CatalogColumn {
+                    .enumerate()
+                    .map(|(ordinal, name)| sqllineage::CatalogColumn {
+                        ordinal: Some(ordinal),
                         name: sqllineage::Ident::unquoted(name.clone()),
                         data_type: None,
                         fields: None,
@@ -178,7 +187,14 @@ impl sqllineage::Catalog for SqllineageCatalogProvider {
     fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
         let adapter = CatalogAdapter::new(&self.snapshot, self.dialect);
         let entry = <CatalogAdapter<'_> as sqllineage::Catalog>::lookup(&adapter, relation)?;
+        // TODO: derive coverage, order, ordinals and evidence references from the
+        // schema evidence. YAML-only column lists use AssumedByYamlPolicy and
+        // must not claim a proven order; these fixed claims are provisional.
         Some(sqllineage::CatalogEntry {
+            coverage: sqllineage::SchemaCoverage::Exhaustive,
+            order: sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: entry.relation,
             columns: Cow::Owned(entry.columns.into_owned()),
         })

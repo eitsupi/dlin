@@ -239,6 +239,15 @@ pub struct SourceColumn {
 /// A contribution whose source cannot be determined completely.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Unresolved {
+    /// Positional correspondence cannot be established from the available order.
+    AlignmentUnknown,
+    /// Additional schema information can change the contributing columns.
+    SchemaDependent {
+        /// The schema-dependent operation.
+        what: SchemaDependencyKind,
+        /// Relations whose schemas determine the operation.
+        relations: Vec<Relation>,
+    },
     /// An unexpanded star may contribute a column from this relation.
     BehindStar {
         /// Relation selected by the star.
@@ -276,6 +285,13 @@ pub enum Unresolved {
         /// Short stable description of the unsupported construct.
         what: &'static str,
     },
+}
+
+/// Schema information needed to determine a dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum SchemaDependencyKind {
+    /// Additional columns can change the keys and values of a NATURAL join.
+    NaturalJoinColumns,
 }
 
 /// Kind of candidate source for an ambiguous column.

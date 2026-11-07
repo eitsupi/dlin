@@ -128,11 +128,17 @@ pub fn output_names(output: &Output) -> Vec<Option<&str>> {
 #[allow(dead_code)]
 pub fn catalog_entry<'a>(relation: &Relation, columns: &'a [&str]) -> CatalogEntry<'a> {
     CatalogEntry {
+        coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+        order: dlin_sqllineage::SchemaOrder::Proven,
+        unknown_segments: std::borrow::Cow::Borrowed(&[]),
+        evidence: std::borrow::Cow::Borrowed(&[]),
         relation: relation.clone(),
         columns: Cow::Owned(
             columns
                 .iter()
-                .map(|column| CatalogColumn {
+                .enumerate()
+                .map(|(ordinal, column)| CatalogColumn {
+                    ordinal: Some(ordinal),
                     name: Ident::unquoted(*column),
                     data_type: None,
                     fields: None,

@@ -336,7 +336,9 @@ impl FixtureEntry {
             canonical,
             columns: columns
                 .into_iter()
-                .map(|name| CatalogColumn {
+                .enumerate()
+                .map(|(ordinal, name)| CatalogColumn {
+                    ordinal: Some(ordinal),
                     name,
                     data_type: None,
                     fields: None,
@@ -365,6 +367,10 @@ impl Catalog for FixtureCatalog {
             .iter()
             .find(|entry| &entry.query == relation)
             .map(|entry| CatalogEntry {
+                coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+                order: dlin_sqllineage::SchemaOrder::Proven,
+                unknown_segments: std::borrow::Cow::Borrowed(&[]),
+                evidence: std::borrow::Cow::Borrowed(&[]),
                 relation: entry.canonical.clone(),
                 columns: Cow::Borrowed(&entry.columns),
             })

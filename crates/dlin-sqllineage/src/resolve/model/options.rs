@@ -38,14 +38,63 @@ pub(super) fn apply_options(
             ilike: options.ilike.clone(),
         })
     });
+    let removed: Vec<_> = elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Column(slot) if !admits(&slot.name, &slot.ranges) => Some(slot.ordinal),
+            _ => None,
+        })
+        .collect();
+    let unknown_positions: Vec<_> = elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| match element {
+            OutputElement::Unknown(segment) if filter.is_some() => Some((index, segment.position)),
+            _ => None,
+        })
+        .collect();
     let mut elements: Vec<OutputElement> = elements
         .into_iter()
-        .filter_map(|element| match element {
-            OutputElement::Column(slot) => {
-                admits(&slot.name, &slot.ranges).then_some(OutputElement::Column(slot))
+        .enumerate()
+        .filter_map(|(index, element)| match element {
+            OutputElement::Column(mut slot) => {
+                if admits(&slot.name, &slot.ranges) {
+                    slot.ordinal = slot.ordinal.and_then(|ordinal| {
+                        // Removal changes a position only when the removed
+                        // columns' positions relative to this slot are known.
+                        let uncertain_removed = ordinal > 0 && removed.iter().any(Option::is_none);
+                        let uncertain_interval =
+                            unknown_positions
+                                .iter()
+                                .any(|(at, position)| match position {
+                                    crate::types::StarPosition::Inferred => *at < index,
+                                    crate::types::StarPosition::Unproven => ordinal > 0,
+                                    crate::types::StarPosition::After(after) => {
+                                        ordinal > after.saturating_add(1)
+                                    }
+                                });
+                        if uncertain_removed || uncertain_interval {
+                            None
+                        } else {
+                            let before = removed
+                                .iter()
+                                .filter(|position| {
+                                    position.is_some_and(|position| position < ordinal)
+                                })
+                                .count();
+                            ordinal.checked_sub(before)
+                        }
+                    });
+                    Some(OutputElement::Column(slot))
+                } else {
+                    None
+                }
             }
             OutputElement::Unknown(mut segment) => {
                 if let Some(filter) = &filter {
+                    if !matches!(segment.position, crate::types::StarPosition::Inferred) {
+                        segment.position = crate::types::StarPosition::Unproven;
+                    }
                     segment
                         .domain
                         .filters
@@ -87,6 +136,7 @@ pub(super) fn apply_options(
         elements.push(OutputElement::Column(ColumnSlot {
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
+            ordinal: None,
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value: ValueId::Expr(replacement.node_id),
@@ -131,6 +181,7 @@ pub(super) fn apply_options(
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
+            ordinal: None,
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value,
