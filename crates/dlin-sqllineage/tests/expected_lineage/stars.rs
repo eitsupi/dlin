@@ -841,6 +841,7 @@ pub fn cases() -> Vec<Case> {
         );
     }
     cases.extend(partial_catalog_modifier_cases());
+    cases.extend(modifier_over_cte_star_cases());
     cases.extend(unknown_using_key_cases());
     cases.extend(set_operation_tail_cases());
     cases.extend(using_key_position_and_ambiguity_cases());
@@ -989,6 +990,44 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
         .catalog(a_columns)
         .unresolved_stars(true),
     ]
+}
+
+/// REPLACE and RENAME over a star that hides behind a CTE of unknown columns.
+/// The column they create belongs to the derived table that holds the star, so
+/// it is that table's alone unless a joined relation may publish the name: `e`
+/// is described without it when a catalog is present and undescribed otherwise.
+/// The sweeps read each name directly and through star wrappers.
+fn modifier_over_cte_star_cases() -> Vec<Case> {
+    let with = "WITH c AS (SELECT * FROM t) ";
+    let mut cases = Vec::new();
+    for (dialect_name, dialect, modifier, expected) in [
+        (
+            "replace",
+            Dialect::DuckDb,
+            "REPLACE (1 AS kept)",
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "rename",
+            Dialect::Snowflake,
+            "RENAME (id AS kept)",
+            partial_col(0, u("kept"), vec![], vec![behind("t", "id")]),
+        ),
+    ] {
+        for (suffix, join) in [("", ""), ("_beside_a_relation_without_it", " CROSS JOIN e")] {
+            cases.push(
+                Case::new(
+                    &format!("{dialect_name}_over_a_cte_star{suffix}"),
+                    &format!("{with}SELECT kept FROM (SELECT * {modifier} FROM c) AS d{join}"),
+                    dialect,
+                    vec![expected.clone()],
+                )
+                .catalog(vec![(relation("e"), vec![u("other")])])
+                .unresolved_stars(true),
+            );
+        }
+    }
+    cases
 }
 
 /// The left operand of the set operation is `t1.*` with unknown columns and

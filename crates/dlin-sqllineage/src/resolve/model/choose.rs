@@ -16,7 +16,7 @@
 //! inside a CTE therefore survives any number of `SELECT *` wrappers.
 
 use super::input::Invalidity;
-use super::{OutputElement, OutputModel};
+use super::{ColumnSlot, OutputElement, OutputModel, UnknownSegment};
 use crate::{Candidate, Ident};
 
 /// The relations that may own a name that has no single owner.
@@ -32,14 +32,19 @@ pub(in crate::resolve) struct Ambiguity {
 }
 
 /// What a name denotes among the elements of one model.
+///
+/// The kind of the answer is the kind of the element it points at: `Column`
+/// carries a listed column and `Possible` an unknown segment, whatever a model
+/// the element was forwarded from found out about the name. Only
+/// [`OutputModel::choose`] builds them, from the element itself.
 #[derive(Debug, Clone)]
-pub(in crate::resolve) enum Choice {
+pub(in crate::resolve) enum Choice<'m> {
     /// Nothing that can be listed publishes the name.
     Absent,
-    /// One enumerated column: the index of its element.
-    Column(usize),
-    /// One provider that cannot list its columns: the index of its element.
-    Possible(usize),
+    /// One enumerated column: the index of its element and the column.
+    Column(usize, &'m ColumnSlot),
+    /// One provider that cannot list its columns: its segment.
+    Possible(&'m UnknownSegment),
     Ambiguous(Ambiguity),
 }
 
@@ -48,8 +53,6 @@ pub(in crate::resolve) enum Choice {
 struct Unit {
     /// Matching elements, in output order.
     elements: Vec<usize>,
-    /// Whether the provider lists the column, as opposed to possibly hiding it.
-    listed: bool,
     candidates: Vec<Candidate>,
     /// Whether a model already found the name ambiguous inside the relation.
     ambiguous: bool,
@@ -57,7 +60,7 @@ struct Unit {
 
 impl OutputModel {
     /// Decide what `name` denotes.
-    pub(in crate::resolve) fn choose(&self, name: &Ident) -> Choice {
+    pub(in crate::resolve) fn choose(&self, name: &Ident) -> Choice<'_> {
         if let Some(ambiguity) = self.invalid_ambiguity(name) {
             return Choice::Ambiguous(ambiguity);
         }
@@ -77,9 +80,9 @@ impl OutputModel {
         let mut units: Vec<Unit> = Vec::new();
         let mut collapsed: Vec<(usize, usize)> = Vec::new();
         for index in indexes {
-            let (listed, ranges, merged) = match &self.elements[index] {
-                OutputElement::Column(slot) => (true, &slot.ranges, &slot.candidate_ranges),
-                OutputElement::Unknown(segment) => (false, &segment.ranges, &segment.ranges),
+            let (ranges, merged) = match &self.elements[index] {
+                OutputElement::Column(slot) => (&slot.ranges, &slot.candidate_ranges),
+                OutputElement::Unknown(segment) => (&segment.ranges, &segment.ranges),
                 OutputElement::Tail(_) => continue, // never matched
             };
             // The elements of a CTE or derived table are weighed by the model
@@ -92,25 +95,20 @@ impl OutputModel {
                     units[at].elements.push(index);
                     continue;
                 }
-                let candidates: Vec<Candidate> = range.candidate().into_iter().collect();
+                // The model the elements came from only says whether the
+                // range provides the name at all and whether it is ambiguous
+                // inside; what the reader's own element is, a listed column or
+                // a segment, is the reader's.
                 let unit = match child.choose(name) {
                     Choice::Absent => None,
                     Choice::Ambiguous(inner) => Some(Unit {
                         elements: vec![index],
-                        listed,
                         candidates: inner.candidates,
                         ambiguous: true,
                     }),
-                    Choice::Column(_) => Some(Unit {
+                    Choice::Column(..) | Choice::Possible(..) => Some(Unit {
                         elements: vec![index],
-                        listed: true,
-                        candidates,
-                        ambiguous: false,
-                    }),
-                    Choice::Possible(_) => Some(Unit {
-                        elements: vec![index],
-                        listed: false,
-                        candidates,
+                        candidates: range.candidate().into_iter().collect(),
                         ambiguous: false,
                     }),
                 };
@@ -143,7 +141,6 @@ impl OutputModel {
             }
             units.push(Unit {
                 elements: vec![index],
-                listed,
                 candidates,
                 ambiguous,
             });
@@ -152,19 +149,32 @@ impl OutputModel {
         match units.as_slice() {
             [] => Choice::Absent,
             [unit] if !unit.ambiguous => {
-                if unit.listed && unit.elements.len() == 1 {
-                    Choice::Column(unit.elements[0])
-                } else if unit.listed {
-                    self.ambiguous(&units)
-                } else {
-                    Choice::Possible(unit.elements[0])
-                }
+                self.single(unit).unwrap_or_else(|| self.ambiguous(&units))
             }
             _ => self.ambiguous(&units),
         }
     }
 
-    fn ambiguous(&self, units: &[Unit]) -> Choice {
+    /// The answer when one provider is left, taken from its elements: a lone
+    /// listed column, or segments that only may publish the name. `None` when
+    /// the provider has several columns or mixes columns with segments, which
+    /// is no single answer.
+    fn single(&self, unit: &Unit) -> Option<Choice<'_>> {
+        let (&first, rest) = unit.elements.split_first()?;
+        match &self.elements[first] {
+            OutputElement::Column(slot) if rest.is_empty() => Some(Choice::Column(first, slot)),
+            OutputElement::Unknown(segment)
+                if rest
+                    .iter()
+                    .all(|&index| matches!(self.elements[index], OutputElement::Unknown(_))) =>
+            {
+                Some(Choice::Possible(segment))
+            }
+            _ => None,
+        }
+    }
+
+    fn ambiguous(&self, units: &[Unit]) -> Choice<'_> {
         let mut candidates = Vec::new();
         let mut listed = Vec::new();
         for unit in units {

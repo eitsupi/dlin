@@ -82,14 +82,28 @@ fn take_key(
 ) -> KeySide {
     match at {
         KeyAt::Slot(index) => {
-            let OutputElement::Column(slot) = elements.remove(index) else {
-                unreachable!("a key slot is a column");
-            };
-            KeySide {
-                value: slot.value,
-                candidate_ranges: slot.candidate_ranges,
-                ranges: slot.ranges,
-                names: Some((slot.name, slot.output_name)),
+            match elements.remove(index) {
+                OutputElement::Column(slot) => KeySide {
+                    value: slot.value,
+                    candidate_ranges: slot.candidate_ranges,
+                    ranges: slot.ranges,
+                    names: Some((slot.name, slot.output_name)),
+                },
+                // `find_key` only points at columns of this very list; if it
+                // ever pointed elsewhere the key would come from nowhere known.
+                other => {
+                    debug_assert!(false, "a key slot is a column");
+                    elements.insert(index, other);
+                    KeySide {
+                        value: ValueId::Uncertain {
+                            column: key.clone(),
+                            candidates: Rc::from([]),
+                        },
+                        ranges: Rc::from([]),
+                        candidate_ranges: Rc::from([]),
+                        names: None,
+                    }
+                }
             }
         }
         // The key is guaranteed to exist on every joined relation, so a
@@ -142,16 +156,19 @@ fn take_key(
                 distinct.insert(range.index);
                 distinct.len() > 1
             });
+            // An unlisted key has a publisher, so there is a value to merge;
+            // without one the key comes from nowhere known.
+            let uncertain = || ValueId::Uncertain {
+                column: key.clone(),
+                candidates: ranges.clone().into(),
+            };
             let value = if several {
-                ValueId::Uncertain {
-                    column: key.clone(),
-                    candidates: ranges.clone().into(),
-                }
+                uncertain()
             } else {
                 values
                     .into_iter()
                     .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-                    .expect("an unlisted key has a publisher")
+                    .unwrap_or_else(uncertain)
             };
             KeySide {
                 value,

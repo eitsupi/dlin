@@ -195,3 +195,104 @@ fn a_listed_column_and_an_unknown_star_both_publish_the_name() {
         );
     }
 }
+
+/// The columns of `from` read as `kept`, directly and through one and two
+/// `SELECT *` wrappers.
+fn kept_readings(with: &str, from: &str) -> [String; 3] {
+    [
+        format!("{with}SELECT kept FROM {from}"),
+        format!("{with}SELECT kept FROM (SELECT * FROM {from}) w1"),
+        format!("{with}SELECT kept FROM (SELECT * FROM (SELECT * FROM {from}) w1) w2"),
+    ]
+}
+
+fn lineage_in(
+    sql: &str,
+    dialect: Dialect,
+    catalog: &'static [(&'static str, &'static [&'static str])],
+) -> Lineage {
+    let catalog = KnownTables(catalog);
+    Analyzer::new(dialect)
+        .with_catalog(&catalog)
+        .analyze(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+        .into_single()
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+        .output
+        .columns
+        .remove(0)
+        .lineage
+}
+
+/// A column that REPLACE or RENAME creates over a star of unknown columns is a
+/// column of the derived table that holds the star. It is the only provider of
+/// its name unless another relation of the clause may publish it too: a
+/// relation the catalog describes without the name does not, an undescribed one
+/// does. The star hides further, behind a CTE, and the answer is the same.
+#[test]
+fn a_replaced_or_renamed_column_over_a_cte_star_is_a_provider_of_its_own() {
+    const E_LACKS_IT: &[(&str, &[&str])] = &[("e", &["other"])];
+    const NO_CATALOG: &[(&str, &[&str])] = &[];
+    let with = "WITH c AS (SELECT * FROM t) ";
+    for (dialect, modifier, expected) in [
+        (
+            Dialect::DuckDb,
+            "REPLACE (1 AS kept)",
+            Lineage::Complete(vec![]),
+        ),
+        (
+            Dialect::Snowflake,
+            "RENAME (id AS kept)",
+            Lineage::Partial {
+                known: vec![],
+                unresolved: vec![Unresolved::NamedBehindStar {
+                    relation: relation("t"),
+                    column: Ident::unquoted("id"),
+                }],
+            },
+        ),
+    ] {
+        let derived = format!("(SELECT * {modifier} FROM c) AS d");
+        // Alone, and beside a relation known not to have the name.
+        for (from, catalog) in [
+            (derived.clone(), NO_CATALOG),
+            (format!("{derived} CROSS JOIN e"), E_LACKS_IT),
+        ] {
+            for sql in kept_readings(with, &from) {
+                assert_eq!(lineage_in(&sql, dialect, catalog), expected, "{sql}");
+            }
+        }
+        // Beside a relation that may have the name too.
+        for sql in kept_readings(with, &format!("{derived} CROSS JOIN e")) {
+            let Lineage::Partial { known, unresolved } = lineage_in(&sql, dialect, NO_CATALOG)
+            else {
+                panic!("{sql}: expected an ambiguity");
+            };
+            assert!(known.is_empty(), "{sql}");
+            let [Unresolved::Ambiguous { candidates, .. }] = unresolved.as_slice() else {
+                panic!("{sql}: expected one ambiguity, got {unresolved:?}");
+            };
+            assert_eq!(candidates.len(), 2, "{sql}: {candidates:?}");
+            assert!(candidates.contains(&Candidate::Derived(Some(Ident::unquoted("d")))));
+            assert!(candidates.contains(&physical("e")));
+        }
+    }
+}
+
+/// Without a modifier the star over unknown columns is still no single
+/// provider when another unknown relation competes.
+#[test]
+fn a_plain_cte_star_beside_an_unknown_relation_stays_ambiguous() {
+    for sql in kept_readings(
+        "WITH c AS (SELECT * FROM t) ",
+        "(SELECT * FROM c) AS d CROSS JOIN e",
+    ) {
+        assert!(
+            matches!(lineage(&sql, &[]), Lineage::Partial { known, unresolved }
+                if known.is_empty()
+                    && matches!(&unresolved[..], [Unresolved::Ambiguous { candidates, .. }]
+                        if candidates.len() == 2)),
+            "{sql}"
+        );
+    }
+}

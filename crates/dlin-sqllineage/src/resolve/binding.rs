@@ -491,12 +491,11 @@ fn resolve_through_scope(
             Some(ColumnOrigin::Recursive {
                 base_sources: origins,
             })
-        } else if origins.len() == 1 {
-            Some(origins.into_iter().next().unwrap())
         } else {
-            // Multi-source CTE output (e.g., UNION inside CTE). Returns the first
-            // origin here; the full list is collected transitively by
-            // collect_output_sources when building the final ColumnMapping.
+            // A single origin, or a multi-source CTE output (e.g., UNION inside
+            // CTE): the first origin is returned here, and the full list is
+            // collected transitively by collect_output_sources when building
+            // the final ColumnMapping.
             origins.into_iter().next()
         }
     } else {

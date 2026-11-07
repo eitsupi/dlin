@@ -180,20 +180,14 @@ impl InputModel {
         let elements = &self.model.elements;
         match self.model.choose(name) {
             Choice::Absent => InputLookup::Absent,
-            Choice::Column(index) => match &elements[index] {
-                OutputElement::Column(slot) => InputLookup::Column {
-                    value: slot.value.clone(),
-                    contributing: slot.candidate_ranges.clone(),
-                },
-                _ => unreachable!("a chosen column is listed"),
+            Choice::Column(_, slot) => InputLookup::Column {
+                value: slot.value.clone(),
+                contributing: slot.candidate_ranges.clone(),
             },
-            Choice::Possible(index) => match &elements[index] {
-                OutputElement::Unknown(segment) => segment
-                    .ranges
-                    .first()
-                    .map_or(InputLookup::Absent, InputLookup::single),
-                _ => unreachable!("a possible provider is an unknown segment"),
-            },
+            Choice::Possible(segment) => segment
+                .ranges
+                .first()
+                .map_or(InputLookup::Absent, InputLookup::single),
             Choice::Ambiguous(ambiguity) => InputLookup::Ambiguous {
                 typed: !ambiguity.refinable,
                 values: ambiguity

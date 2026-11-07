@@ -119,10 +119,13 @@ pub(super) fn apply_options(
                 column: old.clone(),
             });
         }
-        let value = values
+        // A publisher was found above, so there is a value to merge.
+        let Some(value) = values
             .into_iter()
             .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-            .expect("a renamed column has a publisher");
+        else {
+            continue;
+        };
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
