@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use super::super::backend::{BackendId, backend_for_tests};
 use super::super::schema;
 use super::super::{
     ColumnLineageCache, ColumnSource, DlinDialect, TransformationType, compute_column_impact,
@@ -104,11 +103,9 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
         ]),
         ..Default::default()
     };
-    let backend = backend_for_tests(BackendId::Sqllineage);
     let root = manifest.nodes.get(root_id).unwrap();
     let catalog =
-        schema::build_schema_from_manifest(&manifest, root, DlinDialect::Generic, &backend)
-            .unwrap();
+        schema::build_schema_from_manifest(&manifest, root, DlinDialect::Generic).unwrap();
 
     assert_eq!(
         catalog.table_columns("warehouse.analytics.physical_alias"),
