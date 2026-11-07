@@ -365,7 +365,10 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
         "INSERT INTO target (a) ",
         "INSERT INTO target (a, b) ",
     ] {
-        for branch in ["TABLE other_source", "VALUES (1), (2, 3)"] {
+        for branch in ["TABLE other_source", "VALUES (1)", "VALUES (1), (2, 3)"] {
+            if prefix.contains("(a") && branch == "VALUES (1)" {
+                continue; // A uniform target-body VALUES branch is modeled.
+            }
             let sql = format!("{prefix}SELECT x FROM s UNION ALL {branch}");
             let result = one(&sql);
             assert!(
@@ -373,6 +376,12 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
                 "{sql}: {:?}",
                 result.diagnostics
             );
+            assert_eq!(result.output.shape, Shape::Closed, "{sql}");
+            let mut expected_read = vec![source("s", "x").relation];
+            if branch.starts_with("TABLE") {
+                expected_read.insert(0, source("other_source", "x").relation);
+            }
+            assert_eq!(result.read, expected_read, "{sql}");
             assert_eq!(result.output.columns.len(), 1, "{sql}");
             assert_eq!(
                 result.output.columns[0].name,
@@ -381,7 +390,16 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
             );
             assert_eq!(
                 result.output.columns[0].lineage,
-                Lineage::Complete(vec![source("s", "x")]),
+                Lineage::Partial {
+                    known: vec![source("s", "x")],
+                    unresolved: vec![Unresolved::Unsupported {
+                        what: if branch.starts_with("TABLE") {
+                            "TABLE source"
+                        } else {
+                            "VALUES source"
+                        },
+                    }],
+                },
                 "{sql}"
             );
         }
@@ -430,5 +448,161 @@ fn nested_unknown_cte_does_not_hide_a_known_projection_width_mismatch() {
             },
             location: None
         }]
+    );
+}
+
+#[test]
+fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
+    for sql in [
+        "WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
+        "SELECT x FROM s UNION ALL (SELECT x FROM s UNION ALL TABLE public.other_source)",
+        "SELECT x FROM s UNION ALL (WITH c AS (SELECT 1) SELECT x FROM s UNION ALL VALUES (1))",
+        "SELECT q.x FROM (SELECT x FROM s UNION ALL TABLE public.other_source) q",
+        "WITH q AS (SELECT x FROM s UNION ALL TABLE public.other_source) SELECT x FROM q",
+        "WITH q AS (TABLE public.other_source UNION ALL SELECT x FROM s) SELECT x FROM q",
+        "SELECT x, y FROM s UNION ALL TABLE public.other_source",
+    ] {
+        let result = one(sql);
+        assert!(
+            result.diagnostics.is_empty(),
+            "{sql}: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.output.shape, Shape::Closed, "{sql}");
+        let what = if sql.contains("TABLE") {
+            "TABLE source"
+        } else {
+            "VALUES source"
+        };
+        for (index, column) in result.output.columns.iter().enumerate() {
+            assert_eq!(
+                column.lineage,
+                Lineage::Partial {
+                    known: vec![source("s", if index == 0 { "x" } else { "y" })],
+                    unresolved: vec![Unresolved::Unsupported { what }],
+                },
+                "{sql}"
+            );
+        }
+        assert!(!result.output.columns.is_empty(), "{sql}");
+    }
+}
+
+#[test]
+fn table_source_registers_read_without_fabricating_columns() {
+    let result = one("INSERT INTO target TABLE public.other_source");
+    assert_eq!(
+        result.read,
+        vec![Relation {
+            catalog: None,
+            schema: Some(Ident::unquoted("public")),
+            name: Ident::unquoted("other_source"),
+        }]
+    );
+    assert!(result.output.columns.is_empty());
+    assert_eq!(result.output.shape, Shape::Closed);
+    assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn nested_unknown_branch_kinds_are_retained_without_tainting_unrelated_values() {
+    let result = one("SELECT x FROM s UNION ALL (TABLE public.t UNION ALL VALUES (1))");
+    assert_eq!(
+        result.output.columns[0].lineage,
+        Lineage::Partial {
+            known: vec![source("s", "x")],
+            unresolved: vec![
+                Unresolved::Unsupported {
+                    what: "TABLE source"
+                },
+                Unresolved::Unsupported {
+                    what: "VALUES source"
+                },
+            ],
+        }
+    );
+    let result = one("WITH q AS (SELECT x FROM s UNION ALL TABLE public.t) SELECT 1 FROM q");
+    assert_eq!(result.output.columns[0].lineage, Lineage::Complete(vec![]));
+}
+
+#[test]
+fn table_cte_source_does_not_fabricate_a_physical_read() {
+    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE c");
+    assert_eq!(result.read, vec![source("s", "x").relation]);
+    assert_eq!(
+        result.output.columns[0].lineage,
+        Lineage::Partial {
+            known: vec![source("s", "x")],
+            unresolved: vec![Unresolved::Unsupported {
+                what: "TABLE source"
+            }],
+        }
+    );
+}
+
+#[test]
+fn unknown_left_branch_retains_known_right_sources() {
+    for branch in ["TABLE public.t", "VALUES (1), (2, 3)"] {
+        for prefix in ["INSERT INTO target ", "INSERT INTO target (a) "] {
+            let result = one(&format!("{prefix}{branch} UNION ALL SELECT x FROM s"));
+            assert!(result.diagnostics.is_empty());
+            assert_eq!(result.output.shape, Shape::Closed);
+            assert_eq!(result.output.columns.len(), 1);
+            assert_eq!(
+                result.output.columns[0].lineage,
+                Lineage::Partial {
+                    known: vec![source("s", "x")],
+                    unresolved: vec![Unresolved::Unsupported {
+                        what: if branch.starts_with("TABLE") {
+                            "TABLE source"
+                        } else {
+                            "VALUES source"
+                        },
+                    }],
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_branch_marker_survives_unknown_star_merges() {
+    for sql in [
+        "SELECT * FROM u UNION ALL (SELECT x FROM s UNION ALL TABLE public.t)",
+        "(SELECT x FROM s UNION ALL TABLE public.t) UNION ALL SELECT * FROM u",
+    ] {
+        let result = one(sql);
+        let Shape::Open { unexpanded } = &result.output.shape else {
+            panic!("expected the existing unexpanded star: {sql}");
+        };
+        for lineage in result
+            .output
+            .columns
+            .iter()
+            .map(|column| &column.lineage)
+            .chain(unexpanded.iter().map(|star| &star.lineage))
+        {
+            assert!(
+                matches!(lineage, Lineage::Partial { unresolved, .. }
+                if unresolved.contains(&Unresolved::Unsupported { what: "TABLE source" })),
+                "{sql}: {lineage:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn qualified_table_source_is_not_hidden_by_a_same_named_cte() {
+    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE public.c");
+    assert_eq!(
+        result.read,
+        vec![
+            source("s", "x").relation,
+            Relation {
+                catalog: None,
+                schema: Some(Ident::unquoted("public")),
+                name: Ident::unquoted("c")
+            },
+        ]
     );
 }

@@ -9,6 +9,7 @@ use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::star::expand_star;
 
 use crate::Ident;
+use crate::Unresolved;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
@@ -236,6 +237,7 @@ pub(super) fn resolve_scope_mappings(
             right,
             recursive,
         } => {
+            let unknown_reasons = graph.scopes.unknown_output_reasons(scope);
             let left_mappings =
                 resolve_scope_mappings(left, graph, resolved, incoming, catalog, mapping_cache)
                     .iter()
@@ -254,9 +256,10 @@ pub(super) fn resolve_scope_mappings(
             // and lose the remaining branch columns. Merge only the exact
             // prefix before the first wildcard, then retain both tails and
             // expose the Wildcard origin.
-            if !recursive
+            let mut merged = if !recursive
                 && (mappings_have_unknown_shape(&left_mappings)
-                    || mappings_have_unknown_shape(&right_mappings))
+                    || mappings_have_unknown_shape(&right_mappings)
+                    || !unknown_reasons.is_empty())
             {
                 merge_unknown_shape_mappings(left_mappings, right_mappings)
             } else {
@@ -307,7 +310,14 @@ pub(super) fn resolve_scope_mappings(
                     }
                 }
                 merged
+            };
+            // Attach every unknown-width source to each mapping produced by
+            // this set operation, including mappings retained by an early
+            // unknown-star merge and recursive set operations.
+            for mapping in &mut merged {
+                append_unsupported_reasons(&mut mapping.sources, &unknown_reasons);
             }
+            merged
         }
     };
     let mappings: Arc<[ColumnMapping]> = mappings.into();
@@ -365,6 +375,16 @@ fn merge_unknown_shape_mappings(
             .map(|mapping| append_unknown_sources(mapping, &left_unknown)),
     );
     merged
+}
+
+fn append_unsupported_reasons(sources: &mut Vec<ColumnOrigin>, reasons: &[&'static str]) {
+    for &what in reasons {
+        if !sources.iter().any(|source| {
+            matches!(source, ColumnOrigin::Unresolved(Unresolved::Unsupported { what: existing }) if *existing == what)
+        }) {
+            sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
+        }
+    }
 }
 
 /// Merge two positional branch mappings while retaining the fact that one

@@ -114,10 +114,37 @@ impl LineageBuilder {
                 self.visit_query_with_target(q, target_values);
             }
             SetExpr::Values(values) if target_values => self.visit_target_values(values),
-            SetExpr::Values(_) | SetExpr::Table(_) => {
+            SetExpr::Values(_) => {
                 self.graph
                     .scopes
-                    .mark_unknown_output_width(self.current_scope);
+                    .mark_unknown_output_width(self.current_scope, "VALUES source");
+            }
+            SetExpr::Table(table) => {
+                if let Some(table_name) = &table.table_name {
+                    let table_ref = crate::types::TableRef {
+                        catalog: None,
+                        schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
+                        table: crate::Ident::unquoted(table_name.as_str()),
+                    };
+                    let recursive_self = table_ref.schema.is_none()
+                        && self.recursive_cte_name.as_ref().is_some_and(|name| {
+                            name.column_key(self.dialect)
+                                == table_ref.table.column_key(self.dialect)
+                        });
+                    let cte_ref = table_ref.schema.is_none()
+                        && matches!(
+                            self.graph
+                                .scopes
+                                .lookup(self.current_scope, &table_ref.table),
+                            Some(Binding::Cte(_) | Binding::DerivedTable(_))
+                        );
+                    if !recursive_self && !cte_ref {
+                        self.graph.tables.inputs.push(table_ref);
+                    }
+                }
+                self.graph
+                    .scopes
+                    .mark_unknown_output_width(self.current_scope, "TABLE source");
             }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
@@ -136,7 +163,7 @@ impl LineageBuilder {
         if values.rows.iter().any(|row| row.len() != first.len()) {
             self.graph
                 .scopes
-                .mark_unknown_output_width(self.current_scope);
+                .mark_unknown_output_width(self.current_scope, "VALUES source");
             return;
         }
         for index in 0..first.len() {
