@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use super::{direct_using_inputs, identifiers, scopes_joins, stars, support::Case, target_columns};
 
 // Identical observations share one record, but every probe key is explicit.
-// These are exact observations, not conditions for accepting a mismatch.
+// The one allowed difference below is the established Complete versus
+// Partial(NamedBehindStar) certainty marker for exactly the same single source.
 #[derive(serde::Deserialize)]
 struct RecordedDifference {
     cases: Vec<String>,
@@ -89,6 +90,57 @@ fn invalid(observation: &Value) -> bool {
         || observation["lineages"]
             .as_array()
             .is_none_or(|lineages| lineages.len() != 1)
+}
+
+fn certainty_only_pair(direct: &Value, star: &Value) -> bool {
+    if !direct.get("errors").is_some_and(Value::is_array)
+        || !star.get("errors").is_some_and(Value::is_array)
+        || !direct["errors"].as_array().is_some_and(Vec::is_empty)
+        || !star["errors"].as_array().is_some_and(Vec::is_empty)
+    {
+        return false;
+    }
+    let Some(direct_columns) = direct["lineages"].as_array() else {
+        return false;
+    };
+    let Some(star_columns) = star["lineages"].as_array() else {
+        return false;
+    };
+    if direct_columns.len() != 1 || star_columns.len() != 1 {
+        return false;
+    }
+    complete_matches_named_star(&direct_columns[0], &star_columns[0])
+        || complete_matches_named_star(&star_columns[0], &direct_columns[0])
+}
+
+fn complete_matches_named_star(complete: &Value, partial: &Value) -> bool {
+    let Some(sources) = complete.get("Complete").and_then(Value::as_array) else {
+        return false;
+    };
+    if sources.len() != 1 {
+        return false;
+    }
+    let Some(partial) = partial.get("Partial") else {
+        return false;
+    };
+    if !partial["known"].as_array().is_some_and(Vec::is_empty) {
+        return false;
+    }
+    let Some(unresolved) = partial["unresolved"].as_array() else {
+        return false;
+    };
+    if unresolved.len() != 1 {
+        return false;
+    }
+    let Some(named) = unresolved[0].get("NamedBehindStar") else {
+        return false;
+    };
+    sources[0].get("relation") == named.get("relation")
+        && sources[0].get("column") == named.get("column")
+}
+
+fn pair_equivalent(direct: &Value, star: &Value) -> bool {
+    !invalid(direct) && !invalid(star) && (direct == star || certainty_only_pair(direct, star))
 }
 
 #[test]
@@ -176,7 +228,8 @@ fn direct_and_star_from_clause_lookups_agree() {
                     let through =
                         observation(case, &through_sql, catalog, &wrapper, boundary, &name);
                     probes += 1;
-                    if direct != through || invalid(&direct) || invalid(&through) {
+                    if !pair_equivalent(&direct, &through) || invalid(&direct) || invalid(&through)
+                    {
                         let kind = if invalid(&direct) || invalid(&through) {
                             "oracle"
                         } else {
@@ -287,4 +340,64 @@ fn duplicate_boundary_normalization_preserves_inner_expression_ambiguity() {
     assert!(
         matches!(lineage, Lineage::Partial { unresolved, .. } if matches!(&unresolved[..], [Unresolved::Ambiguous { candidates, .. }] if candidates == &[boundary]))
     );
+}
+
+#[test]
+fn certainty_marker_only_allows_the_same_single_named_source() {
+    let source = json!({
+        "relation": {"catalog": null, "schema": null, "name": {"value": "t", "quote": null}},
+        "column": {"value": "id", "quote": null}
+    });
+    let direct = json!({"lineages": [{"Complete": [source.clone()]}], "errors": []});
+    let star = json!({"lineages": [{"Partial": {
+        "known": [],
+        "unresolved": [{"NamedBehindStar": {
+            "relation": source["relation"],
+            "column": source["column"]
+        }}]
+    }}], "errors": []});
+    assert!(pair_equivalent(&direct, &star));
+
+    let different_quote = json!({"lineages": [{"Partial": {
+        "known": [],
+        "unresolved": [{"NamedBehindStar": {
+            "relation": source["relation"],
+            "column": {"value": "id", "quote": "Double"}
+        }}]
+    }}], "errors": []});
+    assert!(!pair_equivalent(&direct, &different_quote));
+
+    let multi_source =
+        json!({"lineages": [{"Complete": [source.clone(), source.clone()]}], "errors": []});
+    assert!(!pair_equivalent(&multi_source, &star));
+
+    let missing_source = json!({"lineages": [{"Complete": []}], "errors": []});
+    assert!(!pair_equivalent(&missing_source, &star));
+
+    let known_and_named = json!({"lineages": [{"Partial": {
+        "known": [source.clone()],
+        "unresolved": [{"NamedBehindStar": {
+            "relation": source["relation"],
+            "column": source["column"]
+        }}]
+    }}], "errors": []});
+    assert!(!pair_equivalent(&direct, &known_and_named));
+
+    let different_relation = json!({"lineages": [{"Partial": {
+        "known": [],
+        "unresolved": [{"NamedBehindStar": {
+            "relation": {"catalog": null, "schema": null, "name": {"value": "other", "quote": null}},
+            "column": source["column"]
+        }}]
+    }}], "errors": []});
+    assert!(!pair_equivalent(&direct, &different_relation));
+
+    let ambiguous = json!({"lineages": [{"Partial": {
+        "known": [],
+        "unresolved": [{"Ambiguous": {"column": source["column"], "candidates": []}}]
+    }}], "errors": []});
+    assert!(!pair_equivalent(&direct, &ambiguous));
+
+    let error = json!({"lineages": [], "errors": [{"severity": "Error"}]});
+    assert!(!pair_equivalent(&error, &error));
 }
