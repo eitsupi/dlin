@@ -446,7 +446,9 @@ const TEMPLATES: [Template; 11] = [
         lateral: false,
     },
     Template {
-        sql: "WITH {a} AS (SELECT x FROM t) SELECT {a}.x FROM {a}",
+        // The CTE reads a relation no rename produces: a CTE that is named
+        // like the relation it reads would read itself in some dialects.
+        sql: "WITH {a} AS (SELECT x FROM src) SELECT {a}.x FROM {a}",
         lateral: false,
     },
     Template {
@@ -737,4 +739,180 @@ fn cte_inside_an_ordinary_derived_table_does_not_see_sibling_items() {
         false,
     );
     assert!(known_sources(&result.output.columns[0]).is_empty());
+}
+
+const FORWARD_REFERENCE: &str =
+    "WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x";
+
+/// Dialects whose CTE visibility rule is not modelled.
+const UNMODELLED_DIALECTS: [Dialect; 8] = [
+    Dialect::Ansi,
+    Dialect::MySql,
+    Dialect::Hive,
+    Dialect::Databricks,
+    Dialect::Redshift,
+    Dialect::Trino,
+    Dialect::Spark,
+    Dialect::SQLite,
+];
+
+/// Candidates of every ambiguity in an output column's unresolved part.
+fn all_ambiguity_candidates(column: &dlin_sqllineage::OutputColumn) -> Vec<Vec<String>> {
+    let Lineage::Partial { unresolved, .. } = &column.lineage else {
+        return Vec::new();
+    };
+    unresolved
+        .iter()
+        .filter_map(|item| match item {
+            Unresolved::Ambiguous { candidates, .. } => {
+                let mut names: Vec<String> = candidates
+                    .iter()
+                    .map(|candidate| match candidate {
+                        dlin_sqllineage::Candidate::Relation(relation) => {
+                            format!("relation {}", relation.name.value)
+                        }
+                        dlin_sqllineage::Candidate::Cte(name) => format!("cte {}", name.value),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                names.sort();
+                Some(names)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// Whether a CTE can read one defined after it depends on the dialect.
+#[test]
+fn forward_cte_reference_follows_the_dialect() {
+    for dialect in [Dialect::PostgreSql, Dialect::BigQuery, Dialect::Generic] {
+        let result = analyze(FORWARD_REFERENCE, dialect, false);
+        assert_eq!(sources(&result, "id"), [pair("t", "id")], "{dialect:?}");
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+    }
+    // DuckDB and Snowflake see only earlier CTEs, even with RECURSIVE: `y` is
+    // the physical relation.
+    for dialect in [Dialect::DuckDb, Dialect::Snowflake] {
+        let result = analyze(FORWARD_REFERENCE, dialect, false);
+        assert_eq!(sources(&result, "id"), [pair("y", "id")], "{dialect:?}");
+    }
+}
+
+#[test]
+fn forward_cte_reference_in_an_unmodelled_dialect_is_not_assumed_physical() {
+    for dialect in UNMODELLED_DIALECTS {
+        for sql in [
+            FORWARD_REFERENCE,
+            "WITH x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x",
+        ] {
+            let result = analyze(sql, dialect, false);
+            let column = &result.output.columns[0];
+            assert!(known_sources(column).is_empty(), "{dialect:?} {sql}");
+            assert_eq!(
+                all_ambiguity_candidates(column),
+                [["cte y", "relation y"]],
+                "{dialect:?} {sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn earlier_ctes_are_visible_in_every_dialect() {
+    for dialect in Dialect::ALL {
+        let result = analyze(
+            "WITH y AS (SELECT id FROM t), x AS (SELECT id FROM y) SELECT id FROM x",
+            dialect,
+            false,
+        );
+        assert_eq!(sources(&result, "id"), [pair("t", "id")], "{dialect:?}");
+    }
+}
+
+const KEYWORD_LESS_SELF_REFERENCE: &str = "WITH c(n) AS (SELECT t.n FROM t UNION ALL \
+     SELECT c.n + 1 FROM c WHERE c.n < 3) SELECT n FROM c";
+
+// Snowflake lets a CTE read itself without RECURSIVE. It is the same
+// recursive CTE as one written with the keyword, never a physical `c`.
+#[test]
+fn snowflake_cte_reads_itself_without_the_keyword() {
+    let result = analyze(KEYWORD_LESS_SELF_REFERENCE, Dialect::Snowflake, false);
+    let keyword = analyze(
+        &KEYWORD_LESS_SELF_REFERENCE.replace("WITH", "WITH RECURSIVE"),
+        Dialect::Snowflake,
+        false,
+    );
+    assert_eq!(result.output.columns, keyword.output.columns);
+    assert_eq!(read_names(&result), ["t"]);
+    let column = &result.output.columns[0];
+    assert_eq!(known_sources(column), [source("t", "n")]);
+    assert!(
+        matches!(&column.lineage, Lineage::Partial { unresolved, .. }
+            if unresolved.iter().any(|item| matches!(item, Unresolved::Recursive))),
+        "{:?}",
+        column.lineage
+    );
+}
+
+fn source(relation: &str, column: &str) -> dlin_sqllineage::SourceColumn {
+    dlin_sqllineage::SourceColumn {
+        relation: common::table(relation),
+        column: Ident::unquoted(column),
+    }
+}
+
+// DuckDB needs RECURSIVE for a CTE to read itself; without it the query is
+// invalid and the name is reported as undecidable between the CTE and a
+// physical relation, not silently bound to either.
+#[test]
+fn duckdb_cte_reading_itself_without_the_keyword_is_unresolved() {
+    let result = analyze(KEYWORD_LESS_SELF_REFERENCE, Dialect::DuckDb, false);
+    let column = &result.output.columns[0];
+    assert_eq!(
+        all_ambiguity_candidates(column),
+        [["cte c", "relation c"]],
+        "{:?}",
+        column.lineage
+    );
+    assert!(!known_sources(column).contains(&source("c", "n")));
+
+    let result = analyze(
+        &KEYWORD_LESS_SELF_REFERENCE.replace("WITH", "WITH RECURSIVE"),
+        Dialect::DuckDb,
+        false,
+    );
+    assert_eq!(read_names(&result), ["t"]);
+    assert!(all_ambiguity_candidates(&result.output.columns[0]).is_empty());
+}
+
+#[test]
+fn self_reference_without_the_keyword_follows_the_dialect() {
+    // PostgreSQL: without RECURSIVE the name is the physical relation `c`.
+    let result = analyze(KEYWORD_LESS_SELF_REFERENCE, Dialect::PostgreSql, false);
+    assert_eq!(read_names(&result), ["c", "t"]);
+    assert_eq!(
+        known_sources(&result.output.columns[0]),
+        [source("c", "n"), source("t", "n")]
+    );
+    // An unmodelled dialect: undecidable.
+    for dialect in UNMODELLED_DIALECTS {
+        let result = analyze(KEYWORD_LESS_SELF_REFERENCE, dialect, false);
+        assert_eq!(
+            all_ambiguity_candidates(&result.output.columns[0]),
+            [["cte c", "relation c"]],
+            "{dialect:?}"
+        );
+        // With the keyword it is an ordinary recursive CTE.
+        let result = analyze(
+            &KEYWORD_LESS_SELF_REFERENCE.replace("WITH", "WITH RECURSIVE"),
+            dialect,
+            false,
+        );
+        assert_eq!(read_names(&result), ["t"], "{dialect:?}");
+        assert!(
+            all_ambiguity_candidates(&result.output.columns[0]).is_empty(),
+            "{dialect:?}"
+        );
+    }
 }

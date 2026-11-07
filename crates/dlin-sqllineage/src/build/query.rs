@@ -1,6 +1,6 @@
 use sqlparser::ast::{Query, SetExpr};
 
-use crate::build::LineageBuilder;
+use crate::build::{LineageBuilder, relation};
 use crate::graph::scope::{OutputPlan, ScopeKind};
 use crate::types::SemanticError;
 
@@ -25,6 +25,7 @@ impl LineageBuilder {
         if let Some(with) = &query.with {
             // Every CTE of the list is defined before any body is visited, so
             // that a RECURSIVE list can refer forward.
+            let rule = relation::cte_list_rule(self.dialect, with.recursive);
             let names = with
                 .cte_tables
                 .iter()
@@ -33,17 +34,18 @@ impl LineageBuilder {
             let scopes = self
                 .graph
                 .scopes
-                .define_ctes(self.current_scope, names, with.recursive);
+                .define_ctes(self.current_scope, names, rule.forward);
             for (cte, cte_scope) in with.cte_tables.iter().zip(scopes) {
                 self.current_scope = cte_scope;
-
-                if with.recursive {
-                    self.recursive_cte_name = Some(crate::Ident::from_ast(&cte.alias.name));
-                }
+                let outer = self.own_cte.replace(relation::OwnCte {
+                    name: crate::Ident::from_ast(&cte.alias.name),
+                    scope: cte_scope,
+                    rule: rule.own_name,
+                });
 
                 self.visit_query(&cte.query);
 
-                self.recursive_cte_name = None;
+                self.own_cte = outer;
                 self.pop_scope();
             }
         }
@@ -96,7 +98,7 @@ impl LineageBuilder {
                 self.visit_set_expr(right, target_values);
                 self.pop_scope();
 
-                let is_recursive = self.recursive_cte_name.is_some();
+                let is_recursive = self.defining_recursive_cte();
                 self.graph.scopes.set_output_plan(
                     self.current_scope,
                     OutputPlan::SetOperation {

@@ -287,11 +287,13 @@ impl LineageBuilder {
         match factor {
             TableFactor::Table { name, alias, .. } => {
                 let table_ref = Self::table_ref_from_object_name(name);
-                let binding = self.bind_relation_reference(table_ref.clone());
+                let bindings = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
                     .as_ref()
                     .map_or_else(|| table_ref.table.clone(), |a| Ident::from_ast(&a.name));
-                self.add_binding(alias_name, binding);
+                for binding in bindings {
+                    self.add_binding(alias_name.clone(), binding);
+                }
             }
 
             TableFactor::Derived {

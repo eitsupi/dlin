@@ -173,6 +173,13 @@ pub(crate) enum JoinMergeKind {
     Full,
 }
 
+/// The CTEs a relation name may denote; see [`ScopeTree::lookup_cte`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CteLookup {
+    pub visible: Option<ScopeId>,
+    pub hidden: Option<ScopeId>,
+}
+
 /// How a scope is introduced, which decides what it can see of the scope
 /// around it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,24 +326,20 @@ impl ScopeTree {
     /// create a scope for each body. All of them are defined before any body
     /// is visited, so a body can refer to a CTE that comes later.
     ///
-    /// Without `recursive` a body sees only the CTEs before it. With it, a
-    /// body sees every CTE of the list, itself and later ones included. Either
+    /// With `forward`, a body sees every CTE of the list, itself and later
+    /// ones included. Without it, a body sees only the CTEs before it. Either
     /// way it sees what the holder's own surroundings allow at its position.
     pub fn define_ctes(
         &mut self,
         holder: ScopeId,
         names: Vec<Ident>,
-        recursive: bool,
+        forward: bool,
     ) -> Vec<ScopeId> {
         let base = self.scopes[holder].binding_log.len();
         let total = names.len();
         let mut scopes = Vec::with_capacity(total);
         for (index, name) in names.into_iter().enumerate() {
-            let visible = if recursive {
-                base + total
-            } else {
-                base + index
-            };
+            let visible = if forward { base + total } else { base + index };
             let id = self.scopes.len();
             self.scopes
                 .push(Scope::new(Some(holder), ScopeKind::Cte, visible));
@@ -351,18 +354,31 @@ impl ScopeTree {
         scopes
     }
 
-    /// The CTE a relation name written without a schema reads, if one is
-    /// visible from `env`. The nearest definition wins.
-    pub fn lookup_cte(&self, env: BindingEnv, name: &Ident) -> Option<ScopeId> {
+    /// The CTEs a relation name written without a schema may denote from
+    /// `env`.
+    ///
+    /// `visible` is the nearest CTE of that name the position can see.
+    /// `hidden` is a CTE of that name defined in a WITH list the position is
+    /// inside of but cannot see (a later one, or the CTE itself), when no
+    /// visible one is nearer. Whether a hidden CTE is simply not there depends
+    /// on the dialect, so the caller decides what it means.
+    pub fn lookup_cte(&self, env: BindingEnv, name: &Ident) -> CteLookup {
         let key = name.column_key(self.dialect);
-        self.chain(env).find_map(|step| {
-            self.scopes[step.scope]
+        let mut lookup = CteLookup::default();
+        for step in self.chain(env) {
+            let mut matching = self.scopes[step.scope]
                 .ctes
                 .iter()
-                .rev()
-                .find(|cte| cte.seq < step.visible && cte.name.column_key(self.dialect) == key)
-                .map(|cte| cte.scope)
-        })
+                .filter(|cte| cte.name.column_key(self.dialect) == key);
+            if let Some(cte) = matching.clone().rev().find(|cte| cte.seq < step.visible) {
+                lookup.visible = Some(cte.scope);
+                return lookup;
+            }
+            if lookup.hidden.is_none() {
+                lookup.hidden = matching.next().map(|cte| cte.scope);
+            }
+        }
+        lookup
     }
 
     /// Number of entries added to `scope` so far; pass it to
@@ -744,14 +760,18 @@ mod tests {
         // A CTE is not a range variable.
         assert!(!sees(&tree, tree.env(body), "c1"));
         // A CTE sees the ones defined before it, not itself or later ones.
-        assert_eq!(tree.lookup_cte(first_env, &c1), None);
-        assert_eq!(tree.lookup_cte(tree.env(second), &c1), Some(first));
-        assert_eq!(tree.lookup_cte(tree.env(second), &c2), None);
+        let visible = |env, name: &Ident| tree.lookup_cte(env, name).visible;
+        assert_eq!(visible(first_env, &c1), None);
+        // The CTE itself and a later one are hidden, not absent.
+        assert_eq!(tree.lookup_cte(first_env, &c1).hidden, Some(first));
+        assert_eq!(tree.lookup_cte(tree.env(first), &c2).hidden, Some(second));
+        assert_eq!(visible(tree.env(second), &c1), Some(first));
+        assert_eq!(visible(tree.env(second), &c2), None);
         // The body sees all of them.
-        assert_eq!(tree.lookup_cte(tree.env(body), &c2), Some(second));
+        assert_eq!(visible(tree.env(body), &c2), Some(second));
         // A range variable in the body does not hide a CTE.
         tree.add_binding(body, Ident::unquoted("c1"), table("t2"));
-        assert_eq!(tree.lookup_cte(tree.env(body), &c1), Some(first));
+        assert_eq!(tree.lookup_cte(tree.env(body), &c1).visible, Some(first));
     }
 
     #[test]
@@ -765,11 +785,13 @@ mod tests {
         );
         for &scope in &ctes {
             assert_eq!(
-                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c1")),
+                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c1"))
+                    .visible,
                 Some(ctes[0])
             );
             assert_eq!(
-                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c2")),
+                tree.lookup_cte(tree.env(scope), &Ident::unquoted("c2"))
+                    .visible,
                 Some(ctes[1])
             );
         }

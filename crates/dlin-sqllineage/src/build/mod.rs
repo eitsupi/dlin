@@ -13,7 +13,8 @@ use sqlparser::ast::Statement;
 pub(crate) struct LineageBuilder {
     pub(crate) graph: RawGraph,
     pub(crate) current_scope: ScopeId,
-    pub(crate) recursive_cte_name: Option<crate::Ident>,
+    /// The CTE whose body is being visited.
+    pub(crate) own_cte: Option<relation::OwnCte>,
     pub(crate) warnings: Vec<Warning>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
@@ -29,7 +30,7 @@ impl LineageBuilder {
         Self {
             graph,
             current_scope: root,
-            recursive_cte_name: None,
+            own_cte: None,
             warnings: Vec::new(),
             inner_statement_type: None,
             dialect,
