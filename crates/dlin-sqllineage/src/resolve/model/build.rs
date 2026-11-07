@@ -13,7 +13,7 @@ use super::{
     SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::OutputName;
-use crate::catalog::CatalogContext;
+use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId};
@@ -133,10 +133,29 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
+                let mut next_ordinal = Some(0usize);
                 for column in graph.scopes.output_columns(scope) {
                     if matches!(graph.nodes[column.node_id], RawNode::Star { .. }) {
                         let star = self.star(column.node_id);
-                        elements.extend(star.elements.iter().cloned());
+                        let width = star.width.exact();
+                        let base_ordinal = next_ordinal;
+                        for element in &star.elements {
+                            let mut element = element.clone();
+                            match &mut element {
+                                OutputElement::Column(slot) => {
+                                    slot.ordinal = slot.ordinal.and_then(|ordinal| {
+                                        base_ordinal.and_then(|base| base.checked_add(ordinal))
+                                    });
+                                }
+                                OutputElement::Unknown(segment) => {
+                                    segment.position = segment.position.shifted(base_ordinal);
+                                }
+                                OutputElement::Tail(_) => {}
+                            }
+                            elements.push(element);
+                        }
+                        next_ordinal = next_ordinal
+                            .and_then(|ordinal| width.and_then(|width| ordinal.checked_add(width)));
                         invalid.extend(star.invalid.iter().cloned());
                         reads.extend(star.reads.iter().cloned());
                     } else {
@@ -147,11 +166,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 .get(&column.node_id)
                                 .cloned()
                                 .unwrap_or_else(|| OutputName::Explicit(column.name.clone())),
+                            ordinal: next_ordinal,
                             ranges: Rc::from([]),
                             candidate_ranges: Rc::from([]),
                             value: ValueId::Expr(column.node_id),
                             origin: SlotOrigin::Defined,
                         }));
+                        next_ordinal = next_ordinal.and_then(|ordinal| ordinal.checked_add(1));
                     }
                 }
                 elements
@@ -265,6 +286,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     OutputElement::Column(ColumnSlot {
                         name: column.name.clone(),
                         output_name: OutputName::Explicit(column.name.clone()),
+                        ordinal: Some(index),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
                         value: ValueId::VirtualColumn {
@@ -279,30 +301,101 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     }
 
     fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[RangeRef]>) -> Vec<OutputElement> {
-        match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
-            Some(columns) => columns
-                .into_iter()
-                .map(|column| {
-                    OutputElement::Column(ColumnSlot {
-                        name: column.clone(),
-                        output_name: OutputName::Explicit(column.clone()),
-                        ranges: ranges.clone(),
-                        candidate_ranges: ranges.clone(),
-                        value: ValueId::Physical {
-                            table: table.clone(),
-                            column: column.clone(),
-                        },
-                        origin: SlotOrigin::Forwarded(column),
-                    })
-                })
-                .collect(),
-            None => vec![OutputElement::Unknown(UnknownSegment {
+        let Some(entry) = self.catalog.and_then(|catalog| catalog.entry(table)) else {
+            return vec![OutputElement::Unknown(UnknownSegment {
+                schema_relations: vec![super::super::analysis::plain_relation(table)],
+                position: crate::types::StarPosition::Inferred,
                 provider: UnknownProvider::Relation(table.clone()),
                 ranges: ranges.clone(),
                 domain: NameDomain::default(),
-            })],
+            })];
+        };
+
+        let mut columns: Vec<_> = entry.columns.iter().cloned().collect();
+        // Individually proven positions also order the known part of a
+        // partial schema; an unknown full order does not revoke those proofs.
+        columns.sort_by_key(|column| column.ordinal.unwrap_or(usize::MAX));
+        let listed_names: Vec<_> = columns.iter().map(|column| column.name.clone()).collect();
+        let mut elements = Vec::new();
+        for column in &columns {
+            elements.push(OutputElement::Column(ColumnSlot {
+                name: column.name.clone(),
+                output_name: OutputName::Explicit(column.name.clone()),
+                ordinal: column.ordinal,
+                ranges: ranges.clone(),
+                candidate_ranges: ranges.clone(),
+                value: ValueId::Physical {
+                    table: table.clone(),
+                    column: column.name.clone(),
+                },
+                origin: SlotOrigin::Forwarded(column.name.clone()),
+            }));
+            if entry.coverage == SchemaCoverage::Partial
+                && let Some(after) = column.ordinal
+            {
+                for segment in entry
+                    .unknown_segments
+                    .iter()
+                    .filter(|segment| segment.after_ordinal == Some(after))
+                {
+                    elements.push(relation_unknown(
+                        table,
+                        ranges,
+                        &listed_names,
+                        *segment,
+                        &entry.relation,
+                    ));
+                }
+            }
         }
+
+        if entry.coverage == SchemaCoverage::Partial {
+            let pending = entry
+                .unknown_segments
+                .iter()
+                .filter(|segment| {
+                    segment.after_ordinal.is_none()
+                        || !columns
+                            .iter()
+                            .any(|column| column.ordinal == segment.after_ordinal)
+                })
+                .copied()
+                .chain(
+                    entry
+                        .unknown_segments
+                        .is_empty()
+                        .then_some(CatalogUnknownSegment {
+                            after_ordinal: None,
+                        }),
+                );
+            elements.extend(pending.map(|segment| {
+                relation_unknown(table, ranges, &listed_names, segment, &entry.relation)
+            }));
+        }
+        elements
     }
+}
+
+fn relation_unknown(
+    table: &Rc<TableRef>,
+    ranges: &Rc<[RangeRef]>,
+    listed_names: &[crate::Ident],
+    segment: CatalogUnknownSegment,
+    canonical_relation: &crate::Relation,
+) -> OutputElement {
+    OutputElement::Unknown(UnknownSegment {
+        schema_relations: vec![canonical_relation.clone()],
+        position: segment.after_ordinal.map_or(
+            crate::types::StarPosition::Unproven,
+            crate::types::StarPosition::After,
+        ),
+        provider: UnknownProvider::Relation(table.clone()),
+        ranges: ranges.clone(),
+        domain: NameDomain {
+            filters: Vec::new(),
+            removed: listed_names.to_vec(),
+        },
+    })
 }
 
 /// Re-express the output of a scope under the range variables of the star
@@ -321,6 +414,7 @@ pub(super) fn forward_scope(
             OutputElement::Column(slot) => OutputElement::Column(ColumnSlot {
                 name: slot.name.clone(),
                 output_name: slot.output_name.clone(),
+                ordinal: slot.ordinal,
                 ranges: ranges.clone(),
                 candidate_ranges: ranges.clone(),
                 value: if set_operation {
@@ -331,6 +425,8 @@ pub(super) fn forward_scope(
                 origin: SlotOrigin::Forwarded(slot.name.clone()),
             }),
             OutputElement::Unknown(segment) => OutputElement::Unknown(UnknownSegment {
+                schema_relations: segment.schema_relations.clone(),
+                position: segment.position,
                 provider: UnknownProvider::Scope { scope, index },
                 ranges: ranges.clone(),
                 domain: segment.domain.clone(),

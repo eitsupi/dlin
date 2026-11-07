@@ -10,12 +10,17 @@ struct CanonicalCatalog;
 impl Catalog for CanonicalCatalog {
     fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
         (relation.name == Ident::unquoted("source")).then(|| CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: Relation {
                 catalog: Some(Ident::quoted("Warehouse", Quote::Backtick)),
                 schema: Some(Ident::quoted("Analytics", Quote::Backtick)),
                 name: Ident::quoted("EventLog", Quote::Backtick),
             },
             columns: Cow::Owned(vec![CatalogColumn {
+                ordinal: Some(0),
                 name: Ident::quoted("MiXeD", Quote::Backtick),
                 data_type: None,
                 fields: None,
@@ -114,14 +119,20 @@ struct DistinctGenericColumns;
 impl Catalog for DistinctGenericColumns {
     fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
         (relation.name == Ident::unquoted("items")).then(|| CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: Cow::Owned(vec![
                 CatalogColumn {
+                    ordinal: Some(0),
                     name: Ident::quoted("id", Quote::Double),
                     data_type: None,
                     fields: None,
                 },
                 CatalogColumn {
+                    ordinal: Some(1),
                     name: Ident::unquoted("ID"),
                     data_type: None,
                     fields: None,
@@ -185,8 +196,13 @@ impl Catalog for NaturalJoinColumns {
         };
 
         Some(CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: Cow::Owned(vec![CatalogColumn {
+                ordinal: Some(0),
                 name: column,
                 data_type: None,
                 fields: None,

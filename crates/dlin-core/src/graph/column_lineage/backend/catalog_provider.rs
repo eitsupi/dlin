@@ -31,11 +31,17 @@ impl sqllineage::Catalog for CatalogAdapter<'_> {
             .unambiguous_columns_for_relation(&table.relation)
             .filter(|columns| !columns.is_empty())?;
         Some(sqllineage::CatalogEntry {
+            coverage: sqllineage::SchemaCoverage::Exhaustive,
+            order: sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation_from_ref(&table.relation),
             columns: Cow::Owned(
                 columns
                     .iter()
-                    .map(|name| sqllineage::CatalogColumn {
+                    .enumerate()
+                    .map(|(ordinal, name)| sqllineage::CatalogColumn {
+                        ordinal: Some(ordinal),
                         name: sqllineage::Ident::unquoted(name.clone()),
                         data_type: None,
                         fields: None,
@@ -179,6 +185,10 @@ impl sqllineage::Catalog for SqllineageCatalogProvider {
         let adapter = CatalogAdapter::new(&self.snapshot, self.dialect);
         let entry = <CatalogAdapter<'_> as sqllineage::Catalog>::lookup(&adapter, relation)?;
         Some(sqllineage::CatalogEntry {
+            coverage: sqllineage::SchemaCoverage::Exhaustive,
+            order: sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: entry.relation,
             columns: Cow::Owned(entry.columns.into_owned()),
         })

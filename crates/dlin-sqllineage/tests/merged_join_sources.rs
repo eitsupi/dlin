@@ -21,11 +21,17 @@ impl Catalog for Columns {
             .iter()
             .find(|(name, _)| *name == table.name.value)
             .map(|(_, columns)| CatalogEntry {
+                coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+                order: dlin_sqllineage::SchemaOrder::Proven,
+                unknown_segments: std::borrow::Cow::Borrowed(&[]),
+                evidence: std::borrow::Cow::Borrowed(&[]),
                 relation: table.clone(),
                 columns: Cow::Owned(
                     columns
                         .iter()
-                        .map(|column| CatalogColumn {
+                        .enumerate()
+                        .map(|(ordinal, column)| CatalogColumn {
+                            ordinal: Some(ordinal),
                             name: Ident::unquoted(*column),
                             data_type: None,
                             fields: None,
@@ -407,17 +413,35 @@ fn natural_join_follows_the_catalog_for_which_tables_hold_the_column() {
 /// so it is not merged; it may or may not have the column, so the name stays
 /// ambiguous between it and the confirmed owner.
 #[test]
-fn natural_join_does_not_merge_a_table_the_catalog_does_not_confirm() {
+fn natural_join_keeps_schema_dependent_contributions_when_a_side_is_unknown() {
+    // P4: a possible NATURAL key retains the known side and the schema gap,
+    // rather than becoming an ambiguous reference to independent columns.
+    let relation = |name: &str| Relation {
+        catalog: None,
+        schema: None,
+        name: Ident::unquoted(name),
+    };
+    let expected = |known: &str, unknown: &str| Lineage::Partial {
+        known: vec![dlin_sqllineage::SourceColumn {
+            relation: relation(known),
+            column: Ident::unquoted("x"),
+        }],
+        unresolved: vec![Unresolved::SchemaDependent {
+            what: dlin_sqllineage::SchemaDependencyKind::NaturalJoinColumns,
+            relations: vec![relation(unknown)],
+        }],
+    };
     assert_eq!(
-        sources("SELECT x FROM t1 NATURAL JOIN t2", Some(&[("t1", &["x"])])),
-        ["?x(t1,t2)"]
+        mapping("SELECT x FROM t1 NATURAL JOIN t2", Some(&[("t1", &["x"])])).lineage,
+        expected("t1", "t2")
     );
     assert_eq!(
-        sources(
+        mapping(
             "WITH a AS (SELECT x FROM s1) SELECT x FROM a NATURAL JOIN t",
             Some(&[("other", &["x"])])
-        ),
-        ["?x(t,a)"]
+        )
+        .lineage,
+        expected("s1", "t")
     );
 }
 

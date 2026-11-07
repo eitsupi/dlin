@@ -68,14 +68,41 @@ pub(crate) struct TableLineage {
     pub output: Option<TableRef>,
 }
 
+/// Evidence for the position of an unknown interval, independent of listed slots.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub(crate) enum StarPosition {
+    /// A syntactic star follows the preceding projection slot.
+    #[default]
+    Inferred,
+    /// Catalog evidence does not establish the interval's position.
+    Unproven,
+    /// The interval follows a proven output position.
+    After(usize),
+}
+
+impl StarPosition {
+    pub(crate) fn shifted(self, base: Option<usize>) -> Self {
+        match self {
+            Self::After(after) => base
+                .and_then(|base| base.checked_add(after))
+                .map_or(Self::Unproven, Self::After),
+            other => other,
+        }
+    }
+}
+
 /// One output column and the source columns it derives from.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ColumnMapping {
+    /// Position evidence for an unenumerated interval.
+    pub star_position: StarPosition,
     /// The output column.
     pub target: ColumnRef,
     /// Name and naming provenance for this single output slot. `None` marks
     /// an unexpanded, variable-width star.
     pub output_name: Option<crate::OutputName>,
+    /// Proven zero-based position in the complete output order.
+    pub ordinal: Option<usize>,
     /// Source columns contributing to this output.
     pub sources: Vec<ColumnOrigin>,
     /// The kind of transformation applied.

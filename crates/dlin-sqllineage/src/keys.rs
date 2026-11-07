@@ -83,10 +83,20 @@ pub(crate) enum UnresolvedKey {
     Recursive,
     RowValue(String),
     Unsupported(&'static str),
+    AlignmentUnknown,
+    SchemaDependent(crate::SchemaDependencyKind, Vec<RelationKey>),
 }
 
 pub(crate) fn unresolved_key(unresolved: &Unresolved, dialect: Dialect) -> UnresolvedKey {
     match unresolved {
+        Unresolved::AlignmentUnknown => UnresolvedKey::AlignmentUnknown,
+        Unresolved::SchemaDependent { what, relations } => UnresolvedKey::SchemaDependent(
+            *what,
+            relations
+                .iter()
+                .map(|relation| relation_key(relation, dialect))
+                .collect(),
+        ),
         Unresolved::BehindStar { relation } => {
             UnresolvedKey::BehindStar(relation_key(relation, dialect))
         }

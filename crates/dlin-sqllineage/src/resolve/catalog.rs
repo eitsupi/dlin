@@ -28,10 +28,14 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &Catalog
     let mut result = Vec::with_capacity(mappings.len());
     for mapping in mappings.drain(..) {
         if let [ColumnOrigin::Wildcard { table }] = mapping.sources.as_slice()
-            && let Some(columns) = catalog.list_columns(table)
+            && let Some(entry) = catalog.entry(table)
+            && entry.coverage == crate::SchemaCoverage::Exhaustive
+            && entry.order == crate::SchemaOrder::Proven
         {
-            for col_name in columns {
+            for col_name in entry.columns.iter().map(|column| column.name.clone()) {
                 result.push(ColumnMapping {
+                    star_position: crate::types::StarPosition::Inferred,
+                    ordinal: None,
                     output_name: Some(crate::OutputName::Explicit(col_name.clone())),
                     target: ColumnRef {
                         table: mapping.target.table.clone(),
@@ -67,10 +71,16 @@ mod tests {
                 _ => return None,
             };
             Some(crate::CatalogEntry {
+                coverage: crate::SchemaCoverage::Exhaustive,
+                order: crate::SchemaOrder::Proven,
+                unknown_segments: std::borrow::Cow::Borrowed(&[]),
+                evidence: std::borrow::Cow::Borrowed(&[]),
                 relation: relation.clone(),
                 columns: names
                     .into_iter()
-                    .map(|name| crate::CatalogColumn {
+                    .enumerate()
+                    .map(|(ordinal, name)| crate::CatalogColumn {
+                        ordinal: Some(ordinal),
                         name: crate::Ident::unquoted(name),
                         data_type: None,
                         fields: None,
@@ -83,6 +93,8 @@ mod tests {
 
     fn named(name: &str) -> ColumnMapping {
         ColumnMapping {
+            star_position: crate::types::StarPosition::Inferred,
+            ordinal: None,
             output_name: Some(crate::OutputName::Explicit(crate::Ident::unquoted(name))),
             target: ColumnRef {
                 table: None,
@@ -98,6 +110,8 @@ mod tests {
 
     fn star(table: &str) -> ColumnMapping {
         ColumnMapping {
+            star_position: crate::types::StarPosition::Inferred,
+            ordinal: None,
             output_name: None,
             target: ColumnRef {
                 table: None,

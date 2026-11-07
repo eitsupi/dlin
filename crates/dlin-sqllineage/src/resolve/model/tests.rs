@@ -19,10 +19,16 @@ impl crate::Catalog for Tables {
             .iter()
             .find(|(name, _)| *name == relation.name.value)?;
         Some(crate::CatalogEntry {
+            coverage: crate::SchemaCoverage::Exhaustive,
+            order: crate::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: columns
                 .iter()
-                .map(|name| crate::CatalogColumn {
+                .enumerate()
+                .map(|(ordinal, name)| crate::CatalogColumn {
+                    ordinal: Some(ordinal),
                     name: Ident::unquoted(*name),
                     data_type: None,
                     fields: None,

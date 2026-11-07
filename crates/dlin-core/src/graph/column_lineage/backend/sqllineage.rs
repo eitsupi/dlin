@@ -381,6 +381,14 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
             OutputFailureKind::Indeterminate,
             format!("column origin uses unsupported syntax '{what}'"),
         ),
+        Some(Unresolved::AlignmentUnknown) => (
+            OutputFailureKind::Indeterminate,
+            "column origin has unknown positional alignment".to_string(),
+        ),
+        Some(Unresolved::SchemaDependent { .. }) => (
+            OutputFailureKind::Indeterminate,
+            "column origin depends on unknown schema".to_string(),
+        ),
         None => (
             OutputFailureKind::Indeterminate,
             "output column has unresolved lineage".to_string(),

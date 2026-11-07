@@ -49,7 +49,9 @@ pub(super) fn expand_star(
             OutputElement::Column(slot) => {
                 let (sources, transform) = evaluator.value(&slot.value);
                 mappings.push(ColumnMapping {
+                    star_position: crate::types::StarPosition::Inferred,
                     output_name: Some(slot.output_name.clone()),
+                    ordinal: slot.ordinal,
                     target: ColumnRef {
                         table: None,
                         column: slot.name.clone(),
@@ -149,6 +151,17 @@ impl Evaluator<'_, '_, '_> {
                 let (sources, _, transform) = self.scope_slot(*scope, *index, false);
                 (sources, transform)
             }
+            ValueId::SchemaDependent { value, relations } => {
+                let (mut sources, transform) = value.as_deref().map_or_else(
+                    || (Vec::new(), TransformKind::Direct),
+                    |value| self.value(value),
+                );
+                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
+                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
+                    relations: relations.clone(),
+                }));
+                (sources, transform)
+            }
             // The same lookup a direct reference to the name in that scope makes.
             ValueId::ScopeName { scope, column } => named_scope_sources(column, *scope, self.cx)
                 .map_or_else(
@@ -210,6 +223,17 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
             ValueId::ScopeSlot { scope, index } => self.scope_slot(*scope, *index, true),
+            ValueId::SchemaDependent { value, relations } => {
+                let (mut sources, has_back, transform) = value.as_deref().map_or_else(
+                    || (Vec::new(), false, TransformKind::Direct),
+                    |value| self.read_value(value, name),
+                );
+                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
+                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
+                    relations: relations.clone(),
+                }));
+                (sources, has_back, transform)
+            }
             ValueId::Merged(left, right) => {
                 let (mut sources, left_back, left_transform) = self.read_value(left, name);
                 let (right_sources, right_back, right_transform) = self.read_value(right, name);
@@ -526,7 +550,7 @@ impl Evaluator<'_, '_, '_> {
     }
 
     fn unknown_mapping(&mut self, segment: &UnknownSegment) -> Option<ColumnMapping> {
-        match &segment.provider {
+        let mut mapping = match &segment.provider {
             UnknownProvider::Relation(table) => Some(wildcard_mapping(None, (**table).clone())),
             UnknownProvider::Scope { scope, index } => self.unknown_slot(*scope, *index),
             UnknownProvider::Opaque(
@@ -535,7 +559,13 @@ impl Evaluator<'_, '_, '_> {
                 | OpaqueReason::Ambiguous(star)),
             ) => Some(self.opaque_star(*star, *reason)),
             UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
+        };
+        if let Some(mapping) = &mut mapping
+            && !matches!(segment.position, crate::types::StarPosition::Inferred)
+        {
+            mapping.star_position = segment.position;
         }
+        mapping
     }
 
     /// A star the analysis cannot attribute to a relation: an ambiguous
@@ -582,7 +612,9 @@ impl Evaluator<'_, '_, '_> {
             }
         };
         ColumnMapping {
+            star_position: crate::types::StarPosition::Inferred,
             output_name: None,
+            ordinal: None,
             target: star_name(),
             sources,
             transform: TransformKind::Direct,

@@ -331,7 +331,16 @@ fn check_case(case: &Case, with_catalog: bool, checks: &mut Checks) {
         let found_ambiguous = actual
             .as_ref()
             .is_ok_and(|lineages| ambiguous_lookup(lineages, name, case.dialect()));
+        let schema_dependent = matches!(&column.lineage, Lineage::Partial { unresolved, .. }
+            if unresolved.iter().any(|item| matches!(item, Unresolved::SchemaDependent { .. })));
         let (expected, actual) = match may_carry {
+            // P4: a possible NATURAL key is one schema-dependent output slot,
+            // not a competing independent column. A wrapper keeps that value
+            // and its unresolved schema contribution exactly.
+            _ if schema_dependent => (
+                json!(Ok::<_, String>(vec![column.lineage.clone()])),
+                json!(actual),
+            ),
             Some(true) => (
                 json!("ambiguous"),
                 if found_ambiguous {

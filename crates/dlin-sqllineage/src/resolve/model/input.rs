@@ -13,6 +13,7 @@ use std::rc::Rc;
 use super::build::{CacheKey, OutputModels, forward_scope};
 use super::join::fold_join_columns;
 use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
+use crate::catalog::ColumnPresence;
 use crate::graph::scope::{Binding, BindingEnv, MergedColumns, ScopeId};
 use crate::keys::table_key;
 use crate::types::TableRef;
@@ -405,7 +406,6 @@ impl OutputModels<'_, '_, '_> {
     /// a single relation needs no model of its own: the name is that
     /// relation's.
     fn clause_standing(&mut self, env: BindingEnv, name: &Ident) -> (Standing, InputLookup) {
-        let dialect = self.graph.dialect;
         let bindings = effective_bindings(env, self.graph);
         match bindings.as_slice() {
             [] => (Standing::Absent, InputLookup::Absent),
@@ -418,18 +418,13 @@ impl OutputModels<'_, '_, '_> {
                 let single = InputLookup::single(&range);
                 let standing = match binding {
                     Binding::Table(table) => {
-                        match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
-                            Some(columns) => {
-                                if columns
-                                    .iter()
-                                    .any(|column| same_column_name(column, name, dialect))
-                                {
-                                    Standing::Present(single.clone())
-                                } else {
-                                    Standing::Absent
-                                }
-                            }
-                            None => Standing::Possible {
+                        match self
+                            .catalog
+                            .map(|catalog| catalog.column_presence(table, name))
+                        {
+                            Some(ColumnPresence::Present(_)) => Standing::Present(single.clone()),
+                            Some(ColumnPresence::Absent) => Standing::Absent,
+                            Some(ColumnPresence::Possible) | None => Standing::Possible {
                                 answer: single.clone(),
                                 candidates: candidates_of([&range]),
                             },

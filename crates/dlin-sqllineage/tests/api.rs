@@ -293,6 +293,10 @@ struct BorrowedCatalog {
 impl Catalog for BorrowedCatalog {
     fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
         (relation.name.value.eq_ignore_ascii_case("raw")).then(|| CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: Relation {
                 catalog: None,
                 schema: Some(Ident::quoted("Physical", Quote::Double)),
@@ -308,7 +312,9 @@ fn borrowed_catalog_expands_in_place_and_preserves_canonical_names() {
     let catalog = BorrowedCatalog {
         columns: vec!["id", "value"]
             .into_iter()
-            .map(|name| CatalogColumn {
+            .enumerate()
+            .map(|(ordinal, name)| CatalogColumn {
+                ordinal: Some(ordinal),
                 name: Ident::unquoted(name),
                 data_type: None,
                 fields: None,
@@ -423,6 +429,7 @@ fn write_targets_keep_quotes_and_original_spelling() {
 fn quote_styles_after_catalog_star_expansion_stay_positional() {
     let catalog = BorrowedCatalog {
         columns: vec![CatalogColumn {
+            ordinal: Some(0),
             name: Ident::unquoted("id"),
             data_type: None,
             fields: None,
@@ -504,6 +511,7 @@ fn duplicate_diagnostics_do_not_invent_ordinals_after_star() {
 fn catalog_star_columns_keep_catalog_quote_metadata() {
     let catalog = BorrowedCatalog {
         columns: vec![CatalogColumn {
+            ordinal: Some(0),
             name: Ident::quoted("MiXeD", Quote::Double),
             data_type: None,
             fields: None,
@@ -534,8 +542,13 @@ impl Catalog for QuoteContextCatalog {
             _ => return None,
         };
         Some(CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: Cow::Owned(vec![CatalogColumn {
+                ordinal: Some(0),
                 name: column,
                 data_type: None,
                 fields: None,

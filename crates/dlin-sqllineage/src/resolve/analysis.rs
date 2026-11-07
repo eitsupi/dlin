@@ -35,7 +35,6 @@ pub(super) fn assemble(
         .collect::<Vec<_>>();
     let mut columns = Vec::new();
     let mut unexpanded = Vec::new();
-    let mut position = Some(0);
     let exact_width = mappings.iter().all(|mapping| mapping.output_name.is_some());
     let rename =
         !target_columns.is_empty() && exact_width && target_columns.len() == mappings.len();
@@ -48,7 +47,7 @@ pub(super) fn assemble(
         let lineage = normalize_lineage(known, unresolved, dialect, &read_order);
         if let Some(name) = &mapping.output_name {
             columns.push(OutputColumn {
-                ordinal: position,
+                ordinal: mapping.ordinal,
                 name: if rename {
                     OutputName::Explicit(target_columns[index].clone())
                 } else {
@@ -57,7 +56,6 @@ pub(super) fn assemble(
                 lineage,
                 transform: transform(&mapping.transform),
             });
-            position = position.map(|n| n + 1);
         } else {
             let mut relations = Vec::new();
             star_relations(&mapping.sources, &mut relations);
@@ -67,11 +65,16 @@ pub(super) fn assemble(
             for relation in relations {
                 unexpanded.push(UnexpandedStar {
                     relation,
-                    after_ordinal: columns.last().and_then(|column| column.ordinal),
+                    after_ordinal: match mapping.star_position {
+                        crate::types::StarPosition::Inferred => {
+                            columns.last().and_then(|column| column.ordinal)
+                        }
+                        crate::types::StarPosition::Unproven => None,
+                        crate::types::StarPosition::After(after) => Some(after),
+                    },
                     lineage: lineage.clone(),
                 });
             }
-            position = None;
         }
     }
     let mut diagnostics = warnings
@@ -249,6 +252,12 @@ fn normalize_unresolved(unresolved: &mut Unresolved, read_order: &[Relation], di
     match unresolved {
         Unresolved::BehindStar { relation } | Unresolved::NamedBehindStar { relation, .. } => {
             retain_first_relation_spelling(relation, read_order, dialect);
+        }
+        Unresolved::SchemaDependent { relations, .. } => {
+            for relation in relations.iter_mut() {
+                retain_first_relation_spelling(relation, read_order, dialect);
+            }
+            sort_dedup_by_key(relations, |relation| relation_key(relation, dialect));
         }
         Unresolved::Ambiguous { candidates, .. } => {
             for candidate in candidates.iter_mut() {

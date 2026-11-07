@@ -10,10 +10,104 @@ use super::{
     unknown_publishers,
 };
 use crate::graph::scope::{JoinMerge, JoinMergeKind, MergedColumns};
-use crate::{Dialect, Ident, OutputName};
+use crate::{Dialect, Ident, OutputName, Relation};
 
 fn union_ranges(left: &[RangeRef], right: &[RangeRef]) -> Rc<[RangeRef]> {
     left.iter().chain(right).cloned().collect()
+}
+
+struct NaturalUncertainty {
+    known_on_left: bool,
+    name: Ident,
+    relations: Vec<Relation>,
+}
+
+fn natural_uncertainties(
+    left: &[OutputElement],
+    right: &[OutputElement],
+    dialect: Dialect,
+) -> Vec<NaturalUncertainty> {
+    let mut uncertain = Vec::new();
+    for (known, possible, known_on_left) in [(left, right, true), (right, left, false)] {
+        for element in known {
+            let OutputElement::Column(slot) = element else {
+                continue;
+            };
+            let listed_other = possible.iter().any(|other| {
+                matches!(other, OutputElement::Column(other)
+                    if same_column_name(&other.name, &slot.name, dialect))
+            });
+            if listed_other {
+                continue;
+            }
+            let (publishers, _) = unknown_publishers(possible, &slot.name, dialect);
+            if publishers.is_empty() {
+                continue;
+            }
+            let relations = possible
+                .iter()
+                .filter_map(|element| match element {
+                    OutputElement::Unknown(segment)
+                        if segment.domain.admits(&slot.name, dialect) =>
+                    {
+                        Some(segment.schema_relations.iter().cloned())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            uncertain.push(NaturalUncertainty {
+                known_on_left,
+                name: slot.name.clone(),
+                relations,
+            });
+        }
+    }
+    uncertain
+}
+
+fn apply_natural_uncertainties(
+    uncertainties: Vec<NaturalUncertainty>,
+    left: &mut [OutputElement],
+    right: &mut [OutputElement],
+    kind: JoinMergeKind,
+    dialect: Dialect,
+) {
+    for uncertainty in uncertainties {
+        let (known, possible) = if uncertainty.known_on_left {
+            (&mut *left, &mut *right)
+        } else {
+            (&mut *right, &mut *left)
+        };
+        for element in possible.iter_mut() {
+            if let OutputElement::Unknown(segment) = element
+                && segment.domain.admits(&uncertainty.name, dialect)
+            {
+                segment.domain.removed.push(uncertainty.name.clone());
+            }
+        }
+        for element in known.iter_mut() {
+            let OutputElement::Column(slot) = element else {
+                continue;
+            };
+            if same_column_name(&slot.name, &uncertainty.name, dialect) {
+                let preserved = matches!(
+                    (uncertainty.known_on_left, kind),
+                    (true, JoinMergeKind::Left) | (false, JoinMergeKind::Right)
+                );
+                if !preserved {
+                    let suppressed = matches!(
+                        (uncertainty.known_on_left, kind),
+                        (true, JoinMergeKind::Right) | (false, JoinMergeKind::Left)
+                    );
+                    slot.value = ValueId::SchemaDependent {
+                        value: (!suppressed).then(|| Box::new(slot.value.clone())),
+                        relations: uncertainty.relations.clone(),
+                    };
+                }
+            }
+        }
+    }
 }
 
 /// Fold USING and NATURAL joins in the order they were written. A shape the
@@ -31,11 +125,38 @@ pub(super) fn fold_join_columns(
     fold_groups(groups, merges, dialect).map_or_else(|| concat_groups(original), concat_groups)
 }
 
-fn concat_groups(groups: Vec<Group>) -> Vec<OutputElement> {
-    groups
-        .into_iter()
-        .flat_map(|group| group.elements)
-        .collect()
+fn concat_groups(mut groups: Vec<Group>) -> Vec<OutputElement> {
+    let mut prefix = Some(0usize);
+    let mut output = Vec::new();
+    for group in &mut groups {
+        for element in &mut group.elements {
+            match element {
+                OutputElement::Column(slot) => {
+                    slot.ordinal = slot
+                        .ordinal
+                        .and_then(|ordinal| prefix.and_then(|prefix| prefix.checked_add(ordinal)));
+                }
+                OutputElement::Unknown(segment) => {
+                    segment.position = segment.position.shifted(prefix);
+                }
+                OutputElement::Tail(_) => {}
+            }
+        }
+        let width = group
+            .elements
+            .iter()
+            .all(|element| !matches!(element, OutputElement::Unknown(_)))
+            .then(|| {
+                group
+                    .elements
+                    .iter()
+                    .filter(|element| matches!(element, OutputElement::Column(_)))
+                    .count()
+            });
+        prefix = prefix.and_then(|prefix| width.and_then(|width| prefix.checked_add(width)));
+        output.append(&mut group.elements);
+    }
+    output
 }
 
 /// Where a USING key sits on one side of a join.
@@ -208,6 +329,17 @@ fn fold_groups(
         let first = *left.iter().chain(&right).min()?;
         let mut left_elements = take_elements(&mut groups, &left);
         let mut right_elements = take_elements(&mut groups, &right);
+        let natural_unknowns = match merge.columns {
+            MergedColumns::Natural => {
+                natural_uncertainties(&left_elements, &right_elements, dialect)
+            }
+            MergedColumns::Using(_) => Vec::new(),
+        };
+        let natural_order_uncertain = matches!(&merge.columns, MergedColumns::Natural)
+            && left_elements.iter().chain(&right_elements).any(|element| {
+                matches!(element, OutputElement::Unknown(_))
+                    || matches!(element, OutputElement::Column(slot) if slot.ordinal.is_none())
+            });
         let mut position = 0;
         groups.retain(|_| {
             let keep = !left.contains(&position) && !right.contains(&position);
@@ -283,6 +415,7 @@ fn fold_groups(
                 .or(right_side.names)
                 .unwrap_or_else(|| (key.clone(), OutputName::Explicit(key.clone())));
             output.push(OutputElement::Column(ColumnSlot {
+                ordinal: Some(output.len()),
                 name,
                 output_name,
                 ranges,
@@ -292,8 +425,30 @@ fn fold_groups(
                 origin: SlotOrigin::Forwarded(key.clone()),
             }));
         }
+        apply_natural_uncertainties(
+            natural_unknowns,
+            &mut left_elements,
+            &mut right_elements,
+            merge.kind,
+            dialect,
+        );
         output.extend(left_elements);
         output.extend(right_elements);
+        recompute_ordinals(&mut output);
+        for element in &mut output {
+            if let OutputElement::Unknown(segment) = element
+                && !matches!(segment.position, crate::types::StarPosition::Inferred)
+            {
+                segment.position = crate::types::StarPosition::Unproven;
+            }
+        }
+        if natural_order_uncertain {
+            for element in &mut output {
+                if let OutputElement::Column(slot) = element {
+                    slot.ordinal = None;
+                }
+            }
+        }
         groups.insert(
             first,
             Group {
@@ -303,6 +458,24 @@ fn fold_groups(
         );
     }
     Some(groups)
+}
+
+fn recompute_ordinals(elements: &mut [OutputElement]) {
+    let mut next = Some(0usize);
+    for element in elements {
+        match element {
+            OutputElement::Column(slot) if slot.ordinal.is_some() => {
+                slot.ordinal = next;
+                next = next.and_then(|ordinal| ordinal.checked_add(1));
+            }
+            OutputElement::Column(slot) => {
+                slot.ordinal = None;
+                next = None;
+            }
+            OutputElement::Unknown(_) => next = None,
+            OutputElement::Tail(_) => {}
+        }
+    }
 }
 
 /// Move the elements of the groups at `indexes` into one list.

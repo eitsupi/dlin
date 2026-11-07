@@ -147,8 +147,13 @@ struct OneColumnCatalog;
 impl dlin_sqllineage::Catalog for OneColumnCatalog {
     fn lookup(&self, relation: &Relation) -> Option<dlin_sqllineage::CatalogEntry<'_>> {
         (relation.name == Ident::unquoted("t")).then(|| dlin_sqllineage::CatalogEntry {
+            coverage: dlin_sqllineage::SchemaCoverage::Exhaustive,
+            order: dlin_sqllineage::SchemaOrder::Proven,
+            unknown_segments: std::borrow::Cow::Borrowed(&[]),
+            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation.clone(),
             columns: std::borrow::Cow::Owned(vec![dlin_sqllineage::CatalogColumn {
+                ordinal: Some(0),
                 name: Ident::unquoted("id"),
                 data_type: None,
                 fields: None,

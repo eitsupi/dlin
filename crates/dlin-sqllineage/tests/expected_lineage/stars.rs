@@ -515,10 +515,24 @@ pub fn cases() -> Vec<Case> {
             "partial_catalog_natural_star",
             "SELECT * FROM a NATURAL JOIN b",
             Dialect::Generic,
-            vec![physical(0, "a", "left_value"), physical(1, "a", "id")],
+            // P4: b may share either name, changing both values and key order.
+            ["left_value", "id"]
+                .into_iter()
+                .map(|name| ExpectedColumn {
+                    ordinal: None,
+                    name: dlin_sqllineage::OutputName::Explicit(u(name)),
+                    lineage: Lineage::Partial {
+                        known: vec![source(relation("a"), u(name))],
+                        unresolved: vec![Unresolved::SchemaDependent {
+                            what: dlin_sqllineage::SchemaDependencyKind::NaturalJoinColumns,
+                            relations: vec![relation("b")],
+                        }],
+                    },
+                })
+                .collect(),
         )
         .catalog(vec![(relation("a"), vec![u("left_value"), u("id")])])
-        .shape(open_star("b", Some(1)))
+        .shape(open_star("b", None))
         .unresolved_stars(true),
     );
     cases.push(Case::new("renamed_derived_star_keeps_join_arity",
