@@ -10,10 +10,9 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::{
-    CacheKey, ColumnSlot, Group, NameMatches, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, ValueId, fold_join_columns, forward_scope,
-};
+use super::build::{CacheKey, OutputModels, forward_scope};
+use super::join::fold_join_columns;
+use super::{ColumnSlot, Group, NameMatches, OpaqueReason, OutputElement, OutputModel, ValueId};
 use crate::graph::scope::{Binding, MergedColumns, ScopeId};
 use crate::keys::table_key;
 use crate::types::TableRef;
