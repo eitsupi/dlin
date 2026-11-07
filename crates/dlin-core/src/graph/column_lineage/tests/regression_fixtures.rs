@@ -61,9 +61,11 @@ fn test_derived_table_select_star_passthrough_is_traced() {
 }
 
 #[test]
-fn test_join_select_star_passthrough_is_traced() {
+fn test_join_select_star_passthrough_is_ambiguous() {
     // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
     // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
+    // Neither relation's columns are known, so the star may publish `id` as well and the
+    // unqualified reference cannot be attributed to `some_table` alone.
     let mut manifest = make_test_manifest();
     manifest
         .nodes
@@ -82,10 +84,17 @@ fn test_join_select_star_passthrough_is_traced() {
 
     assert_exact_column_outcomes(
         &result,
-        &["id"],
-        &["customer_id", "order_date", "order_id", "status"],
+        &[],
+        &["customer_id", "id", "order_date", "order_id", "status"],
     );
     assert_select_star_hint(&result);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.column.as_deref() == Some("id")
+                && matches!(error.kind, ColumnLineageErrorKind::ColumnAmbiguous))
+    );
 }
 
 const STAR_PASSTHROUGH_TRACEABLE_CASES: &[&str] = &[

@@ -9,16 +9,14 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
-use super::lineage::{
-    collect_leaf_origins, collect_output_sources, flatten_mapping_sources, named_scope_sources,
-};
+use super::lineage::{collect_leaf_origins, collect_output_sources, flatten_mapping_sources};
 use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
     wildcard_mapping,
 };
 use super::model::{
-    BranchTail, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
-    UnknownProvider, UnknownSegment, ValueId,
+    BranchTail, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
+    RangeRef, UnknownProvider, UnknownSegment, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target, same_column_name};
 
@@ -28,7 +26,7 @@ use crate::graph::node::{NodeId, RawNode, StarBase};
 use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
 use crate::keys::candidate_key;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
-use crate::{Candidate, Ident};
+use crate::{Candidate, Ident, Unresolved};
 
 /// What a scope publishes under a name that none of its listed columns has.
 pub(super) enum Unlisted {
@@ -129,6 +127,73 @@ pub(super) fn unlisted_name_sources(
     .unlisted(scope, name)
 }
 
+/// The origins of the column a CTE or derived table publishes under `name`,
+/// with the transform that scope applies to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn named_scope_sources(
+    name: &Ident,
+    target_scope: ScopeId,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    Evaluator {
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        active: HashSet::new(),
+    }
+    .named(target_scope, name)
+}
+
+/// What an unqualified name in the FROM clause of `scope` denotes.
+pub(super) fn lookup_input(
+    scope: ScopeId,
+    name: &Ident,
+    graph: &RawGraph,
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> InputLookup {
+    OutputModels::new(graph, catalog, &mut mapping_cache.models).lookup_input(scope, name)
+}
+
+/// The origins of an unqualified name in the FROM clause of `scope`, read from
+/// the same folded model a star over that clause expands. `None` when a
+/// single CTE or derived table decides the name and publishes nothing under
+/// it, or when the name is read from a virtual source.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn input_name_sources(
+    scope: ScopeId,
+    name: &Ident,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    let lookup = lookup_input(scope, name, graph, catalog, mapping_cache);
+    Evaluator {
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        active: HashSet::new(),
+    }
+    .input(lookup, name)
+}
+
+/// `ColumnOrigin` has no equality of its own; its debug form covers every field.
+/// Two relations often reach the same underlying column, and a merged column
+/// lists it once. Distinct spellings stay apart.
+fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
+    format!("{left:?}") == format!("{right:?}")
+}
+
 struct Evaluator<'a, 'c, 'm> {
     graph: &'a RawGraph,
     resolved: &'m mut Vec<Option<ColumnOrigin>>,
@@ -223,6 +288,127 @@ impl Evaluator<'_, '_, '_> {
                 sources.extend(right_sources);
                 (sources, merge_transform(&left_transform, &right_transform))
             }
+            ValueId::Uncertain { column, candidates } => (
+                vec![ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                    column: column.clone(),
+                    candidates: candidates.iter().filter_map(RangeRef::candidate).collect(),
+                })],
+                TransformKind::Direct,
+            ),
+        }
+    }
+
+    /// The origins and transform of a column that a reference to `name`
+    /// reads, with whether they read the recursive CTE the column belongs to.
+    /// A column read this way is spelled as the reference spells it.
+    fn read_value(
+        &mut self,
+        value: &ValueId,
+        name: &Ident,
+    ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+        match value {
+            ValueId::Physical { table, .. } => (
+                vec![ColumnOrigin::Concrete {
+                    table: (**table).clone(),
+                    column: name.clone(),
+                }],
+                false,
+                TransformKind::Direct,
+            ),
+            ValueId::ScopeSlot { scope, index } => self.scope_slot(*scope, *index, true),
+            ValueId::Merged(left, right) => {
+                let (mut sources, left_back, left_transform) = self.read_value(left, name);
+                let (right_sources, right_back, right_transform) = self.read_value(right, name);
+                for source in right_sources {
+                    if !sources.iter().any(|seen| same_origin(seen, &source)) {
+                        sources.push(source);
+                    }
+                }
+                (
+                    sources,
+                    left_back || right_back,
+                    merge_transform(&left_transform, &right_transform),
+                )
+            }
+            other => {
+                let (sources, transform) = self.value(other);
+                (sources, false, transform)
+            }
+        }
+    }
+
+    /// Evaluate the answer of an input lookup.
+    fn input(
+        &mut self,
+        lookup: InputLookup,
+        name: &Ident,
+    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+        let unbound = || ColumnOrigin::Ambiguous {
+            column: name.clone(),
+            candidates: Vec::new(),
+        };
+        match lookup {
+            InputLookup::NoSource => None,
+            InputLookup::Absent => Some((vec![unbound()], false, TransformKind::Direct)),
+            InputLookup::Physical(table) => Some((
+                vec![ColumnOrigin::Concrete {
+                    table: (*table).clone(),
+                    column: name.clone(),
+                }],
+                false,
+                TransformKind::Direct,
+            )),
+            InputLookup::Scope { scope, .. } => self.named(scope, name),
+            InputLookup::Column { value, .. } => Some(self.read_value(&value, name)),
+            InputLookup::Ambiguous { candidates, typed } => {
+                let origin = if typed {
+                    ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                        column: name.clone(),
+                        candidates,
+                    })
+                } else {
+                    ColumnOrigin::Ambiguous {
+                        column: name.clone(),
+                        candidates: candidates
+                            .into_iter()
+                            .filter_map(|candidate| match candidate {
+                                Candidate::Relation(relation) => Some(crate::types::TableRef {
+                                    catalog: relation.catalog,
+                                    schema: relation.schema,
+                                    table: relation.name,
+                                }),
+                                _ => None,
+                            })
+                            .collect(),
+                    }
+                };
+                Some((vec![origin], false, TransformKind::Direct))
+            }
+        }
+    }
+
+    /// The origins of the column a CTE or derived table publishes under
+    /// `name`: a listed column, a column of a set operation's tail, or
+    /// whatever its unknown segments may publish.
+    fn named(
+        &mut self,
+        scope: ScopeId,
+        name: &Ident,
+    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+        if let Some(listed) = self.listed(scope, name) {
+            return Some(listed);
+        }
+        match self.unlisted(scope, name) {
+            Unlisted::Denied => Some((
+                vec![ColumnOrigin::Ambiguous {
+                    column: name.clone(),
+                    candidates: Vec::new(),
+                }],
+                false,
+                TransformKind::Direct,
+            )),
+            Unlisted::Sources(sources) => Some((sources, false, TransformKind::Direct)),
+            Unlisted::None => None,
         }
     }
 
@@ -295,7 +481,6 @@ impl Evaluator<'_, '_, '_> {
     ) -> Vec<Candidate> {
         let graph = self.graph;
         let dialect = graph.dialect;
-        let visible = graph.scopes.visible_bindings(scope);
         let mut candidates = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         let mut push = |candidate: Candidate| {
@@ -307,22 +492,8 @@ impl Evaluator<'_, '_, '_> {
             let OutputElement::Column(slot) = &model.elements[index] else {
                 continue;
             };
-            for range in slot.candidate_ranges.iter() {
-                let binding = visible
-                    .iter()
-                    .find(|(name, _)| same_column_name(name, range, dialect));
-                if let Some((name, binding)) = binding {
-                    match binding {
-                        Binding::Table(table) => push(Candidate::Relation(crate::Relation {
-                            catalog: table.catalog.clone(),
-                            schema: table.schema.clone(),
-                            name: table.table.clone(),
-                        })),
-                        Binding::Cte(_) => push(Candidate::Cte(name.clone())),
-                        Binding::DerivedTable(_) => push(Candidate::Derived(Some(name.clone()))),
-                        Binding::VirtualSource(_) => {}
-                    }
-                }
+            for candidate in slot.candidate_ranges.iter().filter_map(RangeRef::candidate) {
+                push(candidate);
             }
         }
         if candidates.is_empty() {
@@ -344,6 +515,19 @@ impl Evaluator<'_, '_, '_> {
         name: &Ident,
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
         let model = self.scope_model(scope);
+        // A join over duplicated range variables cannot say which relation
+        // owns a name it merges, whatever the relations list.
+        if let Some(invalid) = model
+            .invalid
+            .iter()
+            .find(|invalid| invalid.covers(name, self.graph.dialect))
+        {
+            let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                column: name.clone(),
+                candidates: invalid.candidates.clone(),
+            });
+            return Some((vec![ambiguous], false, TransformKind::Direct));
+        }
         match model.slots_named(name) {
             [] => {}
             [index] => return Some(self.scope_slot(scope, *index, true)),

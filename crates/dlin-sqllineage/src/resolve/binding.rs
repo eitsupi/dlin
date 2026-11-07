@@ -1,18 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use super::lineage::{collect_output_sources, named_scope_sources, virtual_column_origin};
-use super::mapping::{ScopeMappingCache, merge_transform};
-use super::model::OutputModels;
-use super::star::{Unlisted, listed_name_sources, unlisted_name_sources};
+use super::lineage::{collect_output_sources, virtual_column_origin};
+use super::mapping::ScopeMappingCache;
+use super::model::InputLookup;
+use super::star::{
+    Unlisted, input_name_sources, listed_name_sources, lookup_input, unlisted_name_sources,
+};
 use super::target::effective_bindings;
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, JoinMerge, JoinMergeKind, MergedColumns, VirtualSourceId};
-use crate::types::{ColumnOrigin, TableRef, TransformKind};
-use crate::{Candidate, Dialect, Ident, Unresolved};
+use crate::graph::scope::{Binding, VirtualSourceId};
+use crate::types::{ColumnOrigin, TransformKind};
+use crate::{Ident, Unresolved};
 
 pub(super) fn resolve_node(
     node_id: NodeId,
@@ -326,10 +328,8 @@ pub(super) fn find_cte_redirect(
     }
 }
 
-/// The relation an unqualified column reference is read from: the only
-/// relation in scope, or else the only CTE/derived table publishing the name.
-/// A name that joins merge from several relations, or that is ambiguous, has
-/// no single relation; `resolve_merged_column` handles the merged case.
+/// The CTE or derived table an unqualified column reference is read from, when
+/// the folded FROM clause settles on a single one.
 pub(super) fn find_unqualified_binding(
     name: &Ident,
     scope: usize,
@@ -337,358 +337,14 @@ pub(super) fn find_unqualified_binding(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<Binding> {
-    let bindings = effective_bindings(scope, graph);
-    if bindings.len() == 1 {
-        return Some(bindings[0].1.clone());
-    }
-    match unqualified_choice(name, &bindings, scope, graph, catalog, mapping_cache) {
-        UnqualifiedChoice::Merged(mut members) if members.len() == 1 => members.pop(),
-        _ => None,
-    }
+    lookup_input(scope, name, graph, catalog, mapping_cache).binding()
 }
 
-/// What an unqualified column name denotes among the relations of a FROM
-/// clause.
-enum UnqualifiedChoice {
-    /// Competing physical or named relation providers. CTE/derived candidates
-    /// stay typed and are never fabricated as table references. The flag is
-    /// set when a `USING` join guarantees that some candidate has the column,
-    /// so a catalog that does not list the other candidates cannot settle it.
-    Ambiguous(Vec<Candidate>, bool),
-    /// A single column. Its contributing bindings are in FROM order.
-    Merged(Vec<Binding>),
-}
-
-/// A relation that may supply an unqualified column.
-struct ColumnRelation<'a> {
-    name: &'a Ident,
-    binding: &'a Binding,
-    /// The CTE/derived-table scope, `None` for a physical table. Aliases of
-    /// the same scope are separate relations for name resolution.
-    scope: Option<usize>,
-}
-
-fn merge_covers(merge: &JoinMerge, name: &Ident, dialect: Dialect) -> bool {
-    match &merge.columns {
-        MergedColumns::Using(columns) => columns
-            .iter()
-            .any(|column| column.column_key(dialect) == name.column_key(dialect)),
-        MergedColumns::Natural => true,
-    }
-}
-
-/// What the catalog says about whether `table` has the column `name`. A table
-/// the catalog does not describe is `None`: unknown, neither having nor
-/// lacking the column.
-fn table_has_column(
-    table: &TableRef,
-    name: &Ident,
-    catalog: Option<&CatalogContext<'_>>,
-) -> Option<bool> {
-    let catalog = catalog?;
-    catalog.entry(table).map(|entry| {
-        entry.columns.iter().any(|column| {
-            column.name.column_key(catalog.dialect) == name.column_key(catalog.dialect)
-        })
-    })
-}
-
-/// Decide what the unqualified `name` denotes.
-///
-/// Relations that can supply it are CTEs/derived tables that publish the name
-/// and physical tables, whose columns are unknown unless a catalog says
-/// otherwise (a table the catalog knows to lack the name is left out, but only
-/// when a join merges the name, so ordinary lookups behave as without the
-/// catalog and are refined afterwards). Each starts in a group of its own, and
-/// every `USING`/`NATURAL` join that covers the name unites the groups of its
-/// two sides. `USING (x)` guarantees both sides have `x`. `NATURAL` merges
-/// only the columns both sides have, so it unites a physical table only when
-/// the catalog confirms the table has the name; claiming a merge with a table
-/// that may lack the column would report a source that may not exist, so such
-/// tables stay separate choices. CTEs and derived tables are known from their
-/// output columns. A join merges only the relations on its own two sides, so a
-/// relation outside it (comma-joined, or joined with `ON`) stays a separate
-/// choice. A side that already holds several unmerged relations makes the name
-/// ambiguous within the join itself, so that join merges nothing.
-///
-/// The name is one column when all competing relations share a group. When a
-/// CTE or derived table publishes the name it outranks physical tables
-/// (their columns are unknown), so only relations merged with such a provider
-/// count, except that a guaranteed USING group outside that provider's group
-/// remains a competing source.
-fn unqualified_choice(
-    name: &Ident,
-    bindings: &[(Ident, Binding)],
-    scope: usize,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> UnqualifiedChoice {
-    let merges: Vec<&JoinMerge> = graph
-        .scopes
-        .join_merges(scope)
-        .iter()
-        .filter(|merge| merge_covers(merge, name, graph.dialect))
-        .collect();
-    // Merge members name range variables, so duplicate names cannot identify
-    // join sides. Reject the invalid binding set before catalog filtering or
-    // provider precedence could turn it into a definite source.
-    let mut binding_names = HashSet::new();
-    if !merges.is_empty()
-        && bindings
-            .iter()
-            .any(|(name, _)| !binding_names.insert(name.column_key(graph.dialect)))
-    {
-        return UnqualifiedChoice::Ambiguous(
-            bindings
-                .iter()
-                .filter_map(|(name, binding)| match binding {
-                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
-                        catalog: table.catalog.clone(),
-                        schema: table.schema.clone(),
-                        name: table.table.clone(),
-                    })),
-                    Binding::Cte(_) => Some(Candidate::Cte(name.clone())),
-                    Binding::DerivedTable(_) => Some(Candidate::Derived(Some(name.clone()))),
-                    Binding::VirtualSource(_) => None,
-                })
-                .collect(),
-            false,
-        );
-    }
-    let consult_catalog = !merges.is_empty();
-    // Relations a `USING` join on this name combines.
-    let using_members: HashSet<String> = merges
-        .iter()
-        .filter(|merge| matches!(merge.columns, MergedColumns::Using(_)))
-        .flat_map(|merge| merge.left.iter().chain(&merge.right))
-        .map(|member| member.column_key(graph.dialect).into_owned())
-        .collect();
-
-    let mut relations: Vec<ColumnRelation<'_>> = Vec::new();
-    let mut relation_of: HashMap<String, usize> = HashMap::new();
-    // Whether each relation is known to have the column.
-    let mut known_to_have: Vec<bool> = Vec::new();
-    for (binding_name, binding) in bindings {
-        match binding {
-            Binding::Cte(provider) | Binding::DerivedTable(provider) => {
-                let by_using =
-                    using_members.contains(binding_name.column_key(graph.dialect).as_ref());
-                if !binding_publishes(binding, name, by_using, graph, catalog, mapping_cache) {
-                    continue;
-                }
-                relations.push(ColumnRelation {
-                    name: binding_name,
-                    binding,
-                    scope: Some(*provider),
-                });
-                known_to_have.push(true);
-                relation_of.insert(
-                    binding_name.column_key(graph.dialect).into_owned(),
-                    relations.len() - 1,
-                );
-            }
-            Binding::Table(table) => {
-                let has_column = if consult_catalog {
-                    table_has_column(table, name, catalog)
-                } else {
-                    None
-                };
-                if has_column == Some(false) {
-                    continue;
-                }
-                known_to_have.push(has_column == Some(true));
-                relations.push(ColumnRelation {
-                    name: binding_name,
-                    binding,
-                    scope: None,
-                });
-                relation_of.insert(
-                    binding_name.column_key(graph.dialect).into_owned(),
-                    relations.len() - 1,
-                );
-            }
-            Binding::VirtualSource(_) => {}
-        }
-    }
-
-    let mut groups: Vec<usize> = (0..relations.len()).collect();
-    // Group membership resolves names; contributors track the value after
-    // each join, including the preserved side of an outer join.
-    let mut contributes = vec![true; relations.len()];
-    for merge in merges {
-        let natural = matches!(merge.columns, MergedColumns::Natural);
-        let side_group = |side: &[Ident]| {
-            let mut found = side.iter().filter_map(|member| {
-                let key = member.column_key(graph.dialect);
-                relation_of
-                    .get(key.as_ref())
-                    .filter(|&&index| !natural || known_to_have[index])
-                    .map(|&index| groups[index])
-            });
-            let first = found.next()?;
-            found.all(|group| group == first).then_some(first)
-        };
-        let (left, right) = (side_group(&merge.left), side_group(&merge.right));
-        let (Some(left), Some(right)) = (left, right) else {
-            continue;
-        };
-        if left != right {
-            for (index, &group) in groups.iter().enumerate() {
-                if (group == left && matches!(merge.kind, JoinMergeKind::Right))
-                    || (group == right && matches!(merge.kind, JoinMergeKind::Left))
-                {
-                    contributes[index] = false;
-                }
-            }
-        }
-        for group in &mut groups {
-            if *group == right {
-                *group = left;
-            }
-        }
-    }
-
-    let providers: Vec<usize> = (0..relations.len())
-        .filter(|&index| relations[index].scope.is_some())
-        .collect();
-    let contributing_providers: Vec<usize> = providers
-        .iter()
-        .copied()
-        .filter(|&index| contributes[index])
-        .collect();
-    if let Some(&first) = contributing_providers.first() {
-        let provider_groups: HashSet<usize> = contributing_providers
-            .iter()
-            .map(|&index| groups[index])
-            .collect();
-        let using_groups: HashSet<usize> = relations
-            .iter()
-            .enumerate()
-            .filter(|(_, relation)| {
-                using_members.contains(relation.name.column_key(graph.dialect).as_ref())
-            })
-            .map(|(index, _)| groups[index])
-            .collect();
-        let has_competing_using_group = using_groups
-            .iter()
-            .any(|group| provider_groups.iter().any(|provider| provider != group));
-        if has_competing_using_group {
-            let candidates = (0..relations.len())
-                .filter(|&index| {
-                    contributes[index]
-                        && (contributing_providers.contains(&index)
-                            || using_groups.contains(&groups[index]))
-                })
-                .filter_map(|index| match relations[index].binding {
-                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
-                        catalog: table.catalog.clone(),
-                        schema: table.schema.clone(),
-                        name: table.table.clone(),
-                    })),
-                    Binding::Cte(_) => Some(Candidate::Cte(relations[index].name.clone())),
-                    Binding::DerivedTable(_) => {
-                        Some(Candidate::Derived(Some(relations[index].name.clone())))
-                    }
-                    Binding::VirtualSource(_) => None,
-                })
-                .collect();
-            return UnqualifiedChoice::Ambiguous(candidates, true);
-        }
-        if provider_groups.len() > 1 {
-            return UnqualifiedChoice::Ambiguous(
-                contributing_providers
-                    .iter()
-                    .map(|&index| match relations[index].binding {
-                        Binding::Cte(_) => Candidate::Cte(relations[index].name.clone()),
-                        Binding::DerivedTable(_) => {
-                            Candidate::Derived(Some(relations[index].name.clone()))
-                        }
-                        _ => unreachable!("provider is a CTE or derived table"),
-                    })
-                    .collect(),
-                false,
-            );
-        }
-        return UnqualifiedChoice::Merged(
-            (0..relations.len())
-                .filter(|&index| groups[index] == groups[first] && contributes[index])
-                .map(|index| relations[index].binding.clone())
-                .collect(),
-        );
-    }
-
-    let one_column = groups.windows(2).all(|pair| pair[0] == pair[1]);
-    if one_column && !relations.is_empty() {
-        UnqualifiedChoice::Merged(
-            relations
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| contributes[*index])
-                .map(|(_, relation)| relation.binding.clone())
-                .collect(),
-        )
-    } else {
-        let guaranteed = relations.iter().any(|relation| {
-            using_members.contains(relation.name.column_key(graph.dialect).as_ref())
-        });
-        UnqualifiedChoice::Ambiguous(
-            relations
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| contributes[*index])
-                .filter_map(|(_, relation)| match relation.binding {
-                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
-                        catalog: table.catalog.clone(),
-                        schema: table.schema.clone(),
-                        name: table.table.clone(),
-                    })),
-                    Binding::Cte(_) => Some(Candidate::Cte(relation.name.clone())),
-                    Binding::DerivedTable(_) => {
-                        Some(Candidate::Derived(Some(relation.name.clone())))
-                    }
-                    _ => None,
-                })
-                .collect(),
-            guaranteed,
-        )
-    }
-}
-
-/// `ColumnOrigin` has no equality of its own; its debug form covers every field.
-fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
-    format!("{left:?}") == format!("{right:?}")
-}
-
-/// Whether a CTE or derived table publishes `name`. A relation that a
-/// `USING (name)` join combines has the column whatever its star hides, so a
-/// star it cannot enumerate counts there; otherwise only a listed column does.
-fn binding_publishes(
-    binding: &Binding,
-    name: &Ident,
-    may_hide_behind_star: bool,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> bool {
-    let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
-        return false;
-    };
-    let model = OutputModels::new(graph, catalog, &mut mapping_cache.models).scope(*scope);
-    if may_hide_behind_star {
-        model.may_publish(name)
-    } else {
-        model.publishes(name)
-    }
-}
-
-/// Resolve an unqualified column that `USING`/`NATURAL` joins merge from
-/// several relations. Only the sides that supply its value contribute:
-/// both for inner/full joins, the preserved side for left/right joins.
-/// A physical table contributes itself, a CTE or derived table its origins
-/// and transform.
-/// Returns `None` for any other reference, which resolves to one relation.
-pub(super) fn resolve_merged_column(
+/// Resolve an unqualified column that no range variable names, from every
+/// relation the FROM clause lets supply it. A column that `USING`/`NATURAL`
+/// joins merge keeps all the sides that supply its value.
+/// Returns `None` for any other reference.
+pub(super) fn resolve_input_reference(
     node_id: NodeId,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -710,64 +366,15 @@ pub(super) fn resolve_merged_column(
         } => (name, *scope),
         _ => return None,
     };
-    let bindings = effective_bindings(scope, graph);
-    if bindings.len() < 2 {
-        return None;
-    }
-    let UnqualifiedChoice::Merged(members) =
-        unqualified_choice(name, &bindings, scope, graph, catalog, mapping_cache)
-    else {
-        return None;
-    };
-    if members.len() < 2 {
-        return None;
-    }
-
-    let mut sources: Vec<ColumnOrigin> = Vec::new();
-    let mut has_back = false;
-    let mut transform = TransformKind::Direct;
-    for member in members {
-        let (origins, member_back, member_transform) = match member {
-            Binding::Table(table) => (
-                vec![ColumnOrigin::Concrete {
-                    table,
-                    column: name.clone(),
-                }],
-                false,
-                TransformKind::Direct,
-            ),
-            Binding::Cte(provider) | Binding::DerivedTable(provider) => named_scope_sources(
-                name,
-                provider,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-            )
-            .unwrap_or_else(|| {
-                (
-                    vec![ColumnOrigin::Ambiguous {
-                        column: name.clone(),
-                        candidates: Vec::new(),
-                    }],
-                    false,
-                    TransformKind::Direct,
-                )
-            }),
-            Binding::VirtualSource(_) => continue,
-        };
-        for origin in origins {
-            // Two relations often reach the same underlying column. Distinct
-            // spellings stay apart; the final key normalization picks among them.
-            if !sources.iter().any(|seen| same_origin(seen, &origin)) {
-                sources.push(origin);
-            }
-        }
-        has_back |= member_back;
-        transform = merge_transform(&transform, &member_transform);
-    }
-    Some((sources, has_back, transform))
+    input_name_sources(
+        scope,
+        name,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -781,108 +388,30 @@ fn resolve_unqualified(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
-    resolve_from_bindings(
-        name,
-        &effective_bindings(scope, graph),
-        scope,
-        graph,
-        resolved,
-        incoming,
-        visited,
-        catalog,
-        mapping_cache,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_from_bindings(
-    name: &Ident,
-    bindings: &[(Ident, Binding)],
-    scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    visited: &mut HashSet<NodeId>,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> Option<ColumnOrigin> {
-    if bindings.len() == 1 {
-        let (_, binding) = &bindings[0];
-        match binding {
-            Binding::Table(table_ref) => Some(ColumnOrigin::Concrete {
-                table: table_ref.clone(),
-                column: name.clone(),
-            }),
-            Binding::Cte(cte_scope) | Binding::DerivedTable(cte_scope) => resolve_through_scope(
-                name,
-                *cte_scope,
-                graph,
-                resolved,
-                incoming,
-                visited,
-                catalog,
-                mapping_cache,
-            ),
-            Binding::VirtualSource(_) => None,
-        }
-    } else if bindings.is_empty() {
-        Some(ColumnOrigin::Ambiguous {
-            column: name.clone(),
-            candidates: Vec::new(),
-        })
-    } else {
-        match unqualified_choice(name, bindings, scope, graph, catalog, mapping_cache) {
-            UnqualifiedChoice::Ambiguous(candidates, guaranteed) => {
-                if guaranteed
-                    || candidates
-                        .iter()
-                        .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
-                {
-                    Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
-                        column: name.clone(),
-                        candidates,
-                    }))
-                } else {
-                    let candidates = candidates
-                        .into_iter()
-                        .filter_map(|candidate| match candidate {
-                            Candidate::Relation(relation) => Some(TableRef {
-                                catalog: relation.catalog,
-                                schema: relation.schema,
-                                table: relation.name,
-                            }),
-                            _ => None,
-                        })
-                        .collect();
-                    Some(ColumnOrigin::Ambiguous {
-                        column: name.clone(),
-                        candidates,
-                    })
-                }
-            }
-            // A merged column is collected from all its relations by
-            // `resolve_merged_column`; a single origin can only name the
-            // leftmost one.
-            UnqualifiedChoice::Merged(members) => match members.into_iter().next() {
-                Some(Binding::Table(table)) => Some(ColumnOrigin::Concrete {
-                    table,
-                    column: name.clone(),
-                }),
-                Some(Binding::Cte(provider) | Binding::DerivedTable(provider)) => {
-                    resolve_through_scope(
-                        name,
-                        provider,
-                        graph,
-                        resolved,
-                        incoming,
-                        visited,
-                        catalog,
-                        mapping_cache,
-                    )
-                }
-                Some(Binding::VirtualSource(_)) | None => None,
-            },
-        }
+    match lookup_input(scope, name, graph, catalog, mapping_cache) {
+        // A CTE or derived table that publishes nothing under the name still
+        // answers for it: through its raw output columns, else unresolved.
+        InputLookup::Scope { scope: target, .. } => resolve_through_scope(
+            name,
+            target,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        ),
+        InputLookup::NoSource => None,
+        _ => input_name_sources(
+            scope,
+            name,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+        )
+        .and_then(|(sources, _, _)| sources.into_iter().next()),
     }
 }
 

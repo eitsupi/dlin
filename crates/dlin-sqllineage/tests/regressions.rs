@@ -74,10 +74,12 @@ fn nested_join_star_does_not_open_a_closed_root_projection() {
         &result.output.shape,
         dlin_sqllineage::Shape::Closed
     ));
+    // The derived table may publish `id` too, so the name has two owners.
     assert!(
-        matches!(&result.output.columns[0].lineage, Lineage::Complete(sources)
-        if matches!(&sources[..], [source]
-            if source.relation.name.value == "some_table" && source.column.value == "id"))
+        matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved }
+        if known.is_empty()
+            && matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+                if column.value == "id" && candidates.len() == 2))
     );
 }
 

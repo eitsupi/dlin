@@ -258,12 +258,10 @@ fn direct_and_star_from_clause_lookups_agree() {
     }
     let recorded_skips: BTreeMap<String, Vec<String>> =
         serde_json::from_str(include_str!("direct_using_invariant_skips.json")).unwrap();
-    for (key, failure) in &recorded {
-        assert!(
-            failures.contains_key(key),
-            "{key}: comparison now agrees; remove recorded failure {failure}"
-        );
-    }
+    let agreeing: Vec<&String> = recorded
+        .keys()
+        .filter(|key| !failures.contains_key(*key))
+        .collect();
     eprintln!(
         "{} direct/star fixtures, {inputs_count} FROM inputs, {probes} probes, {} recorded differences; {} applicability records",
         cases.len(),
@@ -280,6 +278,10 @@ fn direct_and_star_from_clause_lookups_agree() {
             serde_json::to_string(&failures).unwrap()
         );
     }
+    assert!(
+        agreeing.is_empty(),
+        "comparison now agrees; remove the recorded failures {agreeing:?}"
+    );
     assert_eq!(
         skipped, recorded_skips,
         "direct/star applicability changed; review skipped inputs explicitly"

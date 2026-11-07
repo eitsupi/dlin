@@ -11,9 +11,13 @@ use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+mod input;
+
+pub(super) use input::{InputLookup, RangeRef};
+use input::{InputModel, InvalidRanges};
+
 use super::target::{
-    StarTarget, effective_bindings, excluded_matches_name, ilike_matches, resolve_star_target,
-    same_column_name,
+    StarTarget, excluded_matches_name, ilike_matches, resolve_star_target, same_column_name,
 };
 
 use crate::catalog::CatalogContext;
@@ -73,6 +77,12 @@ pub(super) enum ValueId {
     },
     /// A column merged by USING/NATURAL whose value both sides contribute to.
     Merged(Box<ValueId>, Box<ValueId>),
+    /// A column that exactly one of several unknown relations supplies, with
+    /// no way to tell which. Naming one of them would invent a source.
+    Uncertain {
+        column: Ident,
+        candidates: Rc<[RangeRef]>,
+    },
 }
 
 /// Why a segment of columns cannot be enumerated.
@@ -114,7 +124,7 @@ pub(super) struct StarFilter {
 /// applied, because a qualified EXCLUDE is matched against them.
 #[derive(Debug, Clone, Default)]
 pub(super) struct NameDomain {
-    filters: Vec<(Rc<StarFilter>, Rc<[Ident]>)>,
+    filters: Vec<(Rc<StarFilter>, Rc<[RangeRef]>)>,
     /// Names the segment no longer publishes: merged by USING or renamed away.
     removed: Vec<Ident>,
 }
@@ -143,10 +153,13 @@ pub(super) struct ColumnSlot {
     pub output_name: OutputName,
     /// Range variables the column is visible under. A merged column keeps
     /// the range variables of both sides, whatever the join kind.
-    pub ranges: Rc<[Ident]>,
+    pub ranges: Rc<[RangeRef]>,
     /// Range variables whose values contribute to the column. Unlike
     /// `ranges`, this excludes sides suppressed by an outer USING join.
-    pub candidate_ranges: Rc<[Ident]>,
+    pub candidate_ranges: Rc<[RangeRef]>,
+    /// Whether a USING or NATURAL join merged the column, which guarantees
+    /// that every side it merges has it.
+    pub join_key: bool,
     pub value: ValueId,
 }
 
@@ -155,7 +168,7 @@ pub(super) struct ColumnSlot {
 #[derive(Debug, Clone)]
 pub(super) struct UnknownSegment {
     pub provider: UnknownProvider,
-    pub ranges: Rc<[Ident]>,
+    pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
 }
 
@@ -186,7 +199,7 @@ pub(super) enum OutputElement {
 pub(super) struct BranchTail {
     /// The set operation that merges them in.
     pub scope: ScopeId,
-    pub ranges: Rc<[Ident]>,
+    pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
 }
 
@@ -196,6 +209,9 @@ pub(super) struct BranchTail {
 pub(super) struct NameIndex {
     dialect: Dialect,
     slots: OnceCell<HashMap<String, Vec<usize>>>,
+    /// Positions of the unknown segments and tails, which may publish any
+    /// name their conditions admit.
+    unlisted: OnceCell<Vec<usize>>,
 }
 
 #[derive(Debug)]
@@ -206,6 +222,20 @@ pub(super) struct OutputModel {
     /// Why the width of a scope is unknown, following only the scopes that
     /// produce its output.
     pub unknown_reasons: Vec<&'static str>,
+    /// Joins that merge names over a FROM clause in which two ranges share a
+    /// name, so which relation a merged name belongs to cannot be told.
+    pub invalid: Vec<Rc<InvalidRanges>>,
+}
+
+/// The elements of a model that may carry one name.
+pub(super) struct NameMatches {
+    /// Enumerated columns, in output order.
+    pub listed: Vec<usize>,
+    /// Unknown segments that can still publish the name. A segment the
+    /// analysis does not model (VALUES, a nested field) is not one.
+    pub unknown: Vec<usize>,
+    /// Set-operation tails that can still publish the name.
+    pub tails: Vec<usize>,
 }
 
 impl OutputModel {
@@ -231,9 +261,11 @@ impl OutputModel {
             names: NameIndex {
                 dialect,
                 slots: OnceCell::new(),
+                unlisted: OnceCell::new(),
             },
             width,
             unknown_reasons,
+            invalid: Vec::new(),
         }
     }
 
@@ -258,24 +290,38 @@ impl OutputModel {
         self.width == Width::Unknown
     }
 
-    /// Whether the output lists a column called `name`.
-    pub(super) fn publishes(&self, name: &Ident) -> bool {
-        !self.slots_named(name).is_empty()
-    }
-
-    /// Whether the output may have a column called `name`: it publishes it,
-    /// or a segment or tail that is not listed admits it.
-    pub(super) fn may_publish(&self, name: &Ident) -> bool {
+    /// Everything in the output that may carry `name`: the columns that list
+    /// it and the unlisted segments and tails whose name conditions admit it.
+    pub(super) fn matches(&self, name: &Ident) -> NameMatches {
         let dialect = self.names.dialect;
-        self.publishes(name)
-            || self.elements.iter().any(|element| match element {
-                OutputElement::Unknown(segment) => {
-                    !matches!(segment.provider, UnknownProvider::Opaque(_))
-                        && segment.domain.admits(name, dialect)
+        let mut matches = NameMatches {
+            listed: self.slots_named(name).to_vec(),
+            unknown: Vec::new(),
+            tails: Vec::new(),
+        };
+        let unlisted = self.names.unlisted.get_or_init(|| {
+            self.elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| !matches!(element, OutputElement::Column(_)))
+                .map(|(index, _)| index)
+                .collect()
+        });
+        for &index in unlisted {
+            match &self.elements[index] {
+                OutputElement::Unknown(segment)
+                    if !matches!(segment.provider, UnknownProvider::Opaque(_))
+                        && segment.domain.admits(name, dialect) =>
+                {
+                    matches.unknown.push(index);
                 }
-                OutputElement::Tail(tail) => tail.domain.admits(name, dialect),
-                OutputElement::Column(_) => false,
-            })
+                OutputElement::Tail(tail) if tail.domain.admits(name, dialect) => {
+                    matches.tails.push(index);
+                }
+                _ => {}
+            }
+        }
+        matches
     }
 
     /// Indexes of the enumerated columns named `name`, in output order.
@@ -309,6 +355,7 @@ struct Group {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CacheKey {
     Scope(ScopeId),
+    Input(ScopeId),
     Star(NodeId),
 }
 
@@ -319,6 +366,7 @@ enum CacheKey {
 #[derive(Default)]
 pub(super) struct ModelStore {
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
+    inputs: HashMap<ScopeId, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
     /// Models under construction, each flagged when a cycle was cut beneath it.
     active: Vec<(CacheKey, bool)>,
@@ -417,6 +465,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
 
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
         let graph = self.graph;
+        let mut invalid = Vec::new();
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
@@ -424,6 +473,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     if matches!(graph.nodes[column.node_id], RawNode::Star { .. }) {
                         let star = self.star(column.node_id);
                         elements.extend(star.elements.iter().cloned());
+                        invalid.extend(star.invalid.iter().cloned());
                     } else {
                         elements.push(OutputElement::Column(ColumnSlot {
                             name: column.name.clone(),
@@ -434,6 +484,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 .unwrap_or_else(|| OutputName::Explicit(column.name.clone())),
                             ranges: Rc::from([]),
                             candidate_ranges: Rc::from([]),
+                            join_key: false,
                             value: ValueId::Expr(column.node_id),
                         }));
                     }
@@ -442,6 +493,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
+                invalid.extend(model.invalid.iter().cloned());
                 forward_scope(*child, &model, &Rc::from([]), false)
             }
             // The left operand defines the names of a set operation.
@@ -449,6 +501,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 left, recursive, ..
             } => {
                 let model = self.scope(*left);
+                invalid.extend(model.invalid.iter().cloned());
                 let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
                 if !recursive {
                     // This operation's tail covers whatever the left operand
@@ -474,11 +527,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
-        OutputModel::new(
+        let mut model = OutputModel::new(
             elements,
             graph.scopes.unknown_output_reasons(scope),
             graph.dialect,
-        )
+        );
+        model.invalid = invalid;
+        model
     }
 
     fn build_star(
@@ -490,48 +545,43 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     ) -> OutputModel {
         let graph = self.graph;
         let opaque = |reason| vec![OutputElement::Unknown(UnknownSegment::opaque(reason))];
+        let mut invalid = Vec::new();
         let elements = match resolve_star_target(base, scope, graph) {
-            StarTarget::All => self.all_bindings(scope),
-            StarTarget::Binding { name, binding } => self.binding_part(&binding, &Rc::from([name])),
+            StarTarget::All => {
+                let input = self.input(scope);
+                invalid.extend(input.invalid.iter().cloned());
+                input.star_elements()
+            }
+            StarTarget::Binding { name, binding } => {
+                invalid.extend(self.binding_invalid(&binding));
+                let range = RangeRef {
+                    index: self.range_index(scope, &name, &binding),
+                    name,
+                    binding,
+                };
+                self.binding_part(&range)
+            }
             StarTarget::Unknown(table) => self.relation_part(&Rc::new(table), &Rc::from([])),
             StarTarget::FieldPath { .. } => opaque(OpaqueReason::FieldPath(node_id)),
             StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
-        OutputModel::new(
+        let mut model = OutputModel::new(
             apply_options(base, options, elements, graph.dialect),
             Vec::new(),
             graph.dialect,
-        )
+        );
+        model.invalid = invalid;
+        model
     }
 
-    /// An unqualified star: every relation of the FROM clause with USING and
-    /// NATURAL joins folded, followed by the anonymous derived tables.
-    fn all_bindings(&mut self, scope: ScopeId) -> Vec<OutputElement> {
-        let graph = self.graph;
-        let mut groups = Vec::new();
-        for (name, binding) in effective_bindings(scope, graph) {
-            let elements = self.binding_part(&binding, &Rc::from([name.clone()]));
-            groups.push(Group {
-                members: vec![name],
-                elements,
-            });
-        }
-        let mut elements =
-            fold_join_columns(groups, graph.scopes.join_merges(scope), graph.dialect);
-        for &child in graph.scopes.anonymous_derived(scope) {
-            let model = self.scope(child);
-            elements.extend(forward_scope(child, &model, &Rc::from([]), false));
-        }
-        elements
-    }
-
-    fn binding_part(&mut self, binding: &Binding, ranges: &Rc<[Ident]>) -> Vec<OutputElement> {
-        match binding {
-            Binding::Table(table) => self.relation_part(&Rc::new(table.clone()), ranges),
+    fn binding_part(&mut self, range: &RangeRef) -> Vec<OutputElement> {
+        let ranges: Rc<[RangeRef]> = Rc::from([range.clone()]);
+        match &range.binding {
+            Binding::Table(table) => self.relation_part(&Rc::new(table.clone()), &ranges),
             Binding::Cte(child) | Binding::DerivedTable(child) => {
                 let model = self.scope(*child);
-                forward_scope(*child, &model, ranges, false)
+                forward_scope(*child, &model, &ranges, false)
             }
             Binding::VirtualSource(source) => self
                 .graph
@@ -546,6 +596,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         output_name: OutputName::Explicit(column.name.clone()),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
+                        join_key: false,
                         value: ValueId::VirtualColumn {
                             source: *source,
                             index,
@@ -556,7 +607,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         }
     }
 
-    fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[Ident]>) -> Vec<OutputElement> {
+    fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[RangeRef]>) -> Vec<OutputElement> {
         match self.catalog.and_then(|catalog| catalog.list_columns(table)) {
             Some(columns) => columns
                 .into_iter()
@@ -566,6 +617,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         output_name: OutputName::Explicit(column.clone()),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
+                        join_key: false,
                         value: ValueId::Physical {
                             table: table.clone(),
                             column,
@@ -587,7 +639,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
 fn forward_scope(
     scope: ScopeId,
     model: &OutputModel,
-    ranges: &Rc<[Ident]>,
+    ranges: &Rc<[RangeRef]>,
     set_operation: bool,
 ) -> Vec<OutputElement> {
     model
@@ -600,6 +652,7 @@ fn forward_scope(
                 output_name: slot.output_name.clone(),
                 ranges: ranges.clone(),
                 candidate_ranges: ranges.clone(),
+                join_key: false,
                 value: if set_operation {
                     ValueId::SetOperation { scope, index }
                 } else {
@@ -620,7 +673,7 @@ fn forward_scope(
         .collect()
 }
 
-fn union_ranges(left: &[Ident], right: &[Ident]) -> Rc<[Ident]> {
+fn union_ranges(left: &[RangeRef], right: &[RangeRef]) -> Rc<[RangeRef]> {
     left.iter().chain(right).cloned().collect()
 }
 
@@ -675,8 +728,8 @@ fn find_key(elements: &[OutputElement], key: &Ident, dialect: Dialect) -> Option
 /// What one side contributes to a merged key.
 struct KeySide {
     value: ValueId,
-    ranges: Rc<[Ident]>,
-    candidate_ranges: Rc<[Ident]>,
+    ranges: Rc<[RangeRef]>,
+    candidate_ranges: Rc<[RangeRef]>,
     /// The name of the side's listed column, if it lists one.
     names: Option<(Ident, OutputName)>,
 }
@@ -708,7 +761,7 @@ fn take_key(
         KeyAt::Unlisted => {
             let mut values: Vec<ValueId> = Vec::new();
             let mut opaque = Vec::new();
-            let mut ranges: Vec<Ident> = Vec::new();
+            let mut ranges: Vec<RangeRef> = Vec::new();
             for element in elements.iter_mut() {
                 let OutputElement::Unknown(segment) = element else {
                     continue;
@@ -742,10 +795,26 @@ fn take_key(
                     column: key.clone(),
                 });
             }
-            let value = values
-                .into_iter()
-                .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
-                .expect("an unlisted key has a publisher");
+            // Relations that were not joined by this key (a cross join, an ON
+            // join, a NATURAL join that may share nothing) cannot all have
+            // it: the key is one column of one of them, and which one is
+            // unknown.
+            let mut distinct = HashSet::new();
+            let several = ranges.iter().any(|range| {
+                distinct.insert(range.index);
+                distinct.len() > 1
+            });
+            let value = if several {
+                ValueId::Uncertain {
+                    column: key.clone(),
+                    candidates: ranges.clone().into(),
+                }
+            } else {
+                values
+                    .into_iter()
+                    .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
+                    .expect("an unlisted key has a publisher")
+            };
             KeySide {
                 value,
                 candidate_ranges: ranges.clone().into(),
@@ -854,7 +923,18 @@ fn fold_groups(
                 JoinMergeKind::Left => left_side.value,
                 JoinMergeKind::Right => right_side.value,
                 JoinMergeKind::Inner | JoinMergeKind::Full => {
-                    ValueId::Merged(Box::new(left_side.value), Box::new(right_side.value))
+                    if matches!(left_side.value, ValueId::Uncertain { .. })
+                        || matches!(right_side.value, ValueId::Uncertain { .. })
+                    {
+                        // One side cannot say where the key comes from, so the
+                        // merged column cannot either.
+                        ValueId::Uncertain {
+                            column: key.clone(),
+                            candidates: candidate_ranges.clone(),
+                        }
+                    } else {
+                        ValueId::Merged(Box::new(left_side.value), Box::new(right_side.value))
+                    }
                 }
             };
             // The names come from the left column, else from the right one,
@@ -868,6 +948,7 @@ fn fold_groups(
                 output_name,
                 ranges,
                 candidate_ranges,
+                join_key: true,
                 value,
             }));
         }
@@ -899,7 +980,7 @@ fn unknown_publishers(
     elements: &[OutputElement],
     name: &Ident,
     dialect: Dialect,
-) -> (Vec<UnknownProvider>, Vec<Ident>) {
+) -> (Vec<UnknownProvider>, Vec<RangeRef>) {
     let mut providers = Vec::new();
     let mut ranges = Vec::new();
     for element in elements {
@@ -923,7 +1004,7 @@ fn apply_options(
     elements: Vec<OutputElement>,
     dialect: Dialect,
 ) -> Vec<OutputElement> {
-    let admits = |name: &Ident, ranges: &[Ident]| {
+    let admits = |name: &Ident, ranges: &[RangeRef]| {
         !options
             .exclude
             .iter()
@@ -979,12 +1060,13 @@ fn apply_options(
         // The replacement stands for the tail's column of that name.
         retire_tail_name(&mut elements, &replacement.column, dialect);
         ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
-        let ranges: Rc<[Ident]> = ranges.into();
+        let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
             ranges: ranges.clone(),
             candidate_ranges: ranges,
+            join_key: false,
             value: ValueId::Expr(replacement.node_id),
         }));
     }
@@ -1028,12 +1110,13 @@ fn apply_options(
             .into_iter()
             .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
             .expect("a renamed column has a publisher");
-        let ranges: Rc<[Ident]> = ranges.into();
+        let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
             ranges: ranges.clone(),
             candidate_ranges: ranges,
+            join_key: false,
             value,
         }));
     }
@@ -1045,7 +1128,7 @@ fn tail_publishers(
     elements: &[OutputElement],
     name: &Ident,
     dialect: Dialect,
-) -> Vec<(ScopeId, Rc<[Ident]>)> {
+) -> Vec<(ScopeId, Rc<[RangeRef]>)> {
     elements
         .iter()
         .filter_map(|element| match element {
@@ -1085,7 +1168,8 @@ mod tests {
     use std::rc::Rc;
 
     use super::{
-        ModelStore, OutputElement, OutputModel, OutputModels, UnknownProvider, ValueId, Width,
+        InputLookup, ModelStore, OutputElement, OutputModel, OutputModels, UnknownProvider,
+        ValueId, Width,
     };
     use crate::catalog::CatalogContext;
     use crate::graph::RawGraph;
@@ -1165,7 +1249,7 @@ mod tests {
         };
         slot.ranges
             .iter()
-            .map(|range| range.value.clone())
+            .map(|range| range.name.value.clone())
             .collect()
     }
 
@@ -1410,5 +1494,129 @@ mod tests {
         let mut store = ModelStore::default();
         let mut models = OutputModels::new(&graph, None, &mut store);
         assert!(models.scope(ScopeTree::root()).has_unknown_segment());
+    }
+
+    /// What an unqualified `name` denotes in the FROM clause of the root query.
+    fn lookup(sql: &str, tables: &[(&'static str, Vec<&'static str>)], name: &str) -> InputLookup {
+        let graph = graph(sql);
+        let catalog = Tables(tables.to_vec());
+        let context = CatalogContext::new(&catalog, Dialect::Generic);
+        let mut store = ModelStore::default();
+        OutputModels::new(&graph, Some(&context), &mut store)
+            .lookup_input(ScopeTree::root(), &Ident::unquoted(name))
+    }
+
+    fn contributing(lookup: &InputLookup) -> Vec<String> {
+        let InputLookup::Column { contributing, .. } = lookup else {
+            panic!("expected one column, got {lookup:?}");
+        };
+        contributing
+            .iter()
+            .map(|range| range.name.value.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_input_model_is_built_once_per_scope() {
+        let graph = graph("SELECT * FROM a JOIN b USING (id)");
+        let mut store = ModelStore::default();
+        let mut models = OutputModels::new(&graph, None, &mut store);
+        let first = models.input(ScopeTree::root());
+        assert!(Rc::ptr_eq(&first, &models.input(ScopeTree::root())));
+    }
+
+    #[test]
+    fn a_single_relation_owns_every_name() {
+        assert!(matches!(
+            lookup("SELECT x FROM t", &[], "x"),
+            InputLookup::Physical(_)
+        ));
+        assert!(matches!(
+            lookup("WITH c AS (SELECT y FROM t) SELECT x FROM c", &[], "x"),
+            InputLookup::Scope { .. }
+        ));
+    }
+
+    #[test]
+    fn a_using_key_is_one_column_of_the_relations_that_supply_it() {
+        let tables: &[(&str, Vec<&str>)] = &[];
+        for (join, expected) in [
+            ("JOIN", vec!["a", "b"]),
+            ("LEFT JOIN", vec!["a"]),
+            ("RIGHT JOIN", vec!["b"]),
+            ("FULL JOIN", vec!["a", "b"]),
+        ] {
+            let found = lookup(
+                &format!("SELECT id FROM a {join} b USING (id)"),
+                tables,
+                "id",
+            );
+            assert_eq!(contributing(&found), expected, "{join}");
+        }
+    }
+
+    #[test]
+    fn a_using_key_competes_with_an_unknown_relation_outside_the_join() {
+        let found = lookup("SELECT id FROM a JOIN b USING (id) CROSS JOIN c", &[], "id");
+        let InputLookup::Ambiguous { candidates, typed } = found else {
+            panic!("expected an ambiguity, got {found:?}");
+        };
+        assert_eq!(candidates.len(), 3);
+        assert!(typed);
+    }
+
+    #[test]
+    fn unknown_derived_tables_are_possible_owners() {
+        let found = lookup(
+            "SELECT id FROM a JOIN (SELECT * FROM b) d ON TRUE",
+            &[],
+            "id",
+        );
+        let InputLookup::Ambiguous { candidates, typed } = found else {
+            panic!("expected an ambiguity, got {found:?}");
+        };
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            typed,
+            "a derived table is not a relation a catalog can name"
+        );
+    }
+
+    #[test]
+    fn a_listed_column_outranks_an_unknown_relation() {
+        let found = lookup("SELECT x FROM a JOIN b ON TRUE", &[("a", vec!["x"])], "x");
+        assert_eq!(contributing(&found), ["a"]);
+    }
+
+    #[test]
+    fn range_names_that_repeat_leave_merged_names_ambiguous() {
+        let found = lookup("SELECT id FROM a AS t JOIN b AS t USING (id)", &[], "id");
+        let InputLookup::Ambiguous { candidates, .. } = found else {
+            panic!("expected an ambiguity, got {found:?}");
+        };
+        assert_eq!(candidates.len(), 2);
+        // A name no join merges is still decided by what the ranges list.
+        let found = lookup(
+            "SELECT x FROM a AS t JOIN b AS t USING (id)",
+            &[("a", vec!["x"])],
+            "x",
+        );
+        assert_eq!(contributing(&found), ["t"]);
+    }
+
+    #[test]
+    fn a_key_taken_from_several_unknown_relations_is_uncertain() {
+        let model = first_star("SELECT * FROM a NATURAL JOIN b JOIN c USING (id)", &[]);
+        let OutputElement::Column(key) = &model.elements[0] else {
+            panic!("the key leads");
+        };
+        assert!(key.join_key);
+        assert!(matches!(key.value, ValueId::Uncertain { .. }));
+        let names: Vec<_> = key
+            .candidate_ranges
+            .iter()
+            .map(|range| range.name.value.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b", "c"]);
     }
 }

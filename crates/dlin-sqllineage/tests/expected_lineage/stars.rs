@@ -1549,11 +1549,10 @@ fn using_key_sources(kind: &str) -> Vec<dlin_sqllineage::SourceColumn> {
     }
 }
 
+type CatalogTables = Vec<(dlin_sqllineage::Relation, Vec<dlin_sqllineage::Ident>)>;
+
 /// The catalogs `USING` is checked under: none, only `a`, only `b`.
-fn using_catalogs() -> Vec<(
-    &'static str,
-    Vec<(dlin_sqllineage::Relation, Vec<dlin_sqllineage::Ident>)>,
-)> {
+fn using_catalogs() -> Vec<(&'static str, CatalogTables)> {
     vec![
         ("no_catalog", vec![]),
         (

@@ -1,3 +1,5 @@
+use super::model::RangeRef;
+
 use crate::graph::RawGraph;
 use crate::graph::node::{StarBase, StarColumnName};
 use crate::graph::scope::Binding;
@@ -139,7 +141,7 @@ pub(super) fn excluded_matches_name(
     excluded: &StarColumnName,
     name: &Ident,
     base: Option<&StarBase>,
-    range_variables: &[Ident],
+    range_variables: &[RangeRef],
     dialect: Dialect,
 ) -> bool {
     let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
@@ -147,7 +149,7 @@ pub(super) fn excluded_matches_name(
     };
     same_column_name(name, excluded_column, dialect)
         && (qualifier.is_empty()
-            || matches!(qualifier, [name] if range_variables.iter().any(|variable| same_column_name(variable, name, dialect)))
+            || matches!(qualifier, [name] if range_variables.iter().any(|variable| same_column_name(&variable.name, name, dialect)))
             || base.is_some_and(|base| match base {
                 StarBase::Qualified(parts) => match (parts.as_slice(), qualifier) {
                     ([left], [right]) => same_column_name(left, right, dialect),
