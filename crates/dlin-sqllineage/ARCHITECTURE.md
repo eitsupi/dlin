@@ -139,7 +139,22 @@ CTE with the same name, and does not take its place.
 | `LATERAL` derived table, `APPLY` | The FROM items before it. Never a later item, and never the derived table being defined |
 | Argument of a FROM item such as `UNNEST` | The FROM items before it. The alias being defined does not exist yet |
 | Expression subquery (`IN`, `EXISTS`, scalar, `ARRAY(...)`) | The enclosing query as it stands at the position of the subquery |
-| CTE | The ancestor environment allowed at its position (a CTE inside a `LATERAL` subquery can reference the outer FROM items before it). Within its own `WITH` list: only the CTEs defined before it, or, under `RECURSIVE`, every CTE of the list including itself and later ones (B4) |
+| CTE | The ancestor environment allowed at its position (a CTE inside a `LATERAL` subquery can reference the outer FROM items before it). Visibility of the CTEs of its own `WITH` list, and self-reference, follow the dialect (see below) |
+
+**CTEs of the same `WITH` list.** Which CTEs of its own list a CTE body can
+see, and whether it can reference itself, are dialect rules. They are decided in
+one place, not from the `RECURSIVE` keyword alone.
+
+| Dialect | Without `RECURSIVE` | With `RECURSIVE` |
+| --- | --- | --- |
+| PostgreSQL, BigQuery, Generic (SQL standard) | Earlier CTEs only, no self-reference | Every CTE of the list, including itself and later ones (B4) |
+| DuckDB | Earlier CTEs only, no self-reference | Earlier CTEs and itself. A later CTE is not visible (B6) |
+| Snowflake | Earlier CTEs and itself: self-reference does not need the keyword (B5) | Same |
+| Any other dialect | Earlier CTEs only | Earlier CTEs and itself |
+
+A name that matches a CTE of the list the rule does not make visible, in a
+dialect whose rule is not modelled, is reported as unresolved. It is never
+silently read as a physical relation, and never silently bound to the CTE.
 
 **Structural walks share the scope rules.** Any walk that crosses query
 boundaries, for example one that collects the relations a statement reads or the
@@ -151,7 +166,7 @@ without writing `LATERAL`. That implicit lateral reference is a dialect
 extension the engine does not model yet. A reference that depends on it is
 reported as unresolved. It is never bound to a wrong object.
 
-Cases: B1, B2, B3, B4, I5.
+Cases: B1, B2, B3, B4, B5, B6, I5.
 
 ## 4. Evaluation context and cycles
 
@@ -520,7 +535,9 @@ proven.
 | B1 | PostgreSQL | `WITH c AS (SELECT x FROM t1) SELECT p.x FROM public.c AS p` | none | `x` = `C[public.c.x]`, Closed. `public.c` is a physical relation, not the CTE `c`, and the relations read include `public.c` |
 | B2 | PostgreSQL | `SELECT d.x FROM t CROSS JOIN LATERAL (SELECT x) AS d` | catalog `t(x)` | `x` = `C[t.x]`. Analysis terminates normally. The inner `x` cannot see `d`, so `d` is not a candidate |
 | B3 | BigQuery | `SELECT a FROM t WHERE ARRAY_LENGTH(ARRAY(SELECT b FROM u)) > 0` | none | One output `a` = `C[t.a]`, Closed. The binding and the output of the inner `SELECT b FROM u` do not leak into the outer query |
-| B4 | PostgreSQL | `WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x` | none | `id` = `C[t.id]`. Under `RECURSIVE` the later CTE `y` is visible inside `x`, so `y` is never read as a physical relation. Without `RECURSIVE`, the same `y` inside `x` is the physical relation `y` |
+| B4 | PostgreSQL | `WITH RECURSIVE x AS (SELECT id FROM y), y AS (SELECT id FROM t) SELECT id FROM x` | none | `id` = `C[t.id]`. Under `RECURSIVE` the later CTE `y` is visible inside `x`, so `y` is never read as a physical relation. Without `RECURSIVE`, the same `y` inside `x` is the physical relation `y`. BigQuery and Generic give the same results |
+| B5 | Snowflake | `WITH c(n) AS (SELECT t.n FROM t UNION ALL SELECT c.n + 1 FROM c WHERE c.n < 3) SELECT n FROM c` | none | A recursive CTE without the keyword. `c` inside its body is the CTE itself, never a physical relation `c`. `t.n` stays known, and the recursive part is reported as recursive |
+| B6 | DuckDB | The B4 query | none | `id` = `C[y.id]`, `y` read as a physical relation: DuckDB does not make later CTEs visible even under `RECURSIVE` |
 
 ### Set operations
 
@@ -530,7 +547,7 @@ proven.
 | O2 | BigQuery | `SELECT x.a AS a FROM x FULL OUTER UNION ALL BY NAME SELECT y.b AS b FROM y` | none | Outputs `a` and `b`, in that order, Closed. `a` = `C[x.a]` and `b` = `C[y.b]`, each from the side that has the column |
 | O3 | BigQuery | `SELECT a, b FROM x UNION ALL BY NAME ON (b, a) SELECT a, b FROM y` | none | Outputs in the order `b`, `a`, Closed. `b` = `C[x.b, y.b]` and `a` = `C[x.a, y.a]` |
 | O4 | PostgreSQL | `SELECT t.id AS k, t.* FROM t UNION ALL SELECT u.id AS k, u.* FROM u` | no catalog | `k` = `C[t.id, u.id]`. Position 0 is proven in both operands, before the unknown segments. The shape is `Open` |
-| O5 | BigQuery | `SELECT x.a AS a FROM x FULL OUTER EXCEPT DISTINCT BY NAME SELECT y.b AS b FROM y` | none | Outputs `a` and `b`. `a` = `C[x.a]`. `b` = `C[]`, the left operand's padded `NULL`. `y.b` (and the compared slots of both operands) are row dependencies only. Correspondence is decided first, then the `EXCEPT` rule applies |
+| O5 | BigQuery | `SELECT x.a AS a FROM x FULL OUTER EXCEPT DISTINCT BY NAME SELECT y.b AS b FROM y` | none | Outputs `a` and `b`. `a` = `C[x.a]`. `b` = `C[]`, the left operand's padded `NULL`. `y.b` is a row dependency only. The compared slots of both operands also contribute row dependencies. Correspondence is decided first, then the `EXCEPT` rule applies |
 
 ### Value dependency, column use and row dependency
 
