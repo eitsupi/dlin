@@ -131,6 +131,44 @@ impl Case {
         self.known_failure.as_ref().map(KnownFailure::reason)
     }
 
+    pub fn expected_named_lineages(&self, name: &Ident) -> Vec<Lineage> {
+        self.expected
+            .columns
+            .iter()
+            .filter(|column| match &column.name {
+                OutputName::Explicit(other) | OutputName::Inferred(other) => {
+                    other.column_key(self.dialect) == name.column_key(self.dialect)
+                }
+                OutputName::Anonymous => false,
+            })
+            .map(|column| column.lineage.clone())
+            .collect()
+    }
+
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    pub fn has_catalog(&self) -> bool {
+        self.catalog.is_some()
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    pub fn analyze_sql(&self, sql: &str, use_catalog: bool) -> Result<StatementAnalysis, String> {
+        let mut analyzer = Analyzer::new(self.dialect);
+        if use_catalog && let Some(catalog) = &self.catalog {
+            analyzer = analyzer.with_catalog(catalog);
+        }
+        analyzer
+            .analyze(sql)
+            .map_err(|error| error.to_string())?
+            .into_single()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn run(&self) -> Result<(), String> {
         self.validate()?;
         let mut analyzer = Analyzer::new(self.dialect);
