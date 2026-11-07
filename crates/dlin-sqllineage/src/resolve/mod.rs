@@ -32,7 +32,7 @@ pub(crate) fn resolve(
         return Ok(analysis::assemble(
             &[],
             &graph.tables,
-            if graph.unknown_target_source {
+            if graph.scopes.has_unknown_output_width(ScopeTree::root()) {
                 &[]
             } else {
                 &graph.target_columns
@@ -53,7 +53,7 @@ pub(crate) fn resolve(
         return Ok(analysis::assemble(
             &[],
             &graph.tables,
-            if graph.unknown_target_source {
+            if graph.scopes.has_unknown_output_width(ScopeTree::root()) {
                 &[]
             } else {
                 &graph.target_columns
@@ -66,7 +66,7 @@ pub(crate) fn resolve(
         ));
     }
 
-    validate_set_arities(&graph, catalog)?;
+    let output_width = validate_set_arities(&graph, catalog)?;
     let has_unresolved_stars = graph_has_unresolved_stars(&graph, catalog);
 
     let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
@@ -102,7 +102,7 @@ pub(crate) fn resolve(
     Ok(analysis::assemble(
         &mappings,
         &graph.tables,
-        if graph.unknown_target_source && mappings.is_empty() {
+        if output_width.is_none() {
             &[]
         } else {
             &graph.target_columns

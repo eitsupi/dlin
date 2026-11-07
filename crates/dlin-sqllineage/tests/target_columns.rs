@@ -341,3 +341,94 @@ fn target_values_still_follow_top_level_set_operation_branches() {
         );
     }
 }
+
+#[test]
+fn ordinary_set_operations_do_not_treat_unmodeled_branches_as_zero_width() {
+    let failures = [
+        "SELECT 1 UNION ALL TABLE t",
+        "SELECT 1 UNION ALL VALUES (2)",
+    ]
+    .into_iter()
+    .filter_map(|sql| {
+        let result = one(sql);
+        (!result.diagnostics.is_empty()).then(|| format!("{sql}: {:?}", result.diagnostics))
+    })
+    .collect::<Vec<_>>();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
+    for prefix in [
+        "",
+        "INSERT INTO target ",
+        "INSERT INTO target (a) ",
+        "INSERT INTO target (a, b) ",
+    ] {
+        for branch in ["TABLE other_source", "VALUES (1), (2, 3)"] {
+            let sql = format!("{prefix}SELECT x FROM s UNION ALL {branch}");
+            let result = one(&sql);
+            assert!(
+                result.diagnostics.is_empty(),
+                "{sql}: {:?}",
+                result.diagnostics
+            );
+            assert_eq!(result.output.columns.len(), 1, "{sql}");
+            assert_eq!(
+                result.output.columns[0].name,
+                OutputName::Explicit(Ident::unquoted("x")),
+                "{sql}"
+            );
+            assert_eq!(
+                result.output.columns[0].lineage,
+                Lineage::Complete(vec![source("s", "x")]),
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_width_follows_output_plans_and_derived_stars() {
+    for sql in [
+        "INSERT INTO target (a, b) WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
+        "INSERT INTO target (a, b) (SELECT x FROM s UNION ALL TABLE public.other_source)",
+        "INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v",
+    ] {
+        let result = one(sql);
+        assert!(
+            result.diagnostics.is_empty(),
+            "{sql}: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result
+                .output
+                .columns
+                .iter()
+                .all(|column| column.name != OutputName::Explicit(Ident::unquoted("a"))),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn nested_unknown_cte_does_not_hide_a_known_projection_width_mismatch() {
+    let result =
+        one("INSERT INTO target (a, b) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c");
+    assert_eq!(
+        result.output.columns[0].name,
+        OutputName::Explicit(Ident::unquoted("x"))
+    );
+    assert_eq!(
+        result.diagnostics,
+        [Diagnostic {
+            severity: Severity::Error,
+            kind: DiagnosticKind::TargetColumnCountMismatch {
+                target: 2,
+                source: 1
+            },
+            location: None
+        }]
+    );
+}

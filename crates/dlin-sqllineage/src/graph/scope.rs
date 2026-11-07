@@ -56,6 +56,7 @@ struct Scope {
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
+    unknown_output_width: bool,
     virtual_sources: Vec<VirtualSource>,
 }
 
@@ -138,6 +139,7 @@ impl ScopeTree {
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
+                unknown_output_width: false,
                 virtual_sources: Vec::new(),
             }],
         }
@@ -158,6 +160,7 @@ impl ScopeTree {
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
+            unknown_output_width: false,
             virtual_sources: Vec::new(),
         });
         id
@@ -293,6 +296,26 @@ impl ScopeTree {
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {
         &self.scopes[scope].output_columns
+    }
+
+    pub fn mark_unknown_output_width(&mut self, scope: ScopeId) {
+        self.scopes[scope].unknown_output_width = true;
+    }
+
+    pub fn output_width_unknown(&self, scope: ScopeId) -> bool {
+        self.scopes[scope].unknown_output_width
+    }
+
+    /// Follow only the output plan, not nested FROM bindings or CTE definitions.
+    pub fn has_unknown_output_width(&self, scope: ScopeId) -> bool {
+        self.output_width_unknown(scope)
+            || match self.output_plan(scope) {
+                OutputPlan::Projection => false,
+                OutputPlan::Delegate(child) => self.has_unknown_output_width(*child),
+                OutputPlan::SetOperation { left, right, .. } => {
+                    self.has_unknown_output_width(*left) || self.has_unknown_output_width(*right)
+                }
+            }
     }
 
     pub fn set_output_plan(&mut self, scope: ScopeId, plan: OutputPlan) {

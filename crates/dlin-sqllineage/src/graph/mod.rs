@@ -15,8 +15,6 @@ pub(crate) struct RawGraph {
     pub nodes: Vec<RawNode>,
     pub edges: Vec<RawEdge>,
     pub target_columns: Vec<Ident>,
-    /// An unmodeled source may yield no mappings without being zero columns.
-    pub unknown_target_source: bool,
     pub output_names: HashMap<NodeId, crate::OutputName>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
@@ -31,7 +29,6 @@ impl RawGraph {
             edges: Vec::new(),
             output_names: HashMap::new(),
             target_columns: Vec::new(),
-            unknown_target_source: false,
             empty_projection: None,
             scopes: ScopeTree::new(dialect),
             tables: TableLineage::default(),

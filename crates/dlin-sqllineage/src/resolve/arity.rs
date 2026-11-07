@@ -33,10 +33,9 @@ pub(super) fn graph_has_unresolved_stars(
 pub(super) fn validate_set_arities(
     graph: &RawGraph,
     catalog: Option<&CatalogContext<'_>>,
-) -> Result<(), SemanticError> {
+) -> Result<Option<usize>, SemanticError> {
     let mut active = HashSet::new();
-    let _ = scope_arity(ScopeTree::root(), graph, catalog, &mut active)?;
-    Ok(())
+    scope_arity(ScopeTree::root(), graph, catalog, &mut active)
 }
 
 /// Return an exact output width when every star in a scope can be expanded;
@@ -47,6 +46,9 @@ fn scope_arity(
     catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Result<Option<usize>, SemanticError> {
+    if graph.scopes.output_width_unknown(scope) {
+        return Ok(None);
+    }
     if !active.insert(scope) {
         return Ok(None);
     }
@@ -233,6 +235,9 @@ fn scope_output_names(
     catalog: Option<&CatalogContext<'_>>,
     active: &mut HashSet<usize>,
 ) -> Option<Vec<Ident>> {
+    if graph.scopes.has_unknown_output_width(scope) {
+        return None;
+    }
     if !active.insert(scope) {
         return None;
     }

@@ -114,8 +114,11 @@ impl LineageBuilder {
                 self.visit_query_with_target(q, target_values);
             }
             SetExpr::Values(values) if target_values => self.visit_target_values(values),
-            SetExpr::Table(_) if target_values => self.graph.unknown_target_source = true,
-            SetExpr::Values(_) | SetExpr::Table(_) => {}
+            SetExpr::Values(_) | SetExpr::Table(_) => {
+                self.graph
+                    .scopes
+                    .mark_unknown_output_width(self.current_scope);
+            }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
             | SetExpr::Delete(stmt)
@@ -131,7 +134,9 @@ impl LineageBuilder {
             return;
         };
         if values.rows.iter().any(|row| row.len() != first.len()) {
-            self.graph.unknown_target_source = true;
+            self.graph
+                .scopes
+                .mark_unknown_output_width(self.current_scope);
             return;
         }
         for index in 0..first.len() {
