@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use super::binding::derive_transform;
 use super::catalog;
-use super::lineage::{collect_leaf_origins, collect_output_sources};
+use super::lineage::collect_output_sources;
+use super::model::{ModelStore, OutputModels};
 use super::star::expand_star;
 
 use crate::Ident;
@@ -13,7 +14,7 @@ use crate::Unresolved;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
+use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 
 pub(super) fn wildcard_mapping(
@@ -30,55 +31,6 @@ pub(super) fn wildcard_mapping(
             table: source_table,
         }],
         transform: TransformKind::Direct,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn expand_virtual_source(
-    source: VirtualSourceId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-    mappings: &mut Vec<ColumnMapping>,
-) {
-    for column in &graph.scopes.virtual_source(source).columns {
-        let mut origins = Vec::new();
-        let mut visited = HashSet::new();
-        for &dependency in &column.dependencies {
-            let (dependency_origins, _, _) = collect_leaf_origins(
-                dependency,
-                graph,
-                resolved,
-                incoming,
-                &mut visited,
-                catalog,
-                mapping_cache,
-            );
-            origins.extend(dependency_origins);
-        }
-        if origins.is_empty()
-            && matches!(column.state, VirtualColumnState::Unknown)
-            && !column
-                .dependencies
-                .iter()
-                .all(|&dependency| known_empty_dependency(dependency, graph))
-        {
-            origins.push(ColumnOrigin::Ambiguous {
-                column: column.name.clone(),
-                candidates: Vec::new(),
-            });
-        }
-        mappings.push(ColumnMapping {
-            output_name: Some(crate::OutputName::Explicit(column.name.clone())),
-            target: ColumnRef {
-                table: None,
-                column: column.name.clone(),
-            },
-            sources: origins,
-            transform: TransformKind::Direct,
-        });
     }
 }
 
@@ -111,6 +63,8 @@ pub(super) fn known_empty_dependency(node_id: NodeId, graph: &RawGraph) -> bool 
 #[derive(Default)]
 pub(super) struct ScopeMappingCache {
     entries: HashMap<usize, ScopeMappingEntry>,
+    /// The structural models mappings are evaluated from.
+    pub(super) models: ModelStore,
 }
 
 enum ScopeMappingEntry {
@@ -202,21 +156,14 @@ pub(super) fn resolve_scope_mappings(
                             transform,
                         });
                     }
-                    RawNode::Star {
-                        base,
-                        options,
-                        scope,
-                    } => expand_star(
-                        base,
-                        options,
-                        *scope,
+                    RawNode::Star { .. } => expand_star(
+                        col.node_id,
                         graph,
                         resolved,
                         incoming,
                         catalog,
                         mapping_cache,
                         &mut mappings,
-                        &mut HashSet::new(),
                     ),
                     _ => {}
                 }
@@ -237,7 +184,10 @@ pub(super) fn resolve_scope_mappings(
             right,
             recursive,
         } => {
-            let unknown_reasons = graph.scopes.unknown_output_reasons(scope);
+            let unknown_reasons = OutputModels::new(graph, catalog, &mut mapping_cache.models)
+                .scope(scope)
+                .unknown_reasons
+                .clone();
             let left_mappings =
                 resolve_scope_mappings(left, graph, resolved, incoming, catalog, mapping_cache)
                     .iter()

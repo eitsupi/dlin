@@ -1,12 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use super::arity::effective_bindings;
-use super::lineage::{
-    collect_output_sources, flatten_mapping_sources, named_scope_sources,
-    named_wildcard_sources_for_scope, virtual_column_origin,
-};
-use super::mapping::{ScopeMappingCache, merge_transform, resolve_scope_mappings};
-use super::star::{StarNameDecision, scope_star_name_decision};
+use super::lineage::{collect_output_sources, named_scope_sources, virtual_column_origin};
+use super::mapping::{ScopeMappingCache, merge_transform};
+use super::model::OutputModels;
+use super::star::{Unlisted, listed_name_sources, unlisted_name_sources};
+use super::target::effective_bindings;
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
@@ -278,6 +276,7 @@ pub(super) fn find_cte_redirect(
     node_id: NodeId,
     graph: &RawGraph,
     catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(NodeId, usize)> {
     match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -294,7 +293,7 @@ pub(super) fn find_cte_redirect(
                         _ => None,
                     })
                 })
-                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog));
+                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog, mapping_cache));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -312,7 +311,7 @@ pub(super) fn find_cte_redirect(
         } => {
             let binding = binding
                 .clone()
-                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog));
+                .or_else(|| find_unqualified_binding(name, *scope, graph, catalog, mapping_cache));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -336,12 +335,13 @@ pub(super) fn find_unqualified_binding(
     scope: usize,
     graph: &RawGraph,
     catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<Binding> {
     let bindings = effective_bindings(scope, graph);
     if bindings.len() == 1 {
         return Some(bindings[0].1.clone());
     }
-    match unqualified_choice(name, &bindings, scope, graph, catalog) {
+    match unqualified_choice(name, &bindings, scope, graph, catalog, mapping_cache) {
         UnqualifiedChoice::Merged(mut members) if members.len() == 1 => members.pop(),
         _ => None,
     }
@@ -351,8 +351,10 @@ pub(super) fn find_unqualified_binding(
 /// clause.
 enum UnqualifiedChoice {
     /// Competing physical or named relation providers. CTE/derived candidates
-    /// stay typed and are never fabricated as table references.
-    Ambiguous(Vec<Candidate>),
+    /// stay typed and are never fabricated as table references. The flag is
+    /// set when a `USING` join guarantees that some candidate has the column,
+    /// so a catalog that does not list the other candidates cannot settle it.
+    Ambiguous(Vec<Candidate>, bool),
     /// A single column. Its contributing bindings are in FROM order.
     Merged(Vec<Binding>),
 }
@@ -412,13 +414,15 @@ fn table_has_column(
 /// The name is one column when all competing relations share a group. When a
 /// CTE or derived table publishes the name it outranks physical tables
 /// (their columns are unknown), so only relations merged with such a provider
-/// count; otherwise the physical tables compete.
+/// count, except that a guaranteed USING group outside that provider's group
+/// remains a competing source.
 fn unqualified_choice(
     name: &Ident,
     bindings: &[(Ident, Binding)],
     scope: usize,
     graph: &RawGraph,
     catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> UnqualifiedChoice {
     let merges: Vec<&JoinMerge> = graph
         .scopes
@@ -449,9 +453,17 @@ fn unqualified_choice(
                     Binding::VirtualSource(_) => None,
                 })
                 .collect(),
+            false,
         );
     }
     let consult_catalog = !merges.is_empty();
+    // Relations a `USING` join on this name combines.
+    let using_members: HashSet<String> = merges
+        .iter()
+        .filter(|merge| matches!(merge.columns, MergedColumns::Using(_)))
+        .flat_map(|merge| merge.left.iter().chain(&merge.right))
+        .map(|member| member.column_key(graph.dialect).into_owned())
+        .collect();
 
     let mut relations: Vec<ColumnRelation<'_>> = Vec::new();
     let mut relation_of: HashMap<String, usize> = HashMap::new();
@@ -460,7 +472,9 @@ fn unqualified_choice(
     for (binding_name, binding) in bindings {
         match binding {
             Binding::Cte(provider) | Binding::DerivedTable(provider) => {
-                if !binding_publishes(binding, name, graph) {
+                let by_using =
+                    using_members.contains(binding_name.column_key(graph.dialect).as_ref());
+                if !binding_publishes(binding, name, by_using, graph, catalog, mapping_cache) {
                     continue;
                 }
                 relations.push(ColumnRelation {
@@ -538,13 +552,52 @@ fn unqualified_choice(
     let providers: Vec<usize> = (0..relations.len())
         .filter(|&index| relations[index].scope.is_some())
         .collect();
-    if let Some(&first) = providers.first() {
-        if providers
+    let contributing_providers: Vec<usize> = providers
+        .iter()
+        .copied()
+        .filter(|&index| contributes[index])
+        .collect();
+    if let Some(&first) = contributing_providers.first() {
+        let provider_groups: HashSet<usize> = contributing_providers
             .iter()
-            .any(|&index| groups[index] != groups[first])
-        {
+            .map(|&index| groups[index])
+            .collect();
+        let using_groups: HashSet<usize> = relations
+            .iter()
+            .enumerate()
+            .filter(|(_, relation)| {
+                using_members.contains(relation.name.column_key(graph.dialect).as_ref())
+            })
+            .map(|(index, _)| groups[index])
+            .collect();
+        let has_competing_using_group = using_groups
+            .iter()
+            .any(|group| provider_groups.iter().any(|provider| provider != group));
+        if has_competing_using_group {
+            let candidates = (0..relations.len())
+                .filter(|&index| {
+                    contributes[index]
+                        && (contributing_providers.contains(&index)
+                            || using_groups.contains(&groups[index]))
+                })
+                .filter_map(|index| match relations[index].binding {
+                    Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
+                        catalog: table.catalog.clone(),
+                        schema: table.schema.clone(),
+                        name: table.table.clone(),
+                    })),
+                    Binding::Cte(_) => Some(Candidate::Cte(relations[index].name.clone())),
+                    Binding::DerivedTable(_) => {
+                        Some(Candidate::Derived(Some(relations[index].name.clone())))
+                    }
+                    Binding::VirtualSource(_) => None,
+                })
+                .collect();
+            return UnqualifiedChoice::Ambiguous(candidates, true);
+        }
+        if provider_groups.len() > 1 {
             return UnqualifiedChoice::Ambiguous(
-                providers
+                contributing_providers
                     .iter()
                     .map(|&index| match relations[index].binding {
                         Binding::Cte(_) => Candidate::Cte(relations[index].name.clone()),
@@ -554,6 +607,7 @@ fn unqualified_choice(
                         _ => unreachable!("provider is a CTE or derived table"),
                     })
                     .collect(),
+                false,
             );
         }
         return UnqualifiedChoice::Merged(
@@ -575,10 +629,15 @@ fn unqualified_choice(
                 .collect(),
         )
     } else {
+        let guaranteed = relations.iter().any(|relation| {
+            using_members.contains(relation.name.column_key(graph.dialect).as_ref())
+        });
         UnqualifiedChoice::Ambiguous(
             relations
                 .iter()
-                .filter_map(|relation| match relation.binding {
+                .enumerate()
+                .filter(|(index, _)| contributes[*index])
+                .filter_map(|(_, relation)| match relation.binding {
                     Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
                         catalog: table.catalog.clone(),
                         schema: table.schema.clone(),
@@ -591,6 +650,7 @@ fn unqualified_choice(
                     _ => None,
                 })
                 .collect(),
+            guaranteed,
         )
     }
 }
@@ -600,15 +660,26 @@ fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
     format!("{left:?}") == format!("{right:?}")
 }
 
-fn binding_publishes(binding: &Binding, name: &Ident, graph: &RawGraph) -> bool {
+/// Whether a CTE or derived table publishes `name`. A relation that a
+/// `USING (name)` join combines has the column whatever its star hides, so a
+/// star it cannot enumerate counts there; otherwise only a listed column does.
+fn binding_publishes(
+    binding: &Binding,
+    name: &Ident,
+    may_hide_behind_star: bool,
+    graph: &RawGraph,
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> bool {
     let (Binding::Cte(scope) | Binding::DerivedTable(scope)) = binding else {
         return false;
     };
-    graph
-        .scopes
-        .output_columns(*scope)
-        .iter()
-        .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
+    let model = OutputModels::new(graph, catalog, &mut mapping_cache.models).scope(*scope);
+    if may_hide_behind_star {
+        model.may_publish(name)
+    } else {
+        model.publishes(name)
+    }
 }
 
 /// Resolve an unqualified column that `USING`/`NATURAL` joins merge from
@@ -644,7 +715,7 @@ pub(super) fn resolve_merged_column(
         return None;
     }
     let UnqualifiedChoice::Merged(members) =
-        unqualified_choice(name, &bindings, scope, graph, catalog)
+        unqualified_choice(name, &bindings, scope, graph, catalog, mapping_cache)
     else {
         return None;
     };
@@ -760,11 +831,12 @@ fn resolve_from_bindings(
             candidates: Vec::new(),
         })
     } else {
-        match unqualified_choice(name, bindings, scope, graph, catalog) {
-            UnqualifiedChoice::Ambiguous(candidates) => {
-                if candidates
-                    .iter()
-                    .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
+        match unqualified_choice(name, bindings, scope, graph, catalog, mapping_cache) {
+            UnqualifiedChoice::Ambiguous(candidates, guaranteed) => {
+                if guaranteed
+                    || candidates
+                        .iter()
+                        .any(|candidate| !matches!(candidate, Candidate::Relation(_)))
                 {
                     Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                         column: name.clone(),
@@ -850,21 +922,17 @@ fn resolve_through_scope(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
-    // Resolve through the same expanded output mappings used by the public
-    // projection path. This is important for a qualified CTE/derived
-    // reference whose name was introduced by a catalog-expanded star.
-    let mappings = resolve_scope_mappings(
+    // Resolve through the scope's model, which also lists the names a
+    // catalog-expanded star introduced.
+    if let Some((origins, has_back, _)) = listed_name_sources(
         target_scope,
+        column_name,
         graph,
         resolved,
         incoming,
         catalog,
         mapping_cache,
-    );
-    if let Some(mapping) = mappings.iter().find(|mapping| {
-        mapping.target.column.column_key(graph.dialect) == column_name.column_key(graph.dialect)
-    }) {
-        let (origins, has_back) = flatten_mapping_sources(&mapping.sources);
+    ) {
         return if has_back {
             Some(ColumnOrigin::Recursive {
                 base_sources: origins,
@@ -873,53 +941,23 @@ fn resolve_through_scope(
             origins.into_iter().next()
         };
     }
-    let requested_name =
-        match scope_star_name_decision(target_scope, column_name, graph, &mut HashSet::new()) {
-            StarNameDecision::Denied | StarNameDecision::Ambiguous => {
-                return Some(ColumnOrigin::Ambiguous {
-                    column: column_name.clone(),
-                    candidates: Vec::new(),
-                });
-            }
-            StarNameDecision::Replaced(node_id) => {
-                let (sources, _, has_back, _) = collect_output_sources(
-                    node_id,
-                    graph,
-                    resolved,
-                    incoming,
-                    &mut HashSet::new(),
-                    catalog,
-                    mapping_cache,
-                );
-                return if has_back {
-                    Some(ColumnOrigin::Recursive {
-                        base_sources: sources,
-                    })
-                } else if sources.len() == 1 {
-                    sources.into_iter().next()
-                } else {
-                    Some(ColumnOrigin::Ambiguous {
-                        column: column_name.clone(),
-                        candidates: Vec::new(),
-                    })
-                };
-            }
-            StarNameDecision::Renamed(old) => old,
-            StarNameDecision::Allowed => column_name.clone(),
-        };
-    if let Some(source) = named_wildcard_sources_for_scope(
+    match unlisted_name_sources(
         target_scope,
-        &requested_name,
+        column_name,
         graph,
         resolved,
         incoming,
         catalog,
         mapping_cache,
-    )
-    .into_iter()
-    .next()
-    {
-        return Some(source);
+    ) {
+        Unlisted::Denied => {
+            return Some(ColumnOrigin::Ambiguous {
+                column: column_name.clone(),
+                candidates: Vec::new(),
+            });
+        }
+        Unlisted::Sources(sources) => return sources.into_iter().next(),
+        Unlisted::None => {}
     }
 
     if let Some(col) = graph

@@ -287,5 +287,6 @@ fn self_join_alias_outside_a_merge_keeps_the_column_ambiguous() {
          SELECT x FROM a AS a2 LEFT JOIN a AS a3 USING (x), a AS a1",
         Dialect::Generic,
     );
-    assert_ambiguous(&result, &[cte("a1"), cte("a2"), cte("a3")]);
+    // The LEFT JOIN key comes from a2, so its non-contributing a3 alias is excluded.
+    assert_ambiguous(&result, &[cte("a1"), cte("a2")]);
 }

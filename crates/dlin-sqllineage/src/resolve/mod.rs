@@ -1,15 +1,17 @@
 pub(crate) mod analysis;
-mod arity;
 mod binding;
 mod catalog;
-mod join;
 mod lineage;
 mod mapping;
+mod model;
 mod star;
+mod target;
 mod topo;
+mod width;
 
-use arity::{graph_has_unresolved_stars, validate_set_arities};
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
+use model::OutputModels;
+use width::{graph_has_unresolved_stars, validate_set_arities};
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
@@ -66,8 +68,14 @@ pub(crate) fn resolve(
         ));
     }
 
-    let output_width = validate_set_arities(&graph, catalog)?;
-    let has_unresolved_stars = graph_has_unresolved_stars(&graph, catalog);
+    let mut mapping_cache = ScopeMappingCache::default();
+    let (output_width, has_unresolved_stars) = {
+        let mut models = OutputModels::new(&graph, catalog, &mut mapping_cache.models);
+        (
+            validate_set_arities(&mut models)?,
+            graph_has_unresolved_stars(&graph, &mut models),
+        )
+    };
 
     let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
     for (idx, edge) in graph.edges.iter().enumerate() {
@@ -78,7 +86,6 @@ pub(crate) fn resolve(
 
     let root = ScopeTree::root();
     let output_table = graph.tables.output.clone();
-    let mut mapping_cache = ScopeMappingCache::default();
     // Scope mappings are cached in canonical form without an output table.
     // Internal CTE/derived references need that form, while the root output
     // table is only presentation metadata and is attached once here. Keeping

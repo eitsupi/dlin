@@ -376,6 +376,18 @@ impl ScopeTree {
             .collect()
     }
 
+    /// The first range variable, in scope creation order, that reads `target`
+    /// as a CTE or derived table.
+    pub fn reading_binding(&self, target: ScopeId) -> Option<(Ident, Binding)> {
+        self.scopes
+            .iter()
+            .flat_map(|scope| scope.bindings.values().flatten())
+            .find(|(_, binding)| {
+                matches!(binding, Binding::Cte(read) | Binding::DerivedTable(read) if *read == target)
+            })
+            .cloned()
+    }
+
     /// All bindings visible from `scope` (nearest scope wins for shadowing).
     pub fn visible_bindings(&self, scope: ScopeId) -> Vec<(Ident, Binding)> {
         let mut result = Vec::new();

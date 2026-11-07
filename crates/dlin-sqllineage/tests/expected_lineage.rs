@@ -15,6 +15,8 @@
 mod identifiers;
 #[path = "expected_lineage/scopes_joins.rs"]
 mod scopes_joins;
+#[path = "expected_lineage/star_invariants.rs"]
+mod star_invariants;
 #[path = "expected_lineage/stars.rs"]
 mod stars;
 #[path = "expected_lineage/support.rs"]
