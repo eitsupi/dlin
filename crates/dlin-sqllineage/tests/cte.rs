@@ -471,14 +471,35 @@ fn select_star_from_cte() {
 }
 
 #[test]
-fn cte_join_unqualified_column() {
+fn cte_join_unqualified_column_is_the_ctes_when_the_other_table_lacks_it() {
+    let sql = "\
+        WITH cte AS (SELECT a FROM t1) \
+        SELECT a FROM cte JOIN t2 ON cte.id = t2.id";
+    let result = common::analyze_one_with(
+        sql,
+        Dialect::Generic,
+        Some(&common::KnownTables(&[("t2", &["id"])])),
+    );
+    let m = find_mapping(&result.output.columns, "a");
+    // t2 is known not to have "a", so it comes from the CTE (t1.a)
+    assert_eq!(concrete_sources(m), vec![("t1".into(), "a".into())]);
+}
+
+#[test]
+fn cte_join_unqualified_column_is_ambiguous_with_an_unknown_table() {
     let sql = "\
         WITH cte AS (SELECT a FROM t1) \
         SELECT a FROM cte JOIN t2 ON cte.id = t2.id";
     let result = analyze_one(sql);
     let m = find_mapping(&result.output.columns, "a");
-    // "a" should come from CTE (which traces to t1.a), not from t2
-    assert_eq!(concrete_sources(m), vec![("t1".into(), "a".into())]);
+    // t2 may have an "a" of its own, which SQL would reject as ambiguous
+    let Lineage::Partial { known, unresolved } = &m.lineage else {
+        panic!("expected partial lineage, got {:?}", m.lineage);
+    };
+    assert!(known.is_empty());
+    assert!(matches!(&unresolved[..],
+        [Unresolved::Ambiguous { column, candidates }]
+            if column.value == "a" && candidates.len() == 2));
 }
 
 #[test]

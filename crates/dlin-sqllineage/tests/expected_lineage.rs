@@ -11,6 +11,10 @@
 //! engine output; any change to that recorded failure also fails the case.
 //! Every case checks has_unresolved_stars, defaulting to false.
 
+#[path = "expected_lineage/direct_using_inputs.rs"]
+mod direct_using_inputs;
+#[path = "expected_lineage/direct_using_invariants.rs"]
+mod direct_using_invariants;
 #[path = "expected_lineage/identifiers.rs"]
 mod identifiers;
 #[path = "expected_lineage/scopes_joins.rs"]

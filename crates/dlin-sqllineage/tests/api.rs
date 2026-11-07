@@ -172,10 +172,29 @@ fn nested_star_does_not_open_final_output() {
     assert_eq!(result.output.shape, Shape::Closed);
     assert!(result.has_unresolved_stars);
     assert_eq!(result.output.columns[0].ordinal, Some(0));
-    assert!(matches!(
-        result.output.columns[0].lineage,
-        Lineage::Complete(_)
-    ));
+    // The derived table may publish `id` as well, exactly as a second physical
+    // table could, so the unqualified name has two possible owners.
+    assert!(
+        matches!(
+            &result.output.columns[0].lineage,
+            Lineage::Partial { known, unresolved }
+                if known.is_empty()
+                    && matches!(
+                        unresolved.as_slice(),
+                        [Unresolved::Ambiguous { column, candidates }]
+                            if column.value == "id"
+                                && candidates.len() == 2
+                                && candidates.contains(&Candidate::Relation(Relation {
+                                    catalog: None,
+                                    schema: None,
+                                    name: Ident::unquoted("some_table"),
+                                }))
+                                && candidates.contains(&Candidate::Derived(Some(Ident::unquoted("src"))))
+                    )
+        ),
+        "{:?}",
+        result.output.columns[0].lineage
+    );
     let named = one("WITH src AS (SELECT * FROM unknown_table) SELECT id FROM src");
     assert_eq!(named.output.shape, Shape::Closed);
     assert!(

@@ -141,3 +141,16 @@ pub fn catalog_entry<'a>(relation: &Relation, columns: &'a [&str]) -> CatalogEnt
         ),
     }
 }
+
+/// Tables with known columns; any other relation is unknown.
+#[allow(dead_code)]
+pub struct KnownTables(pub &'static [(&'static str, &'static [&'static str])]);
+
+impl Catalog for KnownTables {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        self.0
+            .iter()
+            .find(|(name, _)| *name == relation.name.value)
+            .map(|(_, columns)| catalog_entry(relation, columns))
+    }
+}

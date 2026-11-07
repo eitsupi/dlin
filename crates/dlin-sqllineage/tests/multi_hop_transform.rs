@@ -16,6 +16,17 @@ fn run(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
         .unwrap()
 }
 
+/// Like [`run`], with `u` and `v` known to have a join key `k` and nothing else.
+fn run_known(sql: &str, dialect: Dialect) -> dlin_sqllineage::StatementAnalysis {
+    let catalog = common::KnownTables(&[("u", &["k"]), ("v", &["k"])]);
+    Analyzer::new(dialect)
+        .with_catalog(&catalog)
+        .analyze(sql)
+        .unwrap_or_else(|err| panic!("{dialect:?}: {sql}: {err:?}"))
+        .into_single()
+        .unwrap()
+}
+
 fn mapping<'a>(result: &'a dlin_sqllineage::StatementAnalysis, target: &str) -> &'a OutputColumn {
     find_mapping(&result.output.columns, target)
 }
@@ -133,8 +144,9 @@ fn plain_pass_through_stays_direct() {
 }
 
 /// An unqualified reference in a scope with more than one relation reaches
-/// its source through the one relation that publishes the column. It must be
-/// classified, and must keep every source, exactly like the qualified form.
+/// its source through the one relation that publishes the column, when the
+/// other relations are known not to have it. It must be classified, and must
+/// keep every source, exactly like the qualified form.
 #[test]
 fn unqualified_reference_in_a_join_is_classified_like_the_qualified_one() {
     for dialect in DIALECTS {
@@ -148,8 +160,8 @@ fn unqualified_reference_in_a_join_is_classified_like_the_qualified_one() {
                 "WITH a AS (SELECT SUM(x) AS s FROM t) SELECT a.s AS s FROM a, u",
             ),
         ] {
-            let left = run(unqualified, dialect);
-            let right = run(qualified, dialect);
+            let left = run_known(unqualified, dialect);
+            let right = run_known(qualified, dialect);
             assert_eq!(
                 mapping(&left, "s").transform,
                 Transform::Aggregation,
@@ -171,7 +183,7 @@ fn unqualified_reference_in_a_join_is_classified_like_the_qualified_one() {
 
 #[test]
 fn unqualified_source_free_aggregate_in_a_join_is_an_aggregation() {
-    let result = run(
+    let result = run_known(
         "WITH a AS (SELECT COUNT(*) AS c FROM t) SELECT c FROM a JOIN u ON true",
         Dialect::Generic,
     );
@@ -180,10 +192,36 @@ fn unqualified_source_free_aggregate_in_a_join_is_an_aggregation() {
     assert!(matches!(&m.lineage, Lineage::Complete(sources) if sources.is_empty()));
 }
 
+/// The relation beside the aggregate may have a column of the same name, so the
+/// name is ambiguous. The value, if it is the aggregate's, is still an
+/// aggregation, and the transform does not depend on the ambiguity.
+#[test]
+fn an_ambiguous_unqualified_aggregate_keeps_its_transform() {
+    for dialect in DIALECTS {
+        for sql in [
+            "SELECT s FROM (SELECT SUM(x) AS s FROM t) d JOIN u ON d.k = u.k",
+            "WITH a AS (SELECT SUM(x) AS s FROM t) SELECT s FROM a, u",
+            "WITH a AS (SELECT COUNT(*) AS s FROM t) SELECT s FROM a JOIN u ON true",
+        ] {
+            let result = run(sql, dialect);
+            let m = mapping(&result, "s");
+            assert_eq!(m.transform, Transform::Aggregation, "{dialect:?}: {sql}");
+            assert!(
+                matches!(&m.lineage, Lineage::Partial { known, unresolved }
+                    if known.is_empty()
+                        && matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
+                            if column.value == "s" && candidates.len() == 2)),
+                "{dialect:?}: {sql}: {:?}",
+                m.lineage
+            );
+        }
+    }
+}
+
 #[test]
 fn unqualified_reference_in_a_join_keeps_every_set_operation_branch() {
     for dialect in DIALECTS {
-        let result = run(
+        let result = run_known(
             "SELECT s FROM (SELECT x AS s FROM t UNION ALL SELECT y FROM u2) d \
              JOIN v ON d.k = v.k",
             dialect,

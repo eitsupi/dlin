@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 use super::binding::{
     find_cte_redirect, find_unqualified_binding, find_virtual_sources_for_column,
-    lookup_virtual_binding, resolve_merged_column, resolve_node,
+    lookup_virtual_binding, resolve_input_reference, resolve_node,
 };
 use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
 };
-use super::star::{Unlisted, listed_name_sources, unlisted_name_sources};
+use super::star::named_scope_sources;
 
 use crate::Ident;
 use crate::catalog::CatalogContext;
@@ -110,7 +110,7 @@ pub(super) fn collect_leaf_origins(
     }
 
     if let Some(result) =
-        resolve_merged_column(node_id, graph, resolved, incoming, catalog, mapping_cache)
+        resolve_input_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
     {
         return result;
     }
@@ -366,51 +366,6 @@ fn resolve_named_scope_reference(
         catalog,
         mapping_cache,
     )
-}
-
-/// The origins of the column `name` published by the CTE or derived table
-/// `target_scope`, with the transform that scope applies to it.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn named_scope_sources(
-    name: &Ident,
-    target_scope: usize,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    if let Some(listed) = listed_name_sources(
-        target_scope,
-        name,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    ) {
-        return Some(listed);
-    }
-    match unlisted_name_sources(
-        target_scope,
-        name,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    ) {
-        Unlisted::Denied => Some((
-            vec![ColumnOrigin::Ambiguous {
-                column: name.clone(),
-                candidates: Vec::new(),
-            }],
-            false,
-            TransformKind::Direct,
-        )),
-        Unlisted::Sources(sources) => Some((sources, false, TransformKind::Direct)),
-        Unlisted::None => None,
-    }
 }
 
 pub(super) fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {

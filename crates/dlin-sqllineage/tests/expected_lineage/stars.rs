@@ -841,6 +841,7 @@ pub fn cases() -> Vec<Case> {
         );
     }
     cases.extend(partial_catalog_modifier_cases());
+    cases.extend(modifier_over_cte_star_cases());
     cases.extend(unknown_using_key_cases());
     cases.extend(set_operation_tail_cases());
     cases.extend(using_key_position_and_ambiguity_cases());
@@ -989,6 +990,115 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
         .catalog(a_columns)
         .unresolved_stars(true),
     ]
+}
+
+/// REPLACE and RENAME over a star that hides behind a CTE of unknown columns.
+/// The column they create belongs to the derived table that holds the star, so
+/// it is that table's alone unless a joined relation may publish the name: `e`
+/// is described without it when a catalog is present and undescribed otherwise.
+/// The sweeps read each name directly and through star wrappers.
+fn modifier_over_cte_star_cases() -> Vec<Case> {
+    let with = "WITH c AS (SELECT * FROM t) ";
+    let mut cases = Vec::new();
+    for (dialect_name, dialect, modifier, expected) in [
+        (
+            "replace",
+            Dialect::DuckDb,
+            "REPLACE (1 AS kept)",
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "rename",
+            Dialect::Snowflake,
+            "RENAME (id AS kept)",
+            partial_col(0, u("kept"), vec![], vec![behind("t", "id")]),
+        ),
+    ] {
+        for (suffix, join) in [("", ""), ("_beside_a_relation_without_it", " CROSS JOIN e")] {
+            cases.push(
+                Case::new(
+                    &format!("{dialect_name}_over_a_cte_star{suffix}"),
+                    &format!("{with}SELECT kept FROM (SELECT * {modifier} FROM c) AS d{join}"),
+                    dialect,
+                    vec![expected.clone()],
+                )
+                .catalog(vec![(relation("e"), vec![u("other")])])
+                .unresolved_stars(true),
+            );
+        }
+    }
+    cases.extend(modifier_over_cte_of_several_stars_cases());
+    cases
+}
+
+/// REPLACE and RENAME over a CTE that holds several unknown stars. The CTE is
+/// ambiguous about a name that two of its relations may publish, but a REPLACE
+/// defines its column in the derived table and a RENAME moves the CTE's column
+/// of the old name, so neither takes the CTE's view of the new name. `kept`
+/// is the derived table's alone, and the renamed column resolves as `id` does
+/// in the CTE.
+fn modifier_over_cte_of_several_stars_cases() -> Vec<Case> {
+    let kept_ambiguous = |candidates: &[&str]| {
+        partial_col(
+            0,
+            u("kept"),
+            vec![],
+            vec![Unresolved::Ambiguous {
+                column: u("kept"),
+                candidates: candidates
+                    .iter()
+                    .map(|table| dlin_sqllineage::Candidate::Relation(relation(table)))
+                    .collect(),
+            }],
+        )
+    };
+    let mut cases = Vec::new();
+    for (name, with, modifier, dialect, expected) in [
+        (
+            "replace_over_a_cte_of_two_unknown_stars",
+            "WITH c AS (SELECT * FROM a CROSS JOIN b) ",
+            "REPLACE (1 AS kept)",
+            Dialect::DuckDb,
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "replace_over_a_cte_of_a_listed_column_and_a_star",
+            "WITH c AS (SELECT a.kept, b.* FROM a, b) ",
+            "REPLACE (1 AS kept)",
+            Dialect::DuckDb,
+            col(0, u("kept"), vec![]),
+        ),
+        (
+            "rename_over_a_cte_whose_stars_exclude_the_old_name",
+            "WITH c AS (SELECT s.id, a.* EXCLUDE (id), b.* EXCLUDE (id) FROM s, a, b) ",
+            "RENAME (id AS kept)",
+            Dialect::Snowflake,
+            col(0, u("kept"), vec![source(relation("s"), u("id"))]),
+        ),
+        (
+            "rename_over_a_cte_whose_stars_both_publish_the_old_name",
+            "WITH c AS (SELECT a.*, b.* EXCLUDE (kept) FROM a, b) ",
+            "RENAME (id AS kept)",
+            Dialect::Snowflake,
+            kept_ambiguous(&["a", "b"]),
+        ),
+    ] {
+        for (suffix, join) in [("", ""), ("_beside_a_relation_without_it", " CROSS JOIN e")] {
+            // Beside `e`, the name has a second provider only when the old
+            // name's ambiguity is not already the answer.
+            cases.push(
+                Case::new(
+                    &format!("{name}{suffix}"),
+                    &format!("{with}SELECT kept FROM (SELECT * {modifier} FROM c) AS d{join}"),
+                    dialect,
+                    vec![expected.clone()],
+                )
+                .catalog(vec![(relation("e"), vec![u("other")])])
+                .unresolved_stars(true),
+            );
+        }
+    }
+    cases
 }
 
 /// The left operand of the set operation is `t1.*` with unknown columns and
@@ -1549,11 +1659,10 @@ fn using_key_sources(kind: &str) -> Vec<dlin_sqllineage::SourceColumn> {
     }
 }
 
+type CatalogTables = Vec<(dlin_sqllineage::Relation, Vec<dlin_sqllineage::Ident>)>;
+
 /// The catalogs `USING` is checked under: none, only `a`, only `b`.
-fn using_catalogs() -> Vec<(
-    &'static str,
-    Vec<(dlin_sqllineage::Relation, Vec<dlin_sqllineage::Ident>)>,
-)> {
+fn using_catalogs() -> Vec<(&'static str, CatalogTables)> {
     vec![
         ("no_catalog", vec![]),
         (

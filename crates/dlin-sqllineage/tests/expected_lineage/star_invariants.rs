@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{identifiers, scopes_joins, stars, support::Case, target_columns};
 
-fn reference(name: &Ident) -> String {
+pub(super) fn reference(name: &Ident) -> String {
     match name.quote {
         None => name.value.clone(),
         Some(Quote::Double) => format!("\"{}\"", name.value.replace('"', "\"\"")),
@@ -48,6 +48,22 @@ fn contributions(lineage: &Lineage, name: &Ident) -> Vec<SourceColumn> {
             }),
             _ => None,
         }));
+        // A relation that may own the name is a possible contribution too.
+        sources.extend(unresolved.iter().flat_map(|unresolved| {
+            match unresolved {
+                Unresolved::Ambiguous { candidates, .. } => candidates
+                    .iter()
+                    .filter_map(|candidate| match candidate {
+                        dlin_sqllineage::Candidate::Relation(relation) => Some(SourceColumn {
+                            relation: relation.clone(),
+                            column: name.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }));
     }
     sources
 }
@@ -81,6 +97,91 @@ fn query(sql: &str) -> &str {
     } else {
         sql
     }
+}
+
+/// Whether a LIKE pattern (`%` any run, `_` one character) matches `value`,
+/// ignoring case.
+fn like(pattern: &[char], value: &[char]) -> bool {
+    match pattern.split_first() {
+        None => value.is_empty(),
+        Some(('%', rest)) => {
+            like(rest, value)
+                || value
+                    .split_first()
+                    .is_some_and(|(_, tail)| like(pattern, tail))
+        }
+        Some((part, rest)) => value.split_first().is_some_and(|(first, tail)| {
+            (*part == '_' || part.eq_ignore_ascii_case(first)) && like(rest, tail)
+        }),
+    }
+}
+
+/// Whether the columns a star cannot enumerate may still carry `name`, judged
+/// from the fixture's SQL text alone. `Some(true)`: nothing written restricts
+/// the name, so an unknown part of the output may publish it next to the
+/// column the star lists. `Some(false)`: an ILIKE pattern that does not match
+/// the name keeps the unknown columns from publishing it. `None`: an EXCLUDE,
+/// REPLACE, RENAME or USING item mentions the name, or the statement is a set
+/// operation (which takes its names from its left operand and appends the
+/// right one's beyond it). What the unknown columns may carry then depends on
+/// which relation the item applies to, which the text does not tell, and either
+/// answer is sound; the hand-written cases pin those shapes exactly.
+fn unknown_may_carry(sql: &str, name: &Ident, dialect: dlin_sqllineage::Dialect) -> Option<bool> {
+    let key = name.column_key(dialect).into_owned();
+    let mentions = |word: &str| {
+        word.rsplit('.')
+            .next()
+            .is_some_and(|last| last.trim_matches(['"', '`']).eq_ignore_ascii_case(&key))
+    };
+    for keyword in [" EXCLUDE (", " REPLACE (", " RENAME (", " USING ("] {
+        let mut rest = sql;
+        while let Some(start) = rest.find(keyword) {
+            let body_start = start + keyword.len();
+            let mut depth = 1;
+            let mut end = rest.len();
+            for (offset, character) in rest[body_start..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    end = body_start + offset;
+                    break;
+                }
+            }
+            if rest[body_start..end]
+                .split(|c: char| c == ',' || c.is_whitespace() || c == '(' || c == ')')
+                .any(mentions)
+            {
+                return None;
+            }
+            rest = &rest[end..];
+        }
+    }
+    if [" UNION ", " INTERSECT ", " EXCEPT "]
+        .iter()
+        .any(|keyword| sql.contains(keyword))
+    {
+        return None;
+    }
+    if let Some(start) = sql.find(" ILIKE '") {
+        let body = &sql[start + " ILIKE '".len()..];
+        let pattern: Vec<char> = body[..body.find('\'').unwrap_or(0)].chars().collect();
+        let value: Vec<char> = name.value.chars().collect();
+        if !like(&pattern, &value) {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+/// A lookup that finds the name ambiguous, whatever the candidates.
+fn ambiguous_lookup(lineages: &[Lineage], name: &Ident, dialect: dlin_sqllineage::Dialect) -> bool {
+    matches!(lineages, [Lineage::Partial { known, unresolved }]
+        if known.is_empty()
+            && matches!(&unresolved[..], [Unresolved::Ambiguous { column, .. }]
+                if column.column_key(dialect) == name.column_key(dialect)))
 }
 
 struct Checks {
@@ -216,10 +317,44 @@ fn check_case(case: &Case, with_catalog: bool, checks: &mut Checks) {
                 .map(|column| column.lineage)
                 .collect::<Vec<_>>()
         });
+        // A name the star lists is that column, unless the columns the star
+        // cannot enumerate may carry it too: then two providers publish it and
+        // it denotes none of them. Which name an unknown part can carry
+        // follows from the modifiers written in the fixture, not from the
+        // analysis.
+        let open = matches!(result.output.shape, Shape::Open { .. });
+        let may_carry = if open {
+            unknown_may_carry(sql, name, case.dialect())
+        } else {
+            Some(false)
+        };
+        let found_ambiguous = actual
+            .as_ref()
+            .is_ok_and(|lineages| ambiguous_lookup(lineages, name, case.dialect()));
+        let (expected, actual) = match may_carry {
+            Some(true) => (
+                json!("ambiguous"),
+                if found_ambiguous {
+                    json!("ambiguous")
+                } else {
+                    json!(actual)
+                },
+            ),
+            Some(false) => (
+                json!(Ok::<_, String>(vec![column.lineage.clone()])),
+                json!(actual),
+            ),
+            // Only some relations lose the name: either answer is sound.
+            None if found_ambiguous => (json!("ambiguous"), json!("ambiguous")),
+            None => (
+                json!(Ok::<_, String>(vec![column.lineage.clone()])),
+                json!(actual),
+            ),
+        };
         checks.check(
             format!("{label}/name_{}", reference(name)),
-            json!(Ok::<_, String>(vec![column.lineage.clone()])),
-            json!(actual),
+            expected,
+            actual,
         );
     }
     let control_sql = without_filters(sql);
