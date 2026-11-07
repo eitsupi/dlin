@@ -144,6 +144,9 @@ pub(super) struct ColumnSlot {
     /// Range variables the column is visible under. A merged column keeps
     /// the range variables of both sides, whatever the join kind.
     pub ranges: Rc<[Ident]>,
+    /// Range variables whose values contribute to the column. Unlike
+    /// `ranges`, this excludes sides suppressed by an outer USING join.
+    pub candidate_ranges: Rc<[Ident]>,
     pub value: ValueId,
 }
 
@@ -430,6 +433,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 .cloned()
                                 .unwrap_or_else(|| OutputName::Explicit(column.name.clone())),
                             ranges: Rc::from([]),
+                            candidate_ranges: Rc::from([]),
                             value: ValueId::Expr(column.node_id),
                         }));
                     }
@@ -541,6 +545,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         name: column.name.clone(),
                         output_name: OutputName::Explicit(column.name.clone()),
                         ranges: ranges.clone(),
+                        candidate_ranges: ranges.clone(),
                         value: ValueId::VirtualColumn {
                             source: *source,
                             index,
@@ -560,6 +565,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         name: column.clone(),
                         output_name: OutputName::Explicit(column.clone()),
                         ranges: ranges.clone(),
+                        candidate_ranges: ranges.clone(),
                         value: ValueId::Physical {
                             table: table.clone(),
                             column,
@@ -593,6 +599,7 @@ fn forward_scope(
                 name: slot.name.clone(),
                 output_name: slot.output_name.clone(),
                 ranges: ranges.clone(),
+                candidate_ranges: ranges.clone(),
                 value: if set_operation {
                     ValueId::SetOperation { scope, index }
                 } else {
@@ -669,6 +676,7 @@ fn find_key(elements: &[OutputElement], key: &Ident, dialect: Dialect) -> Option
 struct KeySide {
     value: ValueId,
     ranges: Rc<[Ident]>,
+    candidate_ranges: Rc<[Ident]>,
     /// The name of the side's listed column, if it lists one.
     names: Option<(Ident, OutputName)>,
 }
@@ -688,6 +696,7 @@ fn take_key(
             };
             KeySide {
                 value: slot.value,
+                candidate_ranges: slot.candidate_ranges,
                 ranges: slot.ranges,
                 names: Some((slot.name, slot.output_name)),
             }
@@ -739,6 +748,7 @@ fn take_key(
                 .expect("an unlisted key has a publisher");
             KeySide {
                 value,
+                candidate_ranges: ranges.clone().into(),
                 ranges: ranges.into(),
                 names: None,
             }
@@ -831,6 +841,13 @@ fn fold_groups(
             let left_side = take_key(&mut left_elements, left_at, &key, dialect);
             let right_side = take_key(&mut right_elements, right_at, &key, dialect);
             let ranges = union_ranges(&left_side.ranges, &right_side.ranges);
+            let candidate_ranges = match merge.kind {
+                JoinMergeKind::Left => left_side.candidate_ranges,
+                JoinMergeKind::Right => right_side.candidate_ranges,
+                JoinMergeKind::Inner | JoinMergeKind::Full => {
+                    union_ranges(&left_side.candidate_ranges, &right_side.candidate_ranges)
+                }
+            };
             // An outer join takes the value from the preserved side; an inner
             // or full join may take it from either.
             let value = match merge.kind {
@@ -850,6 +867,7 @@ fn fold_groups(
                 name,
                 output_name,
                 ranges,
+                candidate_ranges,
                 value,
             }));
         }
@@ -961,10 +979,12 @@ fn apply_options(
         // The replacement stands for the tail's column of that name.
         retire_tail_name(&mut elements, &replacement.column, dialect);
         ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
+        let ranges: Rc<[Ident]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
-            ranges: ranges.into(),
+            ranges: ranges.clone(),
+            candidate_ranges: ranges,
             value: ValueId::Expr(replacement.node_id),
         }));
     }
@@ -1008,10 +1028,12 @@ fn apply_options(
             .into_iter()
             .reduce(|left, right| ValueId::Merged(Box::new(left), Box::new(right)))
             .expect("a renamed column has a publisher");
+        let ranges: Rc<[Ident]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
-            ranges: ranges.into(),
+            ranges: ranges.clone(),
+            candidate_ranges: ranges,
             value,
         }));
     }

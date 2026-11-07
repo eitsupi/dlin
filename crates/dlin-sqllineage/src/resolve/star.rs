@@ -307,7 +307,7 @@ impl Evaluator<'_, '_, '_> {
             let OutputElement::Column(slot) = &model.elements[index] else {
                 continue;
             };
-            for range in slot.ranges.iter() {
+            for range in slot.candidate_ranges.iter() {
                 let binding = visible
                     .iter()
                     .find(|(name, _)| same_column_name(name, range, dialect));

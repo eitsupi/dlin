@@ -552,9 +552,16 @@ fn unqualified_choice(
     let providers: Vec<usize> = (0..relations.len())
         .filter(|&index| relations[index].scope.is_some())
         .collect();
-    if let Some(&first) = providers.first() {
-        let provider_groups: HashSet<usize> =
-            providers.iter().map(|&index| groups[index]).collect();
+    let contributing_providers: Vec<usize> = providers
+        .iter()
+        .copied()
+        .filter(|&index| contributes[index])
+        .collect();
+    if let Some(&first) = contributing_providers.first() {
+        let provider_groups: HashSet<usize> = contributing_providers
+            .iter()
+            .map(|&index| groups[index])
+            .collect();
         let using_groups: HashSet<usize> = relations
             .iter()
             .enumerate()
@@ -569,7 +576,9 @@ fn unqualified_choice(
         if has_competing_using_group {
             let candidates = (0..relations.len())
                 .filter(|&index| {
-                    providers.contains(&index) || using_groups.contains(&groups[index])
+                    contributes[index]
+                        && (contributing_providers.contains(&index)
+                            || using_groups.contains(&groups[index]))
                 })
                 .filter_map(|index| match relations[index].binding {
                     Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
@@ -588,7 +597,7 @@ fn unqualified_choice(
         }
         if provider_groups.len() > 1 {
             return UnqualifiedChoice::Ambiguous(
-                providers
+                contributing_providers
                     .iter()
                     .map(|&index| match relations[index].binding {
                         Binding::Cte(_) => Candidate::Cte(relations[index].name.clone()),
@@ -626,7 +635,9 @@ fn unqualified_choice(
         UnqualifiedChoice::Ambiguous(
             relations
                 .iter()
-                .filter_map(|relation| match relation.binding {
+                .enumerate()
+                .filter(|(index, _)| contributes[*index])
+                .filter_map(|(_, relation)| match relation.binding {
                     Binding::Table(table) => Some(Candidate::Relation(crate::Relation {
                         catalog: table.catalog.clone(),
                         schema: table.schema.clone(),

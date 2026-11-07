@@ -1165,6 +1165,18 @@ fn using_key_position_and_ambiguity_cases() -> Vec<Case> {
             }],
         )
     };
+    let competing_candidates =
+        |join_candidate: dlin_sqllineage::Candidate, provider: dlin_sqllineage::Candidate| {
+            partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![join_candidate, provider],
+                }],
+            )
+        };
     let c_only = || vec![(relation("c"), vec![u("id"), u("y")])];
     let a_and_c = || {
         vec![
@@ -1183,6 +1195,77 @@ fn using_key_position_and_ambiguity_cases() -> Vec<Case> {
         .catalog(vec![(relation("a"), vec![u("k1"), u("x"), u("k2")])])
         .shape(open_star("b", Some(2)))
         .unresolved_stars(true),
+        Case::new(
+            "right_using_ambiguous_candidates_exclude_noncontributing_cte",
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM a RIGHT JOIN t USING (x), c",
+            Dialect::Generic,
+            vec![competing_candidates(
+                dlin_sqllineage::Candidate::Relation(relation("t")),
+                dlin_sqllineage::Candidate::Cte(u("c")),
+            )],
+        ),
+        Case::new(
+            "left_using_ambiguous_candidates_exclude_noncontributing_table",
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM a LEFT JOIN t USING (x), c",
+            Dialect::Generic,
+            vec![competing_candidates(
+                dlin_sqllineage::Candidate::Cte(u("a")),
+                dlin_sqllineage::Candidate::Cte(u("c")),
+            )],
+        ),
+        Case::new(
+            "right_using_ambiguous_candidates_exclude_noncontributing_derived_table",
+            "WITH c AS (SELECT x FROM s2) SELECT x FROM (SELECT x FROM s1) a RIGHT JOIN t USING (x), c",
+            Dialect::Generic,
+            vec![competing_candidates(
+                dlin_sqllineage::Candidate::Relation(relation("t")),
+                dlin_sqllineage::Candidate::Cte(u("c")),
+            )],
+        ),
+        Case::new(
+            "left_using_without_provider_ambiguous_candidates_exclude_noncontributing_table",
+            "SELECT x FROM a LEFT JOIN b USING (x), c",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("a")),
+                        dlin_sqllineage::Candidate::Relation(relation("c")),
+                    ],
+                }],
+            )],
+        )
+        .catalog(vec![
+            (relation("a"), vec![u("x")]),
+            (relation("b"), vec![u("x")]),
+            (relation("c"), vec![u("x")]),
+        ]),
+        Case::new(
+            "left_using_without_provider_ambiguous_candidates_exclude_noncontributing_table_through_star",
+            "SELECT x FROM (SELECT * FROM a LEFT JOIN b USING (x), c) d",
+            Dialect::Generic,
+            vec![partial_col(
+                0,
+                u("x"),
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("x"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("a")),
+                        dlin_sqllineage::Candidate::Relation(relation("c")),
+                    ],
+                }],
+            )],
+        )
+        .catalog(vec![
+            (relation("a"), vec![u("x")]),
+            (relation("b"), vec![u("x")]),
+            (relation("c"), vec![u("x")]),
+        ]),
         // The unknown relation is on the left, so its remaining columns come
         // after the keys and `b`'s remaining column is not at a known place.
         Case::new(
@@ -1389,6 +1472,18 @@ fn ambiguous_name_reads_the_same_directly_and_through_a_star() {
 fn named_provider_outside_using_group_matches_direct_and_star_candidates() {
     for (direct_sql, star_sql) in [
         (
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM a RIGHT JOIN t USING (x), c",
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM (SELECT * FROM a RIGHT JOIN t USING (x), c) d",
+        ),
+        (
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM a LEFT JOIN t USING (x), c",
+            "WITH a AS (SELECT x FROM s1), c AS (SELECT x FROM s2) SELECT x FROM (SELECT * FROM a LEFT JOIN t USING (x), c) d",
+        ),
+        (
+            "WITH c AS (SELECT x FROM s2) SELECT x FROM (SELECT x FROM s1) a RIGHT JOIN t USING (x), c",
+            "WITH c AS (SELECT x FROM s2) SELECT x FROM (SELECT * FROM (SELECT x FROM s1) a RIGHT JOIN t USING (x), c) d",
+        ),
+        (
             "WITH c AS (SELECT id FROM source) SELECT id FROM a JOIN b USING (id) CROSS JOIN c",
             "WITH c AS (SELECT id FROM source) SELECT id FROM (SELECT * FROM a JOIN b USING (id) CROSS JOIN c) d",
         ),
@@ -1413,6 +1508,26 @@ fn named_provider_outside_using_group_matches_direct_and_star_candidates() {
             "{direct_sql}"
         );
     }
+
+    let catalog = vec![
+        (relation("a"), vec![u("x")]),
+        (relation("b"), vec![u("x")]),
+        (relation("c"), vec![u("x")]),
+    ];
+    let case = Case::new("comparison", "SELECT 1", Dialect::Generic, vec![]).catalog(catalog);
+    let direct = case
+        .analyze_sql("SELECT x FROM a LEFT JOIN b USING (x), c", true)
+        .unwrap();
+    let through_star = case
+        .analyze_sql(
+            "SELECT x FROM (SELECT * FROM a LEFT JOIN b USING (x), c) d",
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        direct.output.columns[0].lineage, through_star.output.columns[0].lineage,
+        "catalogued physical providers"
+    );
 }
 
 const JOIN_KINDS: [(&str, &str); 4] = [
