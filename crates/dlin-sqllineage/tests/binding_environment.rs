@@ -961,6 +961,18 @@ fn has_recursive_marker(column: &dlin_sqllineage::OutputColumn) -> bool {
         if unresolved.iter().any(|item| matches!(item, Unresolved::Recursive)))
 }
 
+/// The single output column has complete lineage: no recursive marker and
+/// nothing else left unresolved.
+#[track_caller]
+fn assert_complete(result: &dlin_sqllineage::StatementAnalysis, context: impl std::fmt::Display) {
+    let column = &result.output.columns[0];
+    assert!(
+        matches!(column.lineage, Lineage::Complete(_)),
+        "{context}: {:?}",
+        column.lineage
+    );
+}
+
 const UNION_CTE: &str = "WITH RECURSIVE c AS (SELECT x FROM t UNION ALL SELECT y FROM u) \
      SELECT x FROM c";
 
@@ -980,6 +992,7 @@ fn a_union_cte_that_does_not_read_itself_keeps_both_operands() {
     ] {
         let result = analyze(UNION_CTE, dialect, false);
         assert_eq!(sources(&result, "x"), both, "{dialect:?}");
+        assert_complete(&result, format!("{dialect:?}"));
         assert_eq!(read_names(&result), ["t", "u"], "{dialect:?}");
     }
     // Dialects where a CTE may read itself with or without the keyword.
@@ -990,6 +1003,7 @@ fn a_union_cte_that_does_not_read_itself_keeps_both_operands() {
         ] {
             let result = analyze(&sql, dialect, false);
             assert_eq!(sources(&result, "x"), both, "{dialect:?} {sql}");
+            assert_complete(&result, format!("{dialect:?} {sql}"));
             assert_eq!(read_names(&result), ["t", "u"], "{dialect:?} {sql}");
         }
     }
@@ -997,6 +1011,7 @@ fn a_union_cte_that_does_not_read_itself_keeps_both_operands() {
     for dialect in [Dialect::PostgreSql, Dialect::Generic, Dialect::DuckDb] {
         let result = analyze(&UNION_CTE.replace("WITH RECURSIVE", "WITH"), dialect, false);
         assert_eq!(sources(&result, "x"), both, "{dialect:?}");
+        assert_complete(&result, format!("{dialect:?}"));
     }
 }
 
@@ -1009,6 +1024,7 @@ fn a_union_cte_that_does_not_read_itself_keeps_both_operands_with_a_catalog() {
             [pair("t", "x"), pair("u", "y")],
             "{dialect:?}"
         );
+        assert_complete(&result, format!("{dialect:?}"));
     }
 }
 
@@ -1111,11 +1127,11 @@ fn a_nested_with_reading_a_finished_cte_is_an_ordinary_reference() {
     }
 }
 
-// A nested query that reads the outer CTE by the name an inner CTE of the
-// same name is still being defined is not the outer one: the inner is a
-// different CTE, hidden from its own body in PostgreSQL.
+// Without RECURSIVE, a PostgreSQL CTE is hidden from its own body. The body of
+// the inner `c` therefore reads the outer CTE of the same name, not itself and
+// not a physical relation.
 #[test]
-fn an_inner_cte_reading_its_own_name_does_not_read_the_outer_cte() {
+fn a_non_recursive_inner_cte_body_reads_the_outer_cte_of_the_same_name() {
     let sql = "WITH c AS (SELECT x AS v FROM t) \
          SELECT v FROM (WITH c AS (SELECT v FROM c) SELECT v FROM c) AS e";
     let result = analyze(sql, Dialect::PostgreSql, false);
