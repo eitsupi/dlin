@@ -321,10 +321,7 @@ impl LineageBuilder {
     }
 
     fn visit_target_query(&mut self, query: &ast::Query, columns: Vec<crate::Ident>) {
-        let previous = self.target_values;
-        self.target_values = !columns.is_empty();
-        self.visit_query(query);
-        self.target_values = previous;
+        self.visit_query_with_target(query, !columns.is_empty());
         self.graph.target_columns = columns;
     }
 

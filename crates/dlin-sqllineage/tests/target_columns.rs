@@ -293,3 +293,51 @@ fn values_keep_source_free_scalar_aggregate_transform() {
     assert_eq!(result.output.columns[0].transform, Transform::Aggregation);
     assert_eq!(result.output.columns[0].lineage, Lineage::Complete(vec![]));
 }
+
+#[test]
+fn nested_values_lineage_does_not_depend_on_insert_column_list() {
+    for select in [
+        "SELECT v.c FROM (VALUES (1)) v(c)",
+        "SELECT x FROM s WHERE x IN (VALUES (1))",
+        "SELECT (VALUES ((SELECT x FROM s))) AS value",
+    ] {
+        let named = one(&format!("INSERT INTO target (a) {select}"));
+        let unnamed = one(&format!("INSERT INTO target {select}"));
+        let mut normalized = named.clone();
+        for (column, original) in normalized
+            .output
+            .columns
+            .iter_mut()
+            .zip(&unnamed.output.columns)
+        {
+            column.name.clone_from(&original.name);
+        }
+        assert_eq!(normalized, unnamed, "{select}");
+    }
+}
+
+#[test]
+fn target_values_still_follow_top_level_set_operation_branches() {
+    for sql in [
+        "INSERT INTO target (a) VALUES (1) UNION ALL VALUES (2)",
+        "INSERT INTO target (a) (VALUES (1))",
+    ] {
+        let result = one(sql);
+        assert_eq!(result.output.columns.len(), 1, "{sql}");
+        assert_eq!(
+            result.output.columns[0].name,
+            OutputName::Explicit(Ident::unquoted("a")),
+            "{sql}"
+        );
+        assert_eq!(
+            result.output.columns[0].lineage,
+            Lineage::Complete(vec![]),
+            "{sql}"
+        );
+        assert!(
+            result.diagnostics.is_empty(),
+            "{sql}: {:?}",
+            result.diagnostics
+        );
+    }
+}

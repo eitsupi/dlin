@@ -6,6 +6,12 @@ use crate::types::SemanticError;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
+        self.visit_query_with_target(query, false);
+    }
+
+    /// Target-specific VALUES/TABLE handling follows only the query body and
+    /// its set-operation branches; nested queries use ordinary analysis.
+    pub(crate) fn visit_query_with_target(&mut self, query: &Query, target_values: bool) {
         // Pipe operators (`FROM t |> SELECT a`) reshape the result of the
         // query after its body. Ignoring them would report the lineage of the
         // unpiped body as if it were the query's output, so refuse instead.
@@ -42,7 +48,7 @@ impl LineageBuilder {
             self.push_scope(ScopeKind::Root);
         }
 
-        self.visit_set_expr(&query.body);
+        self.visit_set_expr(&query.body, target_values);
 
         if has_ctes {
             let body_outputs: Vec<_> = self
@@ -63,14 +69,14 @@ impl LineageBuilder {
         }
     }
 
-    pub(crate) fn visit_set_expr(&mut self, body: &SetExpr) {
+    fn visit_set_expr(&mut self, body: &SetExpr, target_values: bool) {
         match body {
             SetExpr::Select(select) => {
                 self.visit_select(select);
             }
             SetExpr::SetOperation { left, right, .. } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
-                self.visit_set_expr(left);
+                self.visit_set_expr(left, target_values);
                 let left_outputs: Vec<(crate::Ident, crate::graph::node::NodeId)> = self
                     .graph
                     .scopes
@@ -81,7 +87,7 @@ impl LineageBuilder {
                 self.pop_scope();
 
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
-                self.visit_set_expr(right);
+                self.visit_set_expr(right, target_values);
                 self.pop_scope();
 
                 let is_recursive = self.recursive_cte_name.is_some();
@@ -105,10 +111,10 @@ impl LineageBuilder {
                 }
             }
             SetExpr::Query(q) => {
-                self.visit_query(q);
+                self.visit_query_with_target(q, target_values);
             }
-            SetExpr::Values(values) if self.target_values => self.visit_target_values(values),
-            SetExpr::Table(_) if self.target_values => self.graph.unknown_target_source = true,
+            SetExpr::Values(values) if target_values => self.visit_target_values(values),
+            SetExpr::Table(_) if target_values => self.graph.unknown_target_source = true,
             SetExpr::Values(_) | SetExpr::Table(_) => {}
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
