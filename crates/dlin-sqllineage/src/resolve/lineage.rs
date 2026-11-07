@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use super::arity::same_column_name;
 use super::binding::{
     derive_transform, find_cte_redirect, find_unqualified_binding, find_virtual_sources_for_column,
     lookup_virtual_binding, resolve_merged_column, resolve_node,
@@ -9,17 +8,17 @@ use super::mapping::{
     ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
 };
 use super::star::{
-    StarNameDecision, expand_star, scope_star_name_decision, star_name_decision,
-    table_matches_qualifier,
+    StarNameDecision, excluded_matches_name, expand_star, expand_star_columns,
+    scope_star_name_decision, star_name_decision,
 };
 
 use crate::Ident;
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
-use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
+use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 
 /// Recursively expand a scope's output columns into `ColumnMapping`s.
 #[allow(clippy::too_many_arguments)]
@@ -539,9 +538,8 @@ pub(super) fn named_wildcard_sources_for_scope(
                         | StarNameDecision::Ambiguous => continue,
                     };
                 let mut expanded = Vec::new();
-                expand_star(
+                let range_variables = expand_star_columns(
                     base,
-                    &StarOptions::default(),
                     *star_scope,
                     graph,
                     resolved,
@@ -553,6 +551,7 @@ pub(super) fn named_wildcard_sources_for_scope(
                 );
                 sources.extend(named_wildcard_sources_for_star(
                     &expanded,
+                    &range_variables,
                     &source_column,
                     options,
                     base,
@@ -614,23 +613,32 @@ pub(super) fn named_wildcard_sources_for_scope(
 
 pub(super) fn named_wildcard_sources_for_star(
     mappings: &[ColumnMapping],
+    range_variables: &[Vec<Ident>],
     column: &Ident,
     options: &StarOptions,
     base: &StarBase,
     scope: usize,
     graph: &RawGraph,
 ) -> Vec<ColumnOrigin> {
+    let range_variables = super::join::merged_star_range_variables(
+        mappings,
+        range_variables,
+        column,
+        graph.scopes.join_merges(scope),
+        graph.dialect,
+    );
     let mut sources = Vec::new();
     let mut wildcard_seen = false;
     let mut denied = false;
-    for mapping in mappings {
+    for (mapping, qualifiers) in mappings.iter().zip(&range_variables) {
+        let excluded = options.exclude.iter().any(|excluded| {
+            excluded_matches_name(excluded, column, Some(base), qualifiers, graph.dialect)
+        });
         for source in &mapping.sources {
             match source {
                 ColumnOrigin::Wildcard { table } => {
                     wildcard_seen = true;
-                    if options.exclude.iter().any(|excluded| {
-                        excluded_matches_source(excluded, column, source, base, scope, graph)
-                    }) {
+                    if excluded {
                         denied = true;
                     } else {
                         sources.push(ColumnOrigin::NamedWildcard {
@@ -643,11 +651,7 @@ pub(super) fn named_wildcard_sources_for_star(
                     for nested in base_sources {
                         if let ColumnOrigin::Wildcard { table } = nested {
                             wildcard_seen = true;
-                            if options.exclude.iter().any(|excluded| {
-                                excluded_matches_source(
-                                    excluded, column, nested, base, scope, graph,
-                                )
-                            }) {
+                            if excluded {
                                 denied = true;
                             } else {
                                 sources.push(ColumnOrigin::NamedWildcard {
@@ -669,55 +673,6 @@ pub(super) fn named_wildcard_sources_for_star(
         });
     }
     sources
-}
-
-fn excluded_matches_source(
-    excluded: &StarColumnName,
-    column: &Ident,
-    source: &ColumnOrigin,
-    base: &StarBase,
-    scope: usize,
-    graph: &RawGraph,
-) -> bool {
-    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
-        return false;
-    };
-    if !same_column_name(column, excluded_column, graph.dialect) {
-        return false;
-    }
-    if qualifier.is_empty() {
-        return true;
-    }
-    if let StarBase::Qualified(parts) = base
-        && parts.len() == qualifier.len()
-        && parts
-            .iter()
-            .zip(qualifier)
-            .all(|(a, b)| a.relation_key(graph.dialect) == b.relation_key(graph.dialect))
-    {
-        return true;
-    }
-    if qualifier.len() == 1
-        && relation_from_origin(source).is_some_and(|table| {
-            graph.scopes.visible_bindings(scope).iter().any(|(name, binding)| {
-                name.column_key(graph.dialect) == qualifier[0].column_key(graph.dialect)
-                    && matches!(binding, Binding::Table(binding_table) if binding_table == table)
-            })
-        })
-    {
-        return true;
-    }
-    relation_from_origin(source)
-        .is_some_and(|table| table_matches_qualifier(table, qualifier, graph.dialect))
-}
-
-fn relation_from_origin(source: &ColumnOrigin) -> Option<&TableRef> {
-    match source {
-        ColumnOrigin::Wildcard { table }
-        | ColumnOrigin::Concrete { table, .. }
-        | ColumnOrigin::NamedWildcard { table, .. } => Some(table),
-        _ => None,
-    }
 }
 
 pub(super) fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {

@@ -36,6 +36,46 @@ pub(super) fn expand_star(
     visited_scopes: &mut HashSet<usize>,
 ) {
     let start = mappings.len();
+    let range_variables = expand_star_columns(
+        base,
+        scope,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+        mappings,
+        visited_scopes,
+    );
+    apply_star_options(
+        mappings,
+        start,
+        &range_variables,
+        base,
+        scope,
+        options,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
+}
+
+/// Expand without modifiers, returning the range variables for each new mapping.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn expand_star_columns(
+    base: &StarBase,
+    scope: usize,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&CatalogContext<'_>>,
+    mapping_cache: &mut ScopeMappingCache,
+    mappings: &mut Vec<ColumnMapping>,
+    visited_scopes: &mut HashSet<usize>,
+) -> Vec<Vec<Ident>> {
+    let start = mappings.len();
     let mut range_variables = Vec::new();
     match resolve_star_target(base, scope, graph) {
         StarTarget::Ambiguous(candidates) => mappings.push(ColumnMapping {
@@ -191,19 +231,7 @@ pub(super) fn expand_star(
         }
     }
     range_variables.resize(mappings.len() - start, Vec::new());
-    apply_star_options(
-        mappings,
-        start,
-        &range_variables,
-        base,
-        scope,
-        options,
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-    );
+    range_variables
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -299,6 +327,7 @@ fn apply_star_options(
         append_unknown_star_options(
             mappings,
             start,
+            range_variables,
             base,
             scope,
             options,
@@ -363,6 +392,7 @@ fn apply_star_options(
 fn append_unknown_star_options(
     mappings: &mut Vec<ColumnMapping>,
     start: usize,
+    range_variables: &[Vec<Ident>],
     base: &StarBase,
     scope: usize,
     options: &StarOptions,
@@ -372,9 +402,49 @@ fn append_unknown_star_options(
     catalog: Option<&CatalogContext<'_>>,
     mapping_cache: &mut ScopeMappingCache,
 ) {
+    // Keep the raw expansion for wildcard lookups and USING membership: removing
+    // a known column must not remove its range variable from the merged key.
     let unknown_sources = mappings[start..].to_vec();
+    let original = mappings.split_off(start);
+    for (index, mapping) in original.into_iter().enumerate() {
+        if mapping.output_name.is_some() {
+            let name = &mapping.target.column;
+            let merged_ranges = super::join::merged_star_range_variables(
+                &unknown_sources,
+                range_variables,
+                name,
+                graph.scopes.join_merges(scope),
+                graph.dialect,
+            );
+            let excluded = options.exclude.iter().any(|excluded| {
+                excluded_matches_name(
+                    excluded,
+                    name,
+                    Some(base),
+                    &merged_ranges[index],
+                    graph.dialect,
+                )
+            });
+            let ilike_mismatch = options
+                .ilike
+                .as_deref()
+                .is_some_and(|pattern| !ilike_matches(pattern, &name.value));
+            if excluded || ilike_mismatch {
+                continue;
+            }
+        }
+        mappings.push(mapping);
+    }
     for replacement in &options.replace {
-        if !name_passes_star_filters(&replacement.column, options, base, graph.dialect) {
+        if !name_passes_unknown_star_filters(
+            &replacement.column,
+            options,
+            base,
+            scope,
+            &unknown_sources,
+            range_variables,
+            graph,
+        ) {
             continue;
         }
         let mut visited = HashSet::new();
@@ -401,11 +471,26 @@ fn append_unknown_star_options(
         });
     }
     for (old, new) in &options.rename {
-        if !name_passes_star_filters(old, options, base, graph.dialect) {
+        if !name_passes_unknown_star_filters(
+            old,
+            options,
+            base,
+            scope,
+            &unknown_sources,
+            range_variables,
+            graph,
+        ) {
             continue;
         }
-        let sources =
-            named_wildcard_sources_for_star(&unknown_sources, old, options, base, scope, graph);
+        let sources = named_wildcard_sources_for_star(
+            &unknown_sources,
+            range_variables,
+            old,
+            options,
+            base,
+            scope,
+            graph,
+        );
         if !sources
             .iter()
             .any(|source| matches!(source, ColumnOrigin::NamedWildcard { .. }))
@@ -424,20 +509,37 @@ fn append_unknown_star_options(
     }
 }
 
-fn name_passes_star_filters(
+#[allow(clippy::too_many_arguments)]
+fn name_passes_unknown_star_filters(
     name: &Ident,
     options: &StarOptions,
     base: &StarBase,
-    dialect: Dialect,
+    scope: usize,
+    mappings: &[ColumnMapping],
+    range_variables: &[Vec<Ident>],
+    graph: &RawGraph,
 ) -> bool {
-    !options
-        .exclude
-        .iter()
-        .any(|excluded| excluded_matches_name(excluded, name, Some(base), &[], dialect))
-        && options
-            .ilike
-            .as_deref()
-            .is_none_or(|pattern| ilike_matches(pattern, &name.value))
+    if options
+        .ilike
+        .as_deref()
+        .is_some_and(|pattern| !ilike_matches(pattern, &name.value))
+    {
+        return false;
+    }
+    let ranges = super::join::merged_star_range_variables(
+        mappings,
+        range_variables,
+        name,
+        graph.scopes.join_merges(scope),
+        graph.dialect,
+    );
+    mappings.iter().zip(ranges).any(|(mapping, qualifiers)| {
+        (mapping.output_name.is_none()
+            || same_column_name(&mapping.target.column, name, graph.dialect))
+            && !options.exclude.iter().any(|excluded| {
+                excluded_matches_name(excluded, name, Some(base), &qualifiers, graph.dialect)
+            })
+    })
 }
 
 /// EXCLUDE resolves range variables, independently of value lineage.
@@ -461,35 +563,6 @@ pub(super) fn excluded_matches_name(
                 },
                 _ => false,
             }))
-}
-
-pub(super) fn table_matches_qualifier(
-    table: &TableRef,
-    qualifier: &[Ident],
-    dialect: Dialect,
-) -> bool {
-    match qualifier {
-        [name] => table.table.relation_key(dialect) == name.relation_key(dialect),
-        [schema, name] => {
-            table
-                .schema
-                .as_ref()
-                .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
-                && table.table.relation_key(dialect) == name.relation_key(dialect)
-        }
-        [catalog, schema, name] => {
-            table
-                .catalog
-                .as_ref()
-                .is_some_and(|c| c.relation_key(dialect) == catalog.relation_key(dialect))
-                && table
-                    .schema
-                    .as_ref()
-                    .is_some_and(|s| s.relation_key(dialect) == schema.relation_key(dialect))
-                && table.table.relation_key(dialect) == name.relation_key(dialect)
-        }
-        _ => false,
-    }
 }
 
 #[derive(Clone)]

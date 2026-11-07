@@ -107,3 +107,89 @@ pub(super) fn merge_join_columns<T: Clone>(
             .collect(),
     )
 }
+
+/// USING names a shared column even when the remaining output width is unknown.
+/// NATURAL cannot establish shared names without knowing both schemas.
+pub(super) fn merged_star_range_variables(
+    mappings: &[crate::types::ColumnMapping],
+    range_variables: &[Vec<Ident>],
+    column: &Ident,
+    merges: &[JoinMerge],
+    dialect: Dialect,
+) -> Vec<Vec<Ident>> {
+    type RangeGroup = (Vec<Ident>, Vec<(Ident, Vec<Ident>)>);
+
+    let merges = merges
+        .iter()
+        .filter_map(|merge| {
+            let MergedColumns::Using(names) = &merge.columns else {
+                return None;
+            };
+            names
+                .iter()
+                .any(|name| name.column_key(dialect) == column.column_key(dialect))
+                .then(|| {
+                    let mut merge = merge.clone();
+                    merge.columns = MergedColumns::Using(vec![column.clone()]);
+                    merge
+                })
+        })
+        .collect::<Vec<_>>();
+    if merges.is_empty() {
+        return range_variables.to_vec();
+    }
+    let mut groups: Vec<RangeGroup> = Vec::new();
+    for (mapping, names) in mappings.iter().zip(range_variables) {
+        if names.is_empty() {
+            continue;
+        }
+        let index = groups
+            .iter()
+            .position(|(seen, _)| {
+                seen.len() == names.len()
+                    && seen
+                        .iter()
+                        .zip(names)
+                        .all(|(left, right)| left.column_key(dialect) == right.column_key(dialect))
+            })
+            .unwrap_or_else(|| {
+                groups.push((names.clone(), Vec::new()));
+                groups.len() - 1
+            });
+        if groups[index].1.is_empty()
+            && (mapping.output_name.is_none()
+                || mapping.target.column.column_key(dialect) == column.column_key(dialect))
+        {
+            groups[index].1.push((column.clone(), names.clone()));
+        }
+    }
+    let Some(combined) = merge_join_columns(
+        groups,
+        &merges,
+        dialect,
+        |entry| &entry.0,
+        |left, right, _kind| {
+            (
+                left.0.clone(),
+                left.1.iter().chain(&right.1).cloned().collect(),
+            )
+        },
+    ) else {
+        return range_variables.to_vec();
+    };
+    range_variables
+        .iter()
+        .map(|names| {
+            combined
+                .iter()
+                .find(|(_, group)| {
+                    names.iter().any(|name| {
+                        group
+                            .iter()
+                            .any(|member| name.column_key(dialect) == member.column_key(dialect))
+                    })
+                })
+                .map_or_else(|| names.clone(), |(_, group)| group.clone())
+        })
+        .collect()
+}
