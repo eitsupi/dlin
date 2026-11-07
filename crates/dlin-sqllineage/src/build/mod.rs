@@ -1,18 +1,24 @@
 pub(crate) mod expr;
 pub(crate) mod function_semantics;
 pub(crate) mod query;
+pub(crate) mod relation;
 pub(crate) mod select;
 pub(crate) mod statement;
 
 use crate::graph::RawGraph;
-use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
+use crate::graph::scope::{Binding, BindingEnv, ScopeId, ScopeKind, ScopeTree};
 use crate::types::{Dialect, SemanticError, StatementType, Warning};
 use sqlparser::ast::Statement;
 
 pub(crate) struct LineageBuilder {
     pub(crate) graph: RawGraph,
     pub(crate) current_scope: ScopeId,
-    pub(crate) recursive_cte_name: Option<crate::Ident>,
+    /// The CTEs whose bodies are being visited, outermost first.
+    pub(crate) defining_ctes: Vec<relation::DefiningCte>,
+    /// The CTE scope each reference to a CTE being defined was bound to, in
+    /// the order the references were met. A set operation is recursive when
+    /// its recursive term added its CTE here.
+    pub(crate) self_references: Vec<ScopeId>,
     pub(crate) warnings: Vec<Warning>,
     pub(crate) inner_statement_type: Option<StatementType>,
     pub(crate) dialect: Dialect,
@@ -28,7 +34,8 @@ impl LineageBuilder {
         Self {
             graph,
             current_scope: root,
-            recursive_cte_name: None,
+            defining_ctes: Vec::new(),
+            self_references: Vec::new(),
             warnings: Vec::new(),
             inner_statement_type: None,
             dialect,
@@ -69,6 +76,11 @@ impl LineageBuilder {
         if let Some(parent) = self.graph.scopes.parent(self.current_scope) {
             self.current_scope = parent;
         }
+    }
+
+    /// The environment at the current position of the current scope.
+    pub(crate) fn env(&self) -> BindingEnv {
+        self.graph.scopes.env(self.current_scope)
     }
 
     pub(crate) fn add_binding(&mut self, name: crate::Ident, binding: Binding) {

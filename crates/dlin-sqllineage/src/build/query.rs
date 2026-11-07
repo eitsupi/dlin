@@ -1,12 +1,26 @@
 use sqlparser::ast::{Query, SetExpr};
 
-use crate::build::LineageBuilder;
-use crate::graph::scope::{Binding, OutputPlan, ScopeKind};
+use crate::build::{LineageBuilder, relation};
+use crate::graph::scope::{OutputPlan, ScopeId, ScopeKind};
 use crate::types::SemanticError;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
         self.visit_query_with_target(query, false);
+    }
+
+    /// Visit a query that crosses a query boundary: a subquery in an
+    /// expression, a derived table, an argument of a function. It gets a scope
+    /// of its own, of the given kind, so the range variables and the outputs
+    /// it introduces never reach the enclosing query. Every walk that enters
+    /// such a query goes through here, whatever it collects, so that the
+    /// walks cannot disagree about where a query's names end. Returns the
+    /// scope, whose output columns are the query's.
+    pub(crate) fn visit_subquery(&mut self, kind: ScopeKind, query: &Query) -> ScopeId {
+        let scope = self.push_scope(kind);
+        self.visit_query(query);
+        self.pop_scope();
+        scope
     }
 
     /// Target-specific VALUES/TABLE handling follows only the query body and
@@ -23,29 +37,38 @@ impl LineageBuilder {
 
         let has_ctes = query.with.is_some();
         if let Some(with) = &query.with {
-            for cte in &with.cte_tables {
-                let cte_scope = self.push_scope(ScopeKind::Cte);
-
-                if with.recursive {
-                    self.recursive_cte_name = Some(crate::Ident::from_ast(&cte.alias.name));
-                }
+            // Every CTE of the list is defined before any body is visited, so
+            // that a RECURSIVE list can refer forward.
+            let rule = relation::cte_list_rule(self.dialect, with.recursive);
+            let names = with
+                .cte_tables
+                .iter()
+                .map(|cte| crate::Ident::from_ast(&cte.alias.name))
+                .collect();
+            let scopes = self.graph.scopes.define_ctes(
+                self.current_scope,
+                names,
+                rule.forward,
+                rule.own_name == relation::OwnName::Recursive,
+            );
+            for (cte, cte_scope) in with.cte_tables.iter().zip(scopes) {
+                self.current_scope = cte_scope;
+                self.defining_ctes.push(relation::DefiningCte {
+                    scope: cte_scope,
+                    own_name: rule.own_name,
+                });
 
                 self.visit_query(&cte.query);
 
-                self.recursive_cte_name = None;
+                self.defining_ctes.pop();
                 self.pop_scope();
-
-                self.add_binding(
-                    crate::Ident::from_ast(&cte.alias.name),
-                    Binding::Cte(cte_scope),
-                );
             }
         }
 
         // Push a child scope for the body when CTEs exist, so FROM bindings
         // don't mix with CTE registration bindings (avoids false ambiguity).
         if has_ctes {
-            self.push_scope(ScopeKind::Root);
+            self.push_scope(ScopeKind::Body);
         }
 
         self.visit_set_expr(&query.body, target_values);
@@ -86,11 +109,17 @@ impl LineageBuilder {
                     .collect();
                 self.pop_scope();
 
+                let references_before = self.self_references.len();
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(right, target_values);
                 self.pop_scope();
 
-                let is_recursive = self.recursive_cte_name.is_some();
+                // The operation is recursive when it is the body of a CTE and
+                // its right term reads that CTE. A CTE that merely may read
+                // itself is an ordinary one.
+                let is_recursive = self
+                    .cte_of_body_scope(self.current_scope)
+                    .is_some_and(|cte| self.self_references[references_before..].contains(&cte));
                 self.graph.scopes.set_output_plan(
                     self.current_scope,
                     OutputPlan::SetOperation {
@@ -126,21 +155,7 @@ impl LineageBuilder {
                         schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
                         table: crate::Ident::unquoted(table_name.as_str()),
                     };
-                    let recursive_self = table_ref.schema.is_none()
-                        && self.recursive_cte_name.as_ref().is_some_and(|name| {
-                            name.column_key(self.dialect)
-                                == table_ref.table.column_key(self.dialect)
-                        });
-                    let cte_ref = table_ref.schema.is_none()
-                        && matches!(
-                            self.graph
-                                .scopes
-                                .lookup(self.current_scope, &table_ref.table),
-                            Some(Binding::Cte(_) | Binding::DerivedTable(_))
-                        );
-                    if !recursive_self && !cte_ref {
-                        self.graph.tables.inputs.push(table_ref);
-                    }
+                    self.bind_relation_reference(table_ref);
                 }
                 self.graph
                     .scopes

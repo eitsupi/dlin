@@ -7,7 +7,7 @@ use super::{
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::RawNode;
-use crate::graph::scope::ScopeTree;
+use crate::graph::scope::{OutputPlan, ScopeTree};
 use crate::{Dialect, Ident};
 
 struct Tables(Vec<(&'static str, Vec<&'static str>)>);
@@ -291,7 +291,7 @@ fn replace_and_rename_take_over_the_name_of_a_set_operation_tail() {
             .nodes
             .iter()
             .position(
-                |node| matches!(node, RawNode::Star { scope, .. } if *scope == ScopeTree::root()),
+                |node| matches!(node, RawNode::Star { env, .. } if env.scope == ScopeTree::root()),
             )
             .expect("the root projection has a star");
         let mut store = ModelStore::default();
@@ -328,14 +328,24 @@ fn a_cycle_is_cut_to_an_unknown_segment() {
     assert!(models.scope(ScopeTree::root()).has_unknown_segment());
 }
 
+/// The scope that holds the FROM clause of the root query: the root itself, or
+/// the body below its WITH clause.
+fn query_scope(graph: &RawGraph) -> usize {
+    let mut scope = ScopeTree::root();
+    while let OutputPlan::Delegate(child) = graph.scopes.output_plan(scope) {
+        scope = *child;
+    }
+    scope
+}
+
 /// What an unqualified `name` denotes in the FROM clause of the root query.
 fn lookup(sql: &str, tables: &[(&'static str, Vec<&'static str>)], name: &str) -> InputLookup {
     let graph = graph(sql);
     let catalog = Tables(tables.to_vec());
     let context = CatalogContext::new(&catalog, Dialect::Generic);
     let mut store = ModelStore::default();
-    OutputModels::new(&graph, Some(&context), &mut store)
-        .lookup_input(ScopeTree::root(), &Ident::unquoted(name))
+    let env = graph.scopes.env(query_scope(&graph));
+    OutputModels::new(&graph, Some(&context), &mut store).lookup_input(env, &Ident::unquoted(name))
 }
 
 fn contributing(lookup: &InputLookup) -> Vec<String> {
@@ -353,8 +363,9 @@ fn the_input_model_is_built_once_per_scope() {
     let graph = graph("SELECT * FROM a JOIN b USING (id)");
     let mut store = ModelStore::default();
     let mut models = OutputModels::new(&graph, None, &mut store);
-    let first = models.input(ScopeTree::root());
-    assert!(Rc::ptr_eq(&first, &models.input(ScopeTree::root())));
+    let env = graph.scopes.env(ScopeTree::root());
+    let first = models.input(env);
+    assert!(Rc::ptr_eq(&first, &models.input(env)));
 }
 
 #[test]

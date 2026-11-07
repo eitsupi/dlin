@@ -332,11 +332,9 @@ impl LineageBuilder {
     /// the same star `SELECT *` produces: left unexpanded without a catalog
     /// and expanded against the source's columns with one.
     fn add_merge_source_star(&mut self) {
-        let star = self.graph.add_star(
-            StarBase::Unqualified,
-            StarOptions::default(),
-            self.current_scope,
-        );
+        let star = self
+            .graph
+            .add_star(StarBase::Unqualified, StarOptions::default(), self.env());
         self.graph.scopes.add_output_column(
             self.current_scope,
             ScopeColumn {
@@ -349,20 +347,14 @@ impl LineageBuilder {
     pub(crate) fn scan_expr_for_tables(&mut self, expr: &ast::Expr) {
         match expr {
             ast::Expr::Subquery(query) => {
-                self.push_scope(crate::graph::scope::ScopeKind::Subquery);
-                self.visit_query(query);
-                self.pop_scope();
+                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, query);
             }
             ast::Expr::InSubquery { subquery, expr, .. } => {
-                self.push_scope(crate::graph::scope::ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, subquery);
                 self.scan_expr_for_tables(expr);
             }
             ast::Expr::Exists { subquery, .. } => {
-                self.push_scope(crate::graph::scope::ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, subquery);
             }
             ast::Expr::BinaryOp { left, right, .. } => {
                 self.scan_expr_for_tables(left);
@@ -422,7 +414,7 @@ impl LineageBuilder {
                     }
                 }
                 if let FunctionArguments::Subquery(q) = &func.args {
-                    self.visit_query(q);
+                    self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, q);
                 }
             }
             _ => {}

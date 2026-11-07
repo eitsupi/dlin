@@ -213,8 +213,15 @@ impl OutputModel {
         for invalid in &self.invalid {
             match invalid {
                 Invalidity::Own(ranges) if ranges.covers(name, dialect) => {
+                    // Only the relations that can carry the name are
+                    // candidates; the others are in the clause but cannot be
+                    // what the name means.
+                    let mut candidates = self.possible_providers(name);
+                    if candidates.is_empty() {
+                        candidates.clone_from(&ranges.candidates);
+                    }
                     return Some(Ambiguity {
-                        candidates: ranges.candidates.clone(),
+                        candidates,
                         refinable: !ranges.typed(),
                         listed: self.slots_named(name).to_vec(),
                     });
@@ -228,6 +235,31 @@ impl OutputModel {
             }
         }
         None
+    }
+}
+
+impl OutputModel {
+    /// The relations of the FROM clause that may carry `name`: the ranges of
+    /// the columns that list it and of the unknown segments that can still
+    /// publish it.
+    fn possible_providers(&self, name: &Ident) -> Vec<Candidate> {
+        let matches = self.matches(name);
+        let mut seen = Vec::new();
+        let mut candidates = Vec::new();
+        for &index in matches.listed.iter().chain(&matches.unknown) {
+            let ranges = match &self.elements[index] {
+                OutputElement::Column(slot) => &slot.ranges,
+                OutputElement::Unknown(segment) => &segment.ranges,
+                OutputElement::Tail(_) => continue,
+            };
+            for range in ranges.iter() {
+                if !seen.contains(&range.index) {
+                    seen.push(range.index);
+                    candidates.extend(range.candidate());
+                }
+            }
+        }
+        candidates
     }
 }
 

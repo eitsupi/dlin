@@ -9,10 +9,10 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
+use super::context::{EvalContext, EvalKey};
 use super::lineage::{collect_leaf_origins, collect_output_sources, flatten_mapping_sources};
 use super::mapping::{
-    ScopeMappingCache, known_empty_dependency, merge_transform, resolve_scope_mappings,
-    wildcard_mapping,
+    known_empty_dependency, merge_transform, resolve_scope_mappings, wildcard_mapping,
 };
 use super::model::{
     BranchTail, Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
@@ -20,10 +20,8 @@ use super::model::{
 };
 use super::target::{StarTarget, resolve_star_target, same_column_name};
 
-use crate::catalog::CatalogContext;
-use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase};
-use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
+use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, VirtualColumnState};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 use crate::{Candidate, Ident, Unresolved};
 
@@ -39,24 +37,12 @@ pub(super) enum Unlisted {
 
 /// Expand a Star node (qualified or unqualified) into `ColumnMapping`s, one
 /// per element of its model.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn expand_star(
     node_id: NodeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
     mappings: &mut Vec<ColumnMapping>,
 ) {
-    let mut evaluator = Evaluator {
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-        active: HashSet::new(),
-    };
+    let mut evaluator = Evaluator { cx };
     let model = evaluator.star_model(node_id);
     for element in &model.elements {
         match element {
@@ -82,62 +68,34 @@ pub(super) fn expand_star(
 
 /// The origins of the column a CTE or derived table publishes under `name`,
 /// with the transform that scope applies to it.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn named_scope_sources(
     name: &Ident,
     target_scope: ScopeId,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    Evaluator {
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-        active: HashSet::new(),
-    }
-    .named(target_scope, name)
+    Evaluator { cx }.named(target_scope, name)
 }
 
-/// What an unqualified name in the FROM clause of `scope` denotes.
+/// What an unqualified name in the FROM clause at `env` denotes.
 pub(super) fn lookup_input(
-    scope: ScopeId,
+    env: BindingEnv,
     name: &Ident,
-    graph: &RawGraph,
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> InputLookup {
-    OutputModels::new(graph, catalog, &mut mapping_cache.models).lookup_input(scope, name)
+    Evaluator { cx }.models().lookup_input(env, name)
 }
 
-/// The origins of an unqualified name in the FROM clause of `scope`, read from
+/// The origins of an unqualified name in the FROM clause at `env`, read from
 /// the same folded model a star over that clause expands. `None` when a
 /// single CTE or derived table decides the name and publishes nothing under
 /// it, or when the name is read from a virtual source.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn input_name_sources(
-    scope: ScopeId,
+    env: BindingEnv,
     name: &Ident,
-    graph: &RawGraph,
-    resolved: &mut Vec<Option<ColumnOrigin>>,
-    incoming: &[Vec<usize>],
-    catalog: Option<&CatalogContext<'_>>,
-    mapping_cache: &mut ScopeMappingCache,
+    cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let lookup = lookup_input(scope, name, graph, catalog, mapping_cache);
-    Evaluator {
-        graph,
-        resolved,
-        incoming,
-        catalog,
-        mapping_cache,
-        active: HashSet::new(),
-    }
-    .input(lookup, name)
+    let lookup = lookup_input(env, name, cx);
+    Evaluator { cx }.input(lookup, name)
 }
 
 /// `ColumnOrigin` has no equality of its own; its debug form covers every field.
@@ -147,20 +105,18 @@ fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
     format!("{left:?}") == format!("{right:?}")
 }
 
-struct Evaluator<'a, 'c, 'm> {
-    graph: &'a RawGraph,
-    resolved: &'m mut Vec<Option<ColumnOrigin>>,
-    incoming: &'a [Vec<usize>],
-    catalog: Option<&'a CatalogContext<'c>>,
-    mapping_cache: &'m mut ScopeMappingCache,
-    /// Scope outputs being evaluated, which cuts a scope that reads itself.
-    active: HashSet<(ScopeId, usize)>,
+/// Evaluation of models into lineage. It holds no state of its own: what is
+/// being evaluated and what is already computed live in the shared context, so
+/// a walk that leaves this evaluator and comes back is still recognized.
+struct Evaluator<'x, 'a, 'c> {
+    cx: &'x mut EvalContext<'a, 'c>,
 }
 
 impl Evaluator<'_, '_, '_> {
     fn models(&mut self) -> OutputModels<'_, '_, '_> {
-        let store: &mut ModelStore = &mut self.mapping_cache.models;
-        OutputModels::new(self.graph, self.catalog, store)
+        let cx = &mut *self.cx;
+        let store: &mut ModelStore = &mut cx.mapping_cache.models;
+        OutputModels::new(cx.graph, cx.catalog, store)
     }
 
     fn star_model(&mut self, node_id: NodeId) -> Rc<OutputModel> {
@@ -181,17 +137,10 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
             ValueId::Expr(node_id) => {
-                let (sources, edge_kinds, _, inherited) = collect_output_sources(
-                    *node_id,
-                    self.graph,
-                    self.resolved,
-                    self.incoming,
-                    &mut HashSet::new(),
-                    self.catalog,
-                    self.mapping_cache,
-                );
+                let (sources, edge_kinds, _, inherited) =
+                    collect_output_sources(*node_id, self.cx, &mut HashSet::new());
                 let transform = merge_transform(
-                    &derive_transform(&self.graph.nodes[*node_id], &edge_kinds),
+                    &derive_transform(&self.cx.graph.nodes[*node_id], &edge_kinds),
                     &inherited,
                 );
                 (sources, transform)
@@ -201,27 +150,19 @@ impl Evaluator<'_, '_, '_> {
                 (sources, transform)
             }
             // The same lookup a direct reference to the name in that scope makes.
-            ValueId::ScopeName { scope, column } => named_scope_sources(
-                column,
-                *scope,
-                self.graph,
-                self.resolved,
-                self.incoming,
-                self.catalog,
-                self.mapping_cache,
-            )
-            .map_or_else(
-                || {
-                    (
-                        vec![ColumnOrigin::Ambiguous {
-                            column: column.clone(),
-                            candidates: Vec::new(),
-                        }],
-                        TransformKind::Direct,
-                    )
-                },
-                |(sources, _, transform)| (sources, transform),
-            ),
+            ValueId::ScopeName { scope, column } => named_scope_sources(column, *scope, self.cx)
+                .map_or_else(
+                    || {
+                        (
+                            vec![ColumnOrigin::Ambiguous {
+                                column: column.clone(),
+                                candidates: Vec::new(),
+                            }],
+                            TransformKind::Direct,
+                        )
+                    },
+                    |(sources, _, transform)| (sources, transform),
+                ),
             ValueId::Tail { scope, column } => {
                 (self.tail_column(*scope, column), TransformKind::Direct)
             }
@@ -367,7 +308,7 @@ impl Evaluator<'_, '_, '_> {
                 if candidates.is_empty() {
                     // Columns without a range variable are attributed to the
                     // scope itself, as the CTE or derived table that is read.
-                    candidates.extend(self.graph.scopes.reading_binding(scope).map(
+                    candidates.extend(self.cx.graph.scopes.reading_binding(scope).map(
                         |(name, binding)| match binding {
                             Binding::Cte(_) => Candidate::Cte(name),
                             _ => Candidate::Derived(Some(name)),
@@ -416,6 +357,8 @@ impl Evaluator<'_, '_, '_> {
         flatten: bool,
     ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
         let model = self.scope_model(scope);
+        // TODO: an index that names no listed column must surface as an
+        // unresolved value, not as an empty, direct source list.
         let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
             return (Vec::new(), false, TransformKind::Direct);
         };
@@ -429,11 +372,11 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             )
         };
-        if !self.active.insert((scope, index)) {
+        if !self.cx.enter(EvalKey::Slot { scope, index }) {
             return ambiguous();
         }
         let result = if matches!(
-            self.graph.scopes.output_plan(scope),
+            self.cx.graph.scopes.output_plan(scope),
             OutputPlan::SetOperation { .. }
         ) {
             let mappings = self.scope_mappings(scope);
@@ -442,7 +385,11 @@ impl Evaluator<'_, '_, '_> {
             } else {
                 mappings.iter().find(|mapping| {
                     mapping.output_name.is_some()
-                        && same_column_name(&mapping.target.column, &slot.name, self.graph.dialect)
+                        && same_column_name(
+                            &mapping.target.column,
+                            &slot.name,
+                            self.cx.graph.dialect,
+                        )
                 })
             };
             found.map_or_else(ambiguous, |mapping| {
@@ -457,7 +404,7 @@ impl Evaluator<'_, '_, '_> {
             let (sources, transform) = self.value(&slot.value);
             (sources, false, transform)
         };
-        self.active.remove(&(scope, index));
+        self.cx.leave(EvalKey::Slot { scope, index });
         result
     }
 
@@ -468,7 +415,7 @@ impl Evaluator<'_, '_, '_> {
         model: &OutputModel,
         name: &Ident,
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let dialect = self.graph.dialect;
+        let dialect = self.cx.graph.dialect;
         for element in &model.elements {
             let OutputElement::Tail(tail) = element else {
                 continue;
@@ -488,7 +435,7 @@ impl Evaluator<'_, '_, '_> {
     /// lists, minus the names the star's modifiers rule out.
     fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
         let aligned = self.aligned_len(tail.scope);
-        let dialect = self.graph.dialect;
+        let dialect = self.cx.graph.dialect;
         self.scope_mappings(tail.scope)
             .iter()
             .skip(aligned)
@@ -505,7 +452,7 @@ impl Evaluator<'_, '_, '_> {
     /// column unresolved.
     fn tail_column(&mut self, scope: ScopeId, column: &Ident) -> Vec<ColumnOrigin> {
         let aligned = self.aligned_len(scope);
-        let dialect = self.graph.dialect;
+        let dialect = self.cx.graph.dialect;
         let mut sources = Vec::new();
         for mapping in self.scope_mappings(scope).iter().skip(aligned) {
             if mapping.output_name.is_none() {
@@ -533,7 +480,7 @@ impl Evaluator<'_, '_, '_> {
     /// How many leading mappings of a scope stand for the columns its model
     /// lists; a set operation appends what its right operand adds after them.
     fn aligned_len(&mut self, scope: ScopeId) -> usize {
-        match self.graph.scopes.output_plan(scope) {
+        match self.cx.graph.scopes.output_plan(scope) {
             OutputPlan::Projection => self.scope_mappings(scope).len(),
             OutputPlan::Delegate(child) => self.aligned_len(*child),
             OutputPlan::SetOperation { left, .. } => self.aligned_len(*left),
@@ -541,14 +488,7 @@ impl Evaluator<'_, '_, '_> {
     }
 
     fn scope_mappings(&mut self, scope: ScopeId) -> std::sync::Arc<[ColumnMapping]> {
-        resolve_scope_mappings(
-            scope,
-            self.graph,
-            self.resolved,
-            self.incoming,
-            self.catalog,
-            self.mapping_cache,
-        )
+        resolve_scope_mappings(scope, self.cx)
     }
 
     /// The mapping standing for an unknown element of a scope's output.
@@ -558,14 +498,16 @@ impl Evaluator<'_, '_, '_> {
             return None;
         };
         if !matches!(
-            self.graph.scopes.output_plan(scope),
+            self.cx.graph.scopes.output_plan(scope),
             OutputPlan::SetOperation { .. }
         ) {
-            if !self.active.insert((scope, index)) {
+            // TODO: re-entry must surface as an unresolved value, not as a
+            // missing mapping that reads as "nothing published".
+            if !self.cx.enter(EvalKey::Slot { scope, index }) {
                 return None;
             }
             let mapping = self.unknown_mapping(segment);
-            self.active.remove(&(scope, index));
+            self.cx.leave(EvalKey::Slot { scope, index });
             return mapping;
         }
         let mappings = self.scope_mappings(scope);
@@ -599,14 +541,14 @@ impl Evaluator<'_, '_, '_> {
     /// A star the analysis cannot attribute to a relation: an ambiguous
     /// qualifier, a field path or an expression.
     fn opaque_star(&mut self, star: NodeId, reason: OpaqueReason) -> ColumnMapping {
-        let RawNode::Star { base, scope, .. } = &self.graph.nodes[star] else {
+        let RawNode::Star { base, env, .. } = &self.cx.graph.nodes[star] else {
             unreachable!("only star models contain opaque stars");
         };
         let star_name = || ColumnRef {
             table: None,
             column: Ident::unquoted("*"),
         };
-        let sources = match (reason, resolve_star_target(base, *scope, self.graph)) {
+        let sources = match (reason, resolve_star_target(base, *env, self.cx.graph)) {
             (OpaqueReason::Ambiguous(_), StarTarget::Ambiguous(candidates)) => {
                 vec![ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
                     column: Ident::unquoted("*"),
@@ -616,16 +558,8 @@ impl Evaluator<'_, '_, '_> {
             (OpaqueReason::FieldPath(_), StarTarget::FieldPath { binding, path }) => {
                 let mut sources = Vec::new();
                 if let Some(field) = path.first()
-                    && let Some(origin) = resolve_captured_binding(
-                        field,
-                        binding,
-                        self.graph,
-                        self.resolved,
-                        self.incoming,
-                        &mut HashSet::new(),
-                        self.catalog,
-                        self.mapping_cache,
-                    )
+                    && let Some(origin) =
+                        resolve_captured_binding(field, binding, self.cx, &mut HashSet::new())
                 {
                     sources.push(origin);
                 }
@@ -636,15 +570,8 @@ impl Evaluator<'_, '_, '_> {
                 let mut sources = Vec::new();
                 if let StarBase::Expr(dependencies) = base {
                     for &dependency in dependencies {
-                        let (origins, _, _) = collect_leaf_origins(
-                            dependency,
-                            self.graph,
-                            self.resolved,
-                            self.incoming,
-                            &mut HashSet::new(),
-                            self.catalog,
-                            self.mapping_cache,
-                        );
+                        let (origins, _, _) =
+                            collect_leaf_origins(dependency, self.cx, &mut HashSet::new());
                         sources.extend(origins);
                     }
                 }
@@ -667,20 +594,13 @@ impl Evaluator<'_, '_, '_> {
         source: crate::graph::scope::VirtualSourceId,
         index: usize,
     ) -> Vec<ColumnOrigin> {
-        let graph = self.graph;
+        let graph = self.cx.graph;
         let column = &graph.scopes.virtual_source(source).columns[index];
         let mut origins = Vec::new();
         let mut visited = HashSet::new();
         for &dependency in &column.dependencies {
-            let (dependency_origins, _, _) = collect_leaf_origins(
-                dependency,
-                graph,
-                self.resolved,
-                self.incoming,
-                &mut visited,
-                self.catalog,
-                self.mapping_cache,
-            );
+            let (dependency_origins, _, _) =
+                collect_leaf_origins(dependency, self.cx, &mut visited);
             origins.extend(dependency_origins);
         }
         if origins.is_empty()
@@ -710,7 +630,12 @@ impl Evaluator<'_, '_, '_> {
                 column: column.clone(),
             }],
             UnknownProvider::Scope { scope, index } => {
-                if !self.active.insert((*scope, *index)) {
+                // TODO: re-entry must surface as an unresolved value, not as
+                // an empty source list.
+                if !self.cx.enter(EvalKey::Slot {
+                    scope: *scope,
+                    index: *index,
+                }) {
                     return Vec::new();
                 }
                 let model = self.scope_model(*scope);
@@ -723,12 +648,15 @@ impl Evaluator<'_, '_, '_> {
                 // The right operand of a set operation contributes to every
                 // position, though the model lists only the left one.
                 if let OutputPlan::SetOperation { right, .. } =
-                    self.graph.scopes.output_plan(*scope)
+                    self.cx.graph.scopes.output_plan(*scope)
                     && let Unlisted::Sources(more) = self.unlisted(*right, column)
                 {
                     sources.extend(more);
                 }
-                self.active.remove(&(*scope, *index));
+                self.cx.leave(EvalKey::Slot {
+                    scope: *scope,
+                    index: *index,
+                });
                 sources
             }
             UnknownProvider::Opaque(_) => Vec::new(),
@@ -736,7 +664,7 @@ impl Evaluator<'_, '_, '_> {
     }
 
     fn unlisted(&mut self, scope: ScopeId, name: &Ident) -> Unlisted {
-        let graph = self.graph;
+        let graph = self.cx.graph;
         match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let model = self.scope_model(scope);

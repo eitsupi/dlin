@@ -13,7 +13,7 @@ impl LineageBuilder {
         match expr {
             Expr::Identifier(ident) => {
                 let name = Ident::from_ast(ident);
-                let binding = self.graph.scopes.lookup(self.current_scope, &name).cloned();
+                let binding = self.graph.scopes.lookup(self.env(), &name).cloned();
                 if binding.as_ref().is_some_and(|binding| {
                     self.dialect.supports_relation_alias_row_value()
                         && matches!(
@@ -21,16 +21,16 @@ impl LineageBuilder {
                             Binding::Table(_) | Binding::Cte(_) | Binding::DerivedTable(_)
                         )
                 }) {
-                    let node =
-                        self.graph
-                            .add_row_value_candidate(name, self.current_scope, binding);
+                    let node = self
+                        .graph
+                        .add_row_value_candidate(name, self.env(), binding);
                     return vec![node];
                 }
                 let binding =
                     binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
-                let node =
-                    self.graph
-                        .add_unqualified_with_binding(name, self.current_scope, binding);
+                let node = self
+                    .graph
+                    .add_unqualified_with_binding(name, self.env(), binding);
                 vec![node]
             }
 
@@ -269,9 +269,7 @@ impl LineageBuilder {
                     ancestors.extend(self.collect_ancestors(&order.expr));
                 }
                 if let FunctionArguments::Subquery(q) = &func.args {
-                    let _sub = self.push_scope(ScopeKind::Subquery);
-                    self.visit_query(q);
-                    self.pop_scope();
+                    self.visit_subquery(ScopeKind::Subquery, q);
                 }
                 if let Some(WindowType::WindowSpec(spec)) = &func.over {
                     for expr in &spec.partition_by {
@@ -305,9 +303,7 @@ impl LineageBuilder {
             }
 
             Expr::Subquery(query) => {
-                let scope = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(query);
-                self.pop_scope();
+                let scope = self.visit_subquery(ScopeKind::Subquery, query);
                 let [column] = self.graph.scopes.output_columns(scope) else {
                     return vec![];
                 };
@@ -324,23 +320,19 @@ impl LineageBuilder {
                 vec![self.graph.add_ref_with_binding(
                     name,
                     None,
-                    self.current_scope,
+                    self.env(),
                     Some(Binding::DerivedTable(scope)),
                 )]
             }
 
             Expr::InSubquery { expr, subquery, .. } => {
                 let v = self.collect_ancestors(expr);
-                let _sub = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(ScopeKind::Subquery, subquery);
                 v
             }
 
             Expr::Exists { subquery, .. } => {
-                let _sub = self.push_scope(ScopeKind::Subquery);
-                self.visit_query(subquery);
-                self.pop_scope();
+                self.visit_subquery(ScopeKind::Subquery, subquery);
                 vec![]
             }
 
@@ -388,21 +380,18 @@ impl LineageBuilder {
                 if self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &Ident::from_ast(binding_name))
+                    .lookup(self.env(), &Ident::from_ast(binding_name))
                     .is_some()
                     || self
                         .graph
                         .scopes
-                        .ambiguous_binding_candidates(
-                            self.current_scope,
-                            &Ident::from_ast(binding_name),
-                        )
+                        .ambiguous_binding_candidates(self.env(), &Ident::from_ast(binding_name))
                         .is_some() =>
             {
                 let binding = self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &Ident::from_ast(binding_name))
+                    .lookup(self.env(), &Ident::from_ast(binding_name))
                     .cloned();
                 vec![self.add_bound_field_ancestor(
                     vec![Ident::from_ast(binding_name)],
@@ -414,13 +403,13 @@ impl LineageBuilder {
                 let binding = self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &Ident::from_ast(column))
+                    .lookup(self.env(), &Ident::from_ast(column))
                     .cloned();
                 let binding =
                     binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
                 vec![self.graph.add_unqualified_with_binding(
                     Ident::from_ast(column),
-                    self.current_scope,
+                    self.env(),
                     binding,
                 )]
             }
@@ -455,11 +444,13 @@ impl LineageBuilder {
         // already-qualified expressions without a FROM clause (for example
         // `orders.id`): the qualifier is still a physical relation name,
         // rather than an unqualified struct root.
-        if self
-            .graph
-            .scopes
-            .visible_bindings(self.current_scope)
-            .is_empty()
+        //
+        // A qualifier that merely cannot be seen from here, because the
+        // reference sits in a FROM item that does not see its siblings, is
+        // not a physical relation: the fallback applies only to a reference
+        // that no FROM clause surrounds.
+        if self.graph.scopes.visible_bindings(self.env()).is_empty()
+            && !self.graph.scopes.has_enclosing_bindings(self.current_scope)
             && parts.len() >= 2
         {
             let relation_parts = &parts[..parts.len() - 1];
@@ -493,7 +484,7 @@ impl LineageBuilder {
             return vec![self.graph.add_ref_with_binding(
                 Ident::from_ast(&parts[parts.len() - 1]),
                 Some(qualifier),
-                self.current_scope,
+                self.env(),
                 binding,
             )];
         }
@@ -505,12 +496,12 @@ impl LineageBuilder {
         let binding = self
             .graph
             .scopes
-            .lookup(self.current_scope, &column)
+            .lookup(self.env(), &column)
             .cloned()
             .filter(|binding| matches!(binding, Binding::VirtualSource(_)));
         vec![
             self.graph
-                .add_unqualified_with_binding(column, self.current_scope, binding),
+                .add_unqualified_with_binding(column, self.env(), binding),
         ]
     }
 
@@ -521,7 +512,7 @@ impl LineageBuilder {
     /// as `catalog.schema.table.column` without turning the relation into a
     /// single quoted string containing dots.
     fn find_compound_binding(&self, parts: &[sqlparser::ast::Ident]) -> Option<(usize, Binding)> {
-        let visible = self.graph.scopes.visible_bindings(self.current_scope);
+        let visible = self.graph.scopes.visible_bindings(self.env());
         (1..parts.len()).rev().find_map(|prefix_len| {
             let prefix = parts[..prefix_len]
                 .iter()
@@ -543,7 +534,7 @@ impl LineageBuilder {
             // full name still identifies it.
             self.graph
                 .scopes
-                .visible_relations(self.current_scope)
+                .visible_relations(self.env())
                 .into_iter()
                 .find(|table| {
                     let candidate = table_parts(table);
@@ -563,7 +554,7 @@ impl LineageBuilder {
         binding: Option<Binding>,
     ) -> NodeId {
         self.graph
-            .add_ref_with_binding(column, Some(qualifier), self.current_scope, binding)
+            .add_ref_with_binding(column, Some(qualifier), self.env(), binding)
     }
 
     fn collect_subscript_ancestors(&mut self, subscript: &Subscript) -> Vec<NodeId> {

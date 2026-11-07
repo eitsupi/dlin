@@ -7,7 +7,7 @@ use crate::types::Dialect;
 use crate::types::TableLineage;
 use edge::{EdgeKind, RawEdge};
 use node::{NodeId, RawNode, StarBase, StarOptions};
-use scope::{ScopeId, ScopeTree};
+use scope::{BindingEnv, ScopeTree};
 use std::collections::HashMap;
 
 pub(crate) struct RawGraph {
@@ -59,13 +59,13 @@ impl RawGraph {
         &mut self,
         name: Ident,
         qualifier: Option<Vec<Ident>>,
-        scope: ScopeId,
+        env: BindingEnv,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {
         self.add_node(RawNode::Ref {
             name,
             qualifier,
-            scope,
+            env,
             binding,
         })
     }
@@ -73,35 +73,23 @@ impl RawGraph {
     pub fn add_unqualified_with_binding(
         &mut self,
         name: Ident,
-        scope: ScopeId,
+        env: BindingEnv,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {
-        self.add_node(RawNode::Unqualified {
-            name,
-            scope,
-            binding,
-        })
+        self.add_node(RawNode::Unqualified { name, env, binding })
     }
 
     pub fn add_row_value_candidate(
         &mut self,
         name: Ident,
-        scope: ScopeId,
+        env: BindingEnv,
         binding: Option<crate::graph::scope::Binding>,
     ) -> NodeId {
-        self.add_node(RawNode::RowValueCandidate {
-            name,
-            scope,
-            binding,
-        })
+        self.add_node(RawNode::RowValueCandidate { name, env, binding })
     }
 
-    pub fn add_star(&mut self, base: StarBase, options: StarOptions, scope: ScopeId) -> NodeId {
-        self.add_node(RawNode::Star {
-            base,
-            options,
-            scope,
-        })
+    pub fn add_star(&mut self, base: StarBase, options: StarOptions, env: BindingEnv) -> NodeId {
+        self.add_node(RawNode::Star { base, options, env })
     }
 
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {
