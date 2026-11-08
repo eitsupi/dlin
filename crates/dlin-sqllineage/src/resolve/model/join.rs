@@ -415,6 +415,7 @@ fn fold_groups(
                 .or(right_side.names)
                 .unwrap_or_else(|| (key.clone(), OutputName::Explicit(key.clone())));
             output.push(OutputElement::Column(ColumnSlot {
+                id: None,
                 ordinal: Some(output.len()),
                 name,
                 output_name,

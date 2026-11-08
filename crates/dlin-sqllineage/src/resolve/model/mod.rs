@@ -16,11 +16,13 @@ mod choose;
 mod input;
 mod join;
 mod options;
+mod slot;
 
 pub(super) use build::{ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::{InputLookup, RangeRef};
+pub(super) use slot::{SegmentId, SlotId};
 
 use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
@@ -166,6 +168,11 @@ pub(super) enum SlotOrigin {
 /// A column with a known name.
 #[derive(Debug, Clone)]
 pub(super) struct ColumnSlot {
+    /// The identity the owning scope gave the column when it published its
+    /// model. `None` in star models and in the models of FROM clauses, which
+    /// are views of other scopes' outputs and publish nothing themselves.
+    #[allow(dead_code, reason = "ids are published before any reader follows them")]
+    pub id: Option<SlotId>,
     /// The name the column is published under.
     pub name: Ident,
     pub output_name: OutputName,
@@ -185,6 +192,10 @@ pub(super) struct ColumnSlot {
 /// publish.
 #[derive(Debug, Clone)]
 pub(super) struct UnknownSegment {
+    /// The identity the owning scope gave the segment when it published its
+    /// model; `None` wherever [`ColumnSlot::id`] is.
+    #[allow(dead_code, reason = "ids are published before any reader follows them")]
+    pub id: Option<SegmentId>,
     /// Physical schemas responsible for this interval, retained across scopes.
     pub schema_relations: Vec<crate::Relation>,
     pub position: crate::types::StarPosition,
@@ -196,6 +207,7 @@ pub(super) struct UnknownSegment {
 impl UnknownSegment {
     fn opaque(reason: OpaqueReason) -> Self {
         Self {
+            id: None,
             schema_relations: Vec::new(),
             position: crate::types::StarPosition::Inferred,
             provider: UnknownProvider::Opaque(reason),

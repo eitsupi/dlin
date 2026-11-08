@@ -8,6 +8,7 @@ use std::rc::Rc;
 use super::super::target::{StarTarget, resolve_star_target};
 use super::input::{InputModel, Invalidity};
 use super::options::apply_options;
+use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
     BranchTail, ColumnSlot, NameDomain, OpaqueReason, OutputElement, OutputModel, RangeRef,
     SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
@@ -30,8 +31,12 @@ pub(super) enum CacheKey {
 ///
 /// A model that was built while a cycle was cut (a recursive CTE reading
 /// itself) is not kept, because it depends on where the walk started.
+///
+/// The store also owns the arena that defines every column and segment a scope
+/// has published.
 #[derive(Default)]
 pub(in crate::resolve) struct ModelStore {
+    pub(super) arena: SlotArena,
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
     pub(super) inputs: HashMap<BindingEnv, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
@@ -68,10 +73,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             return model.clone();
         }
         if self.enter(CacheKey::Scope(scope)) {
-            return Rc::new(OutputModel::opaque(
-                OpaqueReason::Recursive,
-                self.graph.dialect,
-            ));
+            let mut model = OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect);
+            self.publish(scope, &mut model.elements);
+            return Rc::new(model);
         }
         let model = Rc::new(self.build_scope(scope));
         if self.leave() {
@@ -160,6 +164,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         reads.extend(star.reads.iter().cloned());
                     } else {
                         elements.push(OutputElement::Column(ColumnSlot {
+                            id: None,
                             name: column.name.clone(),
                             output_name: graph
                                 .output_names
@@ -213,6 +218,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
+        self.publish(scope, &mut elements);
         let mut model = OutputModel::new(
             elements,
             graph.scopes.unknown_output_reasons(scope),
@@ -221,6 +227,34 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         model.invalid = invalid;
         model.reads = reads;
         model
+    }
+
+    /// Give each column and segment of a scope's model its identity and record
+    /// its definition. The elements of star and FROM-clause models are views
+    /// of other outputs and are never published.
+    fn publish(&mut self, scope: ScopeId, elements: &mut [OutputElement]) {
+        for (index, element) in elements.iter_mut().enumerate() {
+            match element {
+                OutputElement::Column(slot) => {
+                    debug_assert!(slot.id.is_none(), "a column is published once");
+                    slot.id = Some(self.store.arena.add_slot(SlotDef {
+                        owner: scope,
+                        name: slot.name.clone(),
+                        value: slot.value.clone(),
+                        index,
+                    }));
+                }
+                OutputElement::Unknown(segment) => {
+                    debug_assert!(segment.id.is_none(), "a segment is published once");
+                    segment.id = Some(self.store.arena.add_segment(SegmentDef {
+                        owner: scope,
+                        provider: segment.provider.clone(),
+                        position: segment.position,
+                    }));
+                }
+                OutputElement::Tail(_) => {}
+            }
+        }
     }
 
     fn build_star(
@@ -284,6 +318,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 .enumerate()
                 .map(|(index, column)| {
                     OutputElement::Column(ColumnSlot {
+                        id: None,
                         name: column.name.clone(),
                         output_name: OutputName::Explicit(column.name.clone()),
                         ordinal: Some(index),
@@ -303,6 +338,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[RangeRef]>) -> Vec<OutputElement> {
         let Some(entry) = self.catalog.and_then(|catalog| catalog.entry(table)) else {
             return vec![OutputElement::Unknown(UnknownSegment {
+                id: None,
                 schema_relations: vec![super::super::analysis::plain_relation(table)],
                 position: crate::types::StarPosition::Inferred,
                 provider: UnknownProvider::Relation(table.clone()),
@@ -319,6 +355,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut elements = Vec::new();
         for column in &columns {
             elements.push(OutputElement::Column(ColumnSlot {
+                id: None,
                 name: column.name.clone(),
                 output_name: OutputName::Explicit(column.name.clone()),
                 ordinal: column.ordinal,
@@ -384,6 +421,7 @@ fn relation_unknown(
     canonical_relation: &crate::Relation,
 ) -> OutputElement {
     OutputElement::Unknown(UnknownSegment {
+        id: None,
         schema_relations: vec![canonical_relation.clone()],
         position: segment.after_ordinal.map_or(
             crate::types::StarPosition::Unproven,
@@ -412,6 +450,7 @@ pub(super) fn forward_scope(
         .enumerate()
         .map(|(index, element)| match element {
             OutputElement::Column(slot) => OutputElement::Column(ColumnSlot {
+                id: None,
                 name: slot.name.clone(),
                 output_name: slot.output_name.clone(),
                 ordinal: slot.ordinal,
@@ -425,6 +464,7 @@ pub(super) fn forward_scope(
                 origin: SlotOrigin::Forwarded(slot.name.clone()),
             }),
             OutputElement::Unknown(segment) => OutputElement::Unknown(UnknownSegment {
+                id: None,
                 schema_relations: segment.schema_relations.clone(),
                 position: segment.position,
                 provider: UnknownProvider::Scope { scope, index },

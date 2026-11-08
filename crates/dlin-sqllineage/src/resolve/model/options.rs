@@ -134,6 +134,7 @@ pub(super) fn apply_options(
         ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
+            id: None,
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
             ordinal: None,
@@ -179,6 +180,7 @@ pub(super) fn apply_options(
             .expect("a renamed column has a publisher");
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
+            id: None,
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
             ordinal: None,
