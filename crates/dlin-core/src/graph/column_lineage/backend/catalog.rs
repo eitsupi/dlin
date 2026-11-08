@@ -85,18 +85,29 @@ impl CatalogSnapshot {
 
     /// Register one physical relation and its schema. Registering the same
     /// relation again with the same claim keeps the first schema and adds the
-    /// new evidence id. A contradicting claim marks the relation as conflicted.
+    /// new evidence id. A schema that only adds a proven order to an
+    /// otherwise identical one (see `SchemaEvidence::is_order_refinement_pair`)
+    /// is not a contradiction: the proven schema is stored whichever arrives
+    /// first, both evidence ids are kept, and the first registration's display
+    /// name stays. Any other differing claim marks the relation as conflicted.
     pub(crate) fn add_relation(
         &mut self,
         relation: RelationRef,
         preferred_name: impl Into<String>,
         schema: SchemaEvidence,
     ) {
-        if let Some(existing) = self.tables.get_mut(&relation)
-            && existing.schema.same_claim_as(&schema)
-        {
-            existing.evidence_ids.insert(schema.id.0);
-            return;
+        if let Some(existing) = self.tables.get_mut(&relation) {
+            if existing.schema.same_claim_as(&schema) {
+                existing.evidence_ids.insert(schema.id.0);
+                return;
+            }
+            if existing.schema.is_order_refinement_pair(&schema) {
+                existing.evidence_ids.insert(schema.id.0.clone());
+                if schema.order == sqllineage::SchemaOrder::Proven {
+                    existing.schema = schema;
+                }
+                return;
+            }
         }
         if self.tables.contains_key(&relation) {
             self.conflicted.insert(relation.clone());
@@ -400,6 +411,164 @@ mod tests {
             register(&mut catalog, base.clone());
             register(&mut catalog, variant);
             assert!(is_conflicted(&catalog));
+        }
+    }
+
+    fn ids(catalog: &CatalogSnapshot) -> Vec<&str> {
+        let table = catalog
+            .resolve_table_exact(
+                &RelationRef::from_manifest(None, None, "t"),
+                DlinDialect::Generic,
+            )
+            .unwrap();
+        table.evidence_ids.iter().map(String::as_str).collect()
+    }
+
+    fn stored(catalog: &CatalogSnapshot) -> &CatalogTable {
+        catalog
+            .resolve_table_exact(
+                &RelationRef::from_manifest(None, None, "t"),
+                DlinDialect::Generic,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn proven_order_refines_unknown_order_in_either_registration_order() {
+        let unordered = || with_id(yaml(&[("a", None), ("b", None)]), "yaml:up");
+        let ordered = || with_id(schema(&["b", "a"]), "sql:up");
+
+        let mut unordered_first = CatalogSnapshot::new();
+        register(&mut unordered_first, unordered());
+        register(&mut unordered_first, ordered());
+        let mut ordered_first = CatalogSnapshot::new();
+        register(&mut ordered_first, ordered());
+        register(&mut ordered_first, unordered());
+
+        for catalog in [&unordered_first, &ordered_first] {
+            assert!(!is_conflicted(catalog));
+            assert_eq!(stored(catalog).schema, ordered());
+            assert_eq!(stored(catalog).column_names(), vec!["b", "a"]);
+            assert_eq!(ids(catalog), ["sql:up", "yaml:up"]);
+        }
+        assert_eq!(stored(&unordered_first), stored(&ordered_first));
+    }
+
+    #[test]
+    fn refinement_keeps_the_first_display_name_and_accumulated_ids() {
+        let relation = RelationRef::from_manifest(None, None, "t");
+        let mut catalog = CatalogSnapshot::new();
+        catalog.add_relation(
+            relation.clone(),
+            "first",
+            with_id(yaml(&[("a", None), ("b", None)]), "yaml:one"),
+        );
+        catalog.add_relation(
+            relation.clone(),
+            "second",
+            with_id(yaml(&[("b", None), ("a", None)]), "yaml:two"),
+        );
+        catalog.add_relation(relation, "third", with_id(schema(&["b", "a"]), "sql:up"));
+
+        assert!(!is_conflicted(&catalog));
+        assert_eq!(stored(&catalog).name, "first");
+        assert_eq!(ids(&catalog), ["sql:up", "yaml:one", "yaml:two"]);
+        assert_eq!(stored(&catalog).column_names(), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn proven_orders_that_differ_conflict_even_with_unknown_order_present() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None), ("b", None)]));
+        register(&mut catalog, with_id(schema(&["a", "b"]), "sql:one"));
+        register(&mut catalog, with_id(schema(&["b", "a"]), "sql:two"));
+        assert!(is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn order_refinement_requires_the_same_identifiers() {
+        let mut different_sets = CatalogSnapshot::new();
+        register(&mut different_sets, yaml(&[("a", None), ("c", None)]));
+        register(&mut different_sets, schema(&["a", "b"]));
+        assert!(is_conflicted(&different_sets));
+
+        let mut different_quoting = CatalogSnapshot::new();
+        register(&mut different_quoting, yaml(&[("a", Some(true))]));
+        register(&mut different_quoting, schema(&["a"]));
+        assert!(is_conflicted(&different_quoting));
+    }
+
+    #[test]
+    fn order_refinement_requires_exhaustive_coverage() {
+        let unordered = yaml(&[("a", None), ("b", None)]);
+        for partial in [
+            SchemaEvidence {
+                coverage: sqllineage::SchemaCoverage::Partial,
+                ..schema(&["b", "a"])
+            },
+            SchemaEvidence {
+                unknown_segments: vec![sqllineage::CatalogUnknownSegment {
+                    after_ordinal: None,
+                }],
+                ..schema(&["b", "a"])
+            },
+        ] {
+            let mut catalog = CatalogSnapshot::new();
+            register(&mut catalog, unordered.clone());
+            register(&mut catalog, partial);
+            assert!(is_conflicted(&catalog));
+        }
+        let mut catalog = CatalogSnapshot::new();
+        register(
+            &mut catalog,
+            SchemaEvidence {
+                coverage: sqllineage::SchemaCoverage::Partial,
+                ..unordered
+            },
+        );
+        register(&mut catalog, schema(&["b", "a"]));
+        assert!(is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn order_refinement_requires_unique_names() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None)]));
+        register(&mut catalog, schema(&["a", "a"]));
+        assert!(is_conflicted(&catalog));
+
+        let mut duplicated_unordered = CatalogSnapshot::new();
+        register(
+            &mut duplicated_unordered,
+            SchemaEvidence {
+                columns: vec![yaml(&[("a", None)]).columns[0].clone(); 2],
+                ..yaml(&[("a", None)])
+            },
+        );
+        register(&mut duplicated_unordered, schema(&["a", "a"]));
+        assert!(is_conflicted(&duplicated_unordered));
+    }
+
+    #[test]
+    fn order_refinement_requires_a_complete_ordinal_permutation() {
+        let ordered = schema(&["b", "a"]);
+        let with_ordinals = |ordinals: [Option<usize>; 2]| SchemaEvidence {
+            columns: ordered
+                .columns
+                .iter()
+                .zip(ordinals)
+                .map(|(column, ordinal)| EvidencedColumn {
+                    ordinal,
+                    ..column.clone()
+                })
+                .collect(),
+            ..ordered.clone()
+        };
+        for ordinals in [[Some(0), None], [Some(1), Some(2)], [Some(0), Some(0)]] {
+            let mut catalog = CatalogSnapshot::new();
+            register(&mut catalog, yaml(&[("a", None), ("b", None)]));
+            register(&mut catalog, with_ordinals(ordinals));
+            assert!(is_conflicted(&catalog), "ordinals {ordinals:?}");
         }
     }
 

@@ -102,6 +102,51 @@ impl SchemaEvidence {
             && segment_keys(self) == segment_keys(other)
     }
 
+    /// Whether one schema only adds a proven order to what the other already
+    /// lists. This holds when both are exhaustive without unknown segments,
+    /// each names its columns uniquely, both name exactly the same identifiers,
+    /// and one has unknown order with no ordinals while the other has proven
+    /// order with ordinals forming exactly `0..n`. The relation is symmetric.
+    pub(crate) fn is_order_refinement_pair(&self, other: &Self) -> bool {
+        fn sorted_names(schema: &SchemaEvidence) -> Option<Vec<&sqllineage::Ident>> {
+            let mut names: Vec<_> = schema.columns.iter().map(|column| &column.name).collect();
+            names.sort_unstable();
+            names
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
+                .then_some(names)
+        }
+        fn is_unordered(schema: &SchemaEvidence) -> bool {
+            schema.order == sqllineage::SchemaOrder::Unknown
+                && schema.columns.iter().all(|column| column.ordinal.is_none())
+        }
+        fn is_fully_ordered(schema: &SchemaEvidence) -> bool {
+            if schema.order != sqllineage::SchemaOrder::Proven {
+                return false;
+            }
+            let mut ordinals: Vec<_> = schema.columns.iter().map(|column| column.ordinal).collect();
+            ordinals.sort_unstable();
+            ordinals
+                .iter()
+                .enumerate()
+                .all(|(position, ordinal)| *ordinal == Some(position))
+        }
+        let exhaustive = |schema: &SchemaEvidence| {
+            schema.coverage == sqllineage::SchemaCoverage::Exhaustive
+                && schema.unknown_segments.is_empty()
+        };
+        if !exhaustive(self) || !exhaustive(other) {
+            return false;
+        }
+        let (unordered, ordered) = match (is_unordered(self), is_unordered(other)) {
+            (true, false) => (self, other),
+            (false, true) => (other, self),
+            _ => return false,
+        };
+        let names = sorted_names(unordered);
+        is_fully_ordered(ordered) && names.is_some() && names == sorted_names(ordered)
+    }
+
     /// An ordered, exhaustive enumeration with proven ordinals `0..n`.
     fn enumerated(
         id: String,

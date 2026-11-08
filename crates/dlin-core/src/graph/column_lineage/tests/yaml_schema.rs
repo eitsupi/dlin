@@ -173,3 +173,90 @@ fn star_over_a_table_shared_by_contradicting_source_definitions_is_not_expanded(
         result.columns
     );
 }
+
+/// A model and a source that resolve to one physical relation, both direct
+/// dependencies of `down`, which pairs the relation's star positionally with
+/// `other`. The model's SQL lists `b, a`; the source YAML lists `a, b`.
+fn model_and_source_on_one_relation(dependency_order: [&str; 2]) -> Manifest {
+    let mut dependencies = Vec::from(dependency_order);
+    dependencies.push("model.proj.other");
+    serde_json::from_value(serde_json::json!({
+        "nodes": {
+            "model.proj.m_up": {
+                "unique_id": "model.proj.m_up",
+                "name": "events",
+                "resource_type": "model",
+                "database": "db",
+                "schema": "raw",
+                "depends_on": {"nodes": []},
+                "compiled_code": "SELECT b, a FROM raw_x",
+                "columns": {}
+            },
+            "model.proj.other": {
+                "unique_id": "model.proj.other",
+                "name": "other",
+                "resource_type": "model",
+                "depends_on": {"nodes": []},
+                "compiled_code": "SELECT p, q FROM raw_other",
+                "columns": {}
+            },
+            "model.proj.down": {
+                "unique_id": "model.proj.down",
+                "name": "down",
+                "resource_type": "model",
+                "depends_on": {"nodes": dependencies},
+                "compiled_code":
+                    "SELECT * FROM db.raw.events UNION ALL SELECT p, q FROM other",
+                "columns": {}
+            }
+        },
+        "sources": {
+            "source.proj.raw.events": {
+                "unique_id": "source.proj.raw.events",
+                "name": "events",
+                "source_name": "raw",
+                "resource_type": "source",
+                "database": "db",
+                "schema": "raw",
+                "identifier": "events",
+                "columns": {"a": {"name": "a"}, "b": {"name": "b"}}
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// A model's SQL output and a source's YAML that name the same columns for one
+/// physical relation do not contradict each other: the star expands in the
+/// proven SQL order, so the positional set operation pairs `b` with `p` and
+/// `a` with `q`, whichever dependency is listed first.
+#[test]
+fn star_over_a_relation_shared_by_a_model_and_a_source_follows_the_sql_order() {
+    for dependency_order in [
+        ["model.proj.m_up", "source.proj.raw.events"],
+        ["source.proj.raw.events", "model.proj.m_up"],
+    ] {
+        let manifest = model_and_source_on_one_relation(dependency_order);
+        let result = compute_column_lineage(
+            &manifest,
+            "down",
+            DlinDialect::PostgreSQL,
+            &mut ColumnLineageCache::disabled(),
+        );
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let mut columns: Vec<_> = result.columns.iter().map(|e| e.column.as_str()).collect();
+        columns.sort_unstable();
+        assert_eq!(columns, ["a", "b"], "dependencies: {dependency_order:?}");
+        for (column, upstream) in [("b", "p"), ("a", "q")] {
+            let entry = result.columns.iter().find(|e| e.column == column).unwrap();
+            let mut sources: Vec<_> = pairs(entry);
+            sources.sort_unstable();
+            assert_eq!(
+                sources,
+                [("db.raw.events", column), ("other", upstream)],
+                "column {column}, dependencies: {dependency_order:?}"
+            );
+        }
+    }
+}
