@@ -135,7 +135,7 @@ fn test_cte_select_star_in_manifest_model() {
         .iter()
         .find(|c| c.column == "order_id")
         .unwrap();
-    assert_eq!(order_id.sources[0].column, "id");
+    assert_eq!(order_id.lineage.known()[0].column, "id");
 }
 
 #[test]

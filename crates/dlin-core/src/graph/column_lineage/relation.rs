@@ -11,6 +11,7 @@ use super::backend::DlinDialect;
 /// quoted SQL. Keeping that uncertainty explicit prevents it from being
 /// mistaken for an unquoted identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum QuoteStyle {
     Unquoted,
     Double,
@@ -106,7 +107,7 @@ fn needs_quoting(value: &str) -> bool {
 /// A structurally represented relation, from bare table name to
 /// catalog.schema.table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct RelationRef {
+pub struct RelationRef {
     catalog: Option<Identifier>,
     schema: Option<Identifier>,
     name: Identifier,

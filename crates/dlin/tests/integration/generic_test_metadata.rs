@@ -600,7 +600,7 @@ fn test_column_lineage_source_physical_schema_differs_from_source_name() {
         .iter()
         .find(|c| c["column"] == "account_id")
         .expect("account_id column should be present");
-    let sources = account_id["sources"].as_array().unwrap();
+    let sources = account_id["lineage"]["known"].as_array().unwrap();
     assert!(
         !sources.is_empty(),
         "account_id should have sources after physical schema registration"

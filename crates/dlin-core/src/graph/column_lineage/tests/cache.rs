@@ -12,11 +12,11 @@ fn test_column_cache_hit() {
         columns: vec![ColumnLineageEntry {
             column: "id".to_string(),
             transformation: TransformationType::Direct,
-            sources: vec![ColumnSource {
+            lineage: ValueLineage::complete(vec![ColumnSource {
                 table: "raw".to_string(),
                 column: "id".to_string(),
                 model_path: vec![],
-            }],
+            }]),
         }],
         errors: vec![],
     };
@@ -48,7 +48,7 @@ fn test_column_cache_persists_structural_relation_and_public_output() {
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|entry| entry["sources"].as_array().into_iter().flatten())
+        .flat_map(|entry| entry["lineage"]["known"].as_array().into_iter().flatten())
         .collect::<Vec<_>>();
     assert!(!sources.is_empty());
     assert!(sources[0]["relation"].is_object());
@@ -837,7 +837,8 @@ fn pairs_by_column(result: &ModelColumnLineage) -> Vec<(String, Vec<(String, Str
         .iter()
         .map(|entry| {
             let mut sources: Vec<_> = entry
-                .sources
+                .lineage
+                .known()
                 .iter()
                 .map(|source| (source.table.clone(), source.column.clone()))
                 .collect();

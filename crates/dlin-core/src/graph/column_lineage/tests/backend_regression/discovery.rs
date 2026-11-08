@@ -30,7 +30,8 @@ fn bigquery_temporal_date_parts_are_not_columns() {
         assert_eq!(source_pairs(traced), sources, "sources for {name}");
         assert!(
             traced
-                .sources
+                .lineage
+                .known()
                 .iter()
                 .all(|source| !matches!(source.column.as_str(), "MONDAY" | "ISOWEEK" | "ISOYEAR")),
             "date parts must not be reported as columns: {traced:?}"

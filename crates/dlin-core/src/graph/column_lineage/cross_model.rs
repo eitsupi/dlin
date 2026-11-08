@@ -2,13 +2,23 @@ use crate::parser::manifest::Manifest;
 use std::collections::{HashMap, HashSet};
 
 use super::backend::sqllineage::{
-    analyze_parsed, lineage_failure, parse_sql, resolve_statement_output, statement_error,
+    analyze_parsed, parse_sql, resolve_statement_output, statement_error,
 };
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::{
     ColumnLineageAnalysis, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
-    TransformationType, find_model_by_name, find_model_by_unique_id,
+    ModelOutputRef, TransformationType, UnresolvedContribution, ValueLineage, find_model_by_name,
+    find_model_by_unique_id, value_lineage,
 };
+
+type ModelPath = Vec<(String, String, TransformationType)>;
+
+/// What the trace of one root output column has collected so far.
+#[derive(Default)]
+struct TraceAccumulator {
+    sources: Vec<InternalColumnSource>,
+    unresolved: Vec<UnresolvedContribution>,
+}
 
 pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
     analysis: &'a mut ColumnLineageAnalysis<'m>,
@@ -37,26 +47,35 @@ fn compute_cross_model_inner(
     let upstream_models = build_upstream_model_relations(ctx.analysis.manifest, model_name);
 
     for entry in &mut result.columns {
-        let mut resolved_sources = Vec::new();
+        let mut acc = TraceAccumulator {
+            sources: Vec::new(),
+            unresolved: entry.lineage.unresolved().to_vec(),
+        };
         let mut visited: HashSet<(String, String)> = HashSet::new();
         visited.insert((model_name.to_string(), entry.column.clone()));
 
-        for source in &entry.sources {
+        for source in entry.lineage.known() {
             resolve_source_recursive(
                 source,
                 &entry.column,
                 &upstream_models,
                 &mut visited,
-                &mut resolved_sources,
+                &mut acc,
                 &mut result.errors,
                 ctx,
                 &[],
             );
         }
 
-        resolved_sources.sort_by(|a, b| (&a.relation, &a.column).cmp(&(&b.relation, &b.column)));
-        resolved_sources.dedup();
-        entry.sources = resolved_sources;
+        let TraceAccumulator {
+            mut sources,
+            mut unresolved,
+        } = acc;
+        sources.sort_by(|a, b| (&a.relation, &a.column).cmp(&(&b.relation, &b.column)));
+        sources.dedup();
+        unresolved.sort();
+        unresolved.dedup();
+        entry.lineage = ValueLineage::new(sources, unresolved);
     }
 
     result
@@ -98,7 +117,7 @@ fn resolve_source_recursive(
     root_output_column: &str,
     upstream_models: &[(RelationRef, String)],
     visited: &mut HashSet<(String, String)>,
-    resolved: &mut Vec<InternalColumnSource>,
+    acc: &mut TraceAccumulator,
     errors: &mut Vec<ColumnLineageError>,
     ctx: &mut CrossModelContext<'_, '_>,
     current_path: &[(String, String, TransformationType)],
@@ -119,7 +138,7 @@ fn resolve_source_recursive(
             if visited.contains(&pair) {
                 let mut leaf = source.clone();
                 leaf.model_path = current_path.to_vec();
-                resolved.push(leaf);
+                acc.sources.push(leaf);
                 return;
             }
             visited.insert(pair);
@@ -128,7 +147,7 @@ fn resolve_source_recursive(
         None => {
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
-            resolved.push(leaf);
+            acc.sources.push(leaf);
             return;
         }
     };
@@ -137,7 +156,7 @@ fn resolve_source_recursive(
         if ctx.computing.contains(&model_unique_id) {
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
-            resolved.push(leaf);
+            acc.sources.push(leaf);
             return;
         }
         ctx.computing.insert(model_unique_id.clone());
@@ -173,20 +192,27 @@ fn resolve_source_recursive(
             col_entry.transformation.clone(),
         ));
 
-        if col_entry.sources.is_empty() {
-            // Leaf: the column exists at model_name but has no further sources.
+        let (known, unresolved) = (col_entry.lineage.known(), col_entry.lineage.unresolved());
+        if known.is_empty() {
+            // Leaf: the column exists at model_name but has no known sources.
             // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
+            // This holds for a partial column as well: its nearest terminal is
+            // kept, and the unresolved contributions are carried next to it.
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
-            resolved.push(leaf);
+            acc.sources.push(leaf);
         } else {
-            for s in &col_entry.sources {
+            for s in known {
                 let mut merged = s.clone();
                 let mut full_path = extended_path.clone();
                 full_path.extend(s.model_path.iter().cloned());
                 merged.model_path = full_path;
-                resolved.push(merged);
+                acc.sources.push(merged);
             }
+        }
+        for contribution in unresolved {
+            acc.unresolved
+                .push(extend_contribution(contribution, &extended_path));
         }
     } else {
         // A missing column can mean either that the all-column analysis did
@@ -210,12 +236,14 @@ fn resolve_source_recursive(
             .unwrap_or_else(|| model_unique_id.clone());
         let mut extended_path = current_path.to_vec();
         extended_path.push((model_display_name, source.column.clone(), transformation));
-        let on_demand_sources = on_demand.map(|(sources, _)| sources).unwrap_or_default();
+        let (on_demand_sources, on_demand_unresolved) = on_demand
+            .map(|(lineage, _)| lineage.into_parts())
+            .unwrap_or_default();
         if on_demand_sources.is_empty() {
             // Leaf: column at model_name has no traceable sources — don't self-include in path.
             let mut leaf = source.clone();
             leaf.model_path = current_path.to_vec();
-            resolved.push(leaf);
+            acc.sources.push(leaf);
         } else {
             let further_upstream =
                 build_upstream_model_relations(ctx.analysis.manifest, &model_unique_id);
@@ -225,13 +253,33 @@ fn resolve_source_recursive(
                     root_output_column,
                     &further_upstream,
                     visited,
-                    resolved,
+                    acc,
                     errors,
                     ctx,
                     &extended_path,
                 );
             }
         }
+        for contribution in &on_demand_unresolved {
+            acc.unresolved
+                .push(extend_contribution(contribution, &extended_path));
+        }
+    }
+}
+
+/// Re-express a contribution found in an upstream model relative to the root
+/// output. `prefix` is the hop path from the root to the upstream model,
+/// including the upstream hop itself. The origin is kept as it was found.
+fn extend_contribution(
+    contribution: &UnresolvedContribution,
+    prefix: &ModelPath,
+) -> UnresolvedContribution {
+    let mut model_path = prefix.clone();
+    model_path.extend(contribution.model_path.iter().cloned());
+    UnresolvedContribution {
+        reason: contribution.reason.clone(),
+        origin: contribution.origin.clone(),
+        model_path,
     }
 }
 
@@ -249,11 +297,14 @@ fn should_retry_missing_column(errors: &[ColumnLineageError], column: &str) -> b
         .any(|error| error.is_column_scoped() && error.column_name() == Some(column))
 }
 
+/// Lineage of one output column computed on demand, when the all-column
+/// analysis of the model did not list it. A `Partial` result keeps its known
+/// sources and unresolved contributions.
 fn compute_single_column_lineage(
     analysis: &mut ColumnLineageAnalysis<'_>,
     model_name: &str,
     column_name: &str,
-) -> Option<(Vec<InternalColumnSource>, TransformationType)> {
+) -> Option<(ValueLineage<InternalColumnSource>, TransformationType)> {
     let manifest = analysis.manifest;
     let dialect = analysis.dialect;
     let node = find_model_by_unique_id(manifest, model_name)
@@ -268,25 +319,13 @@ fn compute_single_column_lineage(
         return None;
     }
     let output = resolve_statement_output(&statement, column_name, false, dialect).ok()?;
-    if lineage_failure(&output.lineage).is_some() {
-        return None;
-    }
-    let sqllineage::Lineage::Complete(sources) = &output.lineage else {
-        return None;
+    let origin = ModelOutputRef {
+        unique_id: node.unique_id.clone(),
+        model: node.name.clone(),
+        column: column_name.to_string(),
     };
     Some((
-        sources
-            .iter()
-            .map(|source| InternalColumnSource {
-                relation: super::backend::source_relation(
-                    &source.relation,
-                    catalog.as_ref(),
-                    dialect,
-                ),
-                column: source.column.value.clone(),
-                model_path: vec![],
-            })
-            .collect(),
+        value_lineage(&output.lineage, &origin, catalog.as_ref(), dialect),
         super::backend::sqllineage::transformation(output.transform),
     ))
 }

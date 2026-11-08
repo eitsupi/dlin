@@ -240,7 +240,7 @@ fn cross_model_lineage_resolves_an_aliased_upstream_relation() {
         .unwrap();
 
     assert_eq!(
-        id.sources,
+        id.lineage.known(),
         vec![ColumnSource {
             table: "raw_upstream".to_string(),
             column: "id".to_string(),
@@ -301,10 +301,10 @@ fn column_impact_matches_aliased_upstream_and_keeps_logical_labels() {
 
     assert_eq!(report.model, "upstream_model");
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
-    assert!(report.impacted_columns.iter().any(|column| {
-        column.unique_id == downstream_id
-            && column.model == "downstream_model"
-            && column.column == "id"
+    assert!(report.confirmed.iter().any(|column| {
+        column.target.unique_id == downstream_id
+            && column.target.model == "downstream_model"
+            && column.target.column == "id"
     }));
 }
 
@@ -380,8 +380,8 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
         .find(|column| column.column == "id")
         .unwrap();
 
-    assert_eq!(id.sources[0].table, "raw_b");
-    assert_eq!(id.sources[0].model_path[0].0, "shared_model");
+    assert_eq!(id.lineage.known()[0].table, "raw_b");
+    assert_eq!(id.lineage.known()[0].model_path[0].0, "shared_model");
 }
 
 fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSource {

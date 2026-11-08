@@ -64,7 +64,8 @@ fn sources<'a>(result: &'a ModelColumnLineage, column: &str) -> Vec<(&'a str, &'
             )
         });
     let mut pairs: Vec<_> = entry
-        .sources
+        .lineage
+        .known()
         .iter()
         .map(|source| (source.table.as_str(), source.column.as_str()))
         .collect();
@@ -331,7 +332,21 @@ fn duplicate_output_names_are_kept_and_referenced_ambiguously() {
 
     for model in ["down", "qualified"] {
         let result = trace(&manifest, model);
-        assert!(result.columns.is_empty(), "model {model}: {result:?}");
+        // The ambiguous reference is listed as a partial column with no known
+        // source, explained by one diagnostic.
+        assert_eq!(result.columns.len(), 1, "model {model}: {result:?}");
+        assert!(result.columns[0].lineage.known().is_empty());
+        assert!(
+            matches!(
+                result.columns[0].lineage.unresolved(),
+                [UnresolvedContribution {
+                    reason: UnresolvedReason::Ambiguous { .. },
+                    ..
+                }]
+            ),
+            "model {model}: {result:?}"
+        );
+        assert_eq!(result.traced_columns, 0, "model {model}: {result:?}");
         assert_eq!(result.errors.len(), 1, "model {model}: {result:?}");
         assert_eq!(
             result.errors[0].kind,

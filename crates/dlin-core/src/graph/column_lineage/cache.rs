@@ -42,11 +42,8 @@ struct ColumnLineageCacheEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ColumnLineageCacheFile {
     /// dlin version that created this cache
-    #[serde(default)]
     pub(super) version: String,
-    /// Analysis semantics id that produced this cache. A missing value (a
-    /// cache written before the id existed) never matches.
-    #[serde(default)]
+    /// Analysis semantics id that produced this cache.
     pub(super) semantics_id: String,
     /// Per-model cached entries keyed by canonical manifest unique_id
     entries: HashMap<String, ColumnLineageCacheEntry>,

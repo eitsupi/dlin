@@ -38,11 +38,11 @@ fn test_column_impact_direct_dependent() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert!(
         result
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|ic| ic.model == "orders" && ic.column == "order_id"),
+            .any(|ic| ic.target.model == "orders" && ic.target.column == "order_id"),
         "orders.order_id should be impacted, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 }
 
@@ -63,20 +63,20 @@ fn test_column_impact_two_hops() {
     // orders.customer_id should be impacted (direct dependent)
     assert!(
         result
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|ic| ic.model == "orders" && ic.column == "customer_id"),
+            .any(|ic| ic.target.model == "orders" && ic.target.column == "customer_id"),
         "orders.customer_id should be impacted, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
     // customers.customer_id should also be impacted (two hops)
     assert!(
         result
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|ic| ic.model == "customers" && ic.column == "customer_id"),
+            .any(|ic| ic.target.model == "customers" && ic.target.column == "customer_id"),
         "customers.customer_id should be impacted, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 }
 
@@ -93,14 +93,14 @@ fn test_column_impact_model_path() {
 
     // customers.customer_id goes through orders
     let cust = result
-        .impacted_columns
+        .confirmed
         .iter()
-        .find(|ic| ic.model == "customers" && ic.column == "customer_id")
+        .find(|ic| ic.target.model == "customers" && ic.target.column == "customer_id")
         .unwrap();
     assert!(
-        cust.model_path.iter().any(|(m, _, _)| m == "orders"),
+        cust.path.iter().any(|edge| edge.to.model == "orders"),
         "model_path should include orders, got: {:?}",
-        cust.model_path
+        cust.path
     );
 }
 
@@ -118,9 +118,9 @@ fn test_column_impact_no_dependents() {
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert!(
-        result.impacted_columns.is_empty(),
+        result.confirmed.is_empty(),
         "leaf model should have no impacted columns, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 }
 
@@ -238,18 +238,19 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
     );
     assert!(
         raw_impact
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream" && column.column == "raw_id"),
+            .any(|column| column.target.model == "downstream" && column.target.column == "raw_id"),
         "raw impact: {:?}, errors: {:?}",
-        raw_impact.impacted_columns,
+        raw_impact.confirmed,
         raw_impact.errors
     );
     assert!(
         !raw_impact
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream" && column.column == "staging_id")
+            .any(|column| column.target.model == "downstream"
+                && column.target.column == "staging_id")
     );
 
     let staging_impact = compute_column_impact(
@@ -266,15 +267,16 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
     );
     assert!(
         staging_impact
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream" && column.column == "staging_id")
+            .any(|column| column.target.model == "downstream"
+                && column.target.column == "staging_id")
     );
     assert!(
         !staging_impact
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream" && column.column == "raw_id")
+            .any(|column| column.target.model == "downstream" && column.target.column == "raw_id")
     );
 }
 
@@ -350,11 +352,11 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert!(
         report
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream_model" && column.column == "id"),
+            .any(|column| column.target.model == "downstream_model" && column.target.column == "id"),
         "qualified reference should still reach an unqualified model relation: {:?}",
-        report.impacted_columns
+        report.confirmed
     );
 }
 
@@ -425,9 +427,9 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert!(
         report
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|column| column.model == "downstream_model" && column.column == "id")
+            .any(|column| column.target.model == "downstream_model" && column.target.column == "id")
     );
 }
 
@@ -521,11 +523,11 @@ fn test_column_impact_does_not_attribute_ambiguous_bare_source() {
         );
         assert!(
             !result
-                .impacted_columns
+                .confirmed
                 .iter()
-                .any(|column| column.model == "downstream"),
+                .any(|column| column.target.model == "downstream"),
             "ambiguous bare source should not impact downstream from {upstream_id}: {:?}",
-            result.impacted_columns
+            result.confirmed
         );
     }
 }
@@ -545,12 +547,12 @@ fn test_column_impact_json_serialization() {
 
     assert_eq!(parsed["model"], "stg_orders");
     assert_eq!(parsed["column"], "order_id");
-    assert!(parsed["impacted_columns"].is_array());
+    assert!(parsed["confirmed"].is_array());
     // Verify unique_id is serialized for each impacted column
-    let first = &parsed["impacted_columns"][0];
+    let first = &parsed["confirmed"][0];
     assert!(
-        first["unique_id"].is_string(),
-        "unique_id should be serialized in impacted_columns"
+        first["target"]["unique_id"].is_string(),
+        "unique_id should be serialized in confirmed"
     );
 }
 
@@ -573,9 +575,9 @@ fn test_column_impact_diamond_different_columns_through_shared_model() {
     assert!(impact_x.errors.is_empty(), "errors: {:?}", impact_x.errors);
 
     let impacted_names: Vec<(&str, &str)> = impact_x
-        .impacted_columns
+        .confirmed
         .iter()
-        .map(|ic| (ic.model.as_str(), ic.column.as_str()))
+        .map(|ic| (ic.target.model.as_str(), ic.target.column.as_str()))
         .collect();
     assert!(
         impacted_names.contains(&("shared", "x")),
@@ -603,9 +605,9 @@ fn test_column_impact_diamond_different_columns_through_shared_model() {
     assert!(impact_y.errors.is_empty(), "errors: {:?}", impact_y.errors);
 
     let impacted_names_y: Vec<(&str, &str)> = impact_y
-        .impacted_columns
+        .confirmed
         .iter()
-        .map(|ic| (ic.model.as_str(), ic.column.as_str()))
+        .map(|ic| (ic.target.model.as_str(), ic.target.column.as_str()))
         .collect();
     assert!(
         impacted_names_y.contains(&("shared", "y")),
@@ -668,95 +670,89 @@ fn test_column_impact_reconverging_dag_multi_path() {
 
     // final_model.x must appear at least twice — once via left_model, once via right_model
     let final_entries: Vec<_> = result
-        .impacted_columns
+        .confirmed
         .iter()
-        .filter(|ic| ic.model == "final_model" && ic.column == "x")
+        .filter(|ic| ic.target.model == "final_model" && ic.target.column == "x")
         .collect();
     assert!(
         final_entries.len() >= 2,
         "final_model.x should appear for each upstream path (left and right), \
          got {} entries. impacted: {:?}",
         final_entries.len(),
-        result.impacted_columns
+        result.confirmed
     );
 
     // mart_model.x must also appear at least twice
     let mart_entries: Vec<_> = result
-        .impacted_columns
+        .confirmed
         .iter()
-        .filter(|ic| ic.model == "mart_model" && ic.column == "x")
+        .filter(|ic| ic.target.model == "mart_model" && ic.target.column == "x")
         .collect();
     assert!(
         mart_entries.len() >= 2,
         "mart_model.x should appear for each upstream path, got {} entries. impacted: {:?}",
         mart_entries.len(),
-        result.impacted_columns
+        result.confirmed
     );
 
     // The two mart_model.x entries must have distinct model_paths
     assert!(
-        mart_entries[0].model_path != mart_entries[1].model_path,
+        mart_entries[0].path != mart_entries[1].path,
         "mart_model.x entries should have distinct model_paths, both are: {:?}",
-        mart_entries[0].model_path
+        mart_entries[0].path
     );
 
     // One path passes through left_model, the other through right_model
     let has_left = mart_entries
         .iter()
-        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "left_model"));
+        .any(|ic| ic.path.iter().any(|edge| edge.to.model == "left_model"));
     let has_right = mart_entries
         .iter()
-        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "right_model"));
+        .any(|ic| ic.path.iter().any(|edge| edge.to.model == "right_model"));
     assert!(
         has_left,
         "one mart_model.x path should pass through left_model, paths: {:?}",
-        mart_entries
-            .iter()
-            .map(|ic| &ic.model_path)
-            .collect::<Vec<_>>()
+        mart_entries.iter().map(|ic| &ic.path).collect::<Vec<_>>()
     );
     assert!(
         has_right,
         "one mart_model.x path should pass through right_model, paths: {:?}",
-        mart_entries
-            .iter()
-            .map(|ic| &ic.model_path)
-            .collect::<Vec<_>>()
+        mart_entries.iter().map(|ic| &ic.path).collect::<Vec<_>>()
     );
 
     // dashboard_model.x must also appear at least twice, preserving both upstream paths
     let dashboard_entries: Vec<_> = result
-        .impacted_columns
+        .confirmed
         .iter()
-        .filter(|ic| ic.model == "dashboard_model" && ic.column == "x")
+        .filter(|ic| ic.target.model == "dashboard_model" && ic.target.column == "x")
         .collect();
     assert!(
         dashboard_entries.len() >= 2,
         "dashboard_model.x should appear for each upstream path, got {} entries. impacted: {:?}",
         dashboard_entries.len(),
-        result.impacted_columns
+        result.confirmed
     );
 
     // The two dashboard_model.x entries must have distinct model_paths
     assert!(
-        dashboard_entries[0].model_path != dashboard_entries[1].model_path,
+        dashboard_entries[0].path != dashboard_entries[1].path,
         "dashboard_model.x entries should have distinct model_paths, both are: {:?}",
-        dashboard_entries[0].model_path
+        dashboard_entries[0].path
     );
 
     // One dashboard path passes through left_model, the other through right_model
     let dashboard_has_left = dashboard_entries
         .iter()
-        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "left_model"));
+        .any(|ic| ic.path.iter().any(|edge| edge.to.model == "left_model"));
     let dashboard_has_right = dashboard_entries
         .iter()
-        .any(|ic| ic.model_path.iter().any(|(m, _, _)| m == "right_model"));
+        .any(|ic| ic.path.iter().any(|edge| edge.to.model == "right_model"));
     assert!(
         dashboard_has_left,
         "one dashboard_model.x path should pass through left_model, paths: {:?}",
         dashboard_entries
             .iter()
-            .map(|ic| &ic.model_path)
+            .map(|ic| &ic.path)
             .collect::<Vec<_>>()
     );
     assert!(
@@ -764,7 +760,7 @@ fn test_column_impact_reconverging_dag_multi_path() {
         "one dashboard_model.x path should pass through right_model, paths: {:?}",
         dashboard_entries
             .iter()
-            .map(|ic| &ic.model_path)
+            .map(|ic| &ic.path)
             .collect::<Vec<_>>()
     );
 }

@@ -414,7 +414,7 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                     .columns
                     .iter()
                     .flat_map(|entry| {
-                        entry.sources.iter().flat_map(|src| {
+                        entry.lineage.known().iter().flat_map(|src| {
                             std::iter::once(normalize_table_short_name(&src.table))
                                 .chain(src.model_path.iter().map(|(m, _, _)| m.clone()))
                         })
@@ -460,7 +460,7 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                 report.errors.extend(cross_global_errors);
                 report.errors.extend(cross_column_errors);
 
-                report.traced_columns = report.columns.len();
+                report.traced_columns = report.complete_column_count();
                 report.total_columns = 1;
                 if report.columns.is_empty() && !has_column_error && !has_global_errors {
                     report
@@ -477,7 +477,11 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
             Ok(serde_json::to_value(&report)?)
         }
         "downstream" => {
-            let report = analysis.compute_column_impact(model, column);
+            let report = analysis.compute_column_impact(
+                model,
+                column,
+                graph::column_lineage::ImpactScope::ValueOnly,
+            );
             Ok(serde_json::to_value(&report)?)
         }
         _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),

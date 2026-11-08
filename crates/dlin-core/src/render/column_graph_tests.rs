@@ -1,7 +1,63 @@
 use super::*;
 use crate::graph::column_lineage::{
-    ColumnLineageEntry, ColumnSource, ImpactedColumn, ModelColumnLineage,
+    ColumnLineageEntry, ColumnSource, ConfirmedImpact, DependencyKind, DependencyRef,
+    ExplorationStatus, ImpactEdge, ImpactScope, KindExploration, ModelColumnLineage,
+    ModelOutputRef, TraceGap, UnresolvedContribution, UnresolvedReason, ValueLineage,
 };
+
+fn impact_report(model: &str, column: &str, confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
+    ColumnImpactReport {
+        model: model.to_string(),
+        column: column.to_string(),
+        scope: ImpactScope::ValueOnly,
+        confirmed,
+        exploration: vec![KindExploration {
+            kind: DependencyKind::Value,
+            status: ExplorationStatus::Complete,
+        }],
+        errors: vec![],
+    }
+}
+
+/// A confirmed impact whose path is given as `(model, column, transformation)`
+/// hops from the analysed column `input` to the target.
+fn impacted(
+    unique_id: &str,
+    input: (&str, &str),
+    hops: Vec<(&str, &str, TransformationType)>,
+) -> ConfirmedImpact {
+    let (target_model, target_column, transformation) = hops.last().cloned().unwrap();
+    let mut path = Vec::new();
+    let mut from = (input.0.to_string(), input.1.to_string());
+    for (model, column, transformation) in &hops {
+        let to = ModelOutputRef {
+            unique_id: format!("model.{model}"),
+            model: model.to_string(),
+            column: column.to_string(),
+        };
+        path.push(ImpactEdge {
+            from: DependencyRef::Column {
+                unique_id: format!("model.{}", from.0),
+                model: from.0.clone(),
+                column: from.1.clone(),
+            },
+            to,
+            kind: DependencyKind::Value,
+            transformation: transformation.clone(),
+        });
+        from = (model.to_string(), column.to_string());
+    }
+    ConfirmedImpact {
+        target: ModelOutputRef {
+            unique_id: unique_id.to_string(),
+            model: target_model.to_string(),
+            column: target_column.to_string(),
+        },
+        kind: DependencyKind::Value,
+        transformation,
+        path,
+    }
+}
 
 type SourceSpec<'a> = Vec<(&'a str, &'a str)>;
 type LineageSpec<'a> = Vec<(&'a str, TransformationType, SourceSpec<'a>)>;
@@ -18,14 +74,16 @@ fn make_lineage(model: &str, entries: LineageSpec<'_>) -> ModelColumnLineage {
             .map(|(col, trans, sources)| ColumnLineageEntry {
                 column: col.to_string(),
                 transformation: trans,
-                sources: sources
-                    .into_iter()
-                    .map(|(table, column)| ColumnSource {
-                        table: table.to_string(),
-                        column: column.to_string(),
-                        model_path: vec![],
-                    })
-                    .collect(),
+                lineage: ValueLineage::complete(
+                    sources
+                        .into_iter()
+                        .map(|(table, column)| ColumnSource {
+                            table: table.to_string(),
+                            column: column.to_string(),
+                            model_path: vec![],
+                        })
+                        .collect(),
+                ),
             })
             .collect(),
         errors: vec![],
@@ -97,7 +155,7 @@ fn test_plain_no_sources() {
         columns: vec![ColumnLineageEntry {
             column: "id".to_string(),
             transformation: TransformationType::Unknown,
-            sources: vec![],
+            lineage: ValueLineage::complete(vec![]),
         }],
         errors: vec![],
     };
@@ -210,7 +268,7 @@ fn test_plain_model_path_non_direct_annotation() {
         columns: vec![ColumnLineageEntry {
             column: "area".to_string(),
             transformation: TransformationType::Direct,
-            sources: vec![ColumnSource {
+            lineage: ValueLineage::complete(vec![ColumnSource {
                 table: "raw".to_string(),
                 column: "postcode".to_string(),
                 model_path: vec![(
@@ -218,7 +276,7 @@ fn test_plain_model_path_non_direct_annotation() {
                     "area".to_string(),
                     TransformationType::Expression,
                 )],
-            }],
+            }]),
         }],
         errors: vec![],
     };
@@ -227,127 +285,80 @@ fn test_plain_model_path_non_direct_annotation() {
 
 #[test]
 fn test_impact_plain() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.orders".to_string(),
-            model: "orders".to_string(),
-            column: "order_id".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![(
-                "orders".to_string(),
-                "order_id".to_string(),
-                TransformationType::Direct,
-            )],
-        }],
-        errors: vec![],
-    };
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.orders",
+            ("stg_orders", "order_id"),
+            vec![("orders", "order_id", TransformationType::Direct)],
+        )],
+    );
     insta::assert_snapshot!(impact_plain(&[report]));
 }
 
 #[test]
 fn test_impact_plain_non_direct_intermediate() {
-    let report = ColumnImpactReport {
-        model: "raw".to_string(),
-        column: "postcode".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.mart".to_string(),
-            model: "mart".to_string(),
-            column: "area".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![
-                (
-                    "stg_app".to_string(),
-                    "area".to_string(),
-                    TransformationType::Expression,
-                ),
-                (
-                    "mart".to_string(),
-                    "area".to_string(),
-                    TransformationType::Direct,
-                ),
+    let report = impact_report(
+        "raw",
+        "postcode",
+        vec![impacted(
+            "model.mart",
+            ("raw", "postcode"),
+            vec![
+                ("stg_app", "area", TransformationType::Expression),
+                ("mart", "area", TransformationType::Direct),
             ],
-        }],
-        errors: vec![],
-    };
+        )],
+    );
     insta::assert_snapshot!(impact_plain(&[report]));
 }
 
 #[test]
 fn test_impact_plain_multi_hop() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.customers".to_string(),
-            model: "customers".to_string(),
-            column: "customer_order_id".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![
-                (
-                    "orders".to_string(),
-                    "order_id".to_string(),
-                    TransformationType::Direct,
-                ),
-                (
-                    "customers".to_string(),
-                    "customer_order_id".to_string(),
-                    TransformationType::Direct,
-                ),
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.customers",
+            ("stg_orders", "order_id"),
+            vec![
+                ("orders", "order_id", TransformationType::Direct),
+                ("customers", "customer_order_id", TransformationType::Direct),
             ],
-        }],
-        errors: vec![],
-    };
+        )],
+    );
     insta::assert_snapshot!(impact_plain(&[report]));
 }
 
 #[test]
 fn test_impact_mermaid() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.orders".to_string(),
-            model: "orders".to_string(),
-            column: "order_id".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![(
-                "orders".to_string(),
-                "order_id".to_string(),
-                TransformationType::Direct,
-            )],
-        }],
-        errors: vec![],
-    };
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.orders",
+            ("stg_orders", "order_id"),
+            vec![("orders", "order_id", TransformationType::Direct)],
+        )],
+    );
     insta::assert_snapshot!(impact_mermaid(&[report]));
 }
 
 #[test]
 fn test_impact_mermaid_indirect_edge_label() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.customers".to_string(),
-            model: "customers".to_string(),
-            column: "customer_order_id".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![
-                (
-                    "orders".to_string(),
-                    "order_id".to_string(),
-                    TransformationType::Direct,
-                ),
-                (
-                    "customers".to_string(),
-                    "customer_order_id".to_string(),
-                    TransformationType::Direct,
-                ),
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.customers",
+            ("stg_orders", "order_id"),
+            vec![
+                ("orders", "order_id", TransformationType::Direct),
+                ("customers", "customer_order_id", TransformationType::Direct),
             ],
-        }],
-        errors: vec![],
-    };
+        )],
+    );
     insta::assert_snapshot!(impact_mermaid(&[report]));
 }
 
@@ -409,7 +420,7 @@ fn test_dot_via_path() {
         columns: vec![ColumnLineageEntry {
             column: "order_id".to_string(),
             transformation: TransformationType::Direct,
-            sources: vec![ColumnSource {
+            lineage: ValueLineage::complete(vec![ColumnSource {
                 table: "raw".to_string(),
                 column: "id".to_string(),
                 model_path: vec![(
@@ -417,7 +428,7 @@ fn test_dot_via_path() {
                     "order_id".to_string(),
                     TransformationType::Direct,
                 )],
-            }],
+            }]),
         }],
         errors: vec![],
     };
@@ -426,50 +437,36 @@ fn test_dot_via_path() {
 
 #[test]
 fn test_dot_impact_single() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.orders".to_string(),
-            model: "orders".to_string(),
-            column: "order_id".to_string(),
-            transformation: TransformationType::Direct,
-            model_path: vec![(
-                "orders".to_string(),
-                "order_id".to_string(),
-                TransformationType::Direct,
-            )],
-        }],
-        errors: vec![],
-    };
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.orders",
+            ("stg_orders", "order_id"),
+            vec![("orders", "order_id", TransformationType::Direct)],
+        )],
+    );
     insta::assert_snapshot!(impact_dot(&[report]));
 }
 
 #[test]
 fn test_dot_impact_indirect() {
-    let report = ColumnImpactReport {
-        model: "stg_orders".to_string(),
-        column: "order_id".to_string(),
-        impacted_columns: vec![ImpactedColumn {
-            unique_id: "model.customers".to_string(),
-            model: "customers".to_string(),
-            column: "customer_order_id".to_string(),
-            transformation: TransformationType::Expression,
-            model_path: vec![
+    let report = impact_report(
+        "stg_orders",
+        "order_id",
+        vec![impacted(
+            "model.customers",
+            ("stg_orders", "order_id"),
+            vec![
+                ("orders", "order_id", TransformationType::Direct),
                 (
-                    "orders".to_string(),
-                    "order_id".to_string(),
-                    TransformationType::Direct,
-                ),
-                (
-                    "customers".to_string(),
-                    "customer_order_id".to_string(),
+                    "customers",
+                    "customer_order_id",
                     TransformationType::Expression,
                 ),
             ],
-        }],
-        errors: vec![],
-    };
+        )],
+    );
     insta::assert_snapshot!(impact_dot(&[report]));
 }
 
@@ -486,4 +483,148 @@ fn test_dot_escapes_special_chars() {
         )],
     );
     insta::assert_snapshot!(graph_dot(&[report]));
+}
+
+// ── Partial lineage and incomplete exploration ────────────────────────────
+
+fn behind_star_reason() -> UnresolvedReason {
+    UnresolvedReason::BehindStar {
+        relation: crate::graph::column_lineage::RelationRef::parse("raw.fees").unwrap(),
+    }
+}
+
+fn partial_report() -> ModelColumnLineage {
+    ModelColumnLineage {
+        model: "partial_model".to_string(),
+        traced_columns: 0,
+        total_columns: 1,
+        columns: vec![ColumnLineageEntry {
+            column: "total".to_string(),
+            transformation: TransformationType::Expression,
+            lineage: ValueLineage::new(
+                vec![ColumnSource {
+                    table: "source_model".to_string(),
+                    column: "x".to_string(),
+                    model_path: vec![],
+                }],
+                vec![UnresolvedContribution {
+                    reason: behind_star_reason(),
+                    origin: ModelOutputRef {
+                        unique_id: "model.proj.partial_model".to_string(),
+                        model: "partial_model".to_string(),
+                        column: "total".to_string(),
+                    },
+                    model_path: vec![],
+                }],
+            ),
+        }],
+        errors: vec![],
+    }
+}
+
+#[test]
+fn test_plain_partial_lineage_shows_known_sources_and_unresolved_part() {
+    let output = graph_plain(&[partial_report()]);
+    assert!(
+        output.contains("→  source_model.x (expression)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("unresolved: may come from an unexpanded star of raw.fees"),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_plain_partial_without_known_sources_is_not_called_empty() {
+    let mut report = partial_report();
+    report.columns[0].lineage =
+        ValueLineage::new(vec![], report.columns[0].lineage.unresolved().to_vec());
+    let output = graph_plain(&[report]);
+    assert!(output.contains("(no known sources)"), "{output}");
+    assert!(!output.contains("(no sources)"), "{output}");
+    assert!(output.contains("unresolved:"), "{output}");
+}
+
+#[test]
+fn test_mermaid_and_dot_mark_partial_columns() {
+    let mermaid = graph_mermaid(&[partial_report()]);
+    assert!(mermaid.contains("total (partial)"), "{mermaid}");
+    let dot = graph_dot(&[partial_report()]);
+    assert!(dot.contains("total (partial)"), "{dot}");
+}
+
+fn incomplete_report(confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
+    let mut report = impact_report("source_model", "x", confirmed);
+    report.exploration = vec![KindExploration {
+        kind: DependencyKind::Value,
+        status: ExplorationStatus::Incomplete {
+            gaps: vec![
+                TraceGap::UnresolvedLineage {
+                    at: ModelOutputRef {
+                        unique_id: "model.proj.partial_model".to_string(),
+                        model: "partial_model".to_string(),
+                        column: "total".to_string(),
+                    },
+                    reasons: vec![behind_star_reason()],
+                },
+                TraceGap::NotCollected {
+                    kind: DependencyKind::Row,
+                },
+            ],
+        },
+    }];
+    report
+}
+
+#[test]
+fn test_impact_plain_never_reports_no_impact_for_incomplete_exploration() {
+    let output = impact_plain(&[incomplete_report(vec![])]);
+    assert!(
+        output.contains("no confirmed impact; exploration incomplete"),
+        "{output}"
+    );
+    assert!(!output.contains("no impact)"), "{output}");
+    assert!(
+        output.contains("unresolved lineage at partial_model.total"),
+        "{output}"
+    );
+    assert!(
+        output.contains("row dependencies are not collected"),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_impact_plain_lists_confirmed_impacts_next_to_the_gaps() {
+    let confirmed = vec![impacted(
+        "model.partial_model",
+        ("source_model", "x"),
+        vec![("partial_model", "total", TransformationType::Expression)],
+    )];
+    let output = impact_plain(&[incomplete_report(confirmed)]);
+    assert!(
+        output.contains("1 impacted column; exploration incomplete"),
+        "{output}"
+    );
+    assert!(
+        output.contains("value exploration incomplete (2 gaps):"),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_impact_plain_says_no_impact_only_when_complete() {
+    let output = impact_plain(&[impact_report("leaf", "x", vec![])]);
+    assert!(output.contains("leaf.x (no impact)"), "{output}");
+    assert!(!output.contains("exploration incomplete"), "{output}");
+}
+
+#[test]
+fn test_impact_mermaid_and_dot_mark_gap_nodes() {
+    let report = incomplete_report(vec![]);
+    let mermaid = impact_mermaid(std::slice::from_ref(&report));
+    assert!(mermaid.contains("total (partial)"), "{mermaid}");
+    let dot = impact_dot(&[report]);
+    assert!(dot.contains("total (partial)"), "{dot}");
 }

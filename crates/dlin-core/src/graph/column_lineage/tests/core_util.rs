@@ -109,17 +109,18 @@ fn test_count_star_has_no_sources() {
         .find(|entry| entry.column == "order_count")
         .expect("COUNT(*) output should be traced");
     assert!(
-        order_count.sources.is_empty(),
+        order_count.lineage.known().is_empty(),
         "sources: {:?}",
-        order_count.sources
+        order_count.lineage.known()
     );
     assert!(
         order_count
-            .sources
+            .lineage
+            .known()
             .iter()
             .all(|source| !source.table.is_empty()),
         "COUNT(*) must not publish an empty-table source: {:?}",
-        order_count.sources
+        order_count.lineage.known()
     );
 }
 
@@ -173,7 +174,7 @@ fn test_unattributable_leaves_never_publish_empty_tables() {
             result
                 .columns
                 .iter()
-                .flat_map(|entry| &entry.sources)
+                .flat_map(|entry| entry.lineage.known())
                 .all(|source| !source.table.is_empty()),
             "unattributable leaf published an empty-table source for {sql}: {:?}",
             result.columns
@@ -193,7 +194,7 @@ fn test_source_table_has_empty_model_path() {
     );
 
     for entry in &result.columns {
-        for source in &entry.sources {
+        for source in entry.lineage.known() {
             assert!(
                 source.model_path.is_empty(),
                 "source {}.{} should have empty model_path (no cross-model hops), got: {:?}",
@@ -418,8 +419,8 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
         .find(|c| c.column == "week_start")
         .expect("week_start should be present");
     assert!(
-        week_start.sources.is_empty(),
+        week_start.lineage.known().is_empty(),
         "source-free UNNEST output should have no sources: {:?}",
-        week_start.sources
+        week_start.lineage.known()
     );
 }

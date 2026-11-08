@@ -791,15 +791,23 @@ fn find_nodes_resolves_semantic_layer_full_unique_ids() {
 }
 
 #[test]
-fn column_error_name_parses_structured_and_legacy_prefixes() {
+fn column_error_name_uses_structured_identity_only() {
     let error = ColumnLineageError {
         kind: ColumnLineageErrorKind::ColumnNotFound,
-        column: None,
+        column: Some("order_id".to_string()),
         what: "column 'order_id': not found in model output".to_string(),
         why: None,
         hint: None,
     };
     assert_eq!(error.column_name(), Some("order_id"));
+    assert_eq!(
+        ColumnLineageError {
+            column: None,
+            ..error.clone()
+        }
+        .column_name(),
+        None
+    );
     assert_eq!(
         ColumnLineageError {
             kind: ColumnLineageErrorKind::ParseFailure,

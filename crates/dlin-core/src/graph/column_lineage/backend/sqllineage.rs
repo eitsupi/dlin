@@ -5,6 +5,10 @@ use sqllineage::{Analyzer, Dialect, Lineage, OutputName, Transform, Unresolved, 
 use super::catalog::CatalogSnapshot;
 use super::catalog_provider::CatalogAdapter;
 use super::dialect::DlinDialect;
+use crate::graph::column_lineage::types::{
+    SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind, SetOperator,
+    SetQuantifier, UnresolvedCandidate, UnresolvedReason, UnresolvedSource,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutputFailureKind {
@@ -339,6 +343,102 @@ fn output_column_name(column: &sqllineage::OutputColumn) -> &str {
     match &column.name {
         OutputName::Explicit(name) | OutputName::Inferred(name) => &name.value,
         OutputName::Anonymous => ANONYMOUS_COLUMN,
+    }
+}
+
+/// Convert an engine unresolved contribution into the core-owned reason,
+/// keeping its structured data. Relations are spelled the same way as the
+/// known sources of the same analysis.
+pub(crate) fn unresolved_reason(
+    unresolved: &Unresolved,
+    catalog: Option<&CatalogSnapshot>,
+    dialect: DlinDialect,
+) -> UnresolvedReason {
+    let relation =
+        |relation: &sqllineage::Relation| super::source_relation(relation, catalog, dialect);
+    let source = |source: &sqllineage::SourceColumn| UnresolvedSource {
+        relation: relation(&source.relation),
+        column: source.column.value.clone(),
+    };
+    match unresolved {
+        Unresolved::AlignmentUnknown {
+            operation,
+            possible_sources,
+            unknown_operands,
+        } => UnresolvedReason::AlignmentUnknown {
+            operation: set_operation_kind(operation),
+            possible_sources: possible_sources.iter().map(source).collect(),
+            unknown_operands: unknown_operands
+                .iter()
+                .map(|operand| match operand {
+                    sqllineage::SetOperand::Left => SetOperand::Left,
+                    sqllineage::SetOperand::Right => SetOperand::Right,
+                })
+                .collect(),
+        },
+        Unresolved::SchemaDependent { what, relations } => UnresolvedReason::SchemaDependent {
+            what: match what {
+                sqllineage::SchemaDependencyKind::NaturalJoinColumns => {
+                    SchemaDependencyKind::NaturalJoinColumns
+                }
+            },
+            relations: relations.iter().map(relation).collect(),
+        },
+        Unresolved::BehindStar { relation: star } => UnresolvedReason::BehindStar {
+            relation: relation(star),
+        },
+        Unresolved::NamedBehindStar {
+            relation: star,
+            column,
+        } => UnresolvedReason::NamedBehindStar {
+            relation: relation(star),
+            column: column.value.clone(),
+        },
+        Unresolved::Ambiguous { column, candidates } => UnresolvedReason::Ambiguous {
+            column: column.value.clone(),
+            candidates: candidates
+                .iter()
+                .map(|candidate| match candidate {
+                    sqllineage::Candidate::Relation(found) => UnresolvedCandidate::Relation {
+                        relation: relation(found),
+                    },
+                    sqllineage::Candidate::Cte(name) => UnresolvedCandidate::Cte {
+                        name: name.value.clone(),
+                    },
+                    sqllineage::Candidate::Derived(name) => UnresolvedCandidate::Derived {
+                        name: name.as_ref().map(|name| name.value.clone()),
+                    },
+                })
+                .collect(),
+        },
+        Unresolved::Unbound { column } => UnresolvedReason::Unbound {
+            column: column.value.clone(),
+        },
+        Unresolved::Recursive => UnresolvedReason::Recursive,
+        Unresolved::RowValue { alias } => UnresolvedReason::RowValue {
+            alias: alias.value.clone(),
+        },
+        Unresolved::Unsupported { what } => UnresolvedReason::Unsupported {
+            what: (*what).to_string(),
+        },
+    }
+}
+
+fn set_operation_kind(kind: &sqllineage::SetOperationKind) -> SetOperationKind {
+    SetOperationKind {
+        operator: match kind.operator {
+            sqllineage::SetOperator::Union => SetOperator::Union,
+            sqllineage::SetOperator::Intersect => SetOperator::Intersect,
+            sqllineage::SetOperator::Except => SetOperator::Except,
+        },
+        quantifier: match kind.quantifier {
+            sqllineage::SetQuantifier::All => SetQuantifier::All,
+            sqllineage::SetQuantifier::Distinct => SetQuantifier::Distinct,
+        },
+        correspondence: match kind.correspondence {
+            sqllineage::SetCorrespondence::Positional => SetCorrespondence::Positional,
+            sqllineage::SetCorrespondence::ByName => SetCorrespondence::ByName,
+        },
     }
 }
 

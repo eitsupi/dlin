@@ -131,14 +131,14 @@ fn test_cte_alias_resolution() {
         .find(|c| c.column == "item_id")
         .unwrap();
     assert!(
-        item_id.sources.iter().all(|s| s.table != "base"),
+        item_id.lineage.known().iter().all(|s| s.table != "base"),
         "item_id should not reference alias 'base', got: {:?}",
-        item_id.sources
+        item_id.lineage.known()
     );
     assert!(
-        item_id.sources.iter().any(|s| s.column == "id"),
+        item_id.lineage.known().iter().any(|s| s.column == "id"),
         "item_id should trace to raw items.id, got: {:?}",
-        item_id.sources
+        item_id.lineage.known()
     );
 }
 
@@ -350,11 +350,12 @@ fn test_select_star_chain_with_join() {
     // area should trace through to raw users source
     let area = result.columns.iter().find(|c| c.column == "area").unwrap();
     assert!(
-        area.sources
+        area.lineage
+            .known()
             .iter()
             .any(|s| s.column == "area" && s.table.contains("users")),
         "area should trace to raw users.area, got: {:?}",
-        area.sources
+        area.lineage.known()
     );
 
     // region_name should trace through to raw regions source
@@ -365,11 +366,12 @@ fn test_select_star_chain_with_join() {
         .unwrap();
     assert!(
         region
-            .sources
+            .lineage
+            .known()
             .iter()
             .any(|s| s.column == "region_name" && s.table.contains("regions")),
         "region_name should trace to raw regions.region_name, got: {:?}",
-        region.sources
+        region.lineage.known()
     );
 }
 
@@ -579,11 +581,12 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     // area should trace through CTE alias "u" → import_users → stg_users → raw users
     let area = result.columns.iter().find(|c| c.column == "area").unwrap();
     assert!(
-        area.sources
+        area.lineage
+            .known()
             .iter()
             .any(|s| s.column == "area" && s.table.contains("users")),
         "area should trace to raw users.area, got: {:?}",
-        area.sources
+        area.lineage.known()
     );
 
     // region_name should trace through import_regions → stg_regions → raw regions
@@ -594,11 +597,12 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         .unwrap();
     assert!(
         region
-            .sources
+            .lineage
+            .known()
             .iter()
             .any(|s| s.column == "region_name" && s.table.contains("regions")),
         "region_name should trace to raw regions.region_name, got: {:?}",
-        region.sources
+        region.lineage.known()
     );
 }
 

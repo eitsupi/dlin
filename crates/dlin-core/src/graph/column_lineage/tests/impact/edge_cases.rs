@@ -14,21 +14,21 @@ fn test_column_impact_excludes_off_path_errors() {
     // relevant_model.col_x must be on the impact path
     assert!(
         result
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|ic| ic.model == "relevant_model" && ic.column == "col_x"),
+            .any(|ic| ic.target.model == "relevant_model" && ic.target.column == "col_x"),
         "relevant_model.col_x should be impacted, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 
     // sibling_model is not on the path for col_x
     assert!(
         !result
-            .impacted_columns
+            .confirmed
             .iter()
-            .any(|ic| ic.model == "sibling_model"),
+            .any(|ic| ic.target.model == "sibling_model"),
         "sibling_model should not be impacted, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 
     // sibling_fail error (from off-path sibling_model) must not appear

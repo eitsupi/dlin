@@ -93,7 +93,7 @@ def dlin_upstream_valid(stdout: Path, workload: dict) -> str:
     expected_source = source_name(query["expected_terminal_source_ids"][0])
     actual = {
         (str(item.get("table", "")).split(".")[-1], item.get("column"))
-        for item in column["sources"]
+        for item in column["lineage"]["known"]
     }
     assert actual == {(expected_source, query["column"])}, "dlin source mismatch"
     return "dlin upstream terminal source found"
@@ -110,7 +110,7 @@ def dlin_whole_valid(stdout: Path, workload: dict) -> str:
     assert actual_columns == expected_columns, "dlin whole-model columns mismatch"
     expected_source = source_name(query["expected_terminal_source_ids"][0])
     for item in entry["columns"]:
-        sources = item.get("sources", [])
+        sources = item["lineage"]["known"]
         assert len(sources) == 1 and expected_source in str(sources[0].get("table", "")) and sources[0].get("column") == item["column"], "dlin whole-model source mismatch"
     return "dlin whole-model columns and terminal sources found"
 
@@ -126,8 +126,8 @@ def dlin_downstream_valid(stdout: Path, workload: dict) -> str:
         and item.get("column") == query["column"]
     )
     actual = {
-        (item.get("unique_id"), item.get("column"))
-        for item in entry.get("impacted_columns", [])
+        (item["target"]["unique_id"], item["target"]["column"])
+        for item in entry["confirmed"]
     }
     expected = {(target, query["column"]) for target in query["expected_target_ids"]}
     actual.discard((query["model"], query["column"]))

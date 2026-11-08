@@ -13,18 +13,24 @@ mod types;
 
 use backend::sqllineage::{
     OutputFailureKind, analyze_parsed, discovered_output_names, lineage_failure, parse_sql,
-    resolve_statement_output, single_lineage_statement,
+    resolve_statement_output, single_lineage_statement, unresolved_reason,
 };
 pub use backend::{
     CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
     debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
-pub use impact::{ColumnImpactReport, ImpactedColumn};
+pub use impact::{
+    ColumnImpactReport, ConfirmedImpact, DependencyKind, DependencyRef, ExplorationStatus,
+    ImpactEdge, ImpactScope, KindExploration, TraceGap,
+};
+pub use relation::RelationRef;
 use schema::{SchemaContext, SemanticDigestCache};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
-    ModelColumnLineage, TransformationType,
+    ModelColumnLineage, ModelOutputRef, SchemaDependencyKind, SetCorrespondence, SetOperand,
+    SetOperationKind, SetOperator, SetQuantifier, TransformationType, UnresolvedCandidate,
+    UnresolvedContribution, UnresolvedReason, UnresolvedSource, ValueLineage,
 };
 use types::{
     InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage,
@@ -146,8 +152,9 @@ impl<'a> ColumnLineageAnalysis<'a> {
         &mut self,
         model_name: &str,
         column_name: &str,
+        scope: ImpactScope,
     ) -> ColumnImpactReport {
-        impact::compute_column_impact(self, model_name, column_name)
+        impact::compute_column_impact(self, model_name, column_name, scope)
     }
 
     pub(super) fn compute_column_lineage_internal(
@@ -187,8 +194,30 @@ fn compute_column_impact(
     dialect: DlinDialect,
     cache: &mut ColumnLineageCache,
 ) -> ColumnImpactReport {
-    ColumnLineageAnalysis::new(manifest, dialect, cache)
-        .compute_column_impact(model_name, column_name)
+    compute_column_impact_with_scope(
+        manifest,
+        model_name,
+        column_name,
+        ImpactScope::ValueOnly,
+        dialect,
+        cache,
+    )
+}
+
+#[cfg(test)]
+fn compute_column_impact_with_scope(
+    manifest: &Manifest,
+    model_name: &str,
+    column_name: &str,
+    scope: ImpactScope,
+    dialect: DlinDialect,
+    cache: &mut ColumnLineageCache,
+) -> ColumnImpactReport {
+    ColumnLineageAnalysis::new(manifest, dialect, cache).compute_column_impact(
+        model_name,
+        column_name,
+        scope,
+    )
 }
 
 pub(super) fn compute_column_lineage_internal(
@@ -303,26 +332,16 @@ pub(super) fn compute_column_lineage_internal(
                         failure.message,
                         has_star_columns,
                     ));
-                    continue;
                 }
-                let sqllineage::Lineage::Complete(sources) = &output.lineage else {
-                    unreachable!("lineage failure was handled above")
+                let origin = ModelOutputRef {
+                    unique_id: node.unique_id.clone(),
+                    model: display_name.to_string(),
+                    column: col_name.clone(),
                 };
                 columns.push(InternalColumnLineageEntry {
                     column: col_name.clone(),
                     transformation: backend::sqllineage::transformation(output.transform),
-                    sources: sources
-                        .iter()
-                        .map(|source| InternalColumnSource {
-                            relation: backend::source_relation(
-                                &source.relation,
-                                catalog.as_ref(),
-                                dialect,
-                            ),
-                            column: source.column.value.clone(),
-                            model_path: vec![],
-                        })
-                        .collect(),
+                    lineage: value_lineage(&output.lineage, &origin, catalog.as_ref(), dialect),
                 });
             }
             Err(failure) => errors.push(column_resolution_error_with_message(
@@ -336,7 +355,10 @@ pub(super) fn compute_column_lineage_internal(
 
     let result = InternalModelColumnLineage {
         model: display_name.to_string(),
-        traced_columns: columns.len(),
+        traced_columns: columns
+            .iter()
+            .filter(|entry| entry.lineage.is_complete())
+            .count(),
         total_columns: total,
         columns,
         errors,
@@ -351,6 +373,45 @@ pub(super) fn compute_column_lineage_internal(
         .lineage_results
         .insert(cache_key.to_string(), result.clone());
     result
+}
+
+/// Convert an engine lineage into the typed value lineage of an output at
+/// `origin`. Unresolved contributions are ordered and deduplicated.
+pub(super) fn value_lineage(
+    lineage: &sqllineage::Lineage,
+    origin: &ModelOutputRef,
+    catalog: Option<&CatalogSnapshot>,
+    dialect: DlinDialect,
+) -> ValueLineage<InternalColumnSource> {
+    let known = |sources: &[sqllineage::SourceColumn]| {
+        sources
+            .iter()
+            .map(|source| InternalColumnSource {
+                relation: backend::source_relation(&source.relation, catalog, dialect),
+                column: source.column.value.clone(),
+                model_path: vec![],
+            })
+            .collect()
+    };
+    match lineage {
+        sqllineage::Lineage::Complete(sources) => ValueLineage::complete(known(sources)),
+        sqllineage::Lineage::Partial {
+            known: sources,
+            unresolved,
+        } => {
+            let mut unresolved: Vec<UnresolvedContribution> = unresolved
+                .iter()
+                .map(|item| UnresolvedContribution {
+                    reason: unresolved_reason(item, catalog, dialect),
+                    origin: origin.clone(),
+                    model_path: vec![],
+                })
+                .collect();
+            unresolved.sort();
+            unresolved.dedup();
+            ValueLineage::new(known(sources), unresolved)
+        }
+    }
 }
 
 pub(super) fn find_model_by_name<'a>(

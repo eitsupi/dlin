@@ -321,9 +321,23 @@ fn assert_exact_column_outcomes(
     expected_columns: &[&str],
     expected_errors: &[&str],
 ) {
+    // Columns with a partial value lineage are listed but not traced; each of
+    // them must be explained by a column-scoped diagnostic.
+    for partial in result.columns.iter().filter(|c| c.lineage.is_partial()) {
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.column_name() == Some(partial.column.as_str())),
+            "partial column '{}' has no diagnostic: {:?}",
+            partial.column,
+            result.errors
+        );
+    }
     let mut actual_columns: Vec<_> = result
         .columns
         .iter()
+        .filter(|column| column.lineage.is_complete())
         .map(|column| column.column.as_str())
         .collect();
     actual_columns.sort_unstable();
@@ -780,7 +794,8 @@ fn assert_sources_for(result: &ModelColumnLineage, column: &str, expected: &[(&s
         .find(|entry| entry.column == column)
         .unwrap_or_else(|| panic!("missing traced column {column}: {:?}", result.errors));
     let mut actual: Vec<_> = entry
-        .sources
+        .lineage
+        .known()
         .iter()
         .map(|source| (source.table.as_str(), source.column.as_str()))
         .collect();
@@ -869,7 +884,7 @@ fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
     );
     assert_exact_column_outcomes(&result, &[], &["total"]);
     assert!(result.columns.iter().all(|entry| {
-        entry.sources.iter().all(|source| {
+        entry.lineage.known().iter().all(|source| {
             source.table != "real_x"
                 && source.table != "known_table"
                 && source.table != "star_source"
