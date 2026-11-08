@@ -127,6 +127,12 @@ impl<'a, 'c> EvalContext<'a, 'c> {
         false
     }
 
+    /// Count a cut that was found without refusing an entry: a result that
+    /// is about to be built on an answer that cannot be used.
+    pub(super) fn record_cut(&mut self) {
+        self.cuts += 1;
+    }
+
     /// A reading of the cut count. An evaluation that started at one reading
     /// and finished at another has seen a cut, and what it computed may only
     /// be returned, not kept.

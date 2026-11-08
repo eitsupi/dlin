@@ -12,7 +12,7 @@ use crate::graph::node::NodeId;
 use crate::graph::scope::{OutputPlan, ScopeId, ScopeTree};
 use crate::resolve::context::EvalKey;
 use crate::resolve::lineage::collect_leaf_origins;
-use crate::resolve::mapping::Cut;
+use crate::resolve::mapping::{Cut, resolve_scope_mappings};
 use crate::resolve::model::{BranchTail, NameDomain, OutputElement};
 use crate::{Dialect, Ident};
 
@@ -45,7 +45,7 @@ fn run(ev: &mut Evaluator<'_, '_, '_>, probe: Probe) -> String {
                 collect_leaf_origins(node, ev.cx, &mut HashSet::new());
             format!("{:?} {has_back} {transform:?}", show(&sources))
         }
-        Probe::Mappings(scope) => match ev.scope_mappings(scope) {
+        Probe::Mappings(scope) => match resolve_scope_mappings(scope, ev.cx) {
             Ok(mappings) => mappings
                 .iter()
                 .map(|mapping| {
@@ -235,18 +235,21 @@ fn mappings_that_are_being_computed_are_a_cut_and_not_an_empty_list() {
         OutputPlan::SetOperation { .. }
     ));
     evaluate(&graph, |ev| {
-        let slot = slot_ids(&ev.scope_model(union))[0];
+        let model = ev.scope_model(union);
+        let publication = model.publication.expect("a scope's model is published");
+        let slot = slot_ids(&model)[0];
         assert!(ev.cx.enter(EvalKey::Mappings(union)));
         // Every way a set operation's mappings are read reports the cut.
-        assert_eq!(ev.scope_mappings(union).err(), Some(Cut));
+        assert_eq!(resolve_scope_mappings(union, ev.cx).err(), Some(Cut));
         let (sources, _) = ev.slot_value(slot);
         assert_eq!(show(&sources), ["?id"]);
         assert_eq!(
-            show(&ev.tail_column(union, &Ident::unquoted("id"))),
+            show(&ev.tail_column(union, publication, &Ident::unquoted("id"))),
             ["?id"]
         );
         let tail = BranchTail {
             scope: union,
+            publication,
             ranges: std::rc::Rc::from([]),
             domain: NameDomain::default(),
             offset: Some(0),
@@ -255,17 +258,6 @@ fn mappings_that_are_being_computed_are_a_cut_and_not_an_empty_list() {
         assert_eq!(mappings.len(), 1);
         assert_eq!(show(&mappings[0].sources), ["*?"]);
         ev.cx.leave(EvalKey::Mappings(union));
-    });
-    // How many mappings the left operand lists cannot be known while its own
-    // mappings are being computed.
-    let OutputPlan::SetOperation { left, .. } = *graph.scopes.output_plan(union) else {
-        unreachable!();
-    };
-    evaluate(&graph, |ev| {
-        assert!(ev.cx.enter(EvalKey::Mappings(left)));
-        assert_eq!(ev.aligned_len(union), None);
-        ev.cx.leave(EvalKey::Mappings(left));
-        assert_eq!(ev.aligned_len(union), Some(1));
     });
 }
 
@@ -365,7 +357,10 @@ fn a_set_operation_segment_is_unknown_columns_while_its_mappings_are_computed() 
 fn a_spent_budget_is_a_cut_and_not_an_empty_answer() {
     let pair = pair();
     evaluate_limited(&pair.graph, 0, |ev| {
-        assert_eq!(ev.scope_mappings(ScopeTree::root()).err(), Some(Cut));
+        assert_eq!(
+            resolve_scope_mappings(ScopeTree::root(), ev.cx).err(),
+            Some(Cut)
+        );
         let id = slot_ids(&ev.scope_model(pair.a))[0];
         let (sources, _) = ev.slot_value(id);
         assert_eq!(show(&sources), ["?x"]);

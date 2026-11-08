@@ -41,7 +41,7 @@ fn a_projection_has_one_mapping_per_element_that_stands_for_columns() {
         );
         evaluate(&graph, |ev| {
             let model = ev.scope_model(scope);
-            let mappings = projection_mappings(scope, ev.cx);
+            let mappings = projection_mappings(scope, &model, ev.cx);
             let mut expected = 0;
             let mut next = mappings.iter();
             for element in &model.elements {
@@ -122,7 +122,8 @@ fn a_recursive_marker_is_in_the_mappings_but_not_in_what_a_reader_sees() {
     let graph = parse(sql, Dialect::Generic);
     let projection = cte(&graph, "d");
     evaluate(&graph, |ev| {
-        let mappings = projection_mappings(projection, ev.cx);
+        let model = ev.scope_model(projection);
+        let mappings = projection_mappings(projection, &model, ev.cx);
         assert_eq!(mappings.len(), 1);
         assert!(matches!(
             mappings[0].sources.as_slice(),

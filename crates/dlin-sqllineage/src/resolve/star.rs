@@ -16,9 +16,10 @@ use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
     Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, RangeRef, UnknownProvider, ValueId,
+    OutputModels, OutputRef, RangeRef, UnknownProvider, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target};
+use slot_eval::cut_segment;
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, VirtualColumnState};
@@ -40,10 +41,10 @@ pub(super) enum Unlisted {
 /// all) or the columns a set operation merges in.
 pub(super) fn projection_mappings(
     scope: ScopeId,
+    model: &OutputModel,
     cx: &mut EvalContext<'_, '_>,
 ) -> Vec<ColumnMapping> {
     let mut evaluator = Evaluator { cx };
-    let model = evaluator.scope_model(scope);
     let mut mappings = Vec::with_capacity(model.elements.len());
     for element in &model.elements {
         match element {
@@ -59,17 +60,28 @@ pub(super) fn projection_mappings(
                     },
                     sources,
                     transform,
+                    slot: Some(OutputRef::Slot(slot.published())),
+                    unpublished_tail: false,
+                    merged_in: false,
                 });
             }
             OutputElement::Unknown(segment) => {
-                mappings.extend(evaluator.segment_mapping(segment.published()));
+                let id = segment.published();
+                mappings.extend(evaluator.segment_mapping(id).map(|mapping| ColumnMapping {
+                    slot: Some(OutputRef::Segment(id)),
+                    unpublished_tail: false,
+                    merged_in: false,
+                    ..mapping
+                }));
             }
             OutputElement::Tail(tail) => {
                 for mut mapping in evaluator.tail_mappings(tail) {
+                    mapping.merged_in = false;
+                    mapping.unpublished_tail = true;
                     mapping.star_position = mapping.star_position.shifted(tail.offset);
-                    mapping.ordinal = mapping
-                        .ordinal
-                        .and_then(|ordinal| tail.offset.map(|offset| offset + ordinal));
+                    mapping.ordinal = mapping.ordinal.and_then(|ordinal| {
+                        tail.offset.and_then(|offset| offset.checked_add(ordinal))
+                    });
                     mappings.push(mapping);
                 }
             }
@@ -184,9 +196,14 @@ impl Evaluator<'_, '_, '_> {
                     },
                     |(sources, _, transform)| (sources, transform),
                 ),
-            ValueId::Tail { scope, column } => {
-                (self.tail_column(*scope, column), TransformKind::Direct)
-            }
+            ValueId::Tail {
+                scope,
+                publication,
+                column,
+            } => (
+                self.tail_column(*scope, *publication, column),
+                TransformKind::Direct,
+            ),
             ValueId::VirtualColumn { source, index } => {
                 (self.virtual_column(*source, *index), TransformKind::Direct)
             }
@@ -431,8 +448,13 @@ impl Evaluator<'_, '_, '_> {
     ) -> Option<ColumnMapping> {
         let mut mapping = match provider {
             UnknownProvider::Relation(table) => Some(wildcard_mapping(None, (**table).clone())),
-            UnknownProvider::Segment { id, .. }
-            | UnknownProvider::SetOperation { left: id, .. } => self.segment_mapping(*id),
+            UnknownProvider::Segment { id, .. } => self.segment_mapping(*id),
+            UnknownProvider::SetOperation { op, left } => {
+                match self.merged_counterpart(*op, OutputRef::Segment(*left)) {
+                    Some(OutputRef::Segment(merged)) => self.segment_mapping(merged),
+                    _ => Some(cut_segment()),
+                }
+            }
             UnknownProvider::Opaque(
                 reason @ (OpaqueReason::FieldPath(star)
                 | OpaqueReason::Expression(star)
@@ -497,6 +519,9 @@ impl Evaluator<'_, '_, '_> {
             target: star_name(),
             sources,
             transform: TransformKind::Direct,
+            slot: None,
+            unpublished_tail: false,
+            merged_in: false,
         }
     }
 
@@ -540,8 +565,20 @@ impl Evaluator<'_, '_, '_> {
                 table: (**table).clone(),
                 column: column.clone(),
             }],
-            UnknownProvider::Segment { id, .. }
-            | UnknownProvider::SetOperation { left: id, .. } => self.segment_sources(*id, column),
+            UnknownProvider::Segment { id, .. } => self.segment_sources(*id, column),
+            UnknownProvider::SetOperation { op, left } => {
+                match self.merged_counterpart(*op, crate::resolve::OutputRef::Segment(*left)) {
+                    Some(crate::resolve::OutputRef::Segment(merged)) => self
+                        .segment_mapping(merged)
+                        .map_or_else(Vec::new, |mapping| {
+                            named_wildcard_sources(mapping.sources, column)
+                        }),
+                    _ => vec![ColumnOrigin::Ambiguous {
+                        column: column.clone(),
+                        candidates: Vec::new(),
+                    }],
+                }
+            }
             UnknownProvider::Opaque(_) => Vec::new(),
         }
     }
@@ -603,4 +640,25 @@ impl Evaluator<'_, '_, '_> {
             }
         }
     }
+}
+
+/// Give the wildcard sources in a merged segment the name the reader asked
+/// for, keeping unresolved origins and recursive markers from the merge.
+fn named_wildcard_sources(sources: Vec<ColumnOrigin>, column: &Ident) -> Vec<ColumnOrigin> {
+    sources
+        .into_iter()
+        .map(|source| match source {
+            ColumnOrigin::Wildcard { table } => ColumnOrigin::NamedWildcard {
+                table,
+                column: column.clone(),
+            },
+            ColumnOrigin::Recursive { base_sources } => ColumnOrigin::Recursive {
+                base_sources: named_wildcard_sources(base_sources, column),
+            },
+            ColumnOrigin::UnknownStar => ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
+                column: column.clone(),
+            }),
+            source => source,
+        })
+        .collect()
 }

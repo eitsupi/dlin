@@ -13,14 +13,16 @@
 use std::cell::RefCell;
 
 use super::{Evaluator, Unlisted};
-use crate::Ident;
 use crate::graph::scope::{OutputPlan, ScopeId};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
+use crate::{Ident, Unresolved};
 
 use super::super::context::{EvalKey, SlotValue};
 use super::super::lineage::flatten_mapping_sources;
 use super::super::mapping::Cut;
-use super::super::model::{BranchTail, OutputElement, OutputModel, SegmentId, SlotId};
+use super::super::model::{
+    BranchTail, OutputElement, OutputModel, OutputRef, SegmentId, SlotId, UnknownProvider,
+};
 use super::super::target::same_column_name;
 
 #[cfg(test)]
@@ -51,7 +53,7 @@ impl Evaluator<'_, '_, '_> {
         #[cfg(test)]
         EVALUATED_SLOTS.with(|slots| slots.borrow_mut().push(id));
         let (sources, transform) = if self.is_set_operation(def.owner) {
-            self.merged_slot(def.owner, def.index, &def.name)
+            self.merged_slot(def.owner, id, &def.name)
         } else {
             self.value(&def.value)
         };
@@ -89,42 +91,87 @@ impl Evaluator<'_, '_, '_> {
         op: ScopeId,
         left: SlotId,
     ) -> (Vec<ColumnOrigin>, TransformKind) {
-        let owner = self.cx.mapping_cache.models.arena.slot(left).owner;
-        debug_assert!(
-            matches!(
-                self.cx.graph.scopes.output_plan(op),
-                OutputPlan::SetOperation { left: operand, .. } if *operand == owner
-            ),
-            "a merged column stands for a column of the left operand of its operation"
-        );
-        self.slot_value(left)
+        if let Some(OutputRef::Slot(merged)) = self.merged_counterpart(op, OutputRef::Slot(left)) {
+            self.slot_value(merged)
+        } else {
+            let name = self.cx.mapping_cache.models.arena.slot(left).name.clone();
+            (cut_sources(&name), TransformKind::Direct)
+        }
     }
 
-    /// The column a set operation publishes at element `index` of its model.
-    /// The operation can merge more or fewer mappings than its left operand
-    /// lists columns, so then its mappings are matched by name instead.
+    /// The output of the set operation `op` that stands for `from`, an output
+    /// of its left operand, from the correspondence `op` recorded when it
+    /// published. `None` when `op` forwarded another publication of its left
+    /// operand, which is a cut.
+    pub(super) fn merged_counterpart(&mut self, op: ScopeId, from: OutputRef) -> Option<OutputRef> {
+        let model = self.scope_model(op);
+        let counterpart = model
+            .forwarded
+            .iter()
+            .find(|pair| pair.from == from)
+            .map(|pair| pair.to);
+        if counterpart.is_none() {
+            let arena = &self.cx.mapping_cache.models.arena;
+            let publication = arena.publication(from);
+            debug_assert!(
+                model
+                    .forwarded
+                    .iter()
+                    .all(|pair| arena.publication(pair.from) != publication),
+                "a set operation publishes an output for each output of its left operand"
+            );
+            self.cx.record_cut();
+        }
+        counterpart
+    }
+
+    /// The column `id` of the set operation `scope`: the mapping the
+    /// operation's merge tagged with it.
     fn merged_slot(
         &mut self,
         scope: ScopeId,
-        index: usize,
+        id: SlotId,
         name: &Ident,
     ) -> (Vec<ColumnOrigin>, TransformKind) {
-        let model = self.scope_model(scope);
-        let Ok(mappings) = self.scope_mappings(scope) else {
+        let output = OutputRef::Slot(id);
+        let Ok(mappings) = self.published_mappings(scope, output) else {
             return (cut_sources(name), TransformKind::Direct);
         };
-        let found = if mappings.len() >= model.listed_len() {
-            mappings.get(index)
-        } else {
-            mappings.iter().find(|mapping| {
-                mapping.output_name.is_some()
-                    && same_column_name(&mapping.target.column, name, self.cx.graph.dialect)
-            })
-        };
-        found.map_or_else(
-            || (cut_sources(name), TransformKind::Direct),
-            |mapping| (mapping.sources.clone(), mapping.transform.clone()),
-        )
+        if let Some(mapping) = mappings.iter().find(|mapping| mapping.slot == Some(output)) {
+            return (mapping.sources.clone(), mapping.transform.clone());
+        }
+        debug_assert!(false, "a set operation's column has no merged mapping");
+        (vec![output_correspondence_lost()], TransformKind::Direct)
+    }
+
+    /// The mappings of `scope` for the publication of its model that
+    /// published `output`.
+    fn published_mappings(
+        &mut self,
+        scope: ScopeId,
+        output: OutputRef,
+    ) -> Result<std::sync::Arc<[ColumnMapping]>, Cut> {
+        let publication = self.cx.mapping_cache.models.arena.publication(output);
+        self.publication_mappings(scope, publication)
+    }
+
+    /// The mappings a set operation's tail is read from. They may contain
+    /// unresolved markers from a cut, which callers filter without caching.
+    fn tail_source(
+        &mut self,
+        scope: ScopeId,
+        publication: u32,
+    ) -> Result<std::sync::Arc<[ColumnMapping]>, Cut> {
+        self.publication_mappings(scope, publication)
+    }
+
+    fn publication_mappings(
+        &mut self,
+        scope: ScopeId,
+        publication: u32,
+    ) -> Result<std::sync::Arc<[ColumnMapping]>, Cut> {
+        let view = self.models().view(publication);
+        super::super::mapping::mappings_of(scope, &view, self.cx)
     }
 
     /// The mapping standing for a published segment, at the position its
@@ -137,7 +184,7 @@ impl Evaluator<'_, '_, '_> {
         let def = self.cx.mapping_cache.models.arena.segment(id);
         let generation = self.cx.cut_generation();
         let mapping = if self.is_set_operation(def.owner) {
-            self.merged_segment(def.owner, def.index)
+            self.merged_segment(def.owner, id)
         } else if self.cx.enter(EvalKey::Segment(id)) {
             let mapping = self.provider_mapping(&def.provider, def.position);
             self.cx.leave(EvalKey::Segment(id));
@@ -151,25 +198,26 @@ impl Evaluator<'_, '_, '_> {
         mapping
     }
 
-    /// The mapping a set operation publishes for its segment at element
-    /// `index`.
-    fn merged_segment(&mut self, scope: ScopeId, index: usize) -> Option<ColumnMapping> {
-        let model = self.scope_model(scope);
-        let Ok(mappings) = self.scope_mappings(scope) else {
+    /// The mapping a set operation publishes for its segment `id`: the one
+    /// its merge tagged with it. A segment that stands for no columns has none.
+    fn merged_segment(&mut self, scope: ScopeId, id: SegmentId) -> Option<ColumnMapping> {
+        let output = OutputRef::Segment(id);
+        let Ok(mappings) = self.published_mappings(scope, output) else {
             return Some(cut_segment());
         };
-        if mappings.len() >= model.listed_len() {
-            return mappings.get(index).cloned();
+        if let Some(mapping) = mappings.iter().find(|mapping| mapping.slot == Some(output)) {
+            return Some(mapping.clone());
         }
-        let ordinal = model.elements[..index]
-            .iter()
-            .filter(|element| matches!(element, OutputElement::Unknown(_)))
-            .count();
-        mappings
-            .iter()
-            .filter(|mapping| mapping.output_name.is_none())
-            .nth(ordinal)
-            .cloned()
+        let def = self.cx.mapping_cache.models.arena.segment(id);
+        let stands_for_columns = match def.provider {
+            UnknownProvider::SetOperation { left, .. } => self.segment_mapping(left).is_some(),
+            _ => false,
+        };
+        if !stands_for_columns {
+            return None;
+        }
+        debug_assert!(false, "a set operation's segment has no merged mapping");
+        Some(cut_segment())
     }
 
     /// What a published segment contributes to the column `column`: the
@@ -184,9 +232,12 @@ impl Evaluator<'_, '_, '_> {
             return cut_sources(column);
         }
         let mut sources = self.provider_sources(&def.provider, column);
-        // The right operand of a set operation contributes to every
-        // position, though the model lists only the left one.
-        if let OutputPlan::SetOperation { right, .. } = self.cx.graph.scopes.output_plan(def.owner)
+        // A segment a set operation publishes of its own, rather than one it
+        // forwards from its left operand, is still read next to the right
+        // operand's columns.
+        if !matches!(def.provider, UnknownProvider::SetOperation { .. })
+            && let OutputPlan::SetOperation { right, .. } =
+                self.cx.graph.scopes.output_plan(def.owner)
             && let Unlisted::Sources(more) = self.unlisted(*right, column)
         {
             sources.extend(more);
@@ -229,16 +280,21 @@ impl Evaluator<'_, '_, '_> {
     /// lists, minus the names the star's modifiers rule out.
     pub(super) fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
         let dialect = self.cx.graph.dialect;
-        let (Some(aligned), Ok(mappings)) = (
-            self.aligned_len(tail.scope),
-            self.scope_mappings(tail.scope),
-        ) else {
+        let generation = self.cx.cut_generation();
+        let mappings = match self.tail_source(tail.scope, tail.publication) {
+            Ok(mappings) => mappings,
             // What the right operand adds cannot be listed.
-            return vec![cut_segment()];
+            Err(Cut) => return vec![cut_segment()],
         };
         mappings
             .iter()
-            .skip(aligned)
+            .filter(|mapping| mapping.merged_in)
+            // Under a cut, a named right-only column cannot be published
+            // against the unknown left shape. Keep only the explicit open
+            // segment markers from that tail.
+            .filter(|mapping| {
+                self.cx.cut_generation() == generation || mapping.output_name.is_none()
+            })
             .filter(|mapping| {
                 mapping.output_name.is_none() || tail.domain.admits(&mapping.target.column, dialect)
             })
@@ -250,14 +306,23 @@ impl Evaluator<'_, '_, '_> {
     /// the origins of mappings with that name, and a named wildcard for each
     /// relation it hides behind a star. A tail that has neither leaves the
     /// column unresolved.
-    pub(super) fn tail_column(&mut self, scope: ScopeId, column: &Ident) -> Vec<ColumnOrigin> {
+    pub(super) fn tail_column(
+        &mut self,
+        scope: ScopeId,
+        publication: u32,
+        column: &Ident,
+    ) -> Vec<ColumnOrigin> {
         let dialect = self.cx.graph.dialect;
-        let (Some(aligned), Ok(mappings)) = (self.aligned_len(scope), self.scope_mappings(scope))
-        else {
-            return cut_sources(column);
+        let generation = self.cx.cut_generation();
+        let mappings = match self.tail_source(scope, publication) {
+            Ok(mappings) => mappings,
+            Err(Cut) => return cut_sources(column),
         };
         let mut sources = Vec::new();
-        for mapping in mappings.iter().skip(aligned) {
+        for mapping in mappings.iter().filter(|mapping| mapping.merged_in) {
+            if self.cx.cut_generation() != generation && mapping.output_name.is_some() {
+                continue;
+            }
             if mapping.output_name.is_none() {
                 for source in &mapping.sources {
                     if let ColumnOrigin::Wildcard { table } = source {
@@ -276,27 +341,15 @@ impl Evaluator<'_, '_, '_> {
         }
         sources
     }
+}
 
-    /// How many leading mappings of a scope stand for the columns its model
-    /// lists; a set operation appends what its right operand adds after them.
-    /// `None` when the mappings cannot be known.
-    pub(super) fn aligned_len(&mut self, scope: ScopeId) -> Option<usize> {
-        match self.cx.graph.scopes.output_plan(scope) {
-            OutputPlan::Projection => self
-                .scope_mappings(scope)
-                .ok()
-                .map(|mappings| mappings.len()),
-            OutputPlan::Delegate(child) => self.aligned_len(*child),
-            OutputPlan::SetOperation { left, .. } => self.aligned_len(*left),
-        }
-    }
-
-    pub(super) fn scope_mappings(
-        &mut self,
-        scope: ScopeId,
-    ) -> Result<std::sync::Arc<[ColumnMapping]>, Cut> {
-        super::super::mapping::resolve_scope_mappings(scope, self.cx)
-    }
+/// The origin of a column that a set operation should have a merged mapping
+/// for and has none. This is an internal inconsistency and is reported as an
+/// unresolved value of its own.
+fn output_correspondence_lost() -> ColumnOrigin {
+    ColumnOrigin::Unresolved(Unresolved::Unsupported {
+        what: "set operation output correspondence",
+    })
 }
 
 /// The origin of a column whose value cannot be determined because its
@@ -310,7 +363,7 @@ fn cut_sources(column: &Ident) -> Vec<ColumnOrigin> {
 
 /// The mapping of a segment whose evaluation depends on itself: columns the
 /// analysis cannot enumerate.
-fn cut_segment() -> ColumnMapping {
+pub(super) fn cut_segment() -> ColumnMapping {
     ColumnMapping {
         star_position: StarPosition::Inferred,
         output_name: None,
@@ -321,6 +374,9 @@ fn cut_segment() -> ColumnMapping {
         },
         sources: vec![ColumnOrigin::UnknownStar],
         transform: TransformKind::Direct,
+        slot: None,
+        unpublished_tail: false,
+        merged_in: false,
     }
 }
 

@@ -241,7 +241,6 @@ fn set_operation_keeps_the_columns_its_right_operand_adds_as_a_tail() {
     let mut models = OutputModels::new(&graph, None, &mut store);
     let model = models.scope(ScopeTree::root());
     assert_eq!(layout(&model), ["?", "~"]);
-    assert_eq!(model.listed_len(), 1);
     assert_eq!(model.width, Width::Unknown);
 }
 
@@ -328,7 +327,6 @@ fn scope_models_are_built_once_and_forward_child_slots() {
         panic!("expected a forwarded column, got {:?}", slot.value);
     };
     let child = store.arena.slot(child);
-    assert_eq!(child.index, 0);
     assert_eq!(child.name, Ident::unquoted("x"));
 }
 
@@ -575,10 +573,9 @@ fn columns_with_the_same_name_are_published_under_different_ids() {
     // The name finds both columns and each one's id is its own.
     let x_positions = root.slots_named(&Ident::unquoted("x"));
     assert_eq!(x_positions, [0, 1]);
-    for (position, id) in x_positions.iter().zip(&ids) {
+    for id in &ids {
         let def = store.arena.slot(*id);
         assert_eq!(def.owner, ScopeTree::root());
-        assert_eq!(def.index, *position);
         assert_eq!(def.name, Ident::unquoted("x"));
     }
     // Each definition holds the expression of its own column.
@@ -609,9 +606,8 @@ fn anonymous_columns_are_published_under_different_ids_in_every_scope() {
     // Every reader publishes new ids, defined by the column it forwards.
     assert!(all_distinct(&ids.concat()), "{ids:?}");
     for (reader, child) in ids.iter().zip(&ids[1..]) {
-        for (index, (id, forwarded)) in reader.iter().zip(child).enumerate() {
+        for (id, forwarded) in reader.iter().zip(child) {
             let def = store.arena.slot(*id);
-            assert_eq!(def.index, index);
             assert!(
                 matches!(def.value, ValueId::Forward(target) if target == *forwarded),
                 "{:?}",
@@ -637,9 +633,6 @@ fn a_column_after_an_unknown_segment_keeps_its_own_id() {
     let columns = slot_ids(child);
     assert_eq!((segments.len(), columns.len()), (1, 2));
     assert_ne!(columns[0], columns[1]);
-    // The definitions record the element index, which counts the segment.
-    assert_eq!(store.arena.slot(columns[0]).index, 1);
-    assert_eq!(store.arena.slot(columns[1]).index, 2);
     assert!(matches!(
         store.arena.segment(segments[0]).provider,
         UnknownProvider::Relation(_)
@@ -696,6 +689,21 @@ fn the_model_of_a_cut_cycle_publishes_its_segment() {
     let ids = segment_ids(&root);
     assert!(!ids.is_empty());
     assert!(all_distinct(&ids));
+}
+
+#[test]
+fn callers_above_a_cycle_are_not_cached_with_a_model_built_from_the_cut() {
+    let graph =
+        graph("WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT * FROM a");
+    let mut store = ModelStore::default();
+    let first = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    let first_ids = segment_ids(&first);
+    assert!(!first_ids.is_empty());
+    assert!(store.cached(ScopeTree::root()).is_none());
+
+    let second = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    assert!(!Rc::ptr_eq(&first, &second));
+    assert_ne!(segment_ids(&second), first_ids);
 }
 
 /// A reader whose `forwarded` pairs are `pairs`, checked against the model of

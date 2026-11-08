@@ -131,7 +131,7 @@ pub(super) fn apply_options(
         // and the tail it replaces.
         remove_from_segments(&mut elements, &replacement.column, dialect);
         retire_tail_name(&mut elements, &replacement.column, dialect);
-        ranges.extend(tails.into_iter().flat_map(|(_, ranges)| ranges.to_vec()));
+        ranges.extend(tails.into_iter().flat_map(|(_, _, ranges)| ranges.to_vec()));
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             id: None,
@@ -167,10 +167,11 @@ pub(super) fn apply_options(
                 column: old.clone(),
             });
         }
-        for (scope, tail_ranges) in tails {
+        for (scope, publication, tail_ranges) in tails {
             ranges.extend(tail_ranges.iter().cloned());
             values.push(ValueId::Tail {
                 scope,
+                publication,
                 column: old.clone(),
             });
         }
@@ -224,12 +225,12 @@ fn tail_publishers(
     elements: &[OutputElement],
     name: &Ident,
     dialect: Dialect,
-) -> Vec<(ScopeId, Rc<[RangeRef]>)> {
+) -> Vec<(ScopeId, u32, Rc<[RangeRef]>)> {
     elements
         .iter()
         .filter_map(|element| match element {
             OutputElement::Tail(tail) if tail.domain.admits(name, dialect) => {
-                Some((tail.scope, tail.ranges.clone()))
+                Some((tail.scope, tail.publication, tail.ranges.clone()))
             }
             _ => None,
         })

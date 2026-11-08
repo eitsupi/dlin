@@ -22,7 +22,8 @@ pub(super) use build::{ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::{InputLookup, RangeRef};
-pub(super) use slot::{Forwarding, OutputRef, SegmentId, SlotId};
+pub(crate) use slot::OutputRef;
+pub(super) use slot::{Forwarding, SegmentId, SlotId};
 
 use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
@@ -71,7 +72,11 @@ pub(super) enum ValueId {
     },
     /// A column of the right operand of a set operation, found by name among
     /// the mappings the operation merges in beyond its left operand.
-    Tail { scope: ScopeId, column: Ident },
+    Tail {
+        scope: ScopeId,
+        publication: u32,
+        column: Ident,
+    },
     /// A column that is named but sits behind segments the analysis cannot
     /// enumerate.
     Named {
@@ -268,6 +273,9 @@ pub(super) enum OutputElement {
 pub(super) struct BranchTail {
     /// The set operation that merges them in.
     pub scope: ScopeId,
+    /// The publication of the operation's model that lists this tail, which
+    /// is the one the operation's mappings are read for.
+    pub publication: u32,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
     /// How far the projection that published the tail moved the columns it
@@ -307,6 +315,9 @@ pub(super) struct OutputModel {
     /// delegating scope, the merge of a set operation), which output of that
     /// scope each of its own outputs stands for. Empty for every other model.
     pub forwarded: Vec<Forwarding>,
+    /// Which publication of its scope this model is. `None` for the models of
+    /// stars and FROM clauses, which publish nothing.
+    pub publication: Option<u32>,
 }
 
 /// The elements of a model that may carry one name.
@@ -348,6 +359,7 @@ impl OutputModel {
             invalid: Vec::new(),
             reads: Vec::new(),
             forwarded: Vec::new(),
+            publication: None,
         }
     }
 
@@ -396,15 +408,6 @@ impl OutputModel {
             return Err("an output of the forwarded scope has no correspondence");
         }
         Ok(())
-    }
-
-    /// The number of elements that stand for a column or a segment of the
-    /// output, as opposed to merged-in tails.
-    pub(super) fn listed_len(&self) -> usize {
-        self.elements
-            .iter()
-            .filter(|element| !matches!(element, OutputElement::Tail(_)))
-            .count()
     }
 
     pub(super) fn has_unknown_segment(&self) -> bool {

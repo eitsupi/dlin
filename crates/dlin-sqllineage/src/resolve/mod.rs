@@ -5,6 +5,7 @@ mod context;
 mod lineage;
 mod mapping;
 mod model;
+mod setop_legacy;
 mod star;
 mod target;
 mod topo;
@@ -13,6 +14,7 @@ mod width;
 use context::EvalContext;
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
 use model::OutputModels;
+pub(crate) use model::OutputRef;
 use width::{graph_has_unresolved_stars, validate_set_arities};
 
 use crate::catalog::CatalogContext;

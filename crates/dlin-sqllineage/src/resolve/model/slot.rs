@@ -22,15 +22,15 @@ use crate::types::StarPosition;
 
 /// A column published by a scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(in crate::resolve) struct SlotId(u32);
+pub(crate) struct SlotId(u32);
 
 /// A segment of unenumerable columns published by a scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(in crate::resolve) struct SegmentId(u32);
+pub(crate) struct SegmentId(u32);
 
 /// A published column or segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(in crate::resolve) enum OutputRef {
+pub(crate) enum OutputRef {
     Slot(SlotId),
     Segment(SegmentId),
 }
@@ -55,8 +55,8 @@ pub(in crate::resolve) struct SlotDef {
     pub name: Ident,
     /// How the column's value is found.
     pub value: ValueId,
-    /// The column's element index in the owner's model, tails included.
-    pub index: usize,
+    /// Which publication of the owner defined the column.
+    pub publication: u32,
 }
 
 /// The definition of a published segment.
@@ -64,11 +64,11 @@ pub(in crate::resolve) struct SlotDef {
 pub(in crate::resolve) struct SegmentDef {
     /// The scope whose model publishes the segment.
     pub owner: ScopeId,
-    /// The segment's element index in the owner's model, tails included.
-    pub index: usize,
     pub provider: UnknownProvider,
     /// The position the owner's model gives the segment.
     pub position: StarPosition,
+    /// Which publication of the owner defined the segment.
+    pub publication: u32,
 }
 
 /// Every published column and segment of one statement. Append-only.
@@ -105,6 +105,16 @@ impl SlotArena {
     /// The definition of a published segment.
     pub(in crate::resolve) fn segment(&self, id: SegmentId) -> Rc<SegmentDef> {
         self.segments[id.0 as usize].clone()
+    }
+
+    /// The publication of its owner that defined `output`. A scope whose model
+    /// is built more than once publishes each time, and outputs of different
+    /// publications are not the same outputs.
+    pub(in crate::resolve) fn publication(&self, output: OutputRef) -> u32 {
+        match output {
+            OutputRef::Slot(id) => self.slots[id.0 as usize].publication,
+            OutputRef::Segment(id) => self.segments[id.0 as usize].publication,
+        }
     }
 
     /// The scope that published `output`.

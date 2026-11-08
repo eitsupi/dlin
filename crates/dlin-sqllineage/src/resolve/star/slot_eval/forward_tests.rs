@@ -3,7 +3,9 @@
 use super::harness::{cte, evaluate, parse, show, slot_ids};
 use super::take_evaluated_slots;
 use crate::graph::scope::{OutputPlan, ScopeTree};
+use crate::resolve::mapping::{Cut, resolve_scope_mappings};
 use crate::resolve::model::{OutputElement, OutputRef, ValueId};
+use crate::resolve::setop_legacy::retag;
 use crate::{Dialect, Ident};
 
 const DUPLICATES: &str = "WITH c AS (SELECT t.a AS x, t.b AS x FROM t) SELECT * FROM c";
@@ -191,7 +193,115 @@ fn a_set_operation_forwards_its_left_operand_under_its_own_scope() {
         );
         // What the merge stands for is the left column itself; the right
         // operand's contribution is the operation's column.
-        assert_eq!(show(&ev.value(&def.value).0), ["t.a"]);
+        assert_eq!(show(&ev.value(&def.value).0), ["t.a", "u.b"]);
         assert_eq!(show(&ev.slot_value(merged_slot).0), ["t.a", "u.b"]);
+    });
+}
+
+#[test]
+fn retagging_keeps_unique_published_refs_and_marks_only_tails_unpublished() {
+    for sql in [
+        "WITH a AS (SELECT t.a AS x, t.b AS x FROM t UNION ALL SELECT u.a, u.b FROM u), \
+         b AS (SELECT * FROM a) SELECT * FROM b",
+        "WITH s AS (SELECT * FROM t1 UNION ALL SELECT a, b FROM t2), \
+         d AS (SELECT * FROM s) SELECT * FROM d",
+    ] {
+        let graph = parse(sql, Dialect::Generic);
+        let op = cte(&graph, if sql.contains("WITH a AS") { "a" } else { "s" });
+        evaluate(&graph, |ev| {
+            let model = ev.scope_model(op);
+            let mappings = resolve_scope_mappings(op, ev.cx).expect("mappings resolve");
+            let published: Vec<_> = mappings.iter().filter_map(|mapping| mapping.slot).collect();
+            for (index, output) in published.iter().enumerate() {
+                assert!(
+                    published[..index].iter().all(|earlier| earlier != output),
+                    "duplicate published identity: {output:?}"
+                );
+                assert_eq!(ev.cx.mapping_cache.models.arena.owner(*output), op);
+            }
+            for mapping in mappings.iter() {
+                if mapping.slot.is_none() {
+                    assert!(mapping.unpublished_tail);
+                }
+            }
+            for pair in &model.forwarded {
+                if matches!(pair.to, OutputRef::Slot(_)) {
+                    assert_eq!(
+                        mappings
+                            .iter()
+                            .filter(|mapping| mapping.slot == Some(pair.to))
+                            .count(),
+                        1,
+                        "each published column has one mapping"
+                    );
+                }
+            }
+
+            let mut invalid = mappings.to_vec();
+            if let Some(mapping) = invalid.first_mut() {
+                let published = mapping.slot.expect("the scope publishes this mapping");
+                mapping.slot = None;
+                mapping.unpublished_tail = false;
+                assert_eq!(retag(&mut invalid, &model).err(), Some(Cut));
+
+                let mut missing = mappings.to_vec();
+                missing[0].slot = Some(published);
+                assert_eq!(retag(&mut missing, &model).err(), Some(Cut));
+
+                let mut duplicate = vec![mappings[0].clone(), mappings[0].clone()];
+                assert_eq!(retag(&mut duplicate, &model).err(), Some(Cut));
+            }
+
+            let root_model = ev.scope_model(ScopeTree::root());
+            let root_mappings = resolve_scope_mappings(ScopeTree::root(), ev.cx)
+                .expect("delegated root mappings resolve");
+            let root_ids: Vec<_> = root_mappings
+                .iter()
+                .filter_map(|mapping| mapping.slot)
+                .collect();
+            for (index, output) in root_ids.iter().enumerate() {
+                assert!(root_ids[..index].iter().all(|earlier| earlier != output));
+                assert_eq!(
+                    ev.cx.mapping_cache.models.arena.owner(*output),
+                    ScopeTree::root()
+                );
+            }
+            for pair in &root_model.forwarded {
+                if matches!(pair.to, OutputRef::Slot(_)) {
+                    assert_eq!(
+                        root_mappings
+                            .iter()
+                            .filter(|mapping| mapping.slot == Some(pair.to))
+                            .count(),
+                        1
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn set_operation_provider_evaluation_uses_the_merged_segment_on_both_paths() {
+    let graph = parse(
+        "WITH s AS (SELECT * FROM t1 UNION ALL SELECT * FROM t2) SELECT * FROM s",
+        Dialect::Generic,
+    );
+    let op = cte(&graph, "s");
+    evaluate(&graph, |ev| {
+        let model = ev.scope_model(op);
+        let OutputElement::Unknown(segment) = &model.elements[0] else {
+            panic!("the set operation forwards the unknown segment");
+        };
+        let provider = segment.provider.clone();
+        let position = segment.position;
+        let mapping = ev
+            .provider_mapping(&provider, position)
+            .expect("the merged segment has a mapping");
+        assert_eq!(show(&mapping.sources), ["t1.*", "t2.*"]);
+        assert_eq!(
+            show(&ev.provider_sources(&provider, &Ident::unquoted("id"))),
+            ["t1.*:id", "t2.*:id"]
+        );
     });
 }

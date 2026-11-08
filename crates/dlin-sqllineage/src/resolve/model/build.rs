@@ -37,11 +37,25 @@ pub(super) enum CacheKey {
 #[derive(Default)]
 pub(in crate::resolve) struct ModelStore {
     pub(in crate::resolve) arena: SlotArena,
+    /// How many times a scope has published its model.
+    publications: u32,
+    /// Every model a scope published, by publication. A scope whose model is
+    /// built again while a cycle is cut publishes again, and a reader holds
+    /// the outputs of the publication it read.
+    views: HashMap<u32, Rc<OutputModel>>,
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
     pub(super) inputs: HashMap<BindingEnv, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
     /// Models under construction, each flagged when a cycle was cut beneath it.
     pub(super) active: Vec<(CacheKey, bool)>,
+}
+
+#[cfg(test)]
+impl ModelStore {
+    /// The model a scope has cached, when it has one.
+    pub(in crate::resolve) fn cached(&self, scope: ScopeId) -> Option<&Rc<OutputModel>> {
+        self.scopes.get(&scope)
+    }
 }
 
 /// Builds models for a statement into a [`ModelStore`].
@@ -68,16 +82,29 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         self.graph
     }
 
+    /// The model that was published as `publication`.
+    pub(in crate::resolve) fn view(&self, publication: u32) -> Rc<OutputModel> {
+        self.store
+            .views
+            .get(&publication)
+            .expect("a publication is registered when its model is built")
+            .clone()
+    }
+
     pub(in crate::resolve) fn scope(&mut self, scope: ScopeId) -> Rc<OutputModel> {
         if let Some(model) = self.store.scopes.get(&scope) {
             return model.clone();
         }
         if self.enter(CacheKey::Scope(scope)) {
             let mut model = OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect);
-            self.publish(scope, &mut model.elements);
-            return Rc::new(model);
+            let publication = self.next_publication();
+            self.publish(scope, publication, &mut model.elements);
+            model.publication = Some(publication);
+            return self.register(publication, model);
         }
-        let model = Rc::new(self.build_scope(scope));
+        let model = self.build_scope(scope);
+        let publication = model.publication.expect("a scope's model is published");
+        let model = self.register(publication, model);
         if self.leave() {
             self.store.scopes.insert(scope, model.clone());
         }
@@ -107,16 +134,12 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     }
 
     /// Start building a model. Returns `true` when the key is already under
-    /// construction: the cycle is cut and every model built since then is
-    /// marked as not reusable.
+    /// construction: the cycle is cut and every active model is marked as not
+    /// reusable, including callers above the cycle entry that may retain a model
+    /// built from the cut result.
     pub(super) fn enter(&mut self, key: CacheKey) -> bool {
-        if let Some(position) = self
-            .store
-            .active
-            .iter()
-            .position(|(active, _)| *active == key)
-        {
-            for (_, tainted) in &mut self.store.active[position + 1..] {
+        if self.store.active.iter().any(|(active, _)| *active == key) {
+            for (_, tainted) in &mut self.store.active[..] {
                 *tainted = true;
             }
             return true;
@@ -130,8 +153,21 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         self.store.active.pop().is_some_and(|(_, tainted)| !tainted)
     }
 
+    fn next_publication(&mut self) -> u32 {
+        let publication = self.store.publications;
+        self.store.publications += 1;
+        publication
+    }
+
+    fn register(&mut self, publication: u32, model: OutputModel) -> Rc<OutputModel> {
+        let model = Rc::new(model);
+        self.store.views.insert(publication, model.clone());
+        model
+    }
+
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
         let graph = self.graph;
+        let publication = self.next_publication();
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
         // The scope and the model whose output this scope only re-expresses.
@@ -208,6 +244,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
                     elements.push(OutputElement::Tail(BranchTail {
                         scope,
+                        publication,
                         ranges: Rc::from([]),
                         domain: NameDomain::default(),
                         offset: Some(0),
@@ -228,7 +265,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
-        let forwarded = self.publish(scope, &mut elements);
+        let forwarded = self.publish(scope, publication, &mut elements);
         let mut model = OutputModel::new(
             elements,
             graph.scopes.unknown_output_reasons(scope),
@@ -236,6 +273,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         );
         model.invalid = invalid;
         model.reads = reads;
+        model.publication = Some(publication);
         if let Some((source_scope, source)) = source {
             model.forwarded = forwarded;
             if let Err(problem) =
@@ -255,24 +293,29 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     /// scope's) may still carry an identity that belongs to that model, so
     /// every element gets a new one. Returns which published output each
     /// element that forwards one stands for.
-    fn publish(&mut self, scope: ScopeId, elements: &mut [OutputElement]) -> Vec<Forwarding> {
+    fn publish(
+        &mut self,
+        scope: ScopeId,
+        publication: u32,
+        elements: &mut [OutputElement],
+    ) -> Vec<Forwarding> {
         let mut forwarded = Vec::new();
-        for (index, element) in elements.iter_mut().enumerate() {
+        for element in elements.iter_mut() {
             match element {
                 OutputElement::Column(slot) => {
                     slot.id = Some(self.store.arena.add_slot(SlotDef {
                         owner: scope,
                         name: slot.name.clone(),
                         value: slot.value.clone(),
-                        index,
+                        publication,
                     }));
                 }
                 OutputElement::Unknown(segment) => {
                     segment.id = Some(self.store.arena.add_segment(SegmentDef {
                         owner: scope,
-                        index,
                         provider: segment.provider.clone(),
                         position: segment.position,
+                        publication,
                     }));
                 }
                 OutputElement::Tail(_) => {}
@@ -509,6 +552,7 @@ pub(super) fn forward_scope(
             }
             OutputElement::Tail(tail) => OutputElement::Tail(BranchTail {
                 scope: tail.scope,
+                publication: tail.publication,
                 ranges: ranges.clone(),
                 domain: tail.domain.clone(),
                 offset: Some(0),
