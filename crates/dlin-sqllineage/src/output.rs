@@ -240,7 +240,14 @@ pub struct SourceColumn {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Unresolved {
     /// Positional correspondence cannot be established from the available order.
-    AlignmentUnknown,
+    AlignmentUnknown {
+        /// The set operation whose output cannot be aligned.
+        operation: SetOperationKind,
+        /// Concrete source columns that could correspond to the output.
+        possible_sources: Vec<SourceColumn>,
+        /// Operands whose candidates could not be fully enumerated.
+        unknown_operands: Vec<SetOperand>,
+    },
     /// Additional schema information can change the contributing columns.
     SchemaDependent {
         /// The schema-dependent operation.
@@ -285,6 +292,55 @@ pub enum Unresolved {
         /// Short stable description of the unsupported construct.
         what: &'static str,
     },
+}
+
+/// The semantic kind of a set operation, without an internal scope identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct SetOperationKind {
+    /// Which set operator is applied.
+    pub operator: SetOperator,
+    /// Whether duplicate rows are retained.
+    pub quantifier: SetQuantifier,
+    /// Whether outputs are matched by ordinal or by name.
+    pub correspondence: SetCorrespondence,
+}
+
+/// A set-operation operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum SetOperator {
+    /// Union of both inputs.
+    Union,
+    /// Intersection of both inputs.
+    Intersect,
+    /// Difference of the left input and the right input.
+    Except,
+}
+
+/// Duplicate handling for a set operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum SetQuantifier {
+    /// Preserve duplicates.
+    All,
+    /// Eliminate duplicate rows.
+    Distinct,
+}
+
+/// The operand whose output candidates could not be fully enumerated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum SetOperand {
+    /// The left operand.
+    Left,
+    /// The right operand.
+    Right,
+}
+
+/// How a set operation matches outputs between its operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum SetCorrespondence {
+    /// Outputs match by position.
+    Positional,
+    /// Outputs match by name.
+    ByName,
 }
 
 /// Schema information needed to determine a dependency.

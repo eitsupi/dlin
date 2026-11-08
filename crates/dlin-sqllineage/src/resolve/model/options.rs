@@ -5,10 +5,10 @@ use std::rc::Rc;
 
 use super::super::target::{excluded_matches_name, ilike_matches, same_column_name};
 use super::{
-    ColumnSlot, OutputElement, RangeRef, SlotOrigin, StarFilter, ValueId, unknown_publishers,
+    ColumnSlot, OutputElement, PositionRange, RangeRef, SlotOrigin, StarFilter, ValueId,
+    unknown_publishers,
 };
 use crate::graph::node::{StarBase, StarOptions};
-use crate::graph::scope::ScopeId;
 use crate::{Dialect, Ident, OutputName};
 
 /// Apply EXCLUDE/ILIKE, then REPLACE, then RENAME in list order to the
@@ -85,6 +85,11 @@ pub(super) fn apply_options(
                             ordinal.checked_sub(before)
                         }
                     });
+                    if filter.is_some() {
+                        slot.position = slot
+                            .ordinal
+                            .map_or(PositionRange { min: 0, max: None }, PositionRange::exact);
+                    }
                     Some(OutputElement::Column(slot))
                 } else {
                     None
@@ -95,20 +100,13 @@ pub(super) fn apply_options(
                     if !matches!(segment.position, crate::types::StarPosition::Inferred) {
                         segment.position = crate::types::StarPosition::Unproven;
                     }
+                    segment.position_range = PositionRange { min: 0, max: None };
                     segment
                         .domain
                         .filters
                         .push((filter.clone(), segment.ranges.clone()));
                 }
                 Some(OutputElement::Unknown(segment))
-            }
-            OutputElement::Tail(mut tail) => {
-                if let Some(filter) = &filter {
-                    tail.domain
-                        .filters
-                        .push((filter.clone(), tail.ranges.clone()));
-                }
-                Some(OutputElement::Tail(tail))
             }
         })
         .collect();
@@ -122,22 +120,20 @@ pub(super) fn apply_options(
             remove_from_segments(&mut elements, &replacement.column, dialect);
             continue;
         }
-        let (providers, mut ranges) = unknown_publishers(&elements, &replacement.column, dialect);
-        let tails = tail_publishers(&elements, &replacement.column, dialect);
-        if providers.is_empty() && tails.is_empty() {
+        let (providers, ranges) = unknown_publishers(&elements, &replacement.column, dialect);
+        if providers.is_empty() {
             continue;
         }
         // The replacement stands for the column of that name in the segments
-        // and the tail it replaces.
+        // it replaces.
         remove_from_segments(&mut elements, &replacement.column, dialect);
-        retire_tail_name(&mut elements, &replacement.column, dialect);
-        ranges.extend(tails.into_iter().flat_map(|(_, _, ranges)| ranges.to_vec()));
         let ranges: Rc<[RangeRef]> = ranges.into();
         elements.push(OutputElement::Column(ColumnSlot {
             id: None,
             name: replacement.column.clone(),
             output_name: OutputName::Explicit(replacement.column.clone()),
             ordinal: None,
+            position: PositionRange { min: 0, max: None },
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value: ValueId::Expr(replacement.node_id),
@@ -151,27 +147,16 @@ pub(super) fn apply_options(
             slot.output_name = OutputName::Explicit(new.clone());
             continue;
         }
-        let (providers, mut ranges) = unknown_publishers(&elements, old, dialect);
-        let tails = tail_publishers(&elements, old, dialect);
-        if providers.is_empty() && tails.is_empty() {
+        let (providers, ranges) = unknown_publishers(&elements, old, dialect);
+        if providers.is_empty() {
             continue;
         }
         remove_from_segments(&mut elements, old, dialect);
-        retire_tail_name(&mut elements, old, dialect);
-        // The renamed column carries what every publisher of the old name
-        // contributes: the unknown segments and the set-operation tails.
+        // The renamed column carries what each unknown segment contributes.
         let mut values = Vec::new();
         if !providers.is_empty() {
             values.push(ValueId::Named {
                 providers,
-                column: old.clone(),
-            });
-        }
-        for (scope, publication, tail_ranges) in tails {
-            ranges.extend(tail_ranges.iter().cloned());
-            values.push(ValueId::Tail {
-                scope,
-                publication,
                 column: old.clone(),
             });
         }
@@ -185,6 +170,7 @@ pub(super) fn apply_options(
             name: new.clone(),
             output_name: OutputName::Explicit(new.clone()),
             ordinal: None,
+            position: PositionRange { min: 0, max: None },
             ranges: ranges.clone(),
             candidate_ranges: ranges,
             value,
@@ -216,35 +202,6 @@ fn remove_from_segments(elements: &mut [OutputElement], name: &Ident, dialect: D
             && segment.domain.admits(name, dialect)
         {
             segment.domain.removed.push(name.clone());
-        }
-    }
-}
-
-/// The set-operation tails that may publish `name`, with their range variables.
-fn tail_publishers(
-    elements: &[OutputElement],
-    name: &Ident,
-    dialect: Dialect,
-) -> Vec<(ScopeId, u32, Rc<[RangeRef]>)> {
-    elements
-        .iter()
-        .filter_map(|element| match element {
-            OutputElement::Tail(tail) if tail.domain.admits(name, dialect) => {
-                Some((tail.scope, tail.publication, tail.ranges.clone()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// A column that replaced or renamed a tail's column of the same name is the
-/// only one left under that name.
-fn retire_tail_name(elements: &mut [OutputElement], name: &Ident, dialect: Dialect) {
-    for element in elements {
-        if let OutputElement::Tail(tail) = element
-            && tail.domain.admits(name, dialect)
-        {
-            tail.domain.removed.push(name.clone());
         }
     }
 }

@@ -13,7 +13,7 @@ use crate::graph::scope::{OutputPlan, ScopeId, ScopeTree};
 use crate::resolve::context::EvalKey;
 use crate::resolve::lineage::collect_leaf_origins;
 use crate::resolve::mapping::{Cut, resolve_scope_mappings};
-use crate::resolve::model::{BranchTail, NameDomain, OutputElement};
+use crate::resolve::model::OutputElement;
 use crate::{Dialect, Ident};
 
 use super::super::Evaluator;
@@ -236,33 +236,18 @@ fn mappings_that_are_being_computed_are_a_cut_and_not_an_empty_list() {
     ));
     evaluate(&graph, |ev| {
         let model = ev.scope_model(union);
-        let publication = model.publication.expect("a scope's model is published");
         let slot = slot_ids(&model)[0];
         assert!(ev.cx.enter(EvalKey::Mappings(union)));
         // Every way a set operation's mappings are read reports the cut.
         assert_eq!(resolve_scope_mappings(union, ev.cx).err(), Some(Cut));
         let (sources, _) = ev.slot_value(slot);
         assert_eq!(show(&sources), ["?id"]);
-        assert_eq!(
-            show(&ev.tail_column(union, publication, &Ident::unquoted("id"))),
-            ["?id"]
-        );
-        let tail = BranchTail {
-            scope: union,
-            publication,
-            ranges: std::rc::Rc::from([]),
-            domain: NameDomain::default(),
-            offset: Some(0),
-        };
-        let mappings = ev.tail_mappings(&tail);
-        assert_eq!(mappings.len(), 1);
-        assert_eq!(show(&mappings[0].sources), ["*?"]);
         ev.cx.leave(EvalKey::Mappings(union));
     });
 }
 
 #[test]
-fn cycles_through_set_operations_delegates_and_tails_do_not_depend_on_the_start() {
+fn cycles_through_set_operations_and_delegates_do_not_depend_on_the_start() {
     for sql in [
         "WITH RECURSIVE a AS (SELECT id FROM b UNION ALL SELECT id FROM t), \
          b AS (SELECT id FROM a) SELECT id FROM a",

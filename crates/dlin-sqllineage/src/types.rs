@@ -108,18 +108,9 @@ pub(crate) struct ColumnMapping {
     /// The kind of transformation applied.
     pub transform: TransformKind,
     /// The column or segment of the scope's published model that this mapping
-    /// stands for. `None` is reserved for a column retained from a tail.
+    /// stands for. `None` is used only before publication or for a cut marker.
     #[serde(skip)]
     pub slot: Option<crate::resolve::OutputRef>,
-    /// Whether this mapping is a valid output from a tail and therefore has
-    /// no published slot identity.
-    #[serde(skip)]
-    pub unpublished_tail: bool,
-    /// Whether this is one of the columns a set operation merges in from its
-    /// right operand beyond those its left operand lists. A projection that
-    /// reads such columns through a star lists them as its own.
-    #[serde(skip)]
-    pub merged_in: bool,
 }
 
 /// Resolution state of a source column.

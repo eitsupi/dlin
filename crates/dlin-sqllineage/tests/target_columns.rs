@@ -19,6 +19,21 @@ fn source(relation: &str, column: &str) -> SourceColumn {
     }
 }
 
+fn alignment_unknown(
+    possible_sources: Vec<SourceColumn>,
+    unknown_operands: Vec<SetOperand>,
+) -> Unresolved {
+    Unresolved::AlignmentUnknown {
+        operation: SetOperationKind {
+            operator: SetOperator::Union,
+            quantifier: SetQuantifier::All,
+            correspondence: SetCorrespondence::Positional,
+        },
+        possible_sources,
+        unknown_operands,
+    }
+}
+
 #[test]
 fn insert_target_columns_rename_outputs_and_preserve_lineage() {
     let result =
@@ -358,7 +373,7 @@ fn ordinary_set_operations_do_not_treat_unmodeled_branches_as_zero_width() {
 }
 
 #[test]
-fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
+fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
     for prefix in [
         "",
         "INSERT INTO target ",
@@ -371,11 +386,28 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
             }
             let sql = format!("{prefix}SELECT x FROM s UNION ALL {branch}");
             let result = one(&sql);
-            assert!(
-                result.diagnostics.is_empty(),
-                "{sql}: {:?}",
-                result.diagnostics
-            );
+            if prefix.contains("(a, b)") {
+                assert!(
+                    matches!(
+                        result.diagnostics.as_slice(),
+                        [Diagnostic {
+                            kind: DiagnosticKind::TargetColumnCountMismatch {
+                                target: 2,
+                                source: 1
+                            },
+                            ..
+                        }]
+                    ),
+                    "{sql}: {:?}",
+                    result.diagnostics
+                );
+            } else {
+                assert!(
+                    result.diagnostics.is_empty(),
+                    "{sql}: {:?}",
+                    result.diagnostics
+                );
+            }
             assert_eq!(result.output.shape, Shape::Closed, "{sql}");
             let mut expected_read = vec![source("s", "x").relation];
             if branch.starts_with("TABLE") {
@@ -385,20 +417,27 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
             assert_eq!(result.output.columns.len(), 1, "{sql}");
             assert_eq!(
                 result.output.columns[0].name,
-                OutputName::Explicit(Ident::unquoted("x")),
+                OutputName::Explicit(Ident::unquoted(if prefix.contains("(a)") {
+                    "a"
+                } else {
+                    "x"
+                })),
                 "{sql}"
             );
             assert_eq!(
                 result.output.columns[0].lineage,
                 Lineage::Partial {
                     known: vec![source("s", "x")],
-                    unresolved: vec![Unresolved::Unsupported {
-                        what: if branch.starts_with("TABLE") {
-                            "TABLE source"
-                        } else {
-                            "VALUES source"
-                        },
-                    }],
+                    unresolved: vec![
+                        alignment_unknown(vec![], vec![SetOperand::Right]),
+                        Unresolved::Unsupported {
+                            what: if branch.starts_with("TABLE") {
+                                "TABLE source"
+                            } else {
+                                "VALUES source"
+                            },
+                        }
+                    ],
                 },
                 "{sql}"
             );
@@ -407,27 +446,35 @@ fn unknown_set_operation_branches_prevent_target_renaming_and_diagnostics() {
 }
 
 #[test]
-fn unknown_width_follows_output_plans_and_derived_stars() {
+fn target_width_uses_the_left_model_through_output_plans() {
     for sql in [
         "INSERT INTO target (a, b) WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
         "INSERT INTO target (a, b) (SELECT x FROM s UNION ALL TABLE public.other_source)",
-        "INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v",
     ] {
         let result = one(sql);
         assert!(
-            result.diagnostics.is_empty(),
+            matches!(
+                result.diagnostics.as_slice(),
+                [Diagnostic {
+                    kind: DiagnosticKind::TargetColumnCountMismatch {
+                        target: 2,
+                        source: 1
+                    },
+                    ..
+                }]
+            ),
             "{sql}: {:?}",
             result.diagnostics
         );
-        assert!(
-            result
-                .output
-                .columns
-                .iter()
-                .all(|column| column.name != OutputName::Explicit(Ident::unquoted("a"))),
-            "{sql}"
+        assert_eq!(
+            result.output.columns[0].name,
+            OutputName::Explicit(Ident::unquoted("x"))
         );
     }
+    // The left side itself is unmodeled here; its target width stays unknown.
+    let result = one("INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v");
+    assert!(result.diagnostics.is_empty());
+    assert!(result.output.columns.is_empty());
 }
 
 #[test]
@@ -459,7 +506,6 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
         "SELECT x FROM s UNION ALL (WITH c AS (SELECT 1) SELECT x FROM s UNION ALL VALUES (1))",
         "SELECT q.x FROM (SELECT x FROM s UNION ALL TABLE public.other_source) q",
         "WITH q AS (SELECT x FROM s UNION ALL TABLE public.other_source) SELECT x FROM q",
-        "WITH q AS (TABLE public.other_source UNION ALL SELECT x FROM s) SELECT x FROM q",
         "SELECT x, y FROM s UNION ALL TABLE public.other_source",
     ] {
         let result = one(sql);
@@ -479,7 +525,10 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
                 column.lineage,
                 Lineage::Partial {
                     known: vec![source("s", if index == 0 { "x" } else { "y" })],
-                    unresolved: vec![Unresolved::Unsupported { what }],
+                    unresolved: vec![
+                        alignment_unknown(vec![], vec![SetOperand::Right]),
+                        Unresolved::Unsupported { what }
+                    ],
                 },
                 "{sql}"
             );
@@ -512,6 +561,7 @@ fn nested_unknown_branch_kinds_are_retained_without_tainting_unrelated_values() 
         Lineage::Partial {
             known: vec![source("s", "x")],
             unresolved: vec![
+                alignment_unknown(vec![], vec![SetOperand::Right]),
                 Unresolved::Unsupported {
                     what: "TABLE source"
                 },
@@ -533,36 +583,61 @@ fn table_cte_source_does_not_fabricate_a_physical_read() {
         result.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![source("s", "x")],
-            unresolved: vec![Unresolved::Unsupported {
-                what: "TABLE source"
-            }],
+            unresolved: vec![
+                alignment_unknown(vec![], vec![SetOperand::Right]),
+                Unresolved::Unsupported {
+                    what: "TABLE source"
+                }
+            ],
         }
     );
 }
 
 #[test]
-fn unknown_left_branch_retains_known_right_sources() {
+fn unknown_left_branch_keeps_right_sources_as_candidates_without_publishing_names() {
     for branch in ["TABLE public.t", "VALUES (1), (2, 3)"] {
         for prefix in ["INSERT INTO target ", "INSERT INTO target (a) "] {
             let result = one(&format!("{prefix}{branch} UNION ALL SELECT x FROM s"));
             assert!(result.diagnostics.is_empty());
-            assert_eq!(result.output.shape, Shape::Closed);
-            assert_eq!(result.output.columns.len(), 1);
-            assert_eq!(
-                result.output.columns[0].lineage,
-                Lineage::Partial {
-                    known: vec![source("s", "x")],
-                    unresolved: vec![Unresolved::Unsupported {
-                        what: if branch.starts_with("TABLE") {
-                            "TABLE source"
-                        } else {
-                            "VALUES source"
-                        },
-                    }],
+            assert!(result.output.columns.is_empty());
+            let Shape::Open { unexpanded } = &result.output.shape else {
+                panic!("an unmodeled left operand cannot enumerate the output");
+            };
+            assert_eq!(unexpanded.len(), 1);
+            let Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
+                panic!("unmodeled correspondence cannot be complete");
+            };
+            assert!(known.is_empty());
+            assert!(unresolved.contains(&alignment_unknown(
+                vec![source("s", "x")],
+                vec![SetOperand::Left]
+            )));
+            assert!(unresolved.contains(&Unresolved::Unsupported {
+                what: if branch.starts_with("TABLE") {
+                    "TABLE source"
+                } else {
+                    "VALUES source"
                 }
-            );
+            }));
         }
     }
+}
+
+#[test]
+fn a_named_read_of_an_unmodeled_left_operand_does_not_claim_right_sources() {
+    let result =
+        one("WITH q AS (TABLE public.other_source UNION ALL SELECT x FROM s) SELECT x FROM q");
+    let Lineage::Partial { known, unresolved } = &result.output.columns[0].lineage else {
+        panic!("the name is not proven to be supplied by the right operand");
+    };
+    assert!(known.is_empty());
+    assert!(unresolved.contains(&alignment_unknown(
+        vec![source("s", "x")],
+        vec![SetOperand::Left]
+    )));
+    assert!(unresolved.contains(&Unresolved::Unsupported {
+        what: "TABLE source"
+    }));
 }
 
 #[test]
@@ -572,8 +647,16 @@ fn unknown_branch_marker_survives_unknown_star_merges() {
         "(SELECT x FROM s UNION ALL TABLE public.t) UNION ALL SELECT * FROM u",
     ] {
         let result = one(sql);
-        let Shape::Open { unexpanded } = &result.output.shape else {
-            panic!("expected the existing unexpanded star: {sql}");
+        let unexpanded = match &result.output.shape {
+            Shape::Open { unexpanded } => {
+                assert!(sql.starts_with("SELECT *"), "{sql}");
+                unexpanded.as_slice()
+            }
+            Shape::Closed => {
+                assert!(sql.starts_with("("), "{sql}");
+                assert_eq!(result.output.columns.len(), 1);
+                &[]
+            }
         };
         for lineage in result
             .output

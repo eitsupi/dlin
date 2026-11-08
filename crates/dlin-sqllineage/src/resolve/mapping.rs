@@ -1,13 +1,13 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::catalog;
 use super::context::{EvalContext, EvalKey};
 use super::model::{ModelStore, OutputModel, OutputModels};
-use super::setop_legacy::{merge_operands, retag};
+use super::set_operation::evaluate_set_operation;
 use super::star::projection_mappings;
 
 use crate::Ident;
@@ -33,8 +33,6 @@ pub(super) fn wildcard_mapping(
         }],
         transform: TransformKind::Direct,
         slot: None,
-        unpublished_tail: false,
-        merged_in: false,
     }
 }
 
@@ -108,8 +106,7 @@ pub(super) fn scope_mapping_computations() -> usize {
 pub(super) struct Cut;
 
 /// Resolve a scope's output plan into ordered mappings. Set-operation
-/// branches are resolved independently so catalog expansion happens before
-/// their positional merge.
+/// values are evaluated through the identities aligned by their model.
 ///
 /// A result computed while a cycle was cut depends on where the walk started
 /// and is returned without being kept.
@@ -200,14 +197,28 @@ fn compute_scope_mappings(
             retag(&mut mappings, view)?;
             mappings
         }
-        OutputPlan::SetOperation {
-            left,
-            right,
-            recursive,
-            correspondence,
-        } => merge_operands(view, left, right, recursive, correspondence, cx)?,
+        OutputPlan::SetOperation { .. } => evaluate_set_operation(scope, view, cx)?,
     };
     Ok(mappings)
+}
+
+/// Attach child mappings to the unique published outputs this model forwards.
+pub(super) fn retag(mappings: &mut [ColumnMapping], reader: &OutputModel) -> Result<(), Cut> {
+    let mut published = HashSet::new();
+    for mapping in mappings {
+        let Some(from) = mapping.slot else {
+            return Err(Cut);
+        };
+        let mut matches = reader.forwarded.iter().filter(|pair| pair.from == from);
+        let Some(pair) = matches.next() else {
+            return Err(Cut);
+        };
+        if matches.next().is_some() || !published.insert(pair.to) {
+            return Err(Cut);
+        }
+        mapping.slot = Some(pair.to);
+    }
+    Ok(())
 }
 
 pub(super) fn merge_transform(left: &TransformKind, right: &TransformKind) -> TransformKind {

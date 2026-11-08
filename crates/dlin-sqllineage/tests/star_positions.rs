@@ -103,17 +103,12 @@ fn proven_positions_follow_the_prefix() {
     );
 }
 
-/// The columns a set operation adds beyond its unexpanded left operand sit
-/// behind a star that follows a prefix.
+/// A set operation's left output namespace stays behind a star that follows a
+/// prefix, without listing names supplied only by the right operand.
 #[test]
-fn set_operation_tails_follow_the_prefix_of_the_star_that_reads_them() {
+fn set_operation_left_unknown_interval_follows_the_prefix_of_its_reader() {
     let union = "SELECT * FROM u UNION ALL SELECT a, b FROM v";
-    let behind_u = [
-        "p#0 C[]",
-        "a#- P[v.a | BehindStar(u)]",
-        "b#- P[v.b | BehindStar(u)]",
-        "Open[u after 0]",
-    ];
+    let behind_u = ["p#0 C[]", "Open[u after 0]"];
     expect(&format!("SELECT 1 AS p, s.* FROM ({union}) s"), &behind_u);
     expect(
         &format!("SELECT * FROM (SELECT 1 AS p, s.* FROM ({union}) s) o"),
@@ -125,21 +120,9 @@ fn set_operation_tails_follow_the_prefix_of_the_star_that_reads_them() {
     );
     expect(
         &format!("SELECT 1 AS p, s.*, 2 AS q FROM ({union}) s"),
-        &[
-            "p#0 C[]",
-            "a#- P[v.a | BehindStar(u)]",
-            "b#- P[v.b | BehindStar(u)]",
-            "q#- C[]",
-            "Open[u after 0]",
-        ],
+        &["p#0 C[]", "q#- C[]", "Open[u after 0]"],
     );
-    let behind_u_after_two = [
-        "z#0 C[]",
-        "p#1 C[]",
-        "a#- P[v.a | BehindStar(u)]",
-        "b#- P[v.b | BehindStar(u)]",
-        "Open[u after 1]",
-    ];
+    let behind_u_after_two = ["z#0 C[]", "p#1 C[]", "Open[u after 1]"];
     expect(
         &format!("SELECT 0 AS z, o.* FROM (SELECT 1 AS p, s.* FROM ({union}) s) o"),
         &behind_u_after_two,
@@ -153,14 +136,11 @@ fn set_operation_tails_follow_the_prefix_of_the_star_that_reads_them() {
     );
     expect(
         "SELECT 1 AS p, s.* FROM (SELECT * FROM u UNION ALL SELECT * FROM v) s",
-        &[
-            "p#0 C[]",
-            "Open[u after 0; v after 0; v after 0; u after 0]",
-        ],
+        &["p#0 C[]", "Open[u after 0; v after 0]"],
     );
 }
 
-/// With the left operand's schema known, the added columns are aligned and
+/// With the left operand's schema known, its listed columns are aligned and
 /// take their positions from the prefix.
 #[test]
 fn aligned_set_operation_columns_follow_the_prefix() {
@@ -188,8 +168,7 @@ fn aligned_set_operation_columns_follow_the_prefix() {
     );
 }
 
-/// An interval the catalog places after a position moves with the prefix, for
-/// the operand that lists it and for the one that is merged in.
+/// An interval the left catalog places after a position moves with the prefix.
 #[test]
 fn unknown_intervals_of_set_operations_move_with_the_prefix() {
     expect_known(
@@ -228,11 +207,6 @@ fn unknown_intervals_of_set_operations_move_with_the_prefix() {
     );
     expect_known(
         "SELECT 1 AS p, s.* FROM (SELECT a, b FROM u UNION ALL SELECT * FROM p2) s",
-        &[
-            "p#0 C[]",
-            "a#1 C[p2.a, u.a]",
-            "b#2 C[p2.b, u.b]",
-            "Open[p2 after 2]",
-        ],
+        &["p#0 C[]", "a#1 C[p2.a, u.a]", "b#2 C[p2.b, u.b]", "Closed"],
     );
 }

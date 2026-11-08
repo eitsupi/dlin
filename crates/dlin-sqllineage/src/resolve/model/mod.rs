@@ -72,11 +72,6 @@ pub(super) enum ValueId {
     },
     /// A column of the right operand of a set operation, found by name among
     /// the mappings the operation merges in beyond its left operand.
-    Tail {
-        scope: ScopeId,
-        publication: u32,
-        column: Ident,
-    },
     /// A column that is named but sits behind segments the analysis cannot
     /// enumerate.
     Named {
@@ -189,6 +184,9 @@ pub(super) struct ColumnSlot {
     pub output_name: OutputName,
     /// Proven zero-based position in this model's output, when available.
     pub ordinal: Option<usize>,
+    /// Possible positions established by syntax or schema evidence. Display
+    /// order alone never narrows this range.
+    pub position: PositionRange,
     /// Range variables the column is visible under. A merged column keeps
     /// the range variables of both sides, whatever the join kind.
     pub ranges: Rc<[RangeRef]>,
@@ -209,6 +207,8 @@ pub(super) struct UnknownSegment {
     /// Physical schemas responsible for this interval, retained across scopes.
     pub schema_relations: Vec<crate::Relation>,
     pub position: crate::types::StarPosition,
+    /// Positions that this interval may occupy, independent of its names.
+    pub position_range: PositionRange,
     pub provider: UnknownProvider,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
@@ -251,6 +251,7 @@ impl UnknownSegment {
             id: None,
             schema_relations: Vec::new(),
             position: crate::types::StarPosition::Inferred,
+            position_range: PositionRange { min: 0, max: None },
             provider: UnknownProvider::Opaque(reason),
             ranges: Rc::from([]),
             domain: NameDomain::default(),
@@ -262,29 +263,79 @@ impl UnknownSegment {
 pub(super) enum OutputElement {
     Column(ColumnSlot),
     Unknown(UnknownSegment),
-    /// Columns a set operation merges in from its right operand beyond the
-    /// ones its left operand lists. They are not listed, so they do not count
-    /// towards the width, but a star over the set operation still publishes
-    /// them.
-    Tail(BranchTail),
 }
 
-/// The right-operand columns of a set operation, subject to the same name
-/// conditions as an unknown segment.
+/// A conservative interval of possible output positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PositionRange {
+    /// Inclusive lower bound.
+    pub min: usize,
+    /// Inclusive upper bound, or no established upper bound.
+    pub max: Option<usize>,
+}
+
+impl PositionRange {
+    pub(super) fn exact(ordinal: usize) -> Self {
+        Self {
+            min: ordinal,
+            max: Some(ordinal),
+        }
+    }
+
+    pub(super) fn overlaps(self, other: Self) -> bool {
+        self.max.is_none_or(|max| max >= other.min) && other.max.is_none_or(|max| max >= self.min)
+    }
+
+    pub(super) fn shifted(self, minimum_base: usize, exact_base: Option<usize>) -> Self {
+        match exact_base {
+            Some(base) => Self {
+                min: base.saturating_add(self.min),
+                max: self.max.and_then(|max| base.checked_add(max)),
+            },
+            None => Self {
+                min: minimum_base.saturating_add(self.min),
+                max: None,
+            },
+        }
+    }
+}
+
+/// Correspondence and operator metadata for the outputs this model publishes.
+/// Left identities define the namespace; right identities supply either proven
+/// contributions or position-constrained candidates.
 #[derive(Debug, Clone)]
-pub(super) struct BranchTail {
-    /// The set operation that merges them in.
-    pub scope: ScopeId,
-    /// The publication of the operation's model that lists this tail, which
-    /// is the one the operation's mappings are read for.
-    pub publication: u32,
-    pub ranges: Rc<[RangeRef]>,
-    pub domain: NameDomain,
-    /// How far the projection that published the tail moved the columns it
-    /// stands for: the number of columns before the star that carries it.
-    /// `None` when that number is not known. A scope that only re-expresses
-    /// another scope's output starts again at zero.
-    pub offset: Option<usize>,
+pub(super) struct SetOperationModel {
+    pub kind: crate::SetOperationKind,
+    pub recursive: bool,
+    pub slots: Vec<AlignedSlot>,
+    pub segments: Vec<AlignedSegment>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AlignedSlot {
+    pub left: SlotId,
+    pub matches: Vec<SlotMatch>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AlignedSegment {
+    pub left: SegmentId,
+    pub matches: Vec<SlotMatch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SlotMatchKind {
+    /// Both slots carry the same proven ordinal.
+    Proven,
+    /// Possible position ranges intersect; no value contribution is proven.
+    Possible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SlotMatch {
+    pub operand: crate::SetOperand,
+    pub output: OutputRef,
+    pub kind: SlotMatchKind,
 }
 
 /// All candidates for a name, built on first use. Names are compared by the
@@ -320,6 +371,7 @@ pub(super) struct OutputModel {
     /// Which publication of its scope this model is. `None` for the models of
     /// stars and FROM clauses, which publish nothing.
     pub publication: Option<u32>,
+    pub set_operation: Option<SetOperationModel>,
 }
 
 /// The elements of a model that may carry one name.
@@ -337,10 +389,7 @@ impl OutputModel {
         unknown_reasons: Vec<&'static str>,
         dialect: Dialect,
     ) -> Self {
-        let listed = elements
-            .iter()
-            .filter(|element| !matches!(element, OutputElement::Tail(_)))
-            .count();
+        let listed = elements.len();
         let width = if elements
             .iter()
             .any(|element| matches!(element, OutputElement::Unknown(_)))
@@ -362,6 +411,7 @@ impl OutputModel {
             reads: Vec::new(),
             forwarded: Vec::new(),
             publication: None,
+            set_operation: None,
         }
     }
 
@@ -473,6 +523,21 @@ impl OutputModel {
     }
 }
 
+/// A lower bound on width, including individually established positions.
+/// Counting only listed columns loses the gaps in a partial schema.
+fn minimum_width(elements: &[OutputElement]) -> usize {
+    let listed = elements
+        .iter()
+        .filter(|element| matches!(element, OutputElement::Column(_)))
+        .count();
+    elements.iter().fold(listed, |minimum, element| {
+        minimum.max(match element {
+            OutputElement::Column(slot) => slot.position.min.saturating_add(1),
+            OutputElement::Unknown(segment) => segment.position_range.min,
+        })
+    })
+}
+
 /// The output of the relations a join combined, which can be merged further.
 #[derive(Debug, Clone)]
 struct Group {
@@ -486,7 +551,6 @@ impl OutputElement {
         match self {
             Self::Column(slot) => slot.forwards(),
             Self::Unknown(segment) => segment.forwards(),
-            Self::Tail(_) => None,
         }
     }
 
@@ -495,7 +559,6 @@ impl OutputElement {
         match self {
             Self::Column(slot) => slot.id.map(OutputRef::Slot),
             Self::Unknown(segment) => segment.id.map(OutputRef::Segment),
-            Self::Tail(_) => None,
         }
     }
 }

@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 
 use crate::Ident;
 use crate::graph::node::NodeId;
+pub(crate) use crate::output::{SetCorrespondence, SetOperator, SetQuantifier};
 use crate::types::{Dialect, TableRef};
 
 pub(crate) type ScopeId = usize;
@@ -212,16 +213,11 @@ pub(crate) enum OutputPlan {
         left: ScopeId,
         right: ScopeId,
         recursive: bool,
+        operator: SetOperator,
+        quantifier: SetQuantifier,
         correspondence: SetCorrespondence,
     },
     Delegate(ScopeId),
-}
-
-/// Whether set-operation outputs correspond by ordinal or by name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SetCorrespondence {
-    Positional,
-    ByName,
 }
 
 #[derive(Debug, Clone)]
@@ -601,13 +597,11 @@ impl ScopeTree {
                 OutputPlan::Delegate(child) => self.has_unknown_output_width(*child),
                 OutputPlan::SetOperation {
                     left,
-                    right,
                     correspondence,
                     ..
                 } => {
                     *correspondence == SetCorrespondence::ByName
                         || self.has_unknown_output_width(*left)
-                        || self.has_unknown_output_width(*right)
                 }
             }
     }
@@ -635,6 +629,8 @@ impl ScopeTree {
                 if *correspondence == SetCorrespondence::ByName {
                     reasons.push("BY NAME set operation");
                 }
+                // Value incompleteness follows both operands even though
+                // the output namespace and shape follow only the left.
                 let mut branches = self.unknown_output_reasons(*left);
                 branches.extend(self.unknown_output_reasons(*right));
                 for reason in branches {

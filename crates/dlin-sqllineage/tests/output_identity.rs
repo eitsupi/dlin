@@ -363,15 +363,12 @@ fn set_operation_with_an_unknown_segment_stays_unproven_through_wrappers() {
             &["y#- P[t.x | AlignmentUnknown]", "Open[t after -]"],
         );
     }
-    // The unknown segment on the right: the left column cannot be proven to
-    // pair with the right one either.
+    // A right-side unknown segment cannot add names or widen the shape beyond
+    // the left output namespace. The left slot remains, with unresolved
+    // alignment to the right input.
     expect(
         "SELECT u.p FROM u UNION ALL SELECT * FROM (SELECT *, t.x AS y FROM t) d",
-        &[
-            "p#- P[u.p | BehindStar(t)]",
-            "y#- C[t.x]",
-            "Open[t after -]",
-        ],
+        &["p#0 P[u.p | AlignmentUnknown]", "Closed"],
     );
 }
 
@@ -447,14 +444,7 @@ fn nested_set_operations_pair_every_operand_by_position() {
 #[test]
 fn set_operation_prefix_before_unknown_segments_pairs_through_wrappers() {
     let union = "SELECT t.id AS k, t.* FROM t UNION ALL SELECT u.id AS k, u.* FROM u";
-    // The shape lists the stars of both operands twice (`t, u, u, t`) where one
-    // marker per star is expected. This pins the current result, duplicates
-    // included, so that wrapping cannot change it.
-    expect_through_wrappers(
-        union,
-        &[
-            "k#0 C[t.id, u.id]",
-            "Open[t after 0; u after 0; u after 0; t after 0]",
-        ],
-    );
+    // Each operand's unknown interval appears once in the output shape, and
+    // wrapping the operation does not duplicate either marker.
+    expect_through_wrappers(union, &["k#0 C[t.id, u.id]", "Open[t after 0; u after 0]"]);
 }

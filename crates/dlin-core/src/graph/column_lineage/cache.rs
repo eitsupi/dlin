@@ -14,10 +14,10 @@ pub(super) const CACHE_DIR: &str = ".dlin_cache";
 ///
 /// A cache file is reused only when both the package version and this id
 /// match. Bump it whenever the analysis semantics change in a way that can
-/// alter stored results (schema evidence, adoption policy, coverage policy)
+/// alter stored results (schema evidence, adoption policy, slot correspondence)
 /// without a package version bump, so a development build never reuses
 /// results computed under the old semantics.
-pub(super) const ANALYSIS_SEMANTICS_ID: &str = "schema-evidence-2";
+pub(super) const ANALYSIS_SEMANTICS_ID: &str = "set-operation-slots-1";
 
 /// The package version and [`ANALYSIS_SEMANTICS_ID`] together are the
 /// persistent cache compatibility boundary. Cache formats are intentionally

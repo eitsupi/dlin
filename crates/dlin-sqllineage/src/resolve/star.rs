@@ -16,15 +16,13 @@ use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
     Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, OutputRef, RangeRef, UnknownProvider, ValueId,
+    OutputModels, OutputRef, RangeRef, SegmentId, UnknownProvider, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target};
 use slot_eval::cut_segment;
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
-use crate::graph::scope::{
-    Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence, VirtualColumnState,
-};
+use crate::graph::scope::{Binding, BindingEnv, ScopeId, VirtualColumnState};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 use crate::{Candidate, Ident, Unresolved};
 
@@ -36,6 +34,14 @@ pub(super) enum Unlisted {
     Denied,
     /// Origins of the unlisted columns that may carry the name.
     Sources(Vec<ColumnOrigin>),
+}
+
+pub(super) fn named_segment_sources(
+    id: SegmentId,
+    column: &Ident,
+    cx: &mut EvalContext<'_, '_>,
+) -> Vec<ColumnOrigin> {
+    Evaluator { cx }.segment_sources(id, column)
 }
 
 /// The mappings of a projection scope, one per element of its published
@@ -63,29 +69,14 @@ pub(super) fn projection_mappings(
                     sources,
                     transform,
                     slot: Some(OutputRef::Slot(slot.published())),
-                    unpublished_tail: false,
-                    merged_in: false,
                 });
             }
             OutputElement::Unknown(segment) => {
                 let id = segment.published();
                 mappings.extend(evaluator.segment_mapping(id).map(|mapping| ColumnMapping {
                     slot: Some(OutputRef::Segment(id)),
-                    unpublished_tail: false,
-                    merged_in: false,
                     ..mapping
                 }));
-            }
-            OutputElement::Tail(tail) => {
-                for mut mapping in evaluator.tail_mappings(tail) {
-                    mapping.merged_in = false;
-                    mapping.unpublished_tail = true;
-                    mapping.star_position = mapping.star_position.shifted(tail.offset);
-                    mapping.ordinal = mapping.ordinal.and_then(|ordinal| {
-                        tail.offset.and_then(|offset| offset.checked_add(ordinal))
-                    });
-                    mappings.push(mapping);
-                }
             }
         }
     }
@@ -198,14 +189,6 @@ impl Evaluator<'_, '_, '_> {
                     },
                     |(sources, _, transform)| (sources, transform),
                 ),
-            ValueId::Tail {
-                scope,
-                publication,
-                column,
-            } => (
-                self.tail_column(*scope, *publication, column),
-                TransformKind::Direct,
-            ),
             ValueId::VirtualColumn { source, index } => {
                 (self.virtual_column(*source, *index), TransformKind::Direct)
             }
@@ -395,8 +378,7 @@ impl Evaluator<'_, '_, '_> {
     }
 
     /// The origins of the column a CTE or derived table publishes under
-    /// `name`: a listed column, a column of a set operation's tail, or
-    /// whatever its unknown segments may publish.
+    /// `name`: a listed column or whatever its unknown segments may publish.
     fn named(
         &mut self,
         scope: ScopeId,
@@ -442,10 +424,13 @@ impl Evaluator<'_, '_, '_> {
                 }
                 return Some((sources, false, transform));
             }
-            Choice::Possible(..) | Choice::Absent => {}
-        }
-        if let Some(tail) = self.tail_named(&model, name) {
-            return Some(tail);
+            Choice::Possible(segment) => {
+                let sources = self.segment_sources(segment.published(), name);
+                if !sources.is_empty() {
+                    return Some((sources, false, TransformKind::Direct));
+                }
+            }
+            Choice::Absent => {}
         }
         match self.unlisted(scope, name) {
             Unlisted::Denied => Some((
@@ -547,8 +532,6 @@ impl Evaluator<'_, '_, '_> {
             sources,
             transform: TransformKind::Direct,
             slot: None,
-            unpublished_tail: false,
-            merged_in: false,
         }
     }
 
@@ -594,17 +577,7 @@ impl Evaluator<'_, '_, '_> {
             }],
             UnknownProvider::Segment { id, .. } => self.segment_sources(*id, column),
             UnknownProvider::SetOperation { op, left } => {
-                match self.merged_counterpart(*op, crate::resolve::OutputRef::Segment(*left)) {
-                    Some(crate::resolve::OutputRef::Segment(merged)) => self
-                        .segment_mapping(merged)
-                        .map_or_else(Vec::new, |mapping| {
-                            named_wildcard_sources(mapping.sources, column)
-                        }),
-                    _ => vec![ColumnOrigin::Ambiguous {
-                        column: column.clone(),
-                        candidates: Vec::new(),
-                    }],
-                }
+                super::set_operation::set_operation_segment_sources(*op, *left, column, self.cx)
             }
             UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
                 vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })]
@@ -614,98 +587,32 @@ impl Evaluator<'_, '_, '_> {
     }
 
     fn unlisted(&mut self, scope: ScopeId, name: &Ident) -> Unlisted {
-        let graph = self.cx.graph;
-        match graph.scopes.output_plan(scope) {
-            OutputPlan::Projection => {
-                let model = self.scope_model(scope);
-                let mut admitted = false;
-                let mut unknown_seen = false;
-                let mut sources = Vec::new();
-                for element in &model.elements {
-                    let OutputElement::Unknown(segment) = element else {
-                        continue;
-                    };
-                    unknown_seen = true;
-                    if segment.domain.admits(name, graph.dialect) {
-                        admitted = true;
-                        sources.extend(self.provider_sources(&segment.provider, name));
-                    }
-                }
-                if admitted {
-                    if sources.is_empty() {
-                        Unlisted::None
-                    } else {
-                        Unlisted::Sources(sources)
-                    }
-                } else if unknown_seen {
-                    Unlisted::Denied
-                } else {
-                    Unlisted::None
-                }
-            }
-            OutputPlan::Delegate(child) => self.unlisted(*child, name),
-            // The left operand defines the names of a set operation, but
-            // provenance is collected from both operands. An operand that
-            // rules the name out stays an explicit uncertainty marker because
-            // its unknown-width slot cannot be aligned safely.
-            OutputPlan::SetOperation {
-                left,
-                right,
-                correspondence,
-                ..
-            } => {
-                if *correspondence == SetCorrespondence::ByName {
-                    let mut sources = match self.unlisted(*left, name) {
-                        Unlisted::Sources(sources) => sources,
-                        Unlisted::Denied | Unlisted::None => Vec::new(),
-                    };
-                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
-                        what: "BY NAME set operation",
-                    }));
-                    return Unlisted::Sources(sources);
-                }
-                let mut sources = match self.unlisted(*left, name) {
-                    Unlisted::Denied => return Unlisted::Denied,
-                    Unlisted::Sources(sources) => sources,
-                    Unlisted::None => Vec::new(),
-                };
-                match self.unlisted(*right, name) {
-                    Unlisted::Sources(more) => sources.extend(more),
-                    Unlisted::Denied => sources.push(ColumnOrigin::Ambiguous {
-                        column: name.clone(),
-                        candidates: Vec::new(),
-                    }),
-                    Unlisted::None => {}
-                }
-                if sources.is_empty() {
-                    Unlisted::None
-                } else {
-                    Unlisted::Sources(sources)
-                }
+        let model = self.scope_model(scope);
+        let mut admitted = false;
+        let mut unknown_seen = false;
+        let mut sources = Vec::new();
+        for element in &model.elements {
+            let OutputElement::Unknown(segment) = element else {
+                continue;
+            };
+            unknown_seen = true;
+            if segment.domain.admits(name, self.cx.graph.dialect) {
+                admitted = true;
+                sources.extend(self.provider_sources(&segment.provider, name));
             }
         }
+        if admitted {
+            if sources.is_empty() {
+                Unlisted::None
+            } else {
+                Unlisted::Sources(sources)
+            }
+        } else if unknown_seen {
+            Unlisted::Denied
+        } else {
+            Unlisted::None
+        }
     }
-}
-
-/// Give the wildcard sources in a merged segment the name the reader asked
-/// for, keeping unresolved origins and recursive markers from the merge.
-fn named_wildcard_sources(sources: Vec<ColumnOrigin>, column: &Ident) -> Vec<ColumnOrigin> {
-    sources
-        .into_iter()
-        .map(|source| match source {
-            ColumnOrigin::Wildcard { table } => ColumnOrigin::NamedWildcard {
-                table,
-                column: column.clone(),
-            },
-            ColumnOrigin::Recursive { base_sources } => ColumnOrigin::Recursive {
-                base_sources: named_wildcard_sources(base_sources, column),
-            },
-            ColumnOrigin::UnknownStar => ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
-                column: column.clone(),
-            }),
-            source => source,
-        })
-        .collect()
 }
 
 /// Ambiguity discards possible value sources, but keeps the reason that a

@@ -74,7 +74,6 @@ fn layout(model: &OutputModel) -> Vec<String> {
         .map(|element| match element {
             OutputElement::Column(slot) => slot.name.value.clone(),
             OutputElement::Unknown(_) => "?".to_owned(),
-            OutputElement::Tail(_) => "~".to_owned(),
         })
         .collect()
 }
@@ -235,12 +234,12 @@ fn using_value_follows_the_join_kind_when_one_side_is_unknown() {
 }
 
 #[test]
-fn set_operation_keeps_the_columns_its_right_operand_adds_as_a_tail() {
+fn set_operation_uses_only_the_left_operand_output_namespace() {
     let graph = graph("SELECT * FROM t1 UNION ALL SELECT a, b FROM t2");
     let mut store = ModelStore::default();
     let mut models = OutputModels::new(&graph, None, &mut store);
     let model = models.scope(ScopeTree::root());
-    assert_eq!(layout(&model), ["?", "~"]);
+    assert_eq!(layout(&model), ["?"]);
     assert_eq!(model.width, Width::Unknown);
 }
 
@@ -288,7 +287,7 @@ fn replace_of_an_excluded_unlisted_column_adds_nothing() {
 }
 
 #[test]
-fn replace_and_rename_take_over_the_name_of_a_set_operation_tail() {
+fn replace_and_rename_apply_to_the_left_operand_unknown_interval() {
     let set_operation = "SELECT * FROM t1 UNION ALL SELECT a, b FROM t2";
     for (modifier, new_name) in [("REPLACE (1 AS b)", "b"), ("RENAME (b AS kept)", "kept")] {
         let graph = graph(&format!("SELECT * {modifier} FROM ({set_operation}) s"));
@@ -301,13 +300,15 @@ fn replace_and_rename_take_over_the_name_of_a_set_operation_tail() {
             .expect("the root projection has a star");
         let mut store = ModelStore::default();
         let model = OutputModels::new(&graph, None, &mut store).star(node);
-        assert_eq!(layout(&model), ["?", "~", new_name], "{modifier}");
-        let OutputElement::Tail(tail) = &model.elements[1] else {
+        assert_eq!(layout(&model), ["?", new_name], "{modifier}");
+        let OutputElement::Unknown(segment) = &model.elements[0] else {
             unreachable!();
         };
-        // The tail no longer publishes `b`; the new column stands for it.
-        assert!(!tail.domain.admits(&Ident::unquoted("b"), Dialect::Generic));
-        assert!(tail.domain.admits(&Ident::unquoted("a"), Dialect::Generic));
+        assert!(
+            !segment
+                .domain
+                .admits(&Ident::unquoted("b"), Dialect::Generic)
+        );
     }
 }
 
@@ -676,7 +677,6 @@ fn the_elements_of_star_models_are_not_published() {
     assert!(model.elements.iter().all(|element| match element {
         OutputElement::Column(slot) => slot.id.is_none(),
         OutputElement::Unknown(segment) => segment.id.is_none(),
-        OutputElement::Tail(_) => true,
     }));
 }
 

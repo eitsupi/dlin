@@ -10,8 +10,9 @@ use super::input::{InputModel, Invalidity};
 use super::options::apply_options;
 use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
-    BranchTail, ColumnSlot, Forwarding, NameDomain, OpaqueReason, OutputElement, OutputModel,
-    RangeRef, SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
+    AlignedSegment, AlignedSlot, ColumnSlot, Forwarding, NameDomain, OpaqueReason, OutputElement,
+    OutputModel, OutputRef, PositionRange, RangeRef, SetOperationModel, SlotMatch, SlotMatchKind,
+    SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
@@ -172,10 +173,12 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut reads = Vec::new();
         // The scope and the model whose output this scope only re-expresses.
         let mut source = None;
+        let mut set_operation_source = None;
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
                 let mut next_ordinal = Some(0usize);
+                let mut minimum_width = 0usize;
                 for column in graph.scopes.output_columns(scope) {
                     if matches!(graph.nodes[column.node_id], RawNode::Star { .. }) {
                         let star = self.star(column.node_id);
@@ -188,18 +191,19 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                     slot.ordinal = slot.ordinal.and_then(|ordinal| {
                                         base_ordinal.and_then(|base| base.checked_add(ordinal))
                                     });
+                                    slot.position =
+                                        slot.position.shifted(minimum_width, base_ordinal);
                                 }
                                 OutputElement::Unknown(segment) => {
                                     segment.position = segment.position.shifted(base_ordinal);
-                                }
-                                OutputElement::Tail(tail) => {
-                                    tail.offset = tail.offset.and_then(|offset| {
-                                        base_ordinal.and_then(|base| base.checked_add(offset))
-                                    });
+                                    segment.position_range =
+                                        segment.position_range.shifted(minimum_width, base_ordinal);
                                 }
                             }
                             elements.push(element);
                         }
+                        minimum_width =
+                            minimum_width.saturating_add(super::minimum_width(&star.elements));
                         next_ordinal = next_ordinal
                             .and_then(|ordinal| width.and_then(|width| ordinal.checked_add(width)));
                         invalid.extend(star.invalid.iter().cloned());
@@ -214,12 +218,20 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 .cloned()
                                 .unwrap_or_else(|| OutputName::Explicit(column.name.clone())),
                             ordinal: next_ordinal,
+                            position: next_ordinal.map_or(
+                                PositionRange {
+                                    min: minimum_width,
+                                    max: None,
+                                },
+                                PositionRange::exact,
+                            ),
                             ranges: Rc::from([]),
                             candidate_ranges: Rc::from([]),
                             value: ValueId::Expr(column.node_id),
                             origin: SlotOrigin::Defined,
                         }));
                         next_ordinal = next_ordinal.and_then(|ordinal| ordinal.checked_add(1));
+                        minimum_width = minimum_width.saturating_add(1);
                     }
                 }
                 elements
@@ -234,18 +246,31 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             // The left operand defines the names of a set operation.
             OutputPlan::SetOperation {
                 left,
+                right,
                 recursive,
+                operator,
+                quantifier,
                 correspondence,
-                ..
             } => {
                 let model = self.scope(*left);
                 invalid.push(Invalidity::Whole(model.clone()));
-                let mut elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
+                let elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
+                let right_model = (!recursive).then(|| self.scope(*right));
+                set_operation_source = Some((
+                    crate::SetOperationKind {
+                        operator: *operator,
+                        quantifier: *quantifier,
+                        correspondence: *correspondence,
+                    },
+                    *recursive,
+                    model.clone(),
+                    right_model,
+                ));
+                let mut elements = elements;
                 if *correspondence == SetCorrespondence::ByName {
                     // No right-operand names are enumerated until name-based
                     // correspondence is implemented. Keep the unknown remainder
                     // separate from the left operand's listed names.
-                    elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
                     if !elements
                         .iter()
                         .any(|element| matches!(element, OutputElement::Unknown(_)))
@@ -263,17 +288,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             .collect();
                         elements.push(OutputElement::Unknown(remainder));
                     }
-                } else if !recursive {
-                    // This operation's tail covers whatever the left operand
-                    // already carried.
-                    elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
-                    elements.push(OutputElement::Tail(BranchTail {
-                        scope,
-                        publication,
-                        ranges: Rc::from([]),
-                        domain: NameDomain::default(),
-                        offset: Some(0),
-                    }));
                 }
                 source = Some((*left, model));
                 elements
@@ -299,6 +313,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         model.invalid = invalid;
         model.reads = reads;
         model.publication = Some(publication);
+        model.set_operation = set_operation_source.map(|(kind, recursive, left, right)| {
+            build_set_operation_model(kind, recursive, &left, right.as_deref())
+        });
         if let Some((source_scope, source)) = source {
             model.forwarded = forwarded;
             if let Err(problem) =
@@ -343,7 +360,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         publication,
                     }));
                 }
-                OutputElement::Tail(_) => {}
             }
             if let (Some(from), Some(to)) = (element.forwards(), element.output_ref()) {
                 forwarded.push(Forwarding { from, to });
@@ -417,6 +433,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         name: column.name.clone(),
                         output_name: OutputName::Explicit(column.name.clone()),
                         ordinal: Some(index),
+                        position: PositionRange::exact(index),
                         ranges: ranges.clone(),
                         candidate_ranges: ranges.clone(),
                         value: ValueId::VirtualColumn {
@@ -436,6 +453,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 id: None,
                 schema_relations: vec![super::super::analysis::plain_relation(table)],
                 position: crate::types::StarPosition::Inferred,
+                position_range: PositionRange { min: 0, max: None },
                 provider: UnknownProvider::Relation(table.clone()),
                 ranges: ranges.clone(),
                 domain: NameDomain::default(),
@@ -447,6 +465,17 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         // partial schema; an unknown full order does not revoke those proofs.
         columns.sort_by_key(|column| column.ordinal.unwrap_or(usize::MAX));
         let listed_names: Vec<_> = columns.iter().map(|column| column.name.clone()).collect();
+        let exact_width = (entry.coverage == SchemaCoverage::Exhaustive).then_some(columns.len());
+        let interval_end = |segment: CatalogUnknownSegment| {
+            segment.after_ordinal.and_then(|after| {
+                columns
+                    .iter()
+                    .filter_map(|column| column.ordinal)
+                    .filter(|ordinal| *ordinal > after)
+                    .min()
+                    .and_then(|next| next.checked_sub(1))
+            })
+        };
         let mut elements = Vec::new();
         for column in &columns {
             elements.push(OutputElement::Column(ColumnSlot {
@@ -454,6 +483,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 name: column.name.clone(),
                 output_name: OutputName::Explicit(column.name.clone()),
                 ordinal: column.ordinal,
+                position: column.ordinal.map_or_else(
+                    || PositionRange {
+                        min: 0,
+                        max: exact_width.and_then(|width| width.checked_sub(1)),
+                    },
+                    PositionRange::exact,
+                ),
                 ranges: ranges.clone(),
                 candidate_ranges: ranges.clone(),
                 value: ValueId::Physical {
@@ -475,6 +511,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         ranges,
                         &listed_names,
                         *segment,
+                        interval_end(*segment),
                         &entry.relation,
                     ));
                 }
@@ -501,7 +538,14 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         }),
                 );
             elements.extend(pending.map(|segment| {
-                relation_unknown(table, ranges, &listed_names, segment, &entry.relation)
+                relation_unknown(
+                    table,
+                    ranges,
+                    &listed_names,
+                    segment,
+                    interval_end(segment),
+                    &entry.relation,
+                )
             }));
         }
         elements
@@ -513,6 +557,7 @@ fn relation_unknown(
     ranges: &Rc<[RangeRef]>,
     listed_names: &[crate::Ident],
     segment: CatalogUnknownSegment,
+    interval_end: Option<usize>,
     canonical_relation: &crate::Relation,
 ) -> OutputElement {
     OutputElement::Unknown(UnknownSegment {
@@ -522,6 +567,13 @@ fn relation_unknown(
             crate::types::StarPosition::Unproven,
             crate::types::StarPosition::After,
         ),
+        position_range: segment.after_ordinal.map_or(
+            PositionRange { min: 0, max: None },
+            |after| PositionRange {
+                min: after.saturating_add(1),
+                max: interval_end,
+            },
+        ),
         provider: UnknownProvider::Relation(table.clone()),
         ranges: ranges.clone(),
         domain: NameDomain {
@@ -529,6 +581,140 @@ fn relation_unknown(
             removed: listed_names.to_vec(),
         },
     })
+}
+
+fn build_set_operation_model(
+    kind: crate::SetOperationKind,
+    recursive: bool,
+    left: &OutputModel,
+    right: Option<&OutputModel>,
+) -> SetOperationModel {
+    let mut slots = Vec::new();
+    let mut segments = Vec::new();
+    let left_exact_positions: Vec<_> = left
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Column(slot) => slot.ordinal,
+            OutputElement::Unknown(_) => None,
+        })
+        .collect();
+    let right_exact_positions: Vec<_> = right
+        .into_iter()
+        .flat_map(|model| &model.elements)
+        .filter_map(|element| match element {
+            OutputElement::Column(slot) => slot.ordinal,
+            OutputElement::Unknown(_) => None,
+        })
+        .collect();
+    for element in &left.elements {
+        match element {
+            OutputElement::Column(left_slot) => {
+                let mut matches = Vec::new();
+                if let Some(right) = right
+                    && kind.correspondence == SetCorrespondence::Positional
+                    && !recursive
+                {
+                    let has_exact_match = left_slot.ordinal.is_some_and(|ordinal| {
+                        right.elements.iter().any(|element| {
+                            matches!(element, OutputElement::Column(slot)
+                                if slot.ordinal == Some(ordinal))
+                        })
+                    });
+                    for right_element in &right.elements {
+                        match right_element {
+                            OutputElement::Column(right_slot)
+                                if left_slot.position.overlaps(right_slot.position) =>
+                            {
+                                if has_exact_match && right_slot.ordinal != left_slot.ordinal {
+                                    continue;
+                                }
+                                if right_slot.ordinal.is_some_and(|ordinal| {
+                                    left_slot.ordinal != Some(ordinal)
+                                        && left_exact_positions.contains(&ordinal)
+                                }) {
+                                    continue;
+                                }
+                                matches.push(SlotMatch {
+                                    operand: crate::SetOperand::Right,
+                                    output: OutputRef::Slot(right_slot.published()),
+                                    kind: if left_slot.ordinal.is_some()
+                                        && left_slot.ordinal == right_slot.ordinal
+                                    {
+                                        SlotMatchKind::Proven
+                                    } else {
+                                        SlotMatchKind::Possible
+                                    },
+                                });
+                            }
+                            OutputElement::Unknown(right_segment)
+                                if left_slot.position.overlaps(right_segment.position_range) =>
+                            {
+                                if left_slot
+                                    .ordinal
+                                    .is_some_and(|ordinal| right_exact_positions.contains(&ordinal))
+                                {
+                                    continue;
+                                }
+                                matches.push(SlotMatch {
+                                    operand: crate::SetOperand::Right,
+                                    output: OutputRef::Segment(right_segment.published()),
+                                    kind: SlotMatchKind::Possible,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                slots.push(AlignedSlot {
+                    left: left_slot.published(),
+                    matches,
+                });
+            }
+            OutputElement::Unknown(left_segment) => {
+                let mut matches = Vec::new();
+                if let Some(right) = right
+                    && kind.correspondence == SetCorrespondence::Positional
+                    && !recursive
+                {
+                    for right_element in &right.elements {
+                        let output = match right_element {
+                            OutputElement::Column(slot)
+                                if left_segment.position_range.overlaps(slot.position)
+                                    && !left_exact_positions
+                                        .contains(&slot.ordinal.unwrap_or(usize::MAX)) =>
+                            {
+                                Some(OutputRef::Slot(slot.published()))
+                            }
+                            OutputElement::Unknown(segment)
+                                if left_segment.position_range.overlaps(segment.position_range) =>
+                            {
+                                Some(OutputRef::Segment(segment.published()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(output) = output {
+                            matches.push(SlotMatch {
+                                operand: crate::SetOperand::Right,
+                                output,
+                                kind: SlotMatchKind::Possible,
+                            });
+                        }
+                    }
+                }
+                segments.push(AlignedSegment {
+                    left: left_segment.published(),
+                    matches,
+                });
+            }
+        }
+    }
+    SetOperationModel {
+        kind,
+        recursive,
+        slots,
+        segments,
+    }
 }
 
 /// Re-express the output of a scope under the range variables of the star
@@ -552,6 +738,7 @@ pub(super) fn forward_scope(
                     name: slot.name.clone(),
                     output_name: slot.output_name.clone(),
                     ordinal: slot.ordinal,
+                    position: slot.position,
                     ranges: ranges.clone(),
                     candidate_ranges: ranges.clone(),
                     value: match merged_by {
@@ -567,6 +754,7 @@ pub(super) fn forward_scope(
                     id: None,
                     schema_relations: segment.schema_relations.clone(),
                     position: segment.position,
+                    position_range: segment.position_range,
                     provider: match merged_by {
                         Some(op) => UnknownProvider::SetOperation { op, left: id },
                         None => UnknownProvider::Segment { scope, id },
@@ -575,13 +763,6 @@ pub(super) fn forward_scope(
                     domain: segment.domain.clone(),
                 })
             }
-            OutputElement::Tail(tail) => OutputElement::Tail(BranchTail {
-                scope: tail.scope,
-                publication: tail.publication,
-                ranges: ranges.clone(),
-                domain: tail.domain.clone(),
-                offset: Some(0),
-            }),
         })
         .collect()
 }
