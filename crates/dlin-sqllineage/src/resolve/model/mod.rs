@@ -435,7 +435,13 @@ impl OutputModel {
         for &index in unlisted {
             match &self.elements[index] {
                 OutputElement::Unknown(segment)
-                    if !matches!(segment.provider, UnknownProvider::Opaque(_))
+                    if (!matches!(segment.provider, UnknownProvider::Opaque(_))
+                        || matches!(
+                            segment.provider,
+                            UnknownProvider::Opaque(OpaqueReason::Unsupported(
+                                "BY NAME set operation"
+                            ))
+                        ))
                         && segment.domain.admits(name, dialect) =>
                 {
                     matches.unknown.push(index);

@@ -233,6 +233,11 @@ fn ambiguity_keeps_the_correspondence_reason_through_projection_wrappers() {
         ] {
             let analysis = analyze_one_with(sql, dialect, None);
             assert!(
+                common::known_sources(&analysis.output.columns[0]).is_empty(),
+                "{dialect:?} {sql}: {:#?}",
+                analysis.output
+            );
+            assert!(
                 contains_by_name_unsupported(&analysis.output.columns[0].lineage),
                 "{dialect:?} {sql}: {:#?}",
                 analysis.output
@@ -263,12 +268,21 @@ fn an_unmodelled_left_source_does_not_make_by_name_exhaustive() {
 #[test]
 fn unknown_only_ambiguity_keeps_the_correspondence_reason() {
     for dialect in [Dialect::Generic, Dialect::DuckDb] {
-        let sql = "SELECT x FROM (SELECT * FROM left_t UNION BY NAME SELECT * FROM right_t) s CROSS JOIN other_t o";
-        let analysis = analyze_one_with(sql, dialect, None);
-        assert!(
-            contains_by_name_unsupported(&analysis.output.columns[0].lineage),
-            "{dialect:?}: {:#?}",
-            analysis.output
-        );
+        for sql in [
+            "SELECT x FROM (SELECT * FROM left_t UNION BY NAME SELECT * FROM right_t) s CROSS JOIN other_t o",
+            "SELECT x FROM (SELECT a FROM left_t UNION BY NAME SELECT b FROM right_t) s CROSS JOIN other_t o",
+        ] {
+            let analysis = analyze_one_with(sql, dialect, None);
+            assert!(
+                common::known_sources(&analysis.output.columns[0]).is_empty(),
+                "{dialect:?} {sql}: {:#?}",
+                analysis.output
+            );
+            assert!(
+                contains_by_name_unsupported(&analysis.output.columns[0].lineage),
+                "{dialect:?} {sql}: {:#?}",
+                analysis.output
+            );
+        }
     }
 }
