@@ -69,6 +69,20 @@ pub struct StatementAnalysis {
     pub has_unresolved_stars: bool,
     /// Diagnostics emitted while analyzing this statement.
     pub diagnostics: Vec<Diagnostic>,
+    /// Row dependencies of the output, such as the filtering and matching
+    /// that decide which rows exist.
+    pub row_dependencies: RowDependencies,
+}
+
+/// The row dependencies of a statement's output.
+///
+/// `NotCollected` means the dependencies were not collected. It does not mean
+/// that there are none. A variant that carries the collected dependencies will
+/// be added later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RowDependencies {
+    /// Row dependencies were not collected.
+    NotCollected,
 }
 
 /// Category of a SQL statement.

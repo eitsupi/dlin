@@ -17,7 +17,7 @@ pub(super) const CACHE_DIR: &str = ".dlin_cache";
 /// alter stored results (schema evidence, adoption policy, slot correspondence)
 /// without a package version bump, so a development build never reuses
 /// results computed under the old semantics.
-pub(super) const ANALYSIS_SEMANTICS_ID: &str = "set-operation-slots-1";
+pub(super) const ANALYSIS_SEMANTICS_ID: &str = "except-values-1";
 
 /// The package version and [`ANALYSIS_SEMANTICS_ID`] together are the
 /// persistent cache compatibility boundary. Cache formats are intentionally

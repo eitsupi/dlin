@@ -635,9 +635,9 @@ fn alignment_reason_retains_the_intersect_operator_and_distinct_quantifier() {
 }
 
 #[test]
-fn alignment_reason_retains_the_except_operator_and_all_quantifier() {
+fn alignment_reason_retains_the_intersect_operator_and_all_quantifier() {
     let catalog = Schemas::unknown_order("t", &["z", "a"]);
-    let result = analyze_with("SELECT p, q FROM s EXCEPT ALL SELECT * FROM t", &catalog);
+    let result = analyze_with("SELECT p, q FROM s INTERSECT ALL SELECT * FROM t", &catalog);
     for column in &result.output.columns {
         assert!(matches!(
             &column.lineage,
@@ -646,7 +646,7 @@ fn alignment_reason_retains_the_except_operator_and_all_quantifier() {
                     reason,
                     Unresolved::AlignmentUnknown {
                         operation: SetOperationKind {
-                            operator: SetOperator::Except,
+                            operator: SetOperator::Intersect,
                             quantifier: SetQuantifier::All,
                             correspondence: SetCorrespondence::Positional,
                         },

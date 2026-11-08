@@ -5,10 +5,14 @@ use std::rc::Rc;
 
 use super::context::EvalContext;
 use super::mapping::{Cut, mappings_of, merge_transform, models};
-use super::model::{OutputElement, OutputModel, OutputRef, SegmentId, SlotMatch, SlotMatchKind};
+use super::model::{
+    OutputElement, OutputModel, OutputRef, SegmentId, SetOperationModel, SlotMatch, SlotMatchKind,
+};
 use crate::graph::scope::ScopeId;
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
-use crate::{Ident, SetCorrespondence, SetOperand, SetOperationKind, SourceColumn, Unresolved};
+use crate::{
+    Ident, SetCorrespondence, SetOperand, SetOperationKind, SetOperator, SourceColumn, Unresolved,
+};
 
 fn output_mapping(
     output: OutputRef,
@@ -125,6 +129,13 @@ fn merge_values(left: &mut ColumnMapping, right: &ColumnMapping) {
     left.transform = merge_transform(&left.transform, &right.transform);
 }
 
+/// Whether the right operand supplies values to the output. `EXCEPT` takes its
+/// values from the left operand only; the right operand contributes row
+/// dependencies, which are not part of value lineage.
+fn right_supplies_values(operation: &SetOperationModel) -> bool {
+    operation.kind.operator != SetOperator::Except
+}
+
 fn recursive(sources: Vec<ColumnOrigin>) -> Vec<ColumnOrigin> {
     vec![ColumnOrigin::Recursive {
         base_sources: sources,
@@ -166,6 +177,8 @@ pub(super) fn evaluate_set_operation(
                 if operation.kind.correspondence == SetCorrespondence::Positional {
                     if operation.recursive {
                         mapping.sources = recursive(mapping.sources);
+                    } else if !right_supplies_values(operation) {
+                        // The right operand only excludes rows.
                     } else if let Some(proven) = aligned
                         .matches
                         .iter()
@@ -213,7 +226,7 @@ pub(super) fn evaluate_set_operation(
                     if operation.kind.correspondence == SetCorrespondence::Positional {
                         if operation.recursive {
                             mapping.sources = recursive(mapping.sources);
-                        } else {
+                        } else if right_supplies_values(operation) {
                             // Publish each right interval once, even if several
                             // left intervals have overlapping possible positions.
                             for matched in &aligned.matches {
@@ -295,7 +308,7 @@ pub(super) fn set_operation_segment_sources(
     if operation.kind.correspondence == SetCorrespondence::Positional {
         if operation.recursive {
             sources = recursive(sources);
-        } else {
+        } else if right_supplies_values(operation) {
             sources.push(alignment(operation.kind, &aligned.matches, true, cx));
         }
     }
