@@ -230,7 +230,7 @@ fn sources_text(sources: &[dlin_sqllineage::SourceColumn]) -> String {
 
 fn unresolved_text(unresolved: &Unresolved) -> String {
     match unresolved {
-        Unresolved::AlignmentUnknown => "AlignmentUnknown".to_string(),
+        Unresolved::AlignmentUnknown { .. } => "AlignmentUnknown".to_string(),
         Unresolved::BehindStar { relation } => format!("BehindStar({})", relation.name.value),
         Unresolved::Unbound { column } => format!("Unbound({})", column.value),
         Unresolved::Ambiguous { column, candidates } => format!(

@@ -106,7 +106,7 @@ fn leading_unknown_star_does_not_publish_nonleading_only_set_names() {
         .iter()
         .map(|mapping| output_name(mapping).unwrap_or(""))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["id", "total"]);
+    assert!(names.is_empty());
 }
 
 #[test]

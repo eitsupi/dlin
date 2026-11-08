@@ -1,7 +1,9 @@
 //! Dialect-aware identity for collections that retain their original spelling.
 
 use crate::types::TableRef;
-use crate::{Candidate, Dialect, Ident, Relation, SourceColumn, Unresolved};
+use crate::{
+    Candidate, Dialect, Ident, Relation, SetOperand, SetOperationKind, SourceColumn, Unresolved,
+};
 
 pub(crate) type RelationKey = (Option<String>, Option<String>, String);
 
@@ -83,13 +85,32 @@ pub(crate) enum UnresolvedKey {
     Recursive,
     RowValue(String),
     Unsupported(&'static str),
-    AlignmentUnknown,
+    AlignmentUnknown(
+        SetOperationKind,
+        Vec<(RelationKey, String)>,
+        Vec<SetOperand>,
+    ),
     SchemaDependent(crate::SchemaDependencyKind, Vec<RelationKey>),
 }
 
 pub(crate) fn unresolved_key(unresolved: &Unresolved, dialect: Dialect) -> UnresolvedKey {
     match unresolved {
-        Unresolved::AlignmentUnknown => UnresolvedKey::AlignmentUnknown,
+        Unresolved::AlignmentUnknown {
+            operation,
+            possible_sources,
+            unknown_operands,
+        } => {
+            let mut possible_sources: Vec<_> = possible_sources
+                .iter()
+                .map(|source| source_key(source, dialect))
+                .collect();
+            possible_sources.sort();
+            possible_sources.dedup();
+            let mut unknown_operands = unknown_operands.clone();
+            unknown_operands.sort();
+            unknown_operands.dedup();
+            UnresolvedKey::AlignmentUnknown(*operation, possible_sources, unknown_operands)
+        }
         Unresolved::SchemaDependent { what, relations } => UnresolvedKey::SchemaDependent(
             *what,
             relations

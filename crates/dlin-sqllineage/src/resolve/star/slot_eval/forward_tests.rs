@@ -3,9 +3,9 @@
 use super::harness::{cte, evaluate, parse, show, slot_ids};
 use super::take_evaluated_slots;
 use crate::graph::scope::{OutputPlan, ScopeTree};
+use crate::resolve::mapping::retag;
 use crate::resolve::mapping::{Cut, resolve_scope_mappings};
 use crate::resolve::model::{OutputElement, OutputRef, ValueId};
-use crate::resolve::setop_legacy::retag;
 use crate::{Dialect, Ident};
 
 const DUPLICATES: &str = "WITH c AS (SELECT t.a AS x, t.b AS x FROM t) SELECT * FROM c";
@@ -199,7 +199,7 @@ fn a_set_operation_forwards_its_left_operand_under_its_own_scope() {
 }
 
 #[test]
-fn retagging_keeps_unique_published_refs_and_marks_only_tails_unpublished() {
+fn retagging_keeps_every_mapping_attached_to_a_unique_published_ref() {
     for sql in [
         "WITH a AS (SELECT t.a AS x, t.b AS x FROM t UNION ALL SELECT u.a, u.b FROM u), \
          b AS (SELECT * FROM a) SELECT * FROM b",
@@ -219,11 +219,7 @@ fn retagging_keeps_unique_published_refs_and_marks_only_tails_unpublished() {
                 );
                 assert_eq!(ev.cx.mapping_cache.models.arena.owner(*output), op);
             }
-            for mapping in mappings.iter() {
-                if mapping.slot.is_none() {
-                    assert!(mapping.unpublished_tail);
-                }
-            }
+            assert!(mappings.iter().all(|mapping| mapping.slot.is_some()));
             for pair in &model.forwarded {
                 if matches!(pair.to, OutputRef::Slot(_)) {
                     assert_eq!(
@@ -241,7 +237,6 @@ fn retagging_keeps_unique_published_refs_and_marks_only_tails_unpublished() {
             if let Some(mapping) = invalid.first_mut() {
                 let published = mapping.slot.expect("the scope publishes this mapping");
                 mapping.slot = None;
-                mapping.unpublished_tail = false;
                 assert_eq!(retag(&mut invalid, &model).err(), Some(Cut));
 
                 let mut missing = mappings.to_vec();
@@ -298,10 +293,18 @@ fn set_operation_provider_evaluation_uses_the_merged_segment_on_both_paths() {
         let mapping = ev
             .provider_mapping(&provider, position)
             .expect("the merged segment has a mapping");
-        assert_eq!(show(&mapping.sources), ["t1.*", "t2.*"]);
-        assert_eq!(
-            show(&ev.provider_sources(&provider, &Ident::unquoted("id"))),
-            ["t1.*:id", "t2.*:id"]
+        assert!(show(&mapping.sources).contains(&"t1.*".to_owned()));
+        assert!(show(&mapping.sources).contains(&"t2.*".to_owned()));
+        let named = ev.provider_sources(&provider, &Ident::unquoted("id"));
+        assert!(show(&named).contains(&"t1.*:id".to_owned()));
+        assert!(!show(&named).contains(&"t2.*:id".to_owned()));
+        assert!(
+            named.iter().any(|origin| matches!(origin,
+                crate::types::ColumnOrigin::Unresolved(crate::Unresolved::AlignmentUnknown {
+                    unknown_operands, ..
+                }) if unknown_operands.contains(&crate::SetOperand::Right)
+            )),
+            "{named:?}"
         );
     });
 }

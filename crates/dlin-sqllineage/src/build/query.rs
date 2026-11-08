@@ -1,4 +1,4 @@
-use sqlparser::ast::{Query, SetExpr, SetQuantifier};
+use sqlparser::ast::{Query, SetExpr, SetOperator as SqlSetOperator, SetQuantifier};
 
 use crate::build::{LineageBuilder, relation};
 use crate::graph::scope::{OutputPlan, ScopeId, ScopeKind};
@@ -100,8 +100,8 @@ impl LineageBuilder {
             SetExpr::SetOperation {
                 left,
                 right,
+                op,
                 set_quantifier,
-                ..
             } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(left, target_values);
@@ -135,12 +135,30 @@ impl LineageBuilder {
                         crate::graph::scope::SetCorrespondence::Positional
                     }
                 };
+                let operator = match op {
+                    SqlSetOperator::Union => crate::graph::scope::SetOperator::Union,
+                    SqlSetOperator::Intersect => crate::graph::scope::SetOperator::Intersect,
+                    SqlSetOperator::Except | SqlSetOperator::Minus => {
+                        crate::graph::scope::SetOperator::Except
+                    }
+                };
+                let quantifier = match set_quantifier {
+                    SetQuantifier::All | SetQuantifier::AllByName => {
+                        crate::graph::scope::SetQuantifier::All
+                    }
+                    SetQuantifier::Distinct
+                    | SetQuantifier::None
+                    | SetQuantifier::ByName
+                    | SetQuantifier::DistinctByName => crate::graph::scope::SetQuantifier::Distinct,
+                };
                 self.graph.scopes.set_output_plan(
                     self.current_scope,
                     OutputPlan::SetOperation {
                         left: left_scope,
                         right: right_scope,
                         recursive: is_recursive,
+                        operator,
+                        quantifier,
                         correspondence,
                     },
                 );

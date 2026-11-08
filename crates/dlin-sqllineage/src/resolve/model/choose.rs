@@ -73,10 +73,6 @@ impl OutputModel {
             return Choice::Ambiguous(ambiguity);
         }
         let matches = self.matches(name);
-        // Set-operation tails are not weighed: a tail holds the right
-        // operand's columns beyond the left operand's, so it competes with
-        // nothing the left operand lists. Readers consult it when no provider
-        // is found here.
         let mut indexes: Vec<usize> = matches
             .listed
             .iter()
@@ -91,7 +87,6 @@ impl OutputModel {
             let (ranges, merged) = match &self.elements[index] {
                 OutputElement::Column(slot) => (&slot.ranges, &slot.candidate_ranges),
                 OutputElement::Unknown(segment) => (&segment.ranges, &segment.ranges),
-                OutputElement::Tail(_) => continue, // never matched
             };
             let asked = asked_name(&self.elements[index], name);
             // The elements of a CTE or derived table are weighed by the model
@@ -250,7 +245,6 @@ impl OutputModel {
             let ranges = match &self.elements[index] {
                 OutputElement::Column(slot) => &slot.ranges,
                 OutputElement::Unknown(segment) => &segment.ranges,
-                OutputElement::Tail(_) => continue,
             };
             for range in ranges.iter() {
                 if !seen.contains(&range.index) {

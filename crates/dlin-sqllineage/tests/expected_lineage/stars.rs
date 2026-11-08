@@ -1,5 +1,6 @@
 use dlin_sqllineage::{
-    Diagnostic, DiagnosticKind, Dialect, Lineage, Severity, Shape, UnexpandedStar, Unresolved,
+    Diagnostic, DiagnosticKind, Dialect, Lineage, SetCorrespondence, SetOperand, SetOperationKind,
+    SetOperator, SetQuantifier, Severity, Shape, UnexpandedStar, Unresolved,
 };
 
 use super::support::{
@@ -1115,116 +1116,131 @@ fn modifier_over_cte_of_several_stars_cases() -> Vec<Case> {
     cases
 }
 
-/// The left operand of the set operation is `t1.*` with unknown columns and
-/// the right one lists `a, b`. Names and positions of the unknown columns are
-/// not known, so the right operand's columns stay reachable by name, each
-/// with the right branch's source and the left operand's unresolved star.
-/// A star over the set operation must not lose them.
+/// A set operation publishes the names of its left operand. When that operand
+/// is an unexpanded star, right-only names are alignment candidates rather
+/// than output columns. Star modifiers can still introduce or rename a name
+/// from the left unknown segment.
 fn set_operation_tail_cases() -> Vec<Case> {
     let set_operation = "SELECT * FROM t1 UNION ALL SELECT a, b FROM t2";
-    let right_branch = |column: &str| {
+    let alignment = || Unresolved::AlignmentUnknown {
+        operation: SetOperationKind {
+            operator: SetOperator::Union,
+            quantifier: SetQuantifier::All,
+            correspondence: SetCorrespondence::Positional,
+        },
+        possible_sources: vec![
+            source(relation("t2"), u("a")),
+            source(relation("t2"), u("b")),
+        ],
+        unknown_operands: vec![SetOperand::Left],
+    };
+    let open_set_operation = || Shape::Open {
+        unexpanded: vec![UnexpandedStar {
+            relation: Some(relation("t1")),
+            after_ordinal: None,
+            lineage: Lineage::Partial {
+                known: vec![],
+                unresolved: vec![
+                    Unresolved::BehindStar {
+                        relation: relation("t1"),
+                    },
+                    Unresolved::AlignmentUnknown {
+                        operation: SetOperationKind {
+                            operator: SetOperator::Union,
+                            quantifier: SetQuantifier::All,
+                            correspondence: SetCorrespondence::Positional,
+                        },
+                        possible_sources: vec![
+                            source(relation("t2"), u("a")),
+                            source(relation("t2"), u("b")),
+                        ],
+                        unknown_operands: vec![SetOperand::Left],
+                    },
+                ],
+            },
+        }],
+    };
+    let named_from_left_star = |column: &str| {
         partial_col(
             0,
             u(column),
-            vec![source(relation("t2"), u(column))],
-            vec![Unresolved::BehindStar {
-                relation: relation("t1"),
-            }],
+            vec![],
+            vec![behind("t1", column), alignment()],
         )
     };
-    let unpositioned = |column: &str| {
-        let mut expected = right_branch(column);
-        expected.ordinal = None;
-        expected
-    };
-    // The replacement replaces the tail's `b` instead of joining it.
     let replaced_b = || {
         let mut expected = col(0, u("b"), vec![]);
         expected.ordinal = None;
         expected
     };
-    // The renamed column is the right operand's `b`, or whatever `t1` hides
-    // under that name.
     let renamed_b = |ordinal| {
-        let mut expected = partial_col(
-            0,
-            u("kept"),
-            vec![source(relation("t2"), u("b"))],
-            vec![
-                behind("t1", "b"),
-                Unresolved::BehindStar {
-                    relation: relation("t1"),
-                },
-            ],
-        );
+        let mut expected = partial_col(0, u("kept"), vec![], vec![behind("t1", "b"), alignment()]);
         expected.ordinal = ordinal;
         expected
     };
     vec![
         Case::new(
-            "set_operation_right_column_read_directly",
+            "set_operation_left_unknown_name_read_directly",
             &format!("SELECT b FROM ({set_operation}) s"),
             Dialect::Generic,
-            vec![right_branch("b")],
+            vec![named_from_left_star("b")],
         )
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_read_through_star",
+            "set_operation_left_unknown_name_read_through_projection",
             &format!("SELECT b FROM (SELECT * FROM ({set_operation}) s) d"),
             Dialect::Generic,
-            vec![right_branch("b")],
+            vec![named_from_left_star("b")],
         )
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_columns_expanded_by_star",
+            "set_operation_keeps_unknown_left_shape_through_star",
             &format!("SELECT * FROM (SELECT * FROM ({set_operation}) s) d"),
             Dialect::Generic,
-            vec![unpositioned("a"), unpositioned("b")],
+            vec![],
         )
-        .shape(open_star("t1", None))
+        .shape(open_set_operation())
         .unresolved_stars(true),
-        // REPLACE and RENAME act on the right operand's column as well: the
-        // old column is not published next to the new one.
         Case::new(
-            "set_operation_right_column_replaced",
+            "set_operation_replaces_left_unknown_name",
             &format!("SELECT * REPLACE (1 AS b) FROM ({set_operation}) s"),
             Dialect::Generic,
-            vec![unpositioned("a"), replaced_b()],
+            vec![replaced_b()],
         )
-        .shape(open_star("t1", None))
+        .shape(open_set_operation())
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_replaced_read_back",
+            "set_operation_replacement_readback",
             &format!("SELECT b FROM (SELECT * REPLACE (1 AS b) FROM ({set_operation}) s) d"),
             Dialect::Generic,
             vec![col(0, u("b"), vec![])],
         )
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_replaced_and_expanded_again",
+            "set_operation_replacement_survives_star_projection",
             &format!("SELECT * FROM (SELECT * REPLACE (1 AS b) FROM ({set_operation}) s) d"),
             Dialect::Generic,
-            vec![unpositioned("a"), replaced_b()],
+            vec![replaced_b()],
         )
-        .shape(open_star("t1", None))
+        .shape(open_set_operation())
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_renamed",
+            "set_operation_renames_left_unknown_name",
             &format!("SELECT * RENAME (b AS kept) FROM ({set_operation}) s"),
             Dialect::Generic,
-            vec![unpositioned("a"), renamed_b(None)],
+            vec![renamed_b(None)],
         )
-        .shape(open_star("t1", None))
+        .shape(open_set_operation())
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_renamed_read_back",
+            "set_operation_renamed_name_readback",
             &format!("SELECT kept FROM (SELECT * RENAME (b AS kept) FROM ({set_operation}) s) d"),
             Dialect::Generic,
             vec![renamed_b(Some(0))],
         )
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_column_renamed_away_name_is_not_read_back",
+            "set_operation_renamed_left_name_is_not_read_back",
             &format!("SELECT b FROM (SELECT * RENAME (b AS kept) FROM ({set_operation}) s) d"),
             Dialect::Generic,
             vec![partial_col(
@@ -1236,12 +1252,12 @@ fn set_operation_tail_cases() -> Vec<Case> {
         )
         .unresolved_stars(true),
         Case::new(
-            "set_operation_right_columns_respect_star_exclude",
+            "set_operation_excludes_left_unknown_name",
             &format!("SELECT * EXCLUDE (b) FROM ({set_operation}) s"),
             Dialect::Generic,
-            vec![unpositioned("a")],
+            vec![],
         )
-        .shape(open_star("t1", None))
+        .shape(open_set_operation())
         .unresolved_stars(true),
     ]
 }

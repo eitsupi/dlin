@@ -12,18 +12,15 @@
 #[cfg(test)]
 use std::cell::RefCell;
 
-use super::{Evaluator, Unlisted};
-use crate::graph::scope::{OutputPlan, ScopeId, SetCorrespondence};
+use super::Evaluator;
+use crate::graph::scope::{OutputPlan, ScopeId};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
 use crate::{Ident, Unresolved};
 
 use super::super::context::{EvalKey, SlotValue};
 use super::super::lineage::flatten_mapping_sources;
 use super::super::mapping::Cut;
-use super::super::model::{
-    BranchTail, OutputElement, OutputModel, OutputRef, SegmentId, SlotId, UnknownProvider,
-};
-use super::super::target::same_column_name;
+use super::super::model::{OutputRef, SegmentId, SlotId, UnknownProvider};
 
 #[cfg(test)]
 thread_local! {
@@ -155,16 +152,6 @@ impl Evaluator<'_, '_, '_> {
         self.publication_mappings(scope, publication)
     }
 
-    /// The mappings a set operation's tail is read from. They may contain
-    /// unresolved markers from a cut, which callers filter without caching.
-    fn tail_source(
-        &mut self,
-        scope: ScopeId,
-        publication: u32,
-    ) -> Result<std::sync::Arc<[ColumnMapping]>, Cut> {
-        self.publication_mappings(scope, publication)
-    }
-
     fn publication_mappings(
         &mut self,
         scope: ScopeId,
@@ -231,20 +218,7 @@ impl Evaluator<'_, '_, '_> {
         if !self.cx.enter(EvalKey::Segment(id)) {
             return cut_sources(column);
         }
-        let mut sources = self.provider_sources(&def.provider, column);
-        // A segment a set operation publishes of its own, rather than one it
-        // forwards from its left operand, is still read next to the right
-        // operand's columns.
-        if !matches!(def.provider, UnknownProvider::SetOperation { .. })
-            && let OutputPlan::SetOperation {
-                right,
-                correspondence: SetCorrespondence::Positional,
-                ..
-            } = self.cx.graph.scopes.output_plan(def.owner)
-            && let Unlisted::Sources(more) = self.unlisted(*right, column)
-        {
-            sources.extend(more);
-        }
+        let sources = self.provider_sources(&def.provider, column);
         self.cx.leave(EvalKey::Segment(id));
         sources
     }
@@ -254,95 +228,6 @@ impl Evaluator<'_, '_, '_> {
             self.cx.graph.scopes.output_plan(scope),
             OutputPlan::SetOperation { .. }
         )
-    }
-
-    /// The origins of the first right-operand column of a set operation that
-    /// has the name `name`.
-    pub(super) fn tail_named(
-        &mut self,
-        model: &OutputModel,
-        name: &Ident,
-    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let dialect = self.cx.graph.dialect;
-        for element in &model.elements {
-            let OutputElement::Tail(tail) = element else {
-                continue;
-            };
-            if let Some(mapping) = self.tail_mappings(tail).into_iter().find(|mapping| {
-                mapping.output_name.is_some()
-                    && same_column_name(&mapping.target.column, name, dialect)
-            }) {
-                let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-                return Some((sources, has_back, mapping.transform));
-            }
-        }
-        None
-    }
-
-    /// The mappings a set operation merges in beyond those its left operand
-    /// lists, minus the names the star's modifiers rule out.
-    pub(super) fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
-        let dialect = self.cx.graph.dialect;
-        let generation = self.cx.cut_generation();
-        let mappings = match self.tail_source(tail.scope, tail.publication) {
-            Ok(mappings) => mappings,
-            // What the right operand adds cannot be listed.
-            Err(Cut) => return vec![cut_segment()],
-        };
-        mappings
-            .iter()
-            .filter(|mapping| mapping.merged_in)
-            // Under a cut, a named right-only column cannot be published
-            // against the unknown left shape. Keep only the explicit open
-            // segment markers from that tail.
-            .filter(|mapping| {
-                self.cx.cut_generation() == generation || mapping.output_name.is_none()
-            })
-            .filter(|mapping| {
-                mapping.output_name.is_none() || tail.domain.admits(&mapping.target.column, dialect)
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// What the right operand of a set operation merges in under `column`:
-    /// the origins of mappings with that name, and a named wildcard for each
-    /// relation it hides behind a star. A tail that has neither leaves the
-    /// column unresolved.
-    pub(super) fn tail_column(
-        &mut self,
-        scope: ScopeId,
-        publication: u32,
-        column: &Ident,
-    ) -> Vec<ColumnOrigin> {
-        let dialect = self.cx.graph.dialect;
-        let generation = self.cx.cut_generation();
-        let mappings = match self.tail_source(scope, publication) {
-            Ok(mappings) => mappings,
-            Err(Cut) => return cut_sources(column),
-        };
-        let mut sources = Vec::new();
-        for mapping in mappings.iter().filter(|mapping| mapping.merged_in) {
-            if self.cx.cut_generation() != generation && mapping.output_name.is_some() {
-                continue;
-            }
-            if mapping.output_name.is_none() {
-                for source in &mapping.sources {
-                    if let ColumnOrigin::Wildcard { table } = source {
-                        sources.push(ColumnOrigin::NamedWildcard {
-                            table: table.clone(),
-                            column: column.clone(),
-                        });
-                    }
-                }
-            } else if same_column_name(&mapping.target.column, column, dialect) {
-                sources.extend(mapping.sources.iter().cloned());
-            }
-        }
-        if sources.is_empty() {
-            sources = cut_sources(column);
-        }
-        sources
     }
 }
 
@@ -378,8 +263,6 @@ pub(super) fn cut_segment() -> ColumnMapping {
         sources: vec![ColumnOrigin::UnknownStar],
         transform: TransformKind::Direct,
         slot: None,
-        unpublished_tail: false,
-        merged_in: false,
     }
 }
 

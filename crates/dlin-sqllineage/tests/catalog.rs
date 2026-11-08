@@ -4,7 +4,8 @@ use common::{
     analyze_one_with, catalog_entry, concrete_sources, find_mapping, output_name, unresolved,
 };
 use dlin_sqllineage::{
-    Catalog, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Lineage, Relation, Severity, Shape,
+    Catalog, CatalogEntry, Diagnostic, DiagnosticKind, Dialect, Lineage, Relation,
+    SetCorrespondence, SetOperand, SetOperationKind, SetOperator, SetQuantifier, Severity, Shape,
     Unresolved,
 };
 
@@ -465,7 +466,7 @@ fn unqualified_qualified_exclude_keeps_other_relation_wildcard() {
 }
 
 #[test]
-fn set_operation_name_decision_uses_left_branch_only() {
+fn set_operation_name_lookup_uses_left_namespace_and_keeps_alignment_unknown() {
     let result = configured(
         "WITH x AS (SELECT * FROM unknown_left UNION ALL SELECT * EXCEPT (secret) FROM unknown_right) \
          SELECT secret FROM x",
@@ -478,11 +479,25 @@ fn set_operation_name_decision_uses_left_branch_only() {
         Unresolved::NamedBehindStar { relation, column }
             if relation.name.value == "unknown_left" && column.value == "secret")));
     assert!(sources.iter().any(|source| matches!(source,
-        Unresolved::Unbound { column } if column.value == "secret")));
+        Unresolved::AlignmentUnknown {
+            operation: SetOperationKind {
+                operator: SetOperator::Union,
+                quantifier: SetQuantifier::All,
+                correspondence: SetCorrespondence::Positional,
+            },
+            possible_sources,
+            unknown_operands,
+        } if possible_sources.is_empty()
+            && unknown_operands == &[SetOperand::Left, SetOperand::Right])));
+    assert!(
+        !sources
+            .iter()
+            .any(|source| matches!(source, Unresolved::Unbound { .. }))
+    );
 }
 
 #[test]
-fn set_operation_keeps_named_wildcard_sources_from_both_branches() {
+fn set_operation_does_not_guess_right_wildcard_name_by_name() {
     let result = configured(
         "WITH x AS (SELECT * FROM unknown_left UNION ALL SELECT * FROM unknown_right) \
          SELECT secret FROM x",
@@ -491,17 +506,23 @@ fn set_operation_keeps_named_wildcard_sources_from_both_branches() {
     );
 
     let sources = unresolved(&result.output.columns[0]);
-    for table_name in ["unknown_left", "unknown_right"] {
-        assert!(sources.iter().any(|source| {
-            matches!(source, Unresolved::NamedBehindStar { relation, column }
-                if relation.name.value == table_name && column.value == "secret")
-        }));
-    }
-    assert!(
-        !sources
-            .iter()
-            .any(|source| matches!(source, Unresolved::Unbound { .. }))
-    );
+    assert!(sources.iter().any(|source| matches!(source,
+        Unresolved::NamedBehindStar { relation, column }
+            if relation.name.value == "unknown_left" && column.value == "secret")));
+    assert!(sources.iter().any(|source| matches!(source,
+        Unresolved::AlignmentUnknown {
+            operation: SetOperationKind {
+                operator: SetOperator::Union,
+                quantifier: SetQuantifier::All,
+                correspondence: SetCorrespondence::Positional,
+            },
+            possible_sources,
+            unknown_operands,
+        } if possible_sources.is_empty()
+            && unknown_operands == &[SetOperand::Left, SetOperand::Right])));
+    assert!(!sources.iter().any(|source| matches!(source,
+        Unresolved::NamedBehindStar { relation, .. }
+            if relation.name.value == "unknown_right")));
 }
 
 #[test]

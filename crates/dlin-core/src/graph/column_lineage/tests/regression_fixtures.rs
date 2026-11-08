@@ -655,10 +655,10 @@ fn test_set_operation_explicit_projection_before_unresolved_star_is_traced() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    // The source-free literal branches do not erase concrete origins.  The
-    // wildcard ordinal remains indeterminate, while the explicitly named
-    // extra_col output remains discoverable.
-    assert_exact_column_outcomes(&result, &["a", "extra_col"], &["b", "c"]);
+    // The literal at position zero does not erase a's concrete origin.
+    // The other positions cannot be aligned past the right star, and the
+    // right-only extra_col name is outside the output namespace.
+    assert_exact_column_outcomes(&result, &["a"], &["b", "c"]);
 }
 
 #[test]
@@ -791,7 +791,7 @@ fn test_set_star_with_unknown_source_does_not_fabricate_lineage() {
         "SELECT * FROM unknown_source UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
@@ -802,7 +802,7 @@ fn test_nested_set_star_does_not_fabricate_lineage() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt AS total FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
@@ -815,7 +815,7 @@ fn test_leading_star_hides_a_name_declared_by_several_operands() {
          UNION ALL SELECT id, fee AS total FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
@@ -828,7 +828,7 @@ fn test_leading_star_hides_a_name_despite_ordinal_alignment() {
          UNION ALL SELECT id, fee FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
 }
 
 #[test]
@@ -839,7 +839,7 @@ fn test_set_operands_do_not_match_explicit_projections_by_name_at_other_ordinal(
          UNION ALL SELECT fee AS total, id FROM third_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
     assert!(result.columns.is_empty());
 }
 
@@ -860,7 +860,7 @@ fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
         "SELECT * FROM (SELECT * FROM real_x) sub UNION ALL SELECT id, amt FROM known_table",
         &["total"],
     );
-    assert_exact_column_outcomes(&result, &[], &["amt", "id", "total"]);
+    assert_exact_column_outcomes(&result, &[], &["total"]);
     assert!(result.columns.iter().all(|entry| {
         entry.sources.iter().all(|source| {
             source.table != "real_x"
@@ -940,8 +940,6 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
 }
 
 #[test]
-#[ignore = "the upstream analyzer currently traces a name introduced only by a non-leading branch through \
-            a nested set operation, but SQL semantics leave the output unresolved"]
 fn test_set_operation_in_from_subquery_does_not_adopt_a_non_leading_name() {
     let result = compute_star_shape(
         "SELECT col_a FROM (SELECT * FROM ext_a UNION ALL SELECT 2 AS col_a) u",

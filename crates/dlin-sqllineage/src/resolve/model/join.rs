@@ -127,19 +127,22 @@ pub(super) fn fold_join_columns(
 
 fn concat_groups(mut groups: Vec<Group>) -> Vec<OutputElement> {
     let mut prefix = Some(0usize);
+    let mut minimum_prefix = 0usize;
     let mut output = Vec::new();
     for group in &mut groups {
+        let minimum_width = super::minimum_width(&group.elements);
         for element in &mut group.elements {
             match element {
                 OutputElement::Column(slot) => {
                     slot.ordinal = slot
                         .ordinal
                         .and_then(|ordinal| prefix.and_then(|prefix| prefix.checked_add(ordinal)));
+                    slot.position = slot.position.shifted(minimum_prefix, prefix);
                 }
                 OutputElement::Unknown(segment) => {
                     segment.position = segment.position.shifted(prefix);
+                    segment.position_range = segment.position_range.shifted(minimum_prefix, prefix);
                 }
-                OutputElement::Tail(_) => {}
             }
         }
         let width = group
@@ -153,6 +156,7 @@ fn concat_groups(mut groups: Vec<Group>) -> Vec<OutputElement> {
                     .filter(|element| matches!(element, OutputElement::Column(_)))
                     .count()
             });
+        minimum_prefix = minimum_prefix.saturating_add(minimum_width);
         prefix = prefix.and_then(|prefix| width.and_then(|width| prefix.checked_add(width)));
         output.append(&mut group.elements);
     }
@@ -418,6 +422,7 @@ fn fold_groups(
             output.push(OutputElement::Column(ColumnSlot {
                 id: None,
                 ordinal: Some(output.len()),
+                position: super::PositionRange::exact(output.len()),
                 name,
                 output_name,
                 ranges,
@@ -446,8 +451,14 @@ fn fold_groups(
         }
         if natural_order_uncertain {
             for element in &mut output {
-                if let OutputElement::Column(slot) = element {
-                    slot.ordinal = None;
+                match element {
+                    OutputElement::Column(slot) => {
+                        slot.ordinal = None;
+                        slot.position = super::PositionRange { min: 0, max: None };
+                    }
+                    OutputElement::Unknown(segment) => {
+                        segment.position_range = super::PositionRange { min: 0, max: None };
+                    }
                 }
             }
         }
@@ -464,18 +475,33 @@ fn fold_groups(
 
 fn recompute_ordinals(elements: &mut [OutputElement]) {
     let mut next = Some(0usize);
+    let mut minimum = 0usize;
     for element in elements {
         match element {
             OutputElement::Column(slot) if slot.ordinal.is_some() => {
                 slot.ordinal = next;
+                slot.position = next.map_or(
+                    super::PositionRange {
+                        min: minimum,
+                        max: None,
+                    },
+                    super::PositionRange::exact,
+                );
                 next = next.and_then(|ordinal| ordinal.checked_add(1));
+                minimum = minimum.saturating_add(1);
             }
             OutputElement::Column(slot) => {
                 slot.ordinal = None;
+                // The displayed order of unordered catalog columns does
+                // not establish a lower bound for any one of them.
+                slot.position = super::PositionRange { min: 0, max: None };
+                next = None;
+                minimum = minimum.saturating_add(1);
+            }
+            OutputElement::Unknown(segment) => {
+                segment.position_range = super::PositionRange { min: 0, max: None };
                 next = None;
             }
-            OutputElement::Unknown(_) => next = None,
-            OutputElement::Tail(_) => {}
         }
     }
 }

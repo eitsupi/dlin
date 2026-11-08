@@ -5,7 +5,7 @@ mod context;
 mod lineage;
 mod mapping;
 mod model;
-mod setop_legacy;
+mod set_operation;
 mod star;
 mod target;
 mod topo;

@@ -55,7 +55,6 @@ fn a_projection_has_one_mapping_per_element_that_stands_for_columns() {
                     OutputElement::Unknown(segment) => {
                         usize::from(ev.segment_mapping(segment.published()).is_some())
                     }
-                    OutputElement::Tail(tail) => ev.tail_mappings(tail).len(),
                 };
                 expected += produced;
                 for _ in 0..produced {
@@ -69,50 +68,35 @@ fn a_projection_has_one_mapping_per_element_that_stands_for_columns() {
 }
 
 #[test]
-fn a_tail_remembers_the_columns_before_the_star_that_carries_it() {
-    let union = "(SELECT * FROM t1 UNION ALL SELECT a, b FROM t2) s";
-    let offset = |sql: &str, scope_of: fn(&crate::graph::RawGraph) -> ScopeId| {
-        let graph = parse(sql, Dialect::Generic);
+fn a_set_operation_star_keeps_the_position_after_its_projection_prefix() {
+    for (prefix, expected) in [
+        ("", None),
+        ("1 AS p, ", Some(0)),
+        ("1 AS p, 2 AS q, ", Some(1)),
+    ] {
+        let sql =
+            format!("SELECT {prefix}s.* FROM (SELECT * FROM t1 UNION ALL SELECT a, b FROM t2) s");
+        let graph = parse(&sql, Dialect::Generic);
         evaluate(&graph, |ev| {
-            let model = ev.scope_model(scope_of(&graph));
-            let offsets: Vec<_> = model
-                .elements
+            let model = ev.scope_model(body(&graph));
+            let mappings = projection_mappings(body(&graph), &model, ev.cx);
+            let unknown = mappings
                 .iter()
-                .filter_map(|element| match element {
-                    OutputElement::Tail(tail) => Some(tail.offset),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(offsets.len(), 1, "{sql}");
-            offsets[0]
-        })
-    };
-    assert_eq!(
-        offset(&format!("SELECT * FROM {union}"), body),
-        Some(0),
-        "no column precedes the star"
-    );
-    assert_eq!(
-        offset(&format!("SELECT 1 AS p, s.* FROM {union}"), body),
-        Some(1)
-    );
-    assert_eq!(
-        offset(&format!("SELECT 1 AS p, 2 AS q, s.* FROM {union}"), body),
-        Some(2)
-    );
-    // A star of unknown width before it leaves the offset unknown.
-    assert_eq!(
-        offset(&format!("SELECT u.*, s.* FROM u, {union}"), body),
-        None
-    );
-    // A reader that only re-expresses the projection starts counting again.
-    assert_eq!(
-        offset(
-            &format!("SELECT * FROM (SELECT 1 AS p, s.* FROM {union}) o"),
-            body
-        ),
-        Some(0)
-    );
+                .find(|mapping| mapping.output_name.is_none())
+                .expect("the left star still publishes an unknown interval");
+            let after = match unknown.star_position {
+                crate::types::StarPosition::After(after) => Some(after),
+                crate::types::StarPosition::Unproven => None,
+                crate::types::StarPosition::Inferred => mappings
+                    .iter()
+                    .take_while(|mapping| mapping.slot != unknown.slot)
+                    .filter(|mapping| mapping.output_name.is_some())
+                    .last()
+                    .and_then(|mapping| mapping.ordinal),
+            };
+            assert_eq!(after, expected, "{sql}");
+        });
+    }
 }
 
 #[test]

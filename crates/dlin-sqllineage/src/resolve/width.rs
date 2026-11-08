@@ -63,8 +63,11 @@ fn scope_arity(
                     (Some(left), Some(right)) if left != right => {
                         return Err(SemanticError::SetOperationArityMismatch { left, right });
                     }
-                    (Some(width), Some(_)) => Some(width),
-                    _ => None,
+                    // Validation inspects both operands, but the output
+                    // width belongs to the same model that publishes its
+                    // names and slots. An unknown right width does not add
+                    // output slots beyond an exhaustive left operand.
+                    _ => models.scope(scope).width.exact(),
                 }
             }
         }

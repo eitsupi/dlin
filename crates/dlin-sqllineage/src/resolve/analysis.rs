@@ -59,6 +59,20 @@ pub(super) fn assemble(
         } else {
             let mut relations = Vec::new();
             star_relations(&mapping.sources, &mut relations);
+            // One interval can reach the same relation through several
+            // operand paths. Those paths do not publish additional intervals.
+            let mut seen = Vec::new();
+            relations.retain(|relation| {
+                let key = relation
+                    .as_ref()
+                    .map(|relation| relation_key(relation, dialect));
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            });
             if relations.is_empty() {
                 relations.push(None);
             }
@@ -250,6 +264,18 @@ fn retain_first_relation_spelling(
 
 fn normalize_unresolved(unresolved: &mut Unresolved, read_order: &[Relation], dialect: Dialect) {
     match unresolved {
+        Unresolved::AlignmentUnknown {
+            possible_sources,
+            unknown_operands,
+            ..
+        } => {
+            for source in possible_sources.iter_mut() {
+                retain_first_relation_spelling(&mut source.relation, read_order, dialect);
+            }
+            sort_dedup_by_key(possible_sources, |source| source_key(source, dialect));
+            unknown_operands.sort_unstable();
+            unknown_operands.dedup();
+        }
         Unresolved::BehindStar { relation } | Unresolved::NamedBehindStar { relation, .. } => {
             retain_first_relation_spelling(relation, read_order, dialect);
         }
@@ -343,5 +369,60 @@ pub(crate) fn plain_relation(table: &TableRef) -> Relation {
         catalog: table.catalog.clone(),
         schema: table.schema.clone(),
         name: table.table.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Quote, SetCorrespondence, SetOperand, SetOperationKind, SetOperator, SetQuantifier,
+    };
+
+    #[test]
+    fn alignment_candidates_follow_dialect_keys_and_first_relation_spelling() {
+        let relation = |name| Relation {
+            catalog: None,
+            schema: None,
+            name: Ident::unquoted(name),
+        };
+        let candidate = |table, column| SourceColumn {
+            relation: relation(table),
+            column,
+        };
+        let mut reason = Unresolved::AlignmentUnknown {
+            operation: SetOperationKind {
+                operator: SetOperator::Union,
+                quantifier: SetQuantifier::All,
+                correspondence: SetCorrespondence::Positional,
+            },
+            possible_sources: vec![
+                candidate("t", Ident::unquoted("X")),
+                candidate("T", Ident::unquoted("x")),
+                candidate("t", Ident::quoted("x", Quote::Double)),
+            ],
+            unknown_operands: vec![SetOperand::Right, SetOperand::Left, SetOperand::Right],
+        };
+        normalize_unresolved(&mut reason, &[relation("T")], Dialect::Snowflake);
+        let Unresolved::AlignmentUnknown {
+            possible_sources,
+            unknown_operands,
+            ..
+        } = reason
+        else {
+            unreachable!();
+        };
+        assert_eq!(possible_sources.len(), 2);
+        assert!(
+            possible_sources
+                .iter()
+                .all(|source| source.relation == relation("T"))
+        );
+        assert_eq!(possible_sources[0].column, Ident::unquoted("X"));
+        assert_eq!(
+            possible_sources[1].column,
+            Ident::quoted("x", Quote::Double)
+        );
+        assert_eq!(unknown_operands, [SetOperand::Left, SetOperand::Right]);
     }
 }

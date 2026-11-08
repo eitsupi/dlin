@@ -255,7 +255,15 @@ fn unknown_order_cannot_supply_a_guessed_positional_source() {
             statement.output.columns[index].lineage,
             Lineage::Partial {
                 known: vec![source("s", name)],
-                unresolved: vec![Unresolved::AlignmentUnknown],
+                unresolved: vec![Unresolved::AlignmentUnknown {
+                    operation: SetOperationKind {
+                        operator: SetOperator::Union,
+                        quantifier: SetQuantifier::All,
+                        correspondence: SetCorrespondence::Positional,
+                    },
+                    possible_sources: vec![source("t", "a"), source("t", "z")],
+                    unknown_operands: vec![],
+                }],
             }
         );
         assert_eq!(statement.output.columns[index].ordinal, Some(index));
@@ -282,9 +290,24 @@ fn explicit_prefix_survives_an_unknown_order_star_and_a_wrapper() {
     );
     for column in &statement.output.columns[1..] {
         assert_eq!(column.ordinal, None);
-        assert!(
-            matches!(&column.lineage, Lineage::Partial { known, unresolved } if known.iter().all(|s| s.relation == relation("t")) && unresolved == &[Unresolved::AlignmentUnknown])
-        );
+        let Lineage::Partial { known, unresolved } = &column.lineage else {
+            panic!("expected a partial lineage, got {:?}", column.lineage);
+        };
+        assert!(known.iter().all(|source| source.relation == relation("t")));
+        assert!(matches!(
+            unresolved.as_slice(),
+            [Unresolved::AlignmentUnknown {
+                operation: SetOperationKind {
+                    operator: SetOperator::Union,
+                    quantifier: SetQuantifier::All,
+                    correspondence: SetCorrespondence::Positional,
+                },
+                possible_sources,
+                unknown_operands,
+            }] if !possible_sources.is_empty()
+                && possible_sources.iter().all(|source| source.relation == relation("u"))
+                && unknown_operands.is_empty()
+        ));
     }
 }
 
