@@ -588,8 +588,7 @@ impl Evaluator<'_, '_, '_> {
             (OpaqueReason::FieldPath(_), StarTarget::FieldPath { binding, path }) => {
                 let mut sources = Vec::new();
                 if let Some(field) = path.first()
-                    && let Some(origin) =
-                        resolve_captured_binding(field, binding, self.cx, &mut HashSet::new())
+                    && let Some(origin) = resolve_captured_binding(field, binding, self.cx)
                 {
                     sources.push(origin);
                 }

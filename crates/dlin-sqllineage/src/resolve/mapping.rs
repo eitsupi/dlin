@@ -99,8 +99,7 @@ pub(super) fn resolve_scope_mappings(
         return mappings.clone();
     }
     // A scope that is being computed cannot safely publish a partially
-    // materialized result. Returning no mappings preserves the existing
-    // fallback to raw output resolution and does not cache an incomplete
+    // materialized result. Returning no mappings does not cache an incomplete
     // entry as resolved.
     // TODO: re-entry or an exhausted budget must surface as an unresolved
     // value, not as an empty list that readers treat as "no dependencies".
@@ -190,75 +189,36 @@ pub(super) fn resolve_scope_mappings(
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
-            let right_mappings = if recursive {
-                Vec::new()
-            } else {
-                resolve_scope_mappings(right, cx).iter().cloned().collect()
-            };
-            let mut merged = if !recursive
-                && (mappings_have_unknown_shape(&left_mappings)
-                    || mappings_have_unknown_shape(&right_mappings)
-                    || !unknown_reasons.is_empty())
-            {
-                merge_unknown_shape_mappings(left_mappings, right_mappings)
-            } else if !recursive {
-                merge_proven_positions(left_mappings, &right_mappings)
-            } else {
+            let mut merged = if recursive {
                 // The branch resolvers expand stars independently. Preserve the
-                // left branch's names and order, as SQL set operations do.
-                let mut merged = Vec::with_capacity(left_mappings.len());
-                for (idx, left_mapping) in left_mappings.into_iter().enumerate() {
-                    if let Some(right_mapping) = right_mappings.get(idx) {
-                        let (sources, transform) =
-                            merge_branch_sources(&left_mapping, right_mapping);
-                        if recursive {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources: vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }],
-                                transform,
-                            });
-                        } else {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources,
-                                transform,
-                            });
-                        }
-                    } else {
-                        let sources = left_mapping.sources;
-                        let transform = left_mapping.transform;
-                        if recursive {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources: vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }],
-                                transform,
-                            });
-                        } else {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources,
-                                transform,
-                            });
-                        }
-                    }
+                // left branch's names and order, as SQL set operations do. The
+                // right term reads the CTE itself and is not merged.
+                left_mappings
+                    .into_iter()
+                    .map(|left_mapping| ColumnMapping {
+                        star_position: crate::types::StarPosition::Inferred,
+                        ordinal: left_mapping.ordinal,
+                        output_name: left_mapping.output_name,
+                        target: left_mapping.target,
+                        sources: vec![ColumnOrigin::Recursive {
+                            base_sources: left_mapping.sources,
+                        }],
+                        transform: left_mapping.transform,
+                    })
+                    .collect()
+            } else {
+                let right_mappings = resolve_scope_mappings(right, cx)
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if mappings_have_unknown_shape(&left_mappings)
+                    || mappings_have_unknown_shape(&right_mappings)
+                    || !unknown_reasons.is_empty()
+                {
+                    merge_unknown_shape_mappings(left_mappings, right_mappings)
+                } else {
+                    merge_proven_positions(left_mappings, &right_mappings)
                 }
-                merged
             };
             // Attach every unknown-width source to each mapping produced by
             // this set operation, including mappings retained by an early

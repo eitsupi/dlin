@@ -1,47 +1,19 @@
 use std::collections::HashSet;
 
 use super::binding::{
-    find_cte_redirect, find_unqualified_binding, find_virtual_sources_for_column,
-    lookup_virtual_binding, resolve_input_reference, resolve_node,
+    find_unqualified_binding, find_virtual_sources_for_column, lookup_virtual_binding,
+    resolve_input_reference, resolve_node,
 };
 use super::context::{EvalContext, EvalKey};
-use super::mapping::{known_empty_dependency, merge_transform, resolve_scope_mappings};
+use super::mapping::{known_empty_dependency, merge_transform};
 use super::star::named_scope_sources;
 
 use crate::Ident;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState, VirtualSourceId};
+use crate::graph::scope::{Binding, VirtualColumnState, VirtualSourceId};
 use crate::types::{ColumnOrigin, TransformKind};
-
-/// Collect source origins for one logical output slot, retaining both sides
-/// of a set operation. Unlike the public mapping path this returns origins so
-/// a later CTE/derived-table reference can continue through the slot.
-fn scope_column_sources(
-    scope: usize,
-    index: usize,
-    cx: &mut EvalContext<'_, '_>,
-) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
-    let mappings = resolve_scope_mappings(scope, cx);
-    // TODO: a missing mapping (a cycle or an unevaluated scope) must surface
-    // as an unresolved value, not as an empty, direct dependency set.
-    let Some(mapping) = mappings.get(index) else {
-        return (vec![], vec![], false, TransformKind::Direct);
-    };
-    let mut sources = Vec::new();
-    let mut has_back = false;
-    for source in &mapping.sources {
-        match source {
-            ColumnOrigin::Recursive { base_sources } => {
-                sources.extend(base_sources.clone());
-                has_back = true;
-            }
-            source => sources.push(source.clone()),
-        }
-    }
-    (sources, vec![], has_back, mapping.transform.clone())
-}
 
 pub(super) fn collect_output_sources(
     node_id: NodeId,
@@ -129,26 +101,11 @@ pub(super) fn collect_leaf_origins(
         return (sources, has_back, transform);
     }
 
-    if let Some((target_output, scope)) = find_cte_redirect(node_id, cx) {
-        if let Some(index) = graph
-            .scopes
-            .output_columns(scope)
-            .iter()
-            .position(|c| c.node_id == target_output)
-            && !matches!(graph.scopes.output_plan(scope), OutputPlan::Projection)
-        {
-            let (sources, _, has_back, transform) = scope_column_sources(scope, index, cx);
-            return (sources, has_back, transform);
-        }
-        let (sources, _, has_back, transform) = collect_output_sources(target_output, cx, visited);
-        return (sources, has_back, transform);
-    }
-
     if let RawNode::Output { .. } = &graph.nodes[node_id] {
         let (sources, _, has_back, transform) = collect_output_sources(node_id, cx, visited);
         (sources, has_back, transform)
     } else {
-        let origin = resolve_node(node_id, cx, visited);
+        let origin = resolve_node(node_id, cx);
         match origin {
             Some(o) => (vec![o], false, TransformKind::Direct),
             None => (vec![], false, TransformKind::Direct),
