@@ -113,20 +113,6 @@ impl SchemaEvidence {
             names,
         )
     }
-
-    /// The merged YAML and SQL-inferred name list used for dependency models.
-    /// It is replaced by the SQL-output schema of each model.
-    pub(crate) fn merged_node_columns(
-        subject: &str,
-        names: impl IntoIterator<Item = String>,
-    ) -> Self {
-        Self::enumerated(
-            format!("merged:{subject}"),
-            subject,
-            SchemaOrigin::SqlOutput,
-            names,
-        )
-    }
 }
 
 fn quote_for_dialect(dialect: DlinDialect) -> sqllineage::Quote {

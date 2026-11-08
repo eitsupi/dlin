@@ -1,5 +1,5 @@
 use crate::parser::manifest::Manifest;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 mod backend;
 mod cache;
@@ -12,8 +12,8 @@ mod tests;
 mod types;
 
 use backend::sqllineage::{
-    OutputFailureKind, analysis_error, analyze_parsed, analyze_sql, discovered_output_names,
-    legacy_single_error, lineage_failure, parse_sql, resolve_statement_output,
+    OutputFailureKind, analyze_parsed, discovered_output_names, lineage_failure, parse_sql,
+    resolve_statement_output, single_lineage_statement,
 };
 pub use backend::{
     CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
@@ -21,7 +21,7 @@ pub use backend::{
 };
 pub use cache::ColumnLineageCache;
 pub use impact::{ColumnImpactReport, ImpactedColumn};
-use schema::{SemanticDigestCache, build_yaml_schema_for_node};
+use schema::{SchemaContext, SemanticDigestCache};
 pub use types::{
     ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
     ModelColumnLineage, TransformationType,
@@ -30,23 +30,6 @@ use types::{
     InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage,
     normalize_column_lineage_errors,
 };
-
-fn discover_named_output_columns(
-    sql: &str,
-    dialect: DlinDialect,
-    catalog: Option<&CatalogSnapshot>,
-) -> HashSet<String> {
-    // Deliberately preserve the previous parse-failure behavior:
-    // YAML columns remain usable when discovery cannot parse the SQL.
-    // Surfacing discovery parse errors is an error-model change to decide on
-    // its own merits, rather than inherit from this refactor.
-    let Ok(analysis) = analyze_sql(sql, dialect, catalog) else {
-        return HashSet::new();
-    };
-    discovered_output_names(&analysis, dialect)
-        .into_iter()
-        .collect()
-}
 
 fn output_failure_state(kind: OutputFailureKind) -> &'static str {
     match kind {
@@ -130,6 +113,7 @@ pub struct ColumnLineageAnalysis<'a> {
     pub(super) dialect: DlinDialect,
     pub(super) cache: &'a mut ColumnLineageCache,
     semantic_digests: SemanticDigestCache,
+    schema: SchemaContext<'a>,
     lineage_results: HashMap<String, InternalModelColumnLineage>,
 }
 
@@ -144,6 +128,7 @@ impl<'a> ColumnLineageAnalysis<'a> {
             dialect,
             cache,
             semantic_digests: SemanticDigestCache::default(),
+            schema: SchemaContext::new(manifest, dialect),
             lineage_results: HashMap::new(),
         }
     }
@@ -277,7 +262,7 @@ pub(super) fn compute_column_lineage_internal(
         return cached;
     }
 
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+    let catalog = analysis.schema.catalog_for(node);
 
     let parsed = match parse_sql(compiled_code, dialect) {
         Ok(parsed) => parsed,
@@ -288,46 +273,27 @@ pub(super) fn compute_column_lineage_internal(
             return parse_failure(display_name, node.columns.len(), message);
         }
     };
-    let yaml_schema = build_yaml_schema_for_node(manifest, node, dialect);
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
-    let discovered = if yaml_schema.as_ref() == catalog.as_ref() {
-        discovered_output_names(&analyzed, dialect)
-    } else {
-        discovered_output_names(
-            &analyze_parsed(&parsed, dialect, yaml_schema.as_ref()),
-            dialect,
-        )
-    };
-    let mut names: HashSet<String> = node.columns.keys().cloned().collect();
-    names.extend(discovered);
-    let mut column_names: Vec<String> = names.into_iter().collect();
+    let mut column_names: Vec<String> = node.columns.keys().cloned().collect();
+    column_names.extend(discovered_output_names(&analyzed, dialect));
     column_names.sort();
+    column_names.dedup();
 
     if column_names.is_empty() {
         return column_inference_failure(display_name);
     }
 
     let total = column_names.len();
-    if let Some(detail) = analysis_error(&analyzed) {
-        return parse_failure(display_name, total, detail);
-    }
-    let statement = match analyzed.into_single() {
+    let statement = match single_lineage_statement(&analyzed) {
         Ok(statement) => statement,
-        Err(error) => return parse_failure(display_name, total, legacy_single_error(error)),
+        Err(detail) => return parse_failure(display_name, total, detail),
     };
-    if !statement.kind.carries_lineage() {
-        return parse_failure(
-            display_name,
-            total,
-            "statement is not lineage-bearing".to_string(),
-        );
-    }
 
     let has_star_columns = statement.has_unresolved_stars;
     let mut columns = Vec::new();
     let mut errors = Vec::new();
     for col_name in &column_names {
-        match resolve_statement_output(&statement, col_name, false, dialect) {
+        match resolve_statement_output(statement, col_name, false, dialect) {
             Ok(output) => {
                 if let Some(failure) = lineage_failure(&output.lineage) {
                     let state = output_failure_state(failure.kind);

@@ -43,6 +43,9 @@ pub struct CatalogUnknownSegment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ColumnPresence {
     Present(Ident),
+    /// The catalog lists the name more than once, so a reference to it does
+    /// not denote one column.
+    Duplicate,
     Absent,
     Possible,
 }
@@ -134,12 +137,16 @@ impl<'a> CatalogContext<'a> {
         let Some(entry) = self.entry(table) else {
             return ColumnPresence::Possible;
         };
-        if let Some(column) = entry
+        let mut listed = entry
             .columns
             .iter()
-            .find(|column| column.name.column_key(self.dialect) == name.column_key(self.dialect))
-        {
-            return ColumnPresence::Present(column.name.clone());
+            .filter(|column| column.name.column_key(self.dialect) == name.column_key(self.dialect));
+        if let Some(column) = listed.next() {
+            return if listed.next().is_some() {
+                ColumnPresence::Duplicate
+            } else {
+                ColumnPresence::Present(column.name.clone())
+            };
         }
         match entry.coverage {
             SchemaCoverage::Exhaustive => ColumnPresence::Absent,
@@ -150,7 +157,64 @@ impl<'a> CatalogContext<'a> {
     pub(crate) fn column(&self, table: &crate::types::TableRef, name: &Ident) -> Option<Ident> {
         match self.column_presence(table, name) {
             ColumnPresence::Present(canonical) => Some(canonical),
-            ColumnPresence::Absent | ColumnPresence::Possible => None,
+            ColumnPresence::Duplicate | ColumnPresence::Absent | ColumnPresence::Possible => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TableRef;
+
+    struct Listed(&'static [&'static str]);
+
+    impl Catalog for Listed {
+        fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+            Some(CatalogEntry {
+                relation: relation.clone(),
+                columns: self
+                    .0
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, name)| CatalogColumn {
+                        name: Ident::unquoted(*name),
+                        ordinal: Some(ordinal),
+                        data_type: None,
+                        fields: None,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                coverage: SchemaCoverage::Exhaustive,
+                order: SchemaOrder::Proven,
+                unknown_segments: Cow::Borrowed(&[]),
+                evidence: Cow::Borrowed(&[]),
+            })
+        }
+    }
+
+    #[test]
+    fn a_name_listed_twice_is_a_duplicate_and_never_owns_a_column() {
+        let catalog = Listed(&["x", "y", "X"]);
+        let context = CatalogContext::new(&catalog, crate::Dialect::Generic);
+        let table = TableRef::new("t");
+
+        assert_eq!(
+            context.column_presence(&table, &Ident::unquoted("x")),
+            ColumnPresence::Duplicate
+        );
+        assert_eq!(
+            context.column_presence(&table, &Ident::unquoted("y")),
+            ColumnPresence::Present(Ident::unquoted("y"))
+        );
+        assert_eq!(
+            context.column_presence(&table, &Ident::unquoted("z")),
+            ColumnPresence::Absent
+        );
+        assert_eq!(context.column(&table, &Ident::unquoted("x")), None);
+        assert_eq!(
+            context.resolve_column(&Ident::unquoted("x"), std::slice::from_ref(&table)),
+            None
+        );
     }
 }

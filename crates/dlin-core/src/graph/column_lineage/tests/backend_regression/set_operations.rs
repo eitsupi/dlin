@@ -288,11 +288,10 @@ fn known_schema_expands_star_to_concrete_sources() {
 
 #[test]
 fn known_schema_set_operation_with_literal_branch_keeps_concrete_sources() {
-    let result = analyze(
+    let result = analyze_over_sql_models(
         "SELECT * FROM ext_a UNION ALL SELECT 1 AS col_x, 2 AS col_y",
         DlinDialect::Generic,
-        &[("ext_a", &["col_x", "col_y"])],
-        &[],
+        &[("ext_a", "SELECT col_x, col_y FROM raw_a")],
     );
     assert_no_errors(&result);
     for column in ["col_x", "col_y"] {
@@ -307,11 +306,10 @@ fn known_schema_set_operation_with_literal_branch_keeps_concrete_sources() {
 
 #[test]
 fn source_free_branch_does_not_discard_concrete_branch() {
-    let result = analyze(
+    let result = analyze_over_sql_models(
         "WITH lit AS (SELECT 1 AS col_a), u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) SELECT col_a FROM u",
         DlinDialect::Generic,
-        &[("ext_a", &["col_x", "col_y"])],
-        &[],
+        &[("ext_a", "SELECT col_x, col_y FROM raw_a")],
     );
     assert_no_errors(&result);
     assert_resolved(
@@ -320,6 +318,26 @@ fn source_free_branch_does_not_discard_concrete_branch() {
         &[("ext_a", "col_x")],
         TransformationType::Direct,
     );
+}
+
+/// A model with only YAML columns has an exhaustive but unordered schema, so
+/// a positional set operation over its star cannot be aligned by position.
+#[test]
+fn yaml_only_upstream_star_has_unknown_positional_alignment() {
+    let result = analyze(
+        "SELECT * FROM ext_a UNION ALL SELECT 1 AS col_x, 2 AS col_y",
+        DlinDialect::Generic,
+        &[("ext_a", &["col_x", "col_y"])],
+        &[],
+    );
+    for column in ["col_x", "col_y"] {
+        assert_column_error(
+            &result,
+            column,
+            ColumnLineageErrorKind::ColumnIndeterminate,
+            "unknown positional alignment",
+        );
+    }
 }
 
 #[test]

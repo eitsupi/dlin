@@ -186,37 +186,39 @@ fn test_source_table_not_empty() {
     }
 }
 
-// --- YAML column completion tests ---
+// --- Dependency schema tests ---
 
 #[test]
-fn test_yaml_columns_supplement_partial_sql_inference() {
-    // stg_orders_passthrough: "SELECT id, * FROM raw.orders"
-    //   SQL inference only captures "id" (the star is unresolvable without schema).
-    //   YAML defines: id, user_id, order_date, status.
+fn test_dependency_sql_output_is_not_merged_with_yaml_columns() {
+    // stg_orders_passthrough: `select id, * from raw.orders`, where the
+    //   source declares id, user_id, order_date and status in YAML. The model
+    //   really outputs `id` twice: once explicitly and once from the star.
+    //   Its own YAML lists `id` once, but the YAML declaration is a separate
+    //   record and is never merged into what the model provides downstream.
     //
-    // mart_yaml_star: "WITH source AS (SELECT * FROM stg_orders_passthrough) SELECT * FROM source"
-    //   Expanding this CTE star requires knowing stg_orders_passthrough's columns.
-    //   With YAML+SQL merge in resolve_node_columns, the schema has all 4 columns,
-    //   enabling full star expansion and lineage tracing.
+    // mart_yaml_star: `with source as (select * from stg_orders_passthrough)
+    //   select * from source`
+    //   The star expands to the SQL output of stg_orders_passthrough, so the
+    //   duplicated `id` stays ambiguous while the other columns are traced.
     let manifest = load_fixture_manifest();
     let result = compute_column_lineage(&manifest, "mart_yaml_star");
 
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(
-        result.columns.len(),
-        4,
-        "should resolve all 4 YAML columns, got: {:?}",
-        result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
-    );
-
-    // All columns should have sources tracing to stg_orders_passthrough
+    let mut traced: Vec<_> = result.columns.iter().map(|c| c.column.as_str()).collect();
+    traced.sort_unstable();
+    assert_eq!(traced, ["order_date", "status", "user_id"]);
     for entry in &result.columns {
-        assert!(
-            !entry.sources.is_empty(),
-            "column '{}' should have sources",
-            entry.column
-        );
+        assert_eq!(entry.sources.len(), 1, "column '{}'", entry.column);
+        assert_eq!(entry.sources[0].column, entry.column);
+        assert_eq!(entry.sources[0].table, "shop.main.stg_orders_passthrough");
     }
+
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    let error = &result.errors[0];
+    assert_eq!(
+        error.kind,
+        dlin_core::graph::column_lineage::ColumnLineageErrorKind::ColumnAmbiguous
+    );
+    assert_eq!(error.column.as_deref(), Some("id"));
 }
 
 // --- Cross-model lineage integration tests ---

@@ -105,8 +105,9 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
         ..Default::default()
     };
     let root = manifest.nodes.get(root_id).unwrap();
-    let catalog =
-        schema::build_schema_from_manifest(&manifest, root, DlinDialect::Generic).unwrap();
+    let catalog = schema::SchemaContext::new(&manifest, DlinDialect::Generic)
+        .catalog_for(root)
+        .unwrap();
 
     assert_eq!(
         catalog.table_columns("warehouse.analytics.physical_alias"),
@@ -119,14 +120,6 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
     );
     assert_eq!(catalog.table_columns("named_model"), Some(vec!["id"]));
     assert_eq!(catalog.table_columns("model_name"), None);
-
-    let yaml_catalog =
-        schema::build_yaml_schema_for_node(&manifest, root, DlinDialect::Generic).unwrap();
-    assert_eq!(
-        yaml_catalog.table_columns("physical_alias"),
-        Some(vec!["id"])
-    );
-    assert_eq!(yaml_catalog.table_columns("named_model"), Some(vec!["id"]));
 }
 
 #[test]

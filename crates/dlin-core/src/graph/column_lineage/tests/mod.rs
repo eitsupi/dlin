@@ -978,4 +978,5 @@ mod core_util;
 mod impact;
 mod production_output;
 mod regression_fixtures;
+mod schema_knowledge;
 mod yaml_schema;

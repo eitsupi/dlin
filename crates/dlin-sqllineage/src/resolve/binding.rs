@@ -6,12 +6,13 @@ use super::model::InputLookup;
 use super::star::{input_name_sources, lookup_input, named_scope_sources};
 use super::target::effective_bindings;
 
+use crate::catalog::ColumnPresence;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, BindingEnv, VirtualSourceId};
 use crate::types::{ColumnOrigin, TransformKind};
-use crate::{Ident, Unresolved};
+use crate::{Candidate, Ident, Relation, Unresolved};
 
 pub(super) fn resolve_node(
     node_id: NodeId,
@@ -182,10 +183,27 @@ pub(super) fn resolve_captured_binding(
 ) -> Option<ColumnOrigin> {
     let graph = cx.graph;
     match binding {
-        Binding::Table(table) => Some(ColumnOrigin::Concrete {
-            table,
-            column: name.clone(),
-        }),
+        Binding::Table(table) => {
+            if cx.catalog.is_some_and(|catalog| {
+                matches!(
+                    catalog.column_presence(&table, name),
+                    ColumnPresence::Duplicate
+                )
+            }) {
+                return Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                    column: name.clone(),
+                    candidates: vec![Candidate::Relation(Relation {
+                        catalog: table.catalog,
+                        schema: table.schema,
+                        name: table.table,
+                    })],
+                }));
+            }
+            Some(ColumnOrigin::Concrete {
+                table,
+                column: name.clone(),
+            })
+        }
         Binding::Cte(scope) | Binding::DerivedTable(scope) => {
             resolve_through_scope(name, scope, cx, visited)
         }

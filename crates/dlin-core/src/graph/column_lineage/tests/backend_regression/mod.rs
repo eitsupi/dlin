@@ -111,6 +111,34 @@ fn analyze(
     )
 }
 
+/// Analyze `sql` with upstream models defined by SQL (`(name, SQL)` pairs).
+/// Each upstream model provides the output of its SQL, in SQL order.
+fn analyze_over_sql_models(
+    sql: &str,
+    dialect: DlinDialect,
+    upstream: &[(&str, &str)],
+) -> ModelColumnLineage {
+    let mut manifest = make_manifest(sql, &[], &[]);
+    let mut depends_on = Vec::new();
+    for (name, upstream_sql) in upstream {
+        let node = make_node(name, vec![], &[], Some(upstream_sql));
+        depends_on.push(node.unique_id.clone());
+        manifest.nodes.insert(node.unique_id.clone(), node);
+    }
+    manifest
+        .nodes
+        .get_mut(&format!("model.proj.{ROOT_MODEL}"))
+        .unwrap()
+        .depends_on
+        .nodes = depends_on;
+    compute_column_lineage(
+        &manifest,
+        ROOT_MODEL,
+        dialect,
+        &mut ColumnLineageCache::disabled(),
+    )
+}
+
 /// Analyze `sql` with the generic dialect, no upstream models and the given
 /// YAML columns.
 fn generic(sql: &str, yaml_columns: &[&str]) -> ModelColumnLineage {
