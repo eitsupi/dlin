@@ -5,6 +5,12 @@ use serde::Serialize;
 use std::borrow::Cow;
 
 /// Catalog that can look up relation metadata without requiring a clone.
+///
+/// Within one analysis, an implementation must give the same answer every time
+/// the same relation is looked up. The analyzer may consult a relation more
+/// than once and expects the answers to agree. For example, a star over a
+/// relation is expanded only if the relation is listed when the star's scope
+/// is modelled, and a later lookup does not expand it again.
 pub trait Catalog: Send + Sync {
     /// Find a relation and return its canonical spelling and columns.
     fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>>;
