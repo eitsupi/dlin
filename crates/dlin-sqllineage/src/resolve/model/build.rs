@@ -17,7 +17,7 @@ use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence};
 use crate::types::TableRef;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -233,12 +233,37 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             // The left operand defines the names of a set operation.
             OutputPlan::SetOperation {
-                left, recursive, ..
+                left,
+                recursive,
+                correspondence,
+                ..
             } => {
                 let model = self.scope(*left);
                 invalid.push(Invalidity::Whole(model.clone()));
                 let mut elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
-                if !recursive {
+                if *correspondence == SetCorrespondence::ByName {
+                    // No right-operand names are enumerated until name-based
+                    // correspondence is implemented. Keep the unknown remainder
+                    // separate from the left operand's listed names.
+                    elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
+                    if !elements
+                        .iter()
+                        .any(|element| matches!(element, OutputElement::Unknown(_)))
+                    {
+                        let mut remainder = UnknownSegment::opaque(OpaqueReason::Unsupported(
+                            "BY NAME set operation",
+                        ));
+                        remainder.position = crate::types::StarPosition::Unproven;
+                        remainder.domain.removed = elements
+                            .iter()
+                            .filter_map(|element| match element {
+                                OutputElement::Column(slot) => Some(slot.name.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        elements.push(OutputElement::Unknown(remainder));
+                    }
+                } else if !recursive {
                     // This operation's tail covers whatever the left operand
                     // already carried.
                     elements.retain(|element| !matches!(element, OutputElement::Tail(_)));

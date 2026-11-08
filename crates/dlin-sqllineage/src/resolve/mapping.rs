@@ -204,7 +204,8 @@ fn compute_scope_mappings(
             left,
             right,
             recursive,
-        } => merge_operands(view, left, right, recursive, cx)?,
+            correspondence,
+        } => merge_operands(view, left, right, recursive, correspondence, cx)?,
     };
     Ok(mappings)
 }

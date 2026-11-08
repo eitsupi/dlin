@@ -123,6 +123,8 @@ pub(super) enum OpaqueReason {
     Ambiguous(NodeId),
     /// A source whose columns are not modeled, such as VALUES.
     UnknownWidth,
+    /// A shape whose correspondence is not implemented.
+    Unsupported(&'static str),
     /// A scope that reads itself.
     Recursive,
 }
@@ -514,3 +516,43 @@ fn unknown_publishers(
 
 #[cfg(test)]
 mod tests;
+
+impl UnknownProvider {
+    /// Whether an unknown name depends on unimplemented BY NAME
+    /// correspondence. Follow published segments without evaluating values,
+    /// so ambiguity can retain this reason without claiming any candidate.
+    pub(in crate::resolve) fn has_by_name_reason(
+        &self,
+        graph: &crate::graph::RawGraph,
+        arena: &slot::SlotArena,
+    ) -> bool {
+        let mut provider = self.clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            provider = match provider {
+                Self::Relation(_) => return false,
+                Self::Opaque(OpaqueReason::Unsupported("BY NAME set operation")) => return true,
+                Self::Opaque(_) => return false,
+                Self::Segment { id, .. } => {
+                    if !seen.insert(id) {
+                        return false;
+                    }
+                    arena.segment(id).provider.clone()
+                }
+                Self::SetOperation { op, left } => {
+                    if graph
+                        .scopes
+                        .unknown_output_reasons(op)
+                        .contains(&"BY NAME set operation")
+                    {
+                        return true;
+                    }
+                    if !seen.insert(left) {
+                        return false;
+                    }
+                    arena.segment(left).provider.clone()
+                }
+            };
+        }
+    }
+}

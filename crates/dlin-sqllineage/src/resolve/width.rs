@@ -8,7 +8,7 @@ use super::model::OutputModels;
 
 use crate::graph::RawGraph;
 use crate::graph::node::RawNode;
-use crate::graph::scope::{OutputPlan, ScopeTree};
+use crate::graph::scope::{OutputPlan, ScopeTree, SetCorrespondence};
 use crate::types::SemanticError;
 
 /// Inspect the complete graph rather than only the root projection. A star
@@ -48,15 +48,24 @@ fn scope_arity(
     let result = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => models.scope(scope).width.exact(),
         OutputPlan::Delegate(child) => scope_arity(child, models, active)?,
-        OutputPlan::SetOperation { left, right, .. } => {
+        OutputPlan::SetOperation {
+            left,
+            right,
+            correspondence,
+            ..
+        } => {
             let left_width = scope_arity(left, models, active)?;
             let right_width = scope_arity(right, models, active)?;
-            match (left_width, right_width) {
-                (Some(left), Some(right)) if left != right => {
-                    return Err(SemanticError::SetOperationArityMismatch { left, right });
+            if correspondence == SetCorrespondence::ByName {
+                None
+            } else {
+                match (left_width, right_width) {
+                    (Some(left), Some(right)) if left != right => {
+                        return Err(SemanticError::SetOperationArityMismatch { left, right });
+                    }
+                    (Some(width), Some(_)) => Some(width),
+                    _ => None,
                 }
-                (Some(width), Some(_)) => Some(width),
-                _ => None,
             }
         }
     };

@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 
 use super::{Evaluator, Unlisted};
-use crate::graph::scope::{OutputPlan, ScopeId};
+use crate::graph::scope::{OutputPlan, ScopeId, SetCorrespondence};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
 use crate::{Ident, Unresolved};
 
@@ -236,8 +236,11 @@ impl Evaluator<'_, '_, '_> {
         // forwards from its left operand, is still read next to the right
         // operand's columns.
         if !matches!(def.provider, UnknownProvider::SetOperation { .. })
-            && let OutputPlan::SetOperation { right, .. } =
-                self.cx.graph.scopes.output_plan(def.owner)
+            && let OutputPlan::SetOperation {
+                right,
+                correspondence: SetCorrespondence::Positional,
+                ..
+            } = self.cx.graph.scopes.output_plan(def.owner)
             && let Unlisted::Sources(more) = self.unlisted(*right, column)
         {
             sources.extend(more);

@@ -13,10 +13,10 @@ use std::rc::Rc;
 
 use super::context::EvalContext;
 use super::mapping::{Cut, mappings_of, merge_transform, operand_view, resolve_scope_mappings};
-use super::model::OutputModel;
+use super::model::{OutputElement, OutputModel, OutputRef};
 
 use crate::Unresolved;
-use crate::graph::scope::ScopeId;
+use crate::graph::scope::{ScopeId, SetCorrespondence};
 use crate::types::{ColumnMapping, ColumnOrigin, TransformKind};
 
 /// The mappings of the set operation `scope` over `left` and `right`, tagged
@@ -28,11 +28,19 @@ pub(super) fn merge_operands(
     left: ScopeId,
     right: ScopeId,
     recursive: bool,
+    correspondence: SetCorrespondence,
     cx: &mut EvalContext<'_, '_>,
 ) -> Result<Vec<ColumnMapping>, Cut> {
     let left_view = operand_view(model, left, cx);
     let left_mappings = mappings_of(left, &left_view, cx)?.to_vec();
-    let mut merged = if recursive {
+    let mut merged = if correspondence == SetCorrespondence::ByName {
+        // Resolve the right operand independently, but never pair its values
+        // with left outputs by position.
+        if !recursive {
+            let _ = resolve_scope_mappings(right, cx)?;
+        }
+        left_mappings
+    } else if recursive {
         // The branch resolvers expand stars independently. Preserve the left
         // branch's names and order, as SQL set operations do.
         left_mappings
@@ -77,6 +85,32 @@ pub(super) fn merge_operands(
         append_unsupported_reasons(&mut mapping.sources, &model.unknown_reasons);
     }
     retag(&mut merged, model)?;
+    if correspondence == SetCorrespondence::ByName
+        && !merged.iter().any(|mapping| mapping.output_name.is_none())
+    {
+        // An unmodelled left source can have a segment but no mapping. BY
+        // NAME must still expose an unknown remainder instead of a closed list.
+        for element in &model.elements {
+            if let OutputElement::Unknown(segment) = element {
+                let what = "BY NAME set operation";
+                merged.push(ColumnMapping {
+                    star_position: segment.position,
+                    ordinal: None,
+                    output_name: None,
+                    target: crate::types::ColumnRef {
+                        table: None,
+                        column: crate::Ident::unquoted("*"),
+                    },
+                    sources: vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })],
+                    transform: TransformKind::Direct,
+                    slot: Some(OutputRef::Segment(segment.published())),
+                    unpublished_tail: false,
+                    merged_in: false,
+                });
+                break;
+            }
+        }
+    }
     Ok(merged)
 }
 

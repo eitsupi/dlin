@@ -124,8 +124,8 @@ pub(in crate::resolve) enum InputLookup {
     Physical(Rc<TableRef>),
     /// Several relations may carry the name, or several columns do. `typed`
     /// is set when a catalog must not narrow the candidates down. `values`
-    /// are the listed columns among the providers, which decide the
-    /// transform of a value read through the ambiguity.
+    /// are the listed columns and unsupported provider contributions, which
+    /// retain transforms and reasons without claiming candidate sources.
     Ambiguous {
         candidates: Vec<Candidate>,
         typed: bool,
@@ -177,7 +177,11 @@ impl InputModel {
     }
 
     /// Decide what the unqualified `name` denotes among several relations.
-    fn standing(&self, name: &Ident) -> Standing {
+    fn standing(
+        &self,
+        name: &Ident,
+        by_name: impl Fn(&super::UnknownProvider) -> bool,
+    ) -> Standing {
         let elements = &self.model.elements;
         match self.model.choose(name) {
             Choice::Absent => Standing::Absent,
@@ -203,6 +207,23 @@ impl InputModel {
                         OutputElement::Column(slot) => Some(slot.value.clone()),
                         _ => None,
                     })
+                    .chain(
+                        self.model
+                            .matches(name)
+                            .unknown
+                            .iter()
+                            .filter_map(|&index| {
+                                let OutputElement::Unknown(segment) = &elements[index] else {
+                                    return None;
+                                };
+                                by_name(&segment.provider).then(|| ValueId::Named {
+                                    providers: vec![super::UnknownProvider::Opaque(
+                                        OpaqueReason::Unsupported("BY NAME set operation"),
+                                    )],
+                                    column: name.clone(),
+                                })
+                            }),
+                    )
                     .collect(),
                 candidates: ambiguity.candidates,
             }),
@@ -463,7 +484,12 @@ impl OutputModels<'_, '_, '_> {
                 };
                 (standing, single)
             }
-            _ => (self.input(env).standing(name), InputLookup::Absent),
+            _ => (
+                self.input(env).standing(name, |provider| {
+                    provider.has_by_name_reason(self.graph, &self.store.arena)
+                }),
+                InputLookup::Absent,
+            ),
         }
     }
 

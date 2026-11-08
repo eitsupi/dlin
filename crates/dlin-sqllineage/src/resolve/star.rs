@@ -22,7 +22,9 @@ use super::target::{StarTarget, resolve_star_target};
 use slot_eval::cut_segment;
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
-use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, VirtualColumnState};
+use crate::graph::scope::{
+    Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence, VirtualColumnState,
+};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 use crate::{Candidate, Ident, Unresolved};
 
@@ -354,8 +356,10 @@ impl Evaluator<'_, '_, '_> {
                 // The value is not known, but what would produce it is: an
                 // aggregate over an ambiguous column is still an aggregation.
                 let mut transform = TransformKind::Direct;
+                let mut by_name = false;
                 for value in &values {
-                    let (_, _, listed) = self.read_value(value, name);
+                    let (sources, _, listed) = self.read_value(value, name);
+                    by_name |= has_by_name_reason(&sources);
                     transform = merge_transform(&transform, &listed);
                 }
                 let origin = if typed {
@@ -379,7 +383,13 @@ impl Evaluator<'_, '_, '_> {
                             .collect(),
                     }
                 };
-                Some((vec![origin], false, transform))
+                let mut sources = vec![origin];
+                if by_name {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                }
+                Some((sources, false, transform))
             }
         }
     }
@@ -410,15 +420,27 @@ impl Evaluator<'_, '_, '_> {
                     ));
                 }
                 let mut transform = TransformKind::Direct;
+                let mut by_name = model.unknown_reasons.contains(&"BY NAME set operation")
+                    || model.matches(name).unknown.iter().any(|&index| {
+                        matches!(&model.elements[index], OutputElement::Unknown(segment)
+                            if segment.provider.has_by_name_reason(self.cx.graph, &self.cx.mapping_cache.models.arena))
+                    });
                 for &index in &ambiguity.listed {
-                    let (_, _, listed) = self.slot_read(listed_slot(&model, index));
+                    let (sources, _, listed) = self.slot_read(listed_slot(&model, index));
+                    by_name |= has_by_name_reason(&sources);
                     transform = merge_transform(&transform, &listed);
                 }
                 let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: name.clone(),
                     candidates,
                 });
-                return Some((vec![ambiguous], false, transform));
+                let mut sources = vec![ambiguous];
+                if by_name {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                }
+                return Some((sources, false, transform));
             }
             Choice::Possible(..) | Choice::Absent => {}
         }
@@ -460,6 +482,11 @@ impl Evaluator<'_, '_, '_> {
                 | OpaqueReason::Expression(star)
                 | OpaqueReason::Ambiguous(star)),
             ) => Some(self.opaque_star(*star, *reason)),
+            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
+                let mut mapping = cut_segment();
+                mapping.sources = vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })];
+                Some(mapping)
+            }
             UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
         };
         if let Some(mapping) = &mut mapping
@@ -579,6 +606,9 @@ impl Evaluator<'_, '_, '_> {
                     }],
                 }
             }
+            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
+                vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })]
+            }
             UnknownProvider::Opaque(_) => Vec::new(),
         }
     }
@@ -618,7 +648,22 @@ impl Evaluator<'_, '_, '_> {
             // provenance is collected from both operands. An operand that
             // rules the name out stays an explicit uncertainty marker because
             // its unknown-width slot cannot be aligned safely.
-            OutputPlan::SetOperation { left, right, .. } => {
+            OutputPlan::SetOperation {
+                left,
+                right,
+                correspondence,
+                ..
+            } => {
+                if *correspondence == SetCorrespondence::ByName {
+                    let mut sources = match self.unlisted(*left, name) {
+                        Unlisted::Sources(sources) => sources,
+                        Unlisted::Denied | Unlisted::None => Vec::new(),
+                    };
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                    return Unlisted::Sources(sources);
+                }
                 let mut sources = match self.unlisted(*left, name) {
                     Unlisted::Denied => return Unlisted::Denied,
                     Unlisted::Sources(sources) => sources,
@@ -661,4 +706,16 @@ fn named_wildcard_sources(sources: Vec<ColumnOrigin>, column: &Ident) -> Vec<Col
             source => source,
         })
         .collect()
+}
+
+/// Ambiguity discards possible value sources, but keeps the reason that a
+/// candidate's set-operation correspondence could not be evaluated.
+fn has_by_name_reason(sources: &[ColumnOrigin]) -> bool {
+    sources.iter().any(|source| match source {
+        ColumnOrigin::Unresolved(Unresolved::Unsupported {
+            what: "BY NAME set operation",
+        }) => true,
+        ColumnOrigin::Recursive { base_sources } => has_by_name_reason(base_sources),
+        _ => false,
+    })
 }
