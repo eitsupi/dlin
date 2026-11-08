@@ -270,6 +270,11 @@ pub(super) struct BranchTail {
     pub scope: ScopeId,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
+    /// How far the projection that published the tail moved the columns it
+    /// stands for: the number of columns before the star that carries it.
+    /// `None` when that number is not known. A scope that only re-expresses
+    /// another scope's output starts again at zero.
+    pub offset: Option<usize>,
 }
 
 /// All candidates for a name, built on first use. Names are compared by the

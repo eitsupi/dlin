@@ -249,6 +249,7 @@ fn mappings_that_are_being_computed_are_a_cut_and_not_an_empty_list() {
             scope: union,
             ranges: std::rc::Rc::from([]),
             domain: NameDomain::default(),
+            offset: Some(0),
         };
         let mappings = ev.tail_mappings(&tail);
         assert_eq!(mappings.len(), 1);

@@ -330,3 +330,5 @@ mod cut_tests;
 mod forward_tests;
 #[cfg(test)]
 mod harness;
+#[cfg(test)]
+mod projection_tests;

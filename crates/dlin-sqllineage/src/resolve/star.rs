@@ -15,8 +15,8 @@ use super::context::EvalContext;
 use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
-    Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
-    RangeRef, UnknownProvider, UnknownSegment, ValueId,
+    Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
+    OutputModels, RangeRef, UnknownProvider, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target};
 
@@ -35,19 +35,20 @@ pub(super) enum Unlisted {
     Sources(Vec<ColumnOrigin>),
 }
 
-/// Expand a Star node (qualified or unqualified) into `ColumnMapping`s, one
-/// per element of its model.
-pub(super) fn expand_star(
-    node_id: NodeId,
+/// The mappings of a projection scope, one per element of its published
+/// model: a listed column, an unknown segment (when it stands for columns at
+/// all) or the columns a set operation merges in.
+pub(super) fn projection_mappings(
+    scope: ScopeId,
     cx: &mut EvalContext<'_, '_>,
-    mappings: &mut Vec<ColumnMapping>,
-) {
+) -> Vec<ColumnMapping> {
     let mut evaluator = Evaluator { cx };
-    let model = evaluator.star_model(node_id);
+    let model = evaluator.scope_model(scope);
+    let mut mappings = Vec::with_capacity(model.elements.len());
     for element in &model.elements {
         match element {
             OutputElement::Column(slot) => {
-                let (sources, transform) = evaluator.value(&slot.value);
+                let (sources, transform) = evaluator.projected_value(scope, slot);
                 mappings.push(ColumnMapping {
                     star_position: crate::types::StarPosition::Inferred,
                     output_name: Some(slot.output_name.clone()),
@@ -61,11 +62,20 @@ pub(super) fn expand_star(
                 });
             }
             OutputElement::Unknown(segment) => {
-                mappings.extend(evaluator.unknown_mapping(segment));
+                mappings.extend(evaluator.segment_mapping(segment.published()));
             }
-            OutputElement::Tail(tail) => mappings.extend(evaluator.tail_mappings(tail)),
+            OutputElement::Tail(tail) => {
+                for mut mapping in evaluator.tail_mappings(tail) {
+                    mapping.star_position = mapping.star_position.shifted(tail.offset);
+                    mapping.ordinal = mapping
+                        .ordinal
+                        .and_then(|ordinal| tail.offset.map(|offset| offset + ordinal));
+                    mappings.push(mapping);
+                }
+            }
         }
     }
+    mappings
 }
 
 /// The origins of the column a CTE or derived table publishes under `name`,
@@ -130,10 +140,6 @@ impl Evaluator<'_, '_, '_> {
         OutputModels::new(cx.graph, cx.catalog, store)
     }
 
-    fn star_model(&mut self, node_id: NodeId) -> Rc<OutputModel> {
-        self.models().star(node_id)
-    }
-
     fn scope_model(&mut self, scope: ScopeId) -> Rc<OutputModel> {
         self.models().scope(scope)
     }
@@ -148,12 +154,7 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
             ValueId::Expr(node_id) => {
-                let (sources, edge_kinds, _, inherited) =
-                    collect_output_sources(*node_id, self.cx, &mut HashSet::new());
-                let transform = merge_transform(
-                    &derive_transform(&self.cx.graph.nodes[*node_id], &edge_kinds),
-                    &inherited,
-                );
+                let (sources, _, transform) = self.expression(*node_id);
                 (sources, transform)
             }
             ValueId::Forward(id) => self.slot_value(*id),
@@ -210,6 +211,49 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
         }
+    }
+
+    /// The origins and transform of the expression of an output node, with
+    /// whether it reads the recursive CTE it belongs to.
+    fn expression(&mut self, node_id: NodeId) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+        let (sources, edge_kinds, has_back, inherited) =
+            collect_output_sources(node_id, self.cx, &mut HashSet::new());
+        let transform = merge_transform(
+            &derive_transform(&self.cx.graph.nodes[node_id], &edge_kinds),
+            &inherited,
+        );
+        (sources, has_back, transform)
+    }
+
+    /// The origins and transform of a column in the mappings of the
+    /// projection `scope` that published it. A column the projection lists
+    /// itself that reads its own recursive CTE is marked as recursive in the
+    /// mappings, while a reader that names the column does not see the mark.
+    fn projected_value(
+        &mut self,
+        scope: ScopeId,
+        slot: &ColumnSlot,
+    ) -> (Vec<ColumnOrigin>, TransformKind) {
+        if let ValueId::Expr(node_id) = slot.value
+            && self
+                .cx
+                .graph
+                .scopes
+                .output_columns(scope)
+                .iter()
+                .any(|column| column.node_id == node_id)
+        {
+            let (sources, has_back, transform) = self.expression(node_id);
+            let sources = if has_back {
+                vec![ColumnOrigin::Recursive {
+                    base_sources: sources,
+                }]
+            } else {
+                sources
+            };
+            return (sources, transform);
+        }
+        self.slot_value(slot.published())
     }
 
     /// The origins and transform of a column that a reference to `name`
@@ -376,10 +420,6 @@ impl Evaluator<'_, '_, '_> {
             Unlisted::Sources(sources) => Some((sources, false, TransformKind::Direct)),
             Unlisted::None => None,
         }
-    }
-
-    fn unknown_mapping(&mut self, segment: &UnknownSegment) -> Option<ColumnMapping> {
-        self.provider_mapping(&segment.provider, segment.position)
     }
 
     /// The mapping a segment with this provider stands for, at `position`

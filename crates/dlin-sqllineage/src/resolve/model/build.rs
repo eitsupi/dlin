@@ -156,7 +156,11 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 OutputElement::Unknown(segment) => {
                                     segment.position = segment.position.shifted(base_ordinal);
                                 }
-                                OutputElement::Tail(_) => {}
+                                OutputElement::Tail(tail) => {
+                                    tail.offset = tail.offset.and_then(|offset| {
+                                        base_ordinal.and_then(|base| base.checked_add(offset))
+                                    });
+                                }
                             }
                             elements.push(element);
                         }
@@ -206,6 +210,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         scope,
                         ranges: Rc::from([]),
                         domain: NameDomain::default(),
+                        offset: Some(0),
                     }));
                 }
                 source = Some((*left, model));
@@ -506,6 +511,7 @@ pub(super) fn forward_scope(
                 scope: tail.scope,
                 ranges: ranges.clone(),
                 domain: tail.domain.clone(),
+                offset: Some(0),
             }),
         })
         .collect()

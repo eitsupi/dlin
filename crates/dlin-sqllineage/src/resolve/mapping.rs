@@ -1,14 +1,12 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::binding::derive_transform;
 use super::catalog;
 use super::context::{EvalContext, EvalKey};
-use super::lineage::collect_output_sources;
-use super::model::{ModelStore, OutputModels, Width};
-use super::star::expand_star;
+use super::model::{ModelStore, OutputModels};
+use super::star::projection_mappings;
 
 use crate::Ident;
 use crate::Unresolved;
@@ -136,63 +134,7 @@ fn compute_scope_mappings(
     let graph = cx.graph;
     let mappings = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => {
-            let mut mappings = Vec::new();
-            let mut next_ordinal = Some(0usize);
-            for col in graph.scopes.output_columns(scope) {
-                match &graph.nodes[col.node_id] {
-                    RawNode::Output { name, .. } => {
-                        let mut visited = HashSet::new();
-                        let (sources, edge_kinds, has_back, inherited_transform) =
-                            collect_output_sources(col.node_id, cx, &mut visited);
-                        let transform = merge_transform(
-                            &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
-                            &inherited_transform,
-                        );
-                        mappings.push(ColumnMapping {
-                            star_position: crate::types::StarPosition::Inferred,
-                            ordinal: next_ordinal,
-                            output_name: graph
-                                .output_names
-                                .get(&col.node_id)
-                                .cloned()
-                                .or_else(|| Some(crate::OutputName::Explicit(name.clone()))),
-                            target: ColumnRef {
-                                table: None,
-                                column: name.clone(),
-                            },
-                            sources: if has_back {
-                                vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }]
-                            } else {
-                                sources
-                            },
-                            transform,
-                        });
-                        next_ordinal = next_ordinal.map(|ordinal| ordinal + 1);
-                    }
-                    RawNode::Star { .. } => {
-                        let start = mappings.len();
-                        let star_width =
-                            OutputModels::new(graph, cx.catalog, &mut cx.mapping_cache.models)
-                                .star(col.node_id)
-                                .width;
-                        expand_star(col.node_id, cx, &mut mappings);
-                        let base = next_ordinal;
-                        for mapping in &mut mappings[start..] {
-                            mapping.star_position = mapping.star_position.shifted(base);
-                            mapping.ordinal = mapping
-                                .ordinal
-                                .and_then(|ordinal| base.map(|base| base + ordinal));
-                        }
-                        next_ordinal = match (base, star_width) {
-                            (Some(base), Width::Exact(width)) => Some(base + width),
-                            _ => None,
-                        };
-                    }
-                    _ => {}
-                }
-            }
+            let mut mappings = projection_mappings(scope, cx);
             if let Some(cat) = cx.catalog {
                 catalog::apply_catalog(&mut mappings, cat);
             }
