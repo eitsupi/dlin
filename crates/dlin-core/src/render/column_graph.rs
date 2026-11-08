@@ -1,7 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
-use crate::graph::column_lineage::{ColumnImpactReport, ModelColumnLineage, TransformationType};
+use crate::graph::column_lineage::{
+    ColumnImpactReport, DependencyKind, DependencyRef, ExplorationStatus, ModelColumnLineage,
+    TraceGap, TransformationType, UnresolvedContribution,
+};
+
+/// Suffix appended to a node label that has an unresolved part.
+const PARTIAL_MARK: &str = "(partial)";
+const UNRESOLVED_MARK: &str = "(unresolved)";
+/// Fill of the DOT note nodes that report gaps without a column.
+const GAP_NOTE_COLOR: &str = "#F5B7B1";
+
+/// Nodes (model, column) that carry a visible marker, with the marker text.
+type NodeMarks = BTreeMap<(String, String), &'static str>;
+
+fn marked_label(marks: &NodeMarks, model: &str, column: &str) -> String {
+    match marks.get(&(model.to_string(), column.to_string())) {
+        Some(mark) => format!("{column} {mark}"),
+        None => column.to_string(),
+    }
+}
 
 // ── Column graph (upstream lineage) ──────────────────────────────────────────
 
@@ -41,17 +60,19 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
         // Prefix is "  " (2) + col padded to col_width + "  →  " (5 display cols)
         let indent = " ".repeat(2 + col_width + 5);
         for entry in &report.columns {
-            if entry.sources.is_empty() {
-                writeln!(
-                    w,
-                    "  {:width$}  (no sources)",
-                    entry.column,
-                    width = col_width
-                )?;
+            let known = entry.lineage.known();
+            if known.is_empty() {
+                let note = if entry.lineage.is_complete() {
+                    "(no sources)"
+                } else {
+                    "(no known sources)"
+                };
+                writeln!(w, "  {:width$}  {}", entry.column, note, width = col_width)?;
+                write_unresolved_lines(w, &indent, entry.lineage.unresolved())?;
                 continue;
             }
 
-            let first = &entry.sources[0];
+            let first = &known[0];
             let src_str = format_source(
                 first.table.as_str(),
                 first.column.as_str(),
@@ -65,7 +86,7 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 transformation_label(&entry.transformation),
                 width = col_width
             )?;
-            for src in entry.sources.iter().skip(1) {
+            for src in known.iter().skip(1) {
                 let src_str =
                     format_source(src.table.as_str(), src.column.as_str(), &src.model_path);
                 writeln!(
@@ -76,7 +97,31 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                     transformation_label(&entry.transformation),
                 )?;
             }
+            write_unresolved_lines(w, &indent, entry.lineage.unresolved())?;
         }
+    }
+    Ok(())
+}
+
+fn write_unresolved_lines<W: Write>(
+    w: &mut W,
+    indent: &str,
+    unresolved: &[UnresolvedContribution],
+) -> io::Result<()> {
+    for contribution in unresolved {
+        let location = if contribution.model_path.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (in {}.{})",
+                contribution.origin.model, contribution.origin.column
+            )
+        };
+        writeln!(
+            w,
+            "{}  unresolved: {}{}",
+            indent, contribution.reason, location
+        )?;
     }
     Ok(())
 }
@@ -99,6 +144,7 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
     let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // Collect edges: (src_model, src_col, dst_model, dst_col, label)
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut marks = NodeMarks::new();
 
     for report in reports {
         let target_model = &report.model;
@@ -109,8 +155,11 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                 .entry(target_model.clone())
                 .or_default()
                 .insert(entry.column.clone());
+            if entry.lineage.is_partial() {
+                marks.insert((target_model.clone(), entry.column.clone()), PARTIAL_MARK);
+            }
 
-            for src in &entry.sources {
+            for src in entry.lineage.known() {
                 let final_label = transformation_label(&entry.transformation).to_string();
                 if src.model_path.is_empty() {
                     model_columns
@@ -200,7 +249,7 @@ pub fn render_column_graph_mermaid_to_writer<W: Write>(
                 "    n{}_{}[\"{}\"]",
                 midx,
                 cidx,
-                super::mermaid_escape(col)
+                super::mermaid_escape(&marked_label(&marks, model, col))
             )?;
         }
         writeln!(w, "  end")?;
@@ -239,41 +288,43 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
         if i > 0 {
             writeln!(w)?;
         }
-        writeln!(
-            w,
-            "{}.{} ({} impacted column{})",
-            report.model,
-            report.column,
-            report.impacted_columns.len(),
-            if report.impacted_columns.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-        )?;
-
-        if report.impacted_columns.is_empty() {
-            continue;
-        }
+        let count = report.confirmed.len();
+        let complete = report
+            .exploration
+            .iter()
+            .all(|e| e.status == ExplorationStatus::Complete);
+        let plural = if count == 1 { "" } else { "s" };
+        let summary = match (count, complete) {
+            (0, true) => "no impact".to_string(),
+            (0, false) => "no confirmed impact; exploration incomplete".to_string(),
+            (n, true) => format!("{n} impacted column{plural}"),
+            (n, false) => format!("{n} impacted column{plural}; exploration incomplete"),
+        };
+        writeln!(w, "{}.{} ({})", report.model, report.column, summary)?;
 
         let col_width = report
-            .impacted_columns
+            .confirmed
             .iter()
-            .map(|c| c.column.len())
+            .map(|c| c.target.column.len())
             .max()
             .unwrap_or(0);
 
-        for ic in &report.impacted_columns {
-            // model_path is ordered source → final; intermediate hops precede the last element.
-            let via_str = if ic.model_path.len() > 1 {
-                let intermediate = &ic.model_path[..ic.model_path.len() - 1];
+        for ic in &report.confirmed {
+            // path is ordered source → target; intermediate hops precede the last edge.
+            let via_str = if ic.path.len() > 1 {
+                let intermediate = &ic.path[..ic.path.len() - 1];
                 let parts: Vec<String> = intermediate
                     .iter()
-                    .map(|(m, c, t)| {
-                        if matches!(t, TransformationType::Direct) {
-                            format!("{}.{}", m, c)
+                    .map(|edge| {
+                        if matches!(edge.transformation, TransformationType::Direct) {
+                            format!("{}.{}", edge.to.model, edge.to.column)
                         } else {
-                            format!("{}.{} [{}]", m, c, transformation_label(t))
+                            format!(
+                                "{}.{} [{}]",
+                                edge.to.model,
+                                edge.to.column,
+                                transformation_label(&edge.transformation)
+                            )
                         }
                     })
                     .collect();
@@ -284,15 +335,115 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             writeln!(
                 w,
                 "  {:width$}  →  {} ({}{})",
-                ic.column,
-                ic.model,
+                ic.target.column,
+                ic.target.model,
                 transformation_label(&ic.transformation),
                 via_str,
                 width = col_width
             )?;
         }
+        write_exploration_gaps(w, report)?;
     }
     Ok(())
+}
+
+/// Print why an exploration is incomplete. Nothing is printed when every
+/// requested exploration is complete.
+fn write_exploration_gaps<W: Write>(w: &mut W, report: &ColumnImpactReport) -> io::Result<()> {
+    for exploration in &report.exploration {
+        let ExplorationStatus::Incomplete { gaps } = &exploration.status else {
+            continue;
+        };
+        writeln!(
+            w,
+            "  {} exploration incomplete ({} gap{}):",
+            dependency_kind_label(exploration.kind),
+            gaps.len(),
+            if gaps.len() == 1 { "" } else { "s" }
+        )?;
+        for gap in gaps {
+            writeln!(w, "    - {}", describe_gap(gap))?;
+        }
+    }
+    Ok(())
+}
+
+fn dependency_kind_label(kind: DependencyKind) -> &'static str {
+    match kind {
+        DependencyKind::Value => "value",
+        DependencyKind::Row => "row",
+    }
+}
+
+fn describe_gap(gap: &TraceGap) -> String {
+    match gap {
+        TraceGap::UnresolvedLineage { at, reasons } => {
+            let reasons: Vec<String> = reasons.iter().map(ToString::to_string).collect();
+            format!(
+                "unresolved lineage at {}.{}: {}",
+                at.model,
+                at.column,
+                reasons.join("; ")
+            )
+        }
+        TraceGap::AnalysisFailed { model, error, .. } => {
+            format!("analysis of {model} failed ({error:?})")
+        }
+        TraceGap::UnresolvedColumn { at } => {
+            format!(
+                "lineage of {}.{} could not be established",
+                at.model, at.column
+            )
+        }
+        TraceGap::NotCollected { kind } => {
+            format!(
+                "{} dependencies are not collected",
+                dependency_kind_label(*kind)
+            )
+        }
+    }
+}
+
+/// Markers for the nodes where an impact search found a gap.
+fn gap_marks(report: &ColumnImpactReport) -> NodeMarks {
+    let mut marks = NodeMarks::new();
+    for (_, gap) in report.gaps() {
+        match gap {
+            TraceGap::UnresolvedLineage { at, .. } => {
+                marks.insert((at.model.clone(), at.column.clone()), PARTIAL_MARK);
+            }
+            TraceGap::UnresolvedColumn { at } => {
+                marks.insert((at.model.clone(), at.column.clone()), UNRESOLVED_MARK);
+            }
+            TraceGap::AnalysisFailed { .. } | TraceGap::NotCollected { .. } => {}
+        }
+    }
+    marks
+}
+
+/// Labels of the gaps that have no column to mark: dependent models that
+/// failed analysis and dependency kinds that were not collected. They are
+/// drawn as standalone note nodes so that an impact search that could not look
+/// somewhere never reads as "no impact".
+fn gap_notes(reports: &[ColumnImpactReport]) -> BTreeSet<String> {
+    let mut notes = BTreeSet::new();
+    for report in reports {
+        for (_, gap) in report.gaps() {
+            match gap {
+                TraceGap::AnalysisFailed { model, .. } => {
+                    notes.insert(format!("{model}: analysis failed"));
+                }
+                TraceGap::NotCollected { kind } => {
+                    notes.insert(format!(
+                        "{} dependencies not collected",
+                        dependency_kind_label(*kind)
+                    ));
+                }
+                TraceGap::UnresolvedLineage { .. } | TraceGap::UnresolvedColumn { .. } => {}
+            }
+        }
+    }
+    notes
 }
 
 pub fn render_column_impact_mermaid(reports: &[ColumnImpactReport]) {
@@ -311,6 +462,7 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
     let mut model_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // Collect edges: (src_model, src_col, target_model, target_col, label)
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut marks = NodeMarks::new();
 
     for report in reports {
         // Source node (the column being analyzed for impact)
@@ -319,31 +471,32 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
             .or_default()
             .insert(report.column.clone());
 
-        for ic in &report.impacted_columns {
-            // Build edge chain: source → model_path[0] → ... → model_path[-1]
-            // model_path is ordered source → final and includes the final model at the end.
-            // chain: (model, col, edge_label_for_arriving_at_this_node)
-            let mut chain: Vec<(String, String, String)> = Vec::new();
-            chain.push((report.model.clone(), report.column.clone(), String::new()));
-            for (m, c, t) in &ic.model_path {
-                chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
-            }
-
-            for (m, c, _) in &chain {
-                model_columns
-                    .entry(m.clone())
-                    .or_default()
-                    .insert(c.clone());
-            }
-            for window in chain.windows(2) {
-                let (from_m, from_c, _) = &window[0];
-                let (to_m, to_c, label) = &window[1];
+        marks.extend(gap_marks(report));
+        for (model, column) in marks.keys() {
+            model_columns
+                .entry(model.clone())
+                .or_default()
+                .insert(column.clone());
+        }
+        for ic in &report.confirmed {
+            for edge in &ic.path {
+                let DependencyRef::Column {
+                    model: from_model,
+                    column: from_column,
+                    ..
+                } = &edge.from;
+                for (m, c) in [(from_model, from_column), (&edge.to.model, &edge.to.column)] {
+                    model_columns
+                        .entry(m.clone())
+                        .or_default()
+                        .insert(c.clone());
+                }
                 edges.push((
-                    from_m.clone(),
-                    from_c.clone(),
-                    to_m.clone(),
-                    to_c.clone(),
-                    label.clone(),
+                    from_model.clone(),
+                    from_column.clone(),
+                    edge.to.model.clone(),
+                    edge.to.column.clone(),
+                    transformation_label(&edge.transformation).to_string(),
                 ));
             }
         }
@@ -386,10 +539,13 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
                 "    n{}_{}[\"{}\"]",
                 midx,
                 cidx,
-                super::mermaid_escape(col)
+                super::mermaid_escape(&marked_label(&marks, model, col))
             )?;
         }
         writeln!(w, "  end")?;
+    }
+    for (i, note) in gap_notes(reports).iter().enumerate() {
+        writeln!(w, "  gap{i}[\"{}\"]", super::mermaid_escape(note))?;
     }
 
     writeln!(w)?;
@@ -424,6 +580,7 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
     let mut column_transformation: BTreeMap<String, BTreeMap<String, TransformationType>> =
         BTreeMap::new();
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut marks = NodeMarks::new();
 
     for report in reports {
         let target_model = &report.model;
@@ -439,8 +596,11 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
                 .or_default()
                 .entry(entry.column.clone())
                 .or_insert_with(|| entry.transformation.clone());
+            if entry.lineage.is_partial() {
+                marks.insert((target_model.clone(), entry.column.clone()), PARTIAL_MARK);
+            }
 
-            for src in &entry.sources {
+            for src in entry.lineage.known() {
                 let final_label = transformation_label(&entry.transformation).to_string();
                 if src.model_path.is_empty() {
                     model_columns
@@ -489,7 +649,14 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
         }
     }
 
-    write_dot_column_graph(w, &model_columns, &column_transformation, &edges)
+    write_dot_column_graph(
+        w,
+        &model_columns,
+        &column_transformation,
+        &marks,
+        &BTreeSet::new(),
+        &edges,
+    )
 }
 
 // ── Column impact (downstream) — DOT ─────────────────────────────────────────
@@ -509,6 +676,7 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
     let mut column_transformation: BTreeMap<String, BTreeMap<String, TransformationType>> =
         BTreeMap::new();
     let mut edges: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut marks = NodeMarks::new();
 
     for report in reports {
         model_columns
@@ -516,42 +684,50 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
             .or_default()
             .insert(report.column.clone());
 
-        for ic in &report.impacted_columns {
-            // Build edge chain: source → model_path[0] → ... → model_path[-1]
-            // model_path is ordered source → final and includes the final model at the end.
-            let mut chain: Vec<(String, String, String)> = Vec::new();
-            chain.push((report.model.clone(), report.column.clone(), String::new()));
-            for (m, c, t) in &ic.model_path {
-                chain.push((m.clone(), c.clone(), transformation_label(t).to_string()));
+        marks.extend(gap_marks(report));
+        for (model, column) in marks.keys() {
+            model_columns
+                .entry(model.clone())
+                .or_default()
+                .insert(column.clone());
+        }
+        for ic in &report.confirmed {
+            for edge in &ic.path {
+                let DependencyRef::Column {
+                    model: from_model,
+                    column: from_column,
+                    ..
+                } = &edge.from;
+                for (m, c) in [(from_model, from_column), (&edge.to.model, &edge.to.column)] {
+                    model_columns
+                        .entry(m.clone())
+                        .or_default()
+                        .insert(c.clone());
+                }
                 column_transformation
-                    .entry(m.clone())
+                    .entry(edge.to.model.clone())
                     .or_default()
-                    .entry(c.clone())
-                    .or_insert_with(|| t.clone());
-            }
-
-            for (m, c, _) in &chain {
-                model_columns
-                    .entry(m.clone())
-                    .or_default()
-                    .insert(c.clone());
-            }
-
-            for window in chain.windows(2) {
-                let (from_m, from_c, _) = &window[0];
-                let (to_m, to_c, label) = &window[1];
+                    .entry(edge.to.column.clone())
+                    .or_insert_with(|| edge.transformation.clone());
                 edges.push((
-                    from_m.clone(),
-                    from_c.clone(),
-                    to_m.clone(),
-                    to_c.clone(),
-                    label.clone(),
+                    from_model.clone(),
+                    from_column.clone(),
+                    edge.to.model.clone(),
+                    edge.to.column.clone(),
+                    transformation_label(&edge.transformation).to_string(),
                 ));
             }
         }
     }
 
-    write_dot_column_graph(w, &model_columns, &column_transformation, &edges)
+    write_dot_column_graph(
+        w,
+        &model_columns,
+        &column_transformation,
+        &marks,
+        &gap_notes(reports),
+        &edges,
+    )
 }
 
 // ── DOT shared rendering ──────────────────────────────────────────────────────
@@ -560,6 +736,8 @@ fn write_dot_column_graph<W: Write>(
     w: &mut W,
     model_columns: &BTreeMap<String, BTreeSet<String>>,
     column_transformation: &BTreeMap<String, BTreeMap<String, TransformationType>>,
+    marks: &NodeMarks,
+    notes: &BTreeSet<String>,
     edges: &[(String, String, String, String, String)],
 ) -> io::Result<()> {
     writeln!(w, "digraph column_lineage {{")?;
@@ -607,10 +785,17 @@ fn write_dot_column_graph<W: Write>(
             writeln!(
                 w,
                 r#"    "n{midx}_{cidx}" [label="{}", fillcolor="{color}"];"#,
-                dot_escape(col)
+                dot_escape(&marked_label(marks, model, col))
             )?;
         }
         writeln!(w, "  }}")?;
+    }
+    for (i, note) in notes.iter().enumerate() {
+        writeln!(
+            w,
+            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{GAP_NOTE_COLOR}"];"#,
+            dot_escape(note)
+        )?;
     }
 
     writeln!(w)?;

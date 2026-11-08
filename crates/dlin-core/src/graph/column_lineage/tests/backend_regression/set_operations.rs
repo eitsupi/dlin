@@ -346,7 +346,7 @@ fn source_free_only_branch_resolves_without_sources() {
     assert_no_errors(&result);
     assert_eq!(result.traced_columns, 1);
     assert!(
-        entry(&result, "col_a").sources.is_empty(),
+        entry(&result, "col_a").lineage.known().is_empty(),
         "unexpected sources: {:?}",
         result.columns
     );

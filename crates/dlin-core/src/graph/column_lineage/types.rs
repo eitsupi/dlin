@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::relation::RelationRef;
 
 /// Error kind discriminator for column lineage errors.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ColumnLineageErrorKind {
     /// The specified model was not found in the dbt manifest.
@@ -34,9 +35,8 @@ pub enum ColumnLineageErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnLineageError {
     pub kind: ColumnLineageErrorKind,
-    /// Structured output-column identity. Older cached reports omit this field;
-    /// callers should use [`Self::column_name`] to retain their legacy fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Output column the diagnostic is about; `None` for model-level diagnostics.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
     pub what: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,26 +53,12 @@ impl std::fmt::Display for ColumnLineageError {
 
 impl ColumnLineageError {
     /// Return the output column associated with this diagnostic.
-    ///
-    /// New reports carry the identity explicitly. Legacy cache entries and
-    /// serialized reports are supported by parsing the historical
-    /// `column '<name>': ...` message prefix.
     pub fn column_name(&self) -> Option<&str> {
-        self.column.as_deref().or_else(|| {
-            let rest = self.what.strip_prefix("column '")?;
-            let end = rest.find("':")?;
-            (!rest[..end].is_empty()).then_some(&rest[..end])
-        })
+        self.column.as_deref()
     }
 
     pub fn is_column_scoped(&self) -> bool {
         self.column.is_some()
-            || matches!(
-                self.kind,
-                ColumnLineageErrorKind::ColumnNotFound
-                    | ColumnLineageErrorKind::ColumnAmbiguous
-                    | ColumnLineageErrorKind::ColumnIndeterminate
-            ) && self.column_name().is_some()
     }
 
     pub fn is_fatal(&self) -> bool {
@@ -101,12 +87,15 @@ impl ColumnLineageError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelColumnLineage {
     pub model: String,
-    /// Number of columns successfully traced
+    /// Number of output columns whose value lineage is `Complete`.
+    ///
+    /// Columns with a `Partial` lineage are listed in `columns` but are not
+    /// counted here, so this is not the length of `columns`. It is also not a
+    /// measure of how far tracing reached.
     pub traced_columns: usize,
     /// Total number of columns attempted (0 when model/SQL could not be loaded)
     pub total_columns: usize,
     pub columns: Vec<ColumnLineageEntry>,
-    #[serde(default)]
     pub errors: Vec<ColumnLineageError>,
 }
 
@@ -115,7 +104,18 @@ pub struct ModelColumnLineage {
 pub struct ColumnLineageEntry {
     pub column: String,
     pub transformation: TransformationType,
-    pub sources: Vec<ColumnSource>,
+    /// Known sources of the value, and what remains unresolved.
+    pub lineage: ValueLineage<ColumnSource>,
+}
+
+impl ModelColumnLineage {
+    /// Number of listed columns whose value lineage is `Complete`.
+    pub fn complete_column_count(&self) -> usize {
+        self.columns
+            .iter()
+            .filter(|entry| entry.lineage.is_complete())
+            .count()
+    }
 }
 
 /// Classification of the transformation applied to produce an output column.
@@ -163,7 +163,7 @@ pub(crate) struct InternalColumnSource {
 pub(crate) struct InternalColumnLineageEntry {
     pub column: String,
     pub transformation: TransformationType,
-    pub sources: Vec<InternalColumnSource>,
+    pub lineage: ValueLineage<InternalColumnSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +176,14 @@ pub(crate) struct InternalModelColumnLineage {
 }
 
 impl InternalModelColumnLineage {
+    /// Number of listed columns whose value lineage is `Complete`.
+    pub(crate) fn complete_column_count(&self) -> usize {
+        self.columns
+            .iter()
+            .filter(|entry| entry.lineage.is_complete())
+            .count()
+    }
+
     pub(crate) fn into_public(self) -> ModelColumnLineage {
         ModelColumnLineage {
             model: self.model,
@@ -187,15 +195,11 @@ impl InternalModelColumnLineage {
                 .map(|entry| ColumnLineageEntry {
                     column: entry.column,
                     transformation: entry.transformation,
-                    sources: entry
-                        .sources
-                        .into_iter()
-                        .map(|source| ColumnSource {
-                            table: source.relation.render(),
-                            column: source.column,
-                            model_path: source.model_path,
-                        })
-                        .collect(),
+                    lineage: entry.lineage.map_known(|source| ColumnSource {
+                        table: source.relation.render(),
+                        column: source.column,
+                        model_path: source.model_path,
+                    }),
                 })
                 .collect(),
             errors: normalize_column_lineage_errors(self.errors),
@@ -264,21 +268,326 @@ impl From<ModelColumnLineage> for InternalModelColumnLineage {
                 .map(|entry| InternalColumnLineageEntry {
                     column: entry.column,
                     transformation: entry.transformation,
-                    sources: entry
-                        .sources
-                        .into_iter()
-                        .map(|source| InternalColumnSource {
-                            relation: RelationRef::parse(&source.table)
-                                .unwrap_or_else(|_| RelationRef::bare(source.table)),
-                            column: source.column,
-                            model_path: source.model_path,
-                        })
-                        .collect(),
+                    lineage: entry.lineage.map_known(|source| InternalColumnSource {
+                        relation: RelationRef::parse(&source.table)
+                            .unwrap_or_else(|_| RelationRef::bare(source.table)),
+                        column: source.column,
+                        model_path: source.model_path,
+                    }),
                 })
                 .collect(),
             errors: public.errors,
         }
     }
+}
+
+// --- Value lineage ---
+
+/// Identity of one output column of a dbt model.
+///
+/// `unique_id` is the stable identity; `model` is the display name used by the
+/// rest of the report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModelOutputRef {
+    pub unique_id: String,
+    pub model: String,
+    pub column: String,
+}
+
+/// One hop of a cross-model path: `(model_name, column_name, transformation)`.
+pub type ModelPathHop = (String, String, TransformationType);
+
+/// The sources that supply the value of one output column, and whether that
+/// list is the whole story.
+///
+/// The type is a `Complete` / `Partial` pair with one invariant: `Partial`
+/// always has at least one unresolved contribution. The fields are private so
+/// the invariant cannot be broken. [`ValueLineage::new`] returns `Complete`
+/// when nothing is unresolved, and deserialization rejects a `partial` status
+/// without unresolved contributions.
+///
+/// Serialized form: `{"status":"complete","known":[..]}` or
+/// `{"status":"partial","known":[..],"unresolved":[..]}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueLineage<S> {
+    known: Vec<S>,
+    unresolved: Vec<UnresolvedContribution>,
+}
+
+impl<S> ValueLineage<S> {
+    /// Lineage whose every contributing source is known.
+    pub fn complete(known: Vec<S>) -> Self {
+        Self {
+            known,
+            unresolved: Vec::new(),
+        }
+    }
+
+    /// Lineage with the given known sources and unresolved contributions.
+    /// It is `Complete` when `unresolved` is empty.
+    pub fn new(known: Vec<S>, unresolved: Vec<UnresolvedContribution>) -> Self {
+        Self { known, unresolved }
+    }
+
+    /// Sources that are proven to contribute to the value.
+    pub fn known(&self) -> &[S] {
+        &self.known
+    }
+
+    /// Contributions that could not be resolved. Empty exactly when the
+    /// lineage is complete.
+    pub fn unresolved(&self) -> &[UnresolvedContribution] {
+        &self.unresolved
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.unresolved.is_empty()
+    }
+
+    pub fn is_partial(&self) -> bool {
+        !self.is_complete()
+    }
+
+    /// Split into known sources and unresolved contributions.
+    pub fn into_parts(self) -> (Vec<S>, Vec<UnresolvedContribution>) {
+        (self.known, self.unresolved)
+    }
+
+    /// Convert each known source, keeping the unresolved contributions.
+    pub fn map_known<T>(self, f: impl FnMut(S) -> T) -> ValueLineage<T> {
+        ValueLineage {
+            known: self.known.into_iter().map(f).collect(),
+            unresolved: self.unresolved,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ValueLineageOut<'a, S> {
+    Complete {
+        known: &'a [S],
+    },
+    Partial {
+        known: &'a [S],
+        unresolved: &'a [UnresolvedContribution],
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ValueLineageIn<S> {
+    Complete {
+        known: Vec<S>,
+    },
+    Partial {
+        known: Vec<S>,
+        unresolved: Vec<UnresolvedContribution>,
+    },
+}
+
+impl<S: Serialize> Serialize for ValueLineage<S> {
+    fn serialize<Z: Serializer>(&self, serializer: Z) -> Result<Z::Ok, Z::Error> {
+        if self.is_complete() {
+            ValueLineageOut::Complete { known: &self.known }.serialize(serializer)
+        } else {
+            ValueLineageOut::Partial {
+                known: &self.known,
+                unresolved: &self.unresolved,
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de, S: Deserialize<'de>> Deserialize<'de> for ValueLineage<S> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match ValueLineageIn::<S>::deserialize(deserializer)? {
+            ValueLineageIn::Complete { known } => Ok(Self::complete(known)),
+            ValueLineageIn::Partial { unresolved, .. } if unresolved.is_empty() => {
+                Err(D::Error::custom(
+                    "a partial value lineage must have at least one unresolved contribution",
+                ))
+            }
+            ValueLineageIn::Partial { known, unresolved } => Ok(Self::new(known, unresolved)),
+        }
+    }
+}
+
+/// A part of an output value whose source could not be determined.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnresolvedContribution {
+    pub reason: UnresolvedReason,
+    /// The model output where the unresolved part arose.
+    pub origin: ModelOutputRef,
+    /// Model hops from the root output (exclusive) to `origin` (inclusive),
+    /// in the order of [`ColumnSource::model_path`]. Empty when `origin` is
+    /// the root output itself.
+    pub model_path: Vec<ModelPathHop>,
+}
+
+/// Why a contribution is unresolved. This mirrors the engine's reasons and
+/// keeps their structured data; it is not a rendered message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnresolvedReason {
+    /// Positional correspondence of a set operation cannot be established.
+    AlignmentUnknown {
+        operation: SetOperationKind,
+        possible_sources: Vec<UnresolvedSource>,
+        unknown_operands: Vec<SetOperand>,
+    },
+    /// More schema information could change the contributing columns.
+    SchemaDependent {
+        what: SchemaDependencyKind,
+        relations: Vec<RelationRef>,
+    },
+    /// An unexpanded star may contribute a column from this relation.
+    BehindStar { relation: RelationRef },
+    /// A named output may come from a column hidden behind an unexpanded star.
+    NamedBehindStar {
+        relation: RelationRef,
+        column: String,
+    },
+    /// A column could come from more than one candidate.
+    Ambiguous {
+        column: String,
+        candidates: Vec<UnresolvedCandidate>,
+    },
+    /// A column could not be bound to a relation in scope.
+    Unbound { column: String },
+    /// Recursive lineage is represented by its known base sources only.
+    Recursive,
+    /// A whole-row alias is used where a column source is expected.
+    RowValue { alias: String },
+    /// The syntax is not modelled by the engine.
+    Unsupported { what: String },
+}
+
+/// Human-readable form for display only. The structured variant, not this
+/// text, is what callers should branch on.
+impl std::fmt::Display for UnresolvedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlignmentUnknown {
+                operation,
+                possible_sources,
+                ..
+            } => {
+                let operator = match operation.operator {
+                    SetOperator::Union => "UNION",
+                    SetOperator::Intersect => "INTERSECT",
+                    SetOperator::Except => "EXCEPT",
+                };
+                write!(
+                    f,
+                    "{operator} operand columns cannot be aligned ({} possible source{})",
+                    possible_sources.len(),
+                    if possible_sources.len() == 1 { "" } else { "s" }
+                )
+            }
+            Self::SchemaDependent { relations, .. } => {
+                let relations: Vec<String> = relations.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "natural join columns depend on the schema of {}",
+                    relations.join(", ")
+                )
+            }
+            Self::BehindStar { relation } => {
+                write!(f, "may come from an unexpanded star of {relation}")
+            }
+            Self::NamedBehindStar { relation, column } => {
+                write!(
+                    f,
+                    "'{column}' may come from an unexpanded star of {relation}"
+                )
+            }
+            Self::Ambiguous { column, candidates } => {
+                let candidates: Vec<String> = candidates
+                    .iter()
+                    .map(|candidate| match candidate {
+                        UnresolvedCandidate::Relation { relation } => relation.to_string(),
+                        UnresolvedCandidate::Cte { name } => format!("cte {name}"),
+                        UnresolvedCandidate::Derived { name: Some(name) } => {
+                            format!("derived table {name}")
+                        }
+                        UnresolvedCandidate::Derived { name: None } => "derived table".to_string(),
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "'{column}' is ambiguous between {}",
+                    candidates.join(", ")
+                )
+            }
+            Self::Unbound { column } => write!(f, "'{column}' is not bound to a relation"),
+            Self::Recursive => write!(f, "recursive lineage is limited to its base sources"),
+            Self::RowValue { alias } => write!(f, "whole-row value '{alias}'"),
+            Self::Unsupported { what } => write!(f, "unsupported syntax: {what}"),
+        }
+    }
+}
+
+/// A concrete relation column named by an unresolved reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnresolvedSource {
+    pub relation: RelationRef,
+    pub column: String,
+}
+
+/// A candidate source of an ambiguous column.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnresolvedCandidate {
+    Relation { relation: RelationRef },
+    Cte { name: String },
+    Derived { name: Option<String> },
+}
+
+/// The kind of a set operation, as reported by an unresolved reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SetOperationKind {
+    pub operator: SetOperator,
+    pub quantifier: SetQuantifier,
+    pub correspondence: SetCorrespondence,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SetQuantifier {
+    All,
+    Distinct,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SetCorrespondence {
+    Positional,
+    ByName,
+}
+
+/// An operand of a set operation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SetOperand {
+    Left,
+    Right,
+}
+
+/// Schema information that an unresolved dependency needs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaDependencyKind {
+    NaturalJoinColumns,
 }
 
 #[cfg(test)]
@@ -345,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_column_identity_and_legacy_messages_share_filter_contract() {
+    fn column_identity_is_structured() {
         let structured = ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnIndeterminate,
             column: Some("col_a".to_string()),
@@ -353,7 +662,7 @@ mod tests {
             why: None,
             hint: None,
         };
-        let legacy = ColumnLineageError {
+        let message_only = ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnNotFound,
             column: None,
             what: "column 'col_a': not found".to_string(),
@@ -361,30 +670,27 @@ mod tests {
             hint: None,
         };
         assert_eq!(structured.column_name(), Some("col_a"));
-        assert_eq!(legacy.column_name(), Some("col_a"));
         assert!(structured.is_column_scoped());
-        assert!(legacy.is_column_scoped());
         assert!(!structured.is_fatal());
-        assert!(legacy.is_fatal());
-        assert!(
-            ColumnLineageError {
-                kind: ColumnLineageErrorKind::ColumnAmbiguous,
-                column: Some("col_a".to_string()),
-                what: "ambiguous".to_string(),
-                why: None,
-                hint: None,
-            }
-            .is_fatal()
-        );
+        // The message text is never parsed to recover a column identity.
+        assert_eq!(message_only.column_name(), None);
+        assert!(!message_only.is_column_scoped());
+        assert!(message_only.is_fatal());
 
         let encoded = serde_json::to_value(&structured).unwrap();
         assert_eq!(encoded["column"], "col_a");
-        let old = serde_json::json!({
-            "kind": "column_not_found",
-            "what": "column 'col_a': not found"
-        });
-        let decoded: ColumnLineageError = serde_json::from_value(old).unwrap();
-        assert_eq!(decoded.column, None);
-        assert_eq!(decoded.column_name(), Some("col_a"));
+    }
+
+    #[test]
+    fn partial_value_lineage_requires_unresolved_contribution() {
+        let complete = ValueLineage::<String>::new(vec!["a".to_string()], vec![]);
+        assert!(complete.is_complete());
+        assert_eq!(
+            serde_json::to_value(&complete).unwrap(),
+            serde_json::json!({"status": "complete", "known": ["a"]})
+        );
+
+        let invalid = serde_json::json!({"status": "partial", "known": ["a"], "unresolved": []});
+        assert!(serde_json::from_value::<ValueLineage<String>>(invalid).is_err());
     }
 }

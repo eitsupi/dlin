@@ -34,7 +34,8 @@ fn trace(manifest: &Manifest, dialect: DlinDialect) -> ModelColumnLineage {
 
 fn pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
     entry
-        .sources
+        .lineage
+        .known()
         .iter()
         .map(|source| (source.table.as_str(), source.column.as_str()))
         .collect()

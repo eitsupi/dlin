@@ -47,7 +47,8 @@ fn column_names(result: &ModelColumnLineage) -> Vec<&str> {
 
 fn source_pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
     entry
-        .sources
+        .lineage
+        .known()
         .iter()
         .map(|source| (source.table.as_str(), source.column.as_str()))
         .collect()
@@ -94,7 +95,7 @@ fn unnamed_expressions_are_listed_as_question_mark_column() {
     assert_eq!(result.total_columns, 2);
     assert_eq!(result.traced_columns, 2);
     assert_eq!(column_names(&result), ["?column?", "a"]);
-    assert!(result.columns[0].sources.is_empty());
+    assert!(result.columns[0].lineage.known().is_empty());
     assert_eq!(source_pairs(&result.columns[1]), [("t", "a")]);
 
     let result = generic("SELECT a + 1, COUNT(*), a FROM t", &[]);

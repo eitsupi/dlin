@@ -53,7 +53,8 @@ fn test_stg_orders_cte_star_with_rename() {
         .find(|c| c.column == "order_id")
         .unwrap();
     assert_eq!(
-        order_id.sources[0].column, "id",
+        order_id.lineage.known()[0].column,
+        "id",
         "order_id should trace to raw.orders.id"
     );
 
@@ -63,7 +64,7 @@ fn test_stg_orders_cte_star_with_rename() {
         .iter()
         .find(|c| c.column == "customer_id")
         .unwrap();
-    assert_eq!(customer_id.sources[0].column, "user_id");
+    assert_eq!(customer_id.lineage.known()[0].column, "user_id");
 
     // Passthrough columns
     let order_date = result
@@ -71,7 +72,7 @@ fn test_stg_orders_cte_star_with_rename() {
         .iter()
         .find(|c| c.column == "order_date")
         .unwrap();
-    assert_eq!(order_date.sources[0].column, "order_date");
+    assert_eq!(order_date.lineage.known()[0].column, "order_date");
 }
 
 #[test]
@@ -89,8 +90,11 @@ fn test_orders_cte_star_with_schema_and_join() {
         .iter()
         .find(|c| c.column == "order_id")
         .unwrap();
-    assert!(!order_id.sources.is_empty(), "order_id should have sources");
-    assert_eq!(order_id.sources[0].column, "order_id");
+    assert!(
+        !order_id.lineage.known().is_empty(),
+        "order_id should have sources"
+    );
+    assert_eq!(order_id.lineage.known()[0].column, "order_id");
 
     // total_amount renamed from stg_payments.amount
     let total_amount = result
@@ -99,10 +103,10 @@ fn test_orders_cte_star_with_schema_and_join() {
         .find(|c| c.column == "total_amount")
         .unwrap();
     assert!(
-        !total_amount.sources.is_empty(),
+        !total_amount.lineage.known().is_empty(),
         "total_amount should have sources"
     );
-    assert_eq!(total_amount.sources[0].column, "amount");
+    assert_eq!(total_amount.lineage.known()[0].column, "amount");
 }
 
 #[test]
@@ -139,9 +143,12 @@ fn test_order_enriched_nested_cte_star() {
         .iter()
         .find(|c| c.column == "order_id")
         .unwrap();
-    assert!(!order_id.sources.is_empty(), "order_id should have sources");
-    assert_eq!(order_id.sources[0].column, "order_id");
-    assert_eq!(order_id.sources[0].table, "shop.main.stg_orders");
+    assert!(
+        !order_id.lineage.known().is_empty(),
+        "order_id should have sources"
+    );
+    assert_eq!(order_id.lineage.known()[0].column, "order_id");
+    assert_eq!(order_id.lineage.known()[0].table, "shop.main.stg_orders");
 
     // amount should trace to stg_payments (via alias "p")
     let amount = result
@@ -149,12 +156,15 @@ fn test_order_enriched_nested_cte_star() {
         .iter()
         .find(|c| c.column == "amount")
         .unwrap();
-    assert!(!amount.sources.is_empty(), "amount should have sources");
-    assert_eq!(amount.sources[0].column, "amount");
+    assert!(
+        !amount.lineage.known().is_empty(),
+        "amount should have sources"
+    );
+    assert_eq!(amount.lineage.known()[0].column, "amount");
 
     // All columns should have non-empty source tables
     for entry in &result.columns {
-        for src in &entry.sources {
+        for src in entry.lineage.known() {
             assert!(
                 !src.table.is_empty(),
                 "column '{}' has empty table for source '{}'",
@@ -173,7 +183,7 @@ fn test_source_table_not_empty() {
     for model in ["stg_orders", "orders"] {
         let result = compute_column_lineage(&manifest, model);
         for entry in &result.columns {
-            for src in &entry.sources {
+            for src in entry.lineage.known() {
                 assert!(
                     !src.table.is_empty(),
                     "model '{}' column '{}' has empty table for source column '{}'",
@@ -207,9 +217,12 @@ fn test_dependency_sql_output_is_not_merged_with_yaml_columns() {
     traced.sort_unstable();
     assert_eq!(traced, ["order_date", "status", "user_id"]);
     for entry in &result.columns {
-        assert_eq!(entry.sources.len(), 1, "column '{}'", entry.column);
-        assert_eq!(entry.sources[0].column, entry.column);
-        assert_eq!(entry.sources[0].table, "shop.main.stg_orders_passthrough");
+        assert_eq!(entry.lineage.known().len(), 1, "column '{}'", entry.column);
+        assert_eq!(entry.lineage.known()[0].column, entry.column);
+        assert_eq!(
+            entry.lineage.known()[0].table,
+            "shop.main.stg_orders_passthrough"
+        );
     }
 
     assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
@@ -240,9 +253,9 @@ fn test_cross_model_orders_traces_to_raw_sources() {
         .find(|c| c.column == "order_id")
         .unwrap();
     assert!(
-        order_id.sources.iter().any(|s| s.column == "id"),
+        order_id.lineage.known().iter().any(|s| s.column == "id"),
         "order_id should trace to raw source's 'id' column, got: {:?}",
-        order_id.sources
+        order_id.lineage.known()
     );
 
     // total_amount: orders → stg_payments.amount → raw.payments.amount
@@ -252,14 +265,18 @@ fn test_cross_model_orders_traces_to_raw_sources() {
         .find(|c| c.column == "total_amount")
         .unwrap();
     assert!(
-        total_amount.sources.iter().any(|s| s.column == "amount"),
+        total_amount
+            .lineage
+            .known()
+            .iter()
+            .any(|s| s.column == "amount"),
         "total_amount should trace to raw payments.amount, got: {:?}",
-        total_amount.sources
+        total_amount.lineage.known()
     );
 
     // All sources should be raw tables (not intermediate models)
     for entry in &result.columns {
-        for src in &entry.sources {
+        for src in entry.lineage.known() {
             assert!(
                 !src.table.is_empty(),
                 "column '{}' has empty source table",
@@ -287,8 +304,8 @@ fn test_cross_model_stg_orders_unchanged() {
     for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
         assert_eq!(s.column, c.column);
         assert_eq!(
-            s.sources.len(),
-            c.sources.len(),
+            s.lineage.known().len(),
+            c.lineage.known().len(),
             "column '{}' source count differs",
             s.column
         );
@@ -306,7 +323,7 @@ fn test_cross_model_customers_three_levels() {
 
     // All sources should reach raw tables
     for entry in &result.columns {
-        for src in &entry.sources {
+        for src in entry.lineage.known() {
             assert!(
                 !src.table.is_empty(),
                 "column '{}' has empty source table",

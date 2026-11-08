@@ -156,7 +156,7 @@ def dlin_upstream(stdout: str) -> str:
     entry = next(item for item in payload if item.get("model") == "i01_deep_08")
     assert not entry.get("errors"), "query returned lineage errors"
     column = next(column for column in entry["columns"] if column["column"] == "amount_double")
-    sources = column["sources"]
+    sources = column["lineage"]["known"]
     assert any(
         source.get("column") == "amount"
         and str(source.get("table", "")).split(".")[-1] == "raw_orders"
@@ -179,7 +179,8 @@ def dlin_downstream(stdout: str) -> str:
         ("i05_rename_consumer", "renamed_amount"),
     }
     actual = {
-        (item["model"], item["column"]) for item in entry["impacted_columns"]
+        (item["target"]["model"], item["target"]["column"])
+        for item in entry["confirmed"]
     }
     assert expected <= actual, f"missing downstream consumers: {sorted(expected - actual)}"
     return "I05 query and three downstream consumers found"

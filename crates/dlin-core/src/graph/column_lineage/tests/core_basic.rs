@@ -19,8 +19,11 @@ fn test_rename_detection() {
         .iter()
         .find(|c| c.column == "order_id")
         .unwrap();
-    assert!(!order_id.sources.is_empty(), "order_id should have sources");
-    assert_eq!(order_id.sources[0].column, "id");
+    assert!(
+        !order_id.lineage.known().is_empty(),
+        "order_id should have sources"
+    );
+    assert_eq!(order_id.lineage.known()[0].column, "id");
     // Rename is classified as direct (the rename is evident from column name difference)
     assert_eq!(order_id.transformation, TransformationType::Direct);
 
@@ -30,7 +33,7 @@ fn test_rename_detection() {
         .iter()
         .find(|c| c.column == "customer_id")
         .unwrap();
-    assert_eq!(customer_id.sources[0].column, "user_id");
+    assert_eq!(customer_id.lineage.known()[0].column, "user_id");
     assert_eq!(customer_id.transformation, TransformationType::Direct);
 }
 
@@ -54,8 +57,8 @@ fn test_join_lineage() {
         .iter()
         .find(|c| c.column == "total_amount")
         .unwrap();
-    assert!(!total_amount.sources.is_empty());
-    assert_eq!(total_amount.sources[0].column, "amount");
+    assert!(!total_amount.lineage.known().is_empty());
+    assert_eq!(total_amount.lineage.known()[0].column, "amount");
 
     // order_id comes from o.order_id
     let order_id = result
@@ -63,7 +66,7 @@ fn test_join_lineage() {
         .iter()
         .find(|c| c.column == "order_id")
         .unwrap();
-    assert_eq!(order_id.sources[0].column, "order_id");
+    assert_eq!(order_id.lineage.known()[0].column, "order_id");
 }
 
 #[test]
@@ -270,7 +273,7 @@ fn test_json_includes_new_fields() {
         .iter()
         .find(|c| c["column"] == "customer_id")
         .unwrap();
-    let first_source = &customer_id["sources"][0];
+    let first_source = &customer_id["lineage"]["known"][0];
     assert!(
         first_source["model_path"].is_array(),
         "model_path should be present for cross-model source: {:?}",

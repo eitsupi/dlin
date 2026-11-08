@@ -41,7 +41,7 @@ Stdin/pipe support:
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:
     model             model name
-    traced_columns    number of columns successfully traced
+    traced_columns    number of columns whose lineage is complete (partial columns are not counted)
     total_columns     total number of columns attempted
     columns[]
       column          output column name
@@ -52,12 +52,19 @@ Output format (-o/--output):
                         cast         type cast (CAST(x AS INT))
                         conditional  CASE WHEN expression
                         unknown      could not classify
-      sources[]
-        table         source model or raw table name; empty string (\"\") when the
+      lineage
+        status        \"complete\" when every contributing source is known, or
+                      \"partial\" when some contributions could not be resolved
+        known[]       sources proven to contribute to the value
+          table       source model or raw table name; empty string (\"\") when the
                       value originates from a literal (NULL, constant, UNNEST, etc.)
                       — rendered as \"(literal)\" in plain/mermaid/dot outputs
-        column        source column name
-        model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
+          column      source column name
+          model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
+        unresolved[]  (partial only) contributions that could not be resolved:
+          reason      structured reason, tagged by \"kind\"
+          origin      model output where the unresolved part arose
+          model_path[]  hops from this column to the origin
     errors[]    parse or resolution diagnostics. An indeterminate per-column
                 diagnostic is non-fatal and does not change the exit code;
                 model-level, missing-column, ambiguous, and parse diagnostics
@@ -119,7 +126,15 @@ Requires compiled SQL in manifest.json — run `dbt compile` first.
 Use `dlin check-manifest` to verify freshness before querying.
 
 Output format (-o/--output):
-  json (default)  JSON array per column with affected downstream columns and models
+  json (default)  JSON array per column:
+    model, column     the analysed input
+    scope             \"value_only\"
+    confirmed[]       downstream columns that depend on the input through known
+                      edges (target, kind, transformation, path of edges)
+    exploration[]     per dependency kind, \"complete\" or \"incomplete\" with the
+                      gaps (unresolved lineage, failed analysis, ...) that may hide
+                      further impacts. An empty confirmed list means \"no impact\"
+                      only when the exploration is complete.
   plain           human-readable text, one source column per block
   mermaid         Mermaid flowchart (LR) showing impacted columns across models
   dot             Graphviz DOT format; models as clusters, columns as nodes

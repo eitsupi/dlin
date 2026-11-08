@@ -134,7 +134,7 @@ pub(crate) fn run_column_lineage_command(
                             .is_none_or(|name| column_filter.contains(name)),
                         _ => true,
                     });
-                    report.traced_columns = report.columns.len();
+                    report.traced_columns = report.complete_column_count();
                     report.total_columns = column_filter.len();
 
                     // When there are no global errors, explicitly flag requested columns
@@ -263,7 +263,13 @@ pub(crate) fn run_column_impact_command(
 
     let reports: Vec<_> = columns
         .iter()
-        .map(|col| analysis.compute_column_impact(model, col))
+        .map(|col| {
+            analysis.compute_column_impact(
+                model,
+                col,
+                graph::column_lineage::ImpactScope::ValueOnly,
+            )
+        })
         .collect();
 
     // Print warnings for errors

@@ -477,7 +477,7 @@ fn make_duplicate_name_manifest() -> Manifest {
 #[test]
 fn test_column_impact_duplicate_model_names_across_packages() {
     // Two packages each have a "customers" model depending on the same stg_orders.
-    // Both should appear in impacted_columns with distinct unique_ids.
+    // Both should appear in confirmed with distinct unique_ids.
     let manifest = make_duplicate_name_manifest();
     let result = compute_column_impact(
         &manifest,
@@ -490,10 +490,10 @@ fn test_column_impact_duplicate_model_names_across_packages() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let unique_ids: Vec<&str> = result
-        .impacted_columns
+        .confirmed
         .iter()
-        .filter(|ic| ic.column == "customer_id")
-        .map(|ic| ic.unique_id.as_str())
+        .filter(|ic| ic.target.column == "customer_id")
+        .map(|ic| ic.target.unique_id.as_str())
         .collect();
 
     assert!(
@@ -510,7 +510,7 @@ fn test_column_impact_duplicate_model_names_across_packages() {
         unique_ids.len(),
         2,
         "both same-named models should appear separately, got: {:?}",
-        result.impacted_columns
+        result.confirmed
     );
 }
 
@@ -978,6 +978,7 @@ mod core_star;
 mod core_star_chain;
 mod core_util;
 mod impact;
+mod partial_lineage;
 mod production_output;
 mod regression_fixtures;
 mod schema_knowledge;

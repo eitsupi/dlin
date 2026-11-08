@@ -169,7 +169,8 @@ fn entry<'a>(result: &'a ModelColumnLineage, column: &str) -> &'a ColumnLineageE
 
 fn source_pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
     entry
-        .sources
+        .lineage
+        .known()
         .iter()
         .map(|source| (source.table.as_str(), source.column.as_str()))
         .collect()
@@ -195,9 +196,10 @@ fn assert_resolved(
     );
 }
 
-/// Assert that `column` was not traced and reported a column-scoped error of
-/// the given kind whose message contains `message`. Returns the error so the
-/// caller can inspect its hint.
+/// Assert that `column` has no complete lineage and reported a column-scoped
+/// error of the given kind whose message contains `message`. The column is
+/// either absent or listed with a `Partial` value lineage. Returns the error
+/// so the caller can inspect its hint.
 fn assert_column_error<'a>(
     result: &'a ModelColumnLineage,
     column: &str,
@@ -205,8 +207,12 @@ fn assert_column_error<'a>(
     message: &str,
 ) -> &'a ColumnLineageError {
     assert!(
-        result.columns.iter().all(|entry| entry.column != column),
-        "column '{column}' was unexpectedly traced: {:?}",
+        result
+            .columns
+            .iter()
+            .filter(|entry| entry.column == column)
+            .all(|entry| entry.lineage.is_partial()),
+        "column '{column}' was unexpectedly traced completely: {:?}",
         result.columns
     );
     let error = result
