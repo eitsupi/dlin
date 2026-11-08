@@ -12,10 +12,11 @@ fn duplicate_column_impact_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
-            .collect::<HashMap<_, _>>()
+            .collect::<indexmap::IndexMap<_, _>>()
     };
     let model =
         |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
@@ -85,12 +86,13 @@ fn make_off_path_error_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
     // source_model: outputs col_x and col_y
-    let mut src_cols = HashMap::new();
+    let mut src_cols = indexmap::IndexMap::new();
     for name in ["col_x", "col_y"] {
         src_cols.insert(
             name.to_string(),
             ManifestColumn {
                 name: name.to_string(),
+                quote: None,
             },
         );
     }
@@ -114,11 +116,12 @@ fn make_off_path_error_manifest() -> Manifest {
     );
 
     // relevant_model: only col_x from source_model
-    let mut rel_cols = HashMap::new();
+    let mut rel_cols = indexmap::IndexMap::new();
     rel_cols.insert(
         "col_x".to_string(),
         ManifestColumn {
             name: "col_x".to_string(),
+            quote: None,
         },
     );
     nodes.insert(
@@ -143,17 +146,19 @@ fn make_off_path_error_manifest() -> Manifest {
     );
 
     // sibling_model: col_y from source_model, plus sibling_fail in YAML (not in SQL)
-    let mut sib_cols = HashMap::new();
+    let mut sib_cols = indexmap::IndexMap::new();
     sib_cols.insert(
         "col_y".to_string(),
         ManifestColumn {
             name: "col_y".to_string(),
+            quote: None,
         },
     );
     sib_cols.insert(
         "sibling_fail".to_string(),
         ManifestColumn {
             name: "sibling_fail".to_string(),
+            quote: None,
         },
     );
     nodes.insert(

@@ -25,6 +25,7 @@ fn node(
                 (*column).to_string(),
                 ManifestColumn {
                     name: (*column).to_string(),
+                    quote: None,
                 },
             )
         })
@@ -104,36 +105,21 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
         ..Default::default()
     };
     let root = manifest.nodes.get(root_id).unwrap();
-    let catalog =
-        schema::build_schema_from_manifest(&manifest, root, DlinDialect::Generic).unwrap();
+    let catalog = schema::SchemaContext::new(&manifest, DlinDialect::Generic)
+        .catalog_for(root)
+        .unwrap();
 
     assert_eq!(
         catalog.table_columns("warehouse.analytics.physical_alias"),
-        Some(["id".to_string()].as_slice())
+        Some(vec!["id"])
     );
-    assert_eq!(
-        catalog.table_columns("physical_alias"),
-        Some(["id".to_string()].as_slice())
-    );
+    assert_eq!(catalog.table_columns("physical_alias"), Some(vec!["id"]));
     assert_eq!(
         catalog.table_columns("warehouse.analytics.named_model"),
-        Some(["id".to_string()].as_slice())
+        Some(vec!["id"])
     );
-    assert_eq!(
-        catalog.table_columns("named_model"),
-        Some(["id".to_string()].as_slice())
-    );
+    assert_eq!(catalog.table_columns("named_model"), Some(vec!["id"]));
     assert_eq!(catalog.table_columns("model_name"), None);
-
-    let yaml_catalog = schema::build_yaml_schema_for_node(&manifest, root).unwrap();
-    assert_eq!(
-        yaml_catalog.table_columns("physical_alias"),
-        Some(["id".to_string()].as_slice())
-    );
-    assert_eq!(
-        yaml_catalog.table_columns("named_model"),
-        Some(["id".to_string()].as_slice())
-    );
 }
 
 #[test]
@@ -407,10 +393,11 @@ fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSourc
         description: None,
         path: None,
         original_file_path: None,
-        columns: HashMap::from([(
+        columns: indexmap::IndexMap::from([(
             "id".to_string(),
             ManifestColumn {
                 name: "id".to_string(),
+                quote: None,
             },
         )]),
         database: None,

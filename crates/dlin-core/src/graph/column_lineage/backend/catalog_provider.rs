@@ -15,8 +15,13 @@ impl<'a> CatalogAdapter<'a> {
     }
 }
 
-impl sqllineage::Catalog for CatalogAdapter<'_> {
-    fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
+impl CatalogAdapter<'_> {
+    /// Translate the stored schema into an engine entry without changing any
+    /// of its claims. The entry owns its data.
+    pub(crate) fn entry(
+        &self,
+        relation: &sqllineage::Relation,
+    ) -> Option<sqllineage::CatalogEntry<'static>> {
         let query = relation_ref_from_engine(relation);
         let table = self
             .snapshot
@@ -26,32 +31,42 @@ impl sqllineage::Catalog for CatalogAdapter<'_> {
                     .then(|| self.snapshot.resolve_table_exact_case_insensitive(&query))
                     .flatten()
             })?;
-        let columns = self
-            .snapshot
-            .unambiguous_columns_for_relation(&table.relation)
-            .filter(|columns| !columns.is_empty())?;
-        // TODO: derive coverage, order, ordinals and evidence references from the
-        // schema evidence. YAML-only column lists use AssumedByYamlPolicy and
-        // must not claim a proven order; these fixed claims are provisional.
+        if self.snapshot.is_conflicted(&table.relation) {
+            return None;
+        }
+        let schema = &table.schema;
         Some(sqllineage::CatalogEntry {
-            coverage: sqllineage::SchemaCoverage::Exhaustive,
-            order: sqllineage::SchemaOrder::Proven,
-            unknown_segments: std::borrow::Cow::Borrowed(&[]),
-            evidence: std::borrow::Cow::Borrowed(&[]),
             relation: relation_from_ref(&table.relation),
             columns: Cow::Owned(
-                columns
+                schema
+                    .columns
                     .iter()
-                    .enumerate()
-                    .map(|(ordinal, name)| sqllineage::CatalogColumn {
-                        ordinal: Some(ordinal),
-                        name: sqllineage::Ident::unquoted(name.clone()),
+                    .map(|column| sqllineage::CatalogColumn {
+                        name: column.name.clone(),
+                        ordinal: column.ordinal,
                         data_type: None,
                         fields: None,
                     })
                     .collect(),
             ),
+            coverage: schema.coverage,
+            order: schema.order,
+            unknown_segments: Cow::Owned(schema.unknown_segments.clone()),
+            evidence: Cow::Owned(
+                table
+                    .evidence_ids
+                    .iter()
+                    .cloned()
+                    .map(sqllineage::EvidenceRef)
+                    .collect(),
+            ),
         })
+    }
+}
+
+impl sqllineage::Catalog for CatalogAdapter<'_> {
+    fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
+        self.entry(relation)
     }
 }
 
@@ -186,18 +201,7 @@ impl SqllineageCatalogProvider {
 impl sqllineage::Catalog for SqllineageCatalogProvider {
     fn lookup(&self, relation: &sqllineage::Relation) -> Option<sqllineage::CatalogEntry<'_>> {
         let adapter = CatalogAdapter::new(&self.snapshot, self.dialect);
-        let entry = <CatalogAdapter<'_> as sqllineage::Catalog>::lookup(&adapter, relation)?;
-        // TODO: derive coverage, order, ordinals and evidence references from the
-        // schema evidence. YAML-only column lists use AssumedByYamlPolicy and
-        // must not claim a proven order; these fixed claims are provisional.
-        Some(sqllineage::CatalogEntry {
-            coverage: sqllineage::SchemaCoverage::Exhaustive,
-            order: sqllineage::SchemaOrder::Proven,
-            unknown_segments: std::borrow::Cow::Borrowed(&[]),
-            evidence: std::borrow::Cow::Borrowed(&[]),
-            relation: entry.relation,
-            columns: Cow::Owned(entry.columns.into_owned()),
-        })
+        adapter.entry(relation)
     }
 }
 
@@ -223,10 +227,13 @@ impl SqllineageCatalogProvider {
             }
             _ => self.snapshot.resolve_table_exact(&query, self.dialect),
         }?;
-        self.snapshot
-            .unambiguous_columns_for_relation(&found.relation)
-            .filter(|columns| !columns.is_empty())
-            .map(<[String]>::to_vec)
+        (!self.snapshot.is_conflicted(&found.relation)).then(|| {
+            found
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        })
     }
 
     pub(crate) fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
@@ -265,6 +272,240 @@ mod tests {
             ["id".to_string(), "total".to_string(), "region".to_string()],
         );
         snapshot
+    }
+
+    fn relation(name: &str) -> sqllineage::Relation {
+        sqllineage::Relation {
+            catalog: None,
+            schema: None,
+            name: sqllineage::Ident::unquoted(name),
+        }
+    }
+
+    fn yaml_columns(
+        columns: &[(&str, Option<bool>)],
+    ) -> indexmap::IndexMap<String, crate::parser::manifest::ManifestColumn> {
+        columns
+            .iter()
+            .map(|(name, quote)| {
+                (
+                    (*name).to_string(),
+                    crate::parser::manifest::ManifestColumn {
+                        name: (*name).to_string(),
+                        quote: *quote,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn register_yaml(
+        snapshot: &mut CatalogSnapshot,
+        name: &str,
+        columns: &[(&str, Option<bool>)],
+        dialect: DlinDialect,
+    ) {
+        register_yaml_evidence(
+            snapshot,
+            &format!("source.proj.raw.{name}"),
+            name,
+            columns,
+            dialect,
+        );
+    }
+
+    /// Register the relation `src` from the YAML declaration of `subject`.
+    fn register_yaml_as(
+        snapshot: &mut CatalogSnapshot,
+        subject: &str,
+        columns: &[(&str, Option<bool>)],
+    ) {
+        register_yaml_evidence(snapshot, subject, "src", columns, DlinDialect::Generic);
+    }
+
+    fn register_yaml_evidence(
+        snapshot: &mut CatalogSnapshot,
+        subject: &str,
+        name: &str,
+        columns: &[(&str, Option<bool>)],
+        dialect: DlinDialect,
+    ) {
+        let evidence = crate::graph::column_lineage::schema::evidence::yaml_schema_evidence(
+            subject,
+            &yaml_columns(columns),
+            None,
+            dialect,
+        )
+        .expect("non-empty column list");
+        let relation = RelationRef::from_manifest(None, None, name);
+        snapshot.add_relation(relation.clone(), relation.render(), evidence);
+    }
+
+    #[test]
+    fn yaml_only_table_is_exhaustive_with_unknown_order_and_evidence() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml(
+            &mut snapshot,
+            "src",
+            &[("z", None), ("a", None)],
+            DlinDialect::Generic,
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+        assert_eq!(entry.coverage, sqllineage::SchemaCoverage::Exhaustive);
+        assert_eq!(entry.order, sqllineage::SchemaOrder::Unknown);
+        let names: Vec<_> = entry
+            .columns
+            .iter()
+            .map(|c| c.name.value.as_str())
+            .collect();
+        assert_eq!(names, ["z", "a"]);
+        assert!(entry.columns.iter().all(|column| column.ordinal.is_none()));
+        assert!(entry.unknown_segments.is_empty());
+        assert_eq!(
+            entry.evidence.as_ref(),
+            [sqllineage::EvidenceRef(
+                "yaml:source.proj.raw.src".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn consistent_registrations_expose_every_evidence_id() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.a.src",
+            &[("z", None), ("a", None)],
+        );
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("z", None), ("a", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+        assert_eq!(
+            entry.evidence.as_ref(),
+            [
+                sqllineage::EvidenceRef("yaml:source.proj.a.src".to_string()),
+                sqllineage::EvidenceRef("yaml:source.proj.b.src".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reordered_consistent_registration_keeps_the_first_display_order() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.a.src",
+            &[("z", None), ("a", None)],
+        );
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("a", None), ("z", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+        let names: Vec<_> = entry
+            .columns
+            .iter()
+            .map(|c| c.name.value.as_str())
+            .collect();
+        assert_eq!(names, ["z", "a"]);
+        assert_eq!(entry.evidence.len(), 2);
+    }
+
+    #[test]
+    fn contradicting_registration_has_no_entry() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(&mut snapshot, "source.proj.a.src", &[("z", None)]);
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("z", None), ("a", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        assert!(sqllineage::Catalog::lookup(&adapter, &relation("src")).is_none());
+    }
+
+    #[test]
+    fn quote_true_reaches_the_engine_as_a_quoted_identifier() {
+        for (dialect, quote) in [
+            (DlinDialect::Snowflake, sqllineage::Quote::Double),
+            (DlinDialect::BigQuery, sqllineage::Quote::Backtick),
+        ] {
+            let mut snapshot = CatalogSnapshot::new();
+            register_yaml(
+                &mut snapshot,
+                "src",
+                &[("id", Some(true)), ("Name", Some(false)), ("plain", None)],
+                dialect,
+            );
+            let adapter = CatalogAdapter::new(&snapshot, dialect);
+
+            let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+            let names: Vec<_> = entry.columns.iter().map(|c| c.name.clone()).collect();
+            assert_eq!(
+                names,
+                [
+                    sqllineage::Ident::quoted("id", quote),
+                    sqllineage::Ident::unquoted("Name"),
+                    sqllineage::Ident::unquoted("plain"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_exhaustive_table_is_an_entry_with_no_columns() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("empty", Vec::<String>::new());
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("empty")).unwrap();
+
+        assert!(entry.columns.is_empty());
+        assert_eq!(entry.coverage, sqllineage::SchemaCoverage::Exhaustive);
+        assert!(sqllineage::Catalog::lookup(&adapter, &relation("missing")).is_none());
+    }
+
+    #[test]
+    fn user_typed_schema_has_proven_order_and_ordinals() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("t", ["b".to_string(), "a".to_string(), "b".to_string()]);
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("t")).unwrap();
+
+        assert_eq!(entry.coverage, sqllineage::SchemaCoverage::Exhaustive);
+        assert_eq!(entry.order, sqllineage::SchemaOrder::Proven);
+        let columns: Vec<_> = entry
+            .columns
+            .iter()
+            .map(|c| (c.name.value.as_str(), c.ordinal))
+            .collect();
+        assert_eq!(columns, [("b", Some(0)), ("a", Some(1)), ("b", Some(2))]);
+    }
+
+    #[test]
+    fn conflicted_table_has_no_entry() {
+        let mut snapshot = CatalogSnapshot::new();
+        snapshot.add_table("t", ["a".to_string()]);
+        snapshot.add_table("t", ["b".to_string()]);
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        assert!(sqllineage::Catalog::lookup(&adapter, &relation("t")).is_none());
     }
 
     #[test]
@@ -347,14 +588,17 @@ mod tests {
     }
 
     #[test]
-    fn list_columns_rejects_empty_and_conflicted_tables() {
+    fn list_columns_keeps_empty_tables_and_rejects_conflicted_ones() {
         let mut snapshot = CatalogSnapshot::new();
         snapshot.add_table("empty", Vec::<String>::new());
         snapshot.add_table("conflicted", ["id".to_string()]);
         snapshot.add_table("conflicted", ["other".to_string()]);
         let provider = SqllineageCatalogProvider::new(&snapshot, DlinDialect::Generic);
 
-        assert!(provider.list_columns(&table(None, None, "empty")).is_none());
+        assert_eq!(
+            provider.list_columns(&table(None, None, "empty")),
+            Some(Vec::new())
+        );
         assert!(
             provider
                 .list_columns(&table(None, None, "conflicted"))

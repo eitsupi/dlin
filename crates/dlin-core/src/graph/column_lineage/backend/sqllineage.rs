@@ -209,6 +209,25 @@ pub(crate) fn discovered_output_names(
     }
 }
 
+/// The one lineage-carrying statement of an analysis, or why the input does
+/// not have exactly one. An empty projection or a semantic error is a failure.
+pub(crate) fn single_lineage_statement(
+    analysis: &sqllineage::Analysis,
+) -> Result<&sqllineage::StatementAnalysis, String> {
+    if let Some(detail) = analysis_error(analysis) {
+        return Err(detail);
+    }
+    match analysis.statements.as_slice() {
+        [] => Err("no statements in analysis result".to_string()),
+        [statement] if statement.kind.carries_lineage() => Ok(statement),
+        [_] => Err("statement is not lineage-bearing".to_string()),
+        statements => Err(format!(
+            "expected exactly one statement, found {}",
+            statements.len()
+        )),
+    }
+}
+
 /// Find the output column a dlin column name refers to.
 ///
 /// `duplicate_hint` is set when the caller already knows the name is used by

@@ -238,6 +238,9 @@ Rules:
   something is absent.
 - A YAML name written without a quote flag is interpreted by the current
   matching rule, and the fact that no quoting was specified is kept.
+- A schema that lists the same name more than once, by the matching rule,
+  has that column more than once. A reference to the name does not denote one
+  of them, so it is ambiguous. It is never bound to the first listed one.
 
 How the dbt layer chooses these values for YAML is described in the `dlin-core`
 architecture document.

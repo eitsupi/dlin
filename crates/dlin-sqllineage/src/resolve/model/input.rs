@@ -423,6 +423,16 @@ impl OutputModels<'_, '_, '_> {
                             .map(|catalog| catalog.column_presence(table, name))
                         {
                             Some(ColumnPresence::Present(_)) => Standing::Present(single.clone()),
+                            // The catalog lists the name twice: the relation
+                            // has the column, but a reference cannot tell
+                            // which one it means.
+                            Some(ColumnPresence::Duplicate) => {
+                                Standing::Present(InputLookup::Ambiguous {
+                                    candidates: candidates_of([&range]),
+                                    typed: true,
+                                    values: Vec::new(),
+                                })
+                            }
                             Some(ColumnPresence::Absent) => Standing::Absent,
                             Some(ColumnPresence::Possible) | None => Standing::Possible {
                                 answer: single.clone(),

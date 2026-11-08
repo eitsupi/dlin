@@ -72,6 +72,7 @@ fn test_dependency_catalog_unions_yaml_and_compiled_sql_columns() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -266,6 +267,7 @@ fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })

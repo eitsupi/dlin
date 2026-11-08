@@ -6,7 +6,7 @@ use crate::parser::manifest::{
 };
 
 fn source_free_union_manifest() -> Manifest {
-    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+    fn columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
         names
             .iter()
             .map(|name| {
@@ -14,6 +14,7 @@ fn source_free_union_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -106,7 +107,7 @@ fn source_free_union_manifest() -> Manifest {
 }
 
 fn bigquery_compound_field_access_manifest() -> Manifest {
-    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+    fn columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
         names
             .iter()
             .map(|name| {
@@ -114,6 +115,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -197,7 +199,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
 }
 
 fn bigquery_struct_field_cross_model_manifest() -> Manifest {
-    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+    fn columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
         names
             .iter()
             .map(|name| {
@@ -205,6 +207,7 @@ fn bigquery_struct_field_cross_model_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -274,7 +277,7 @@ fn bigquery_struct_field_cross_model_manifest() -> Manifest {
 }
 
 fn same_named_deep_error_manifest() -> Manifest {
-    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+    fn columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
         names
             .iter()
             .map(|name| {
@@ -282,6 +285,7 @@ fn same_named_deep_error_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
@@ -368,6 +372,7 @@ fn bigquery_unnest_cross_model_manifest() -> Manifest {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -391,10 +396,11 @@ fn duplicate_column_error_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })
-            .collect::<HashMap<_, _>>()
+            .collect::<indexmap::IndexMap<_, _>>()
     };
     let model =
         |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
@@ -451,7 +457,7 @@ fn duplicate_column_error_manifest() -> Manifest {
 }
 
 fn bigquery_nested_star_manifest() -> Manifest {
-    fn columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+    fn columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
         names
             .iter()
             .map(|name| {
@@ -459,6 +465,7 @@ fn bigquery_nested_star_manifest() -> Manifest {
                     (*name).to_string(),
                     ManifestColumn {
                         name: (*name).to_string(),
+                        quote: None,
                     },
                 )
             })

@@ -568,3 +568,44 @@ fn exhaustive_unordered_natural_keys_have_complete_values_without_proven_positio
         );
     }
 }
+
+#[test]
+fn a_column_name_listed_twice_in_a_catalog_is_ambiguous_not_the_first_match() {
+    let catalog = Schemas::new(&[
+        (
+            "dup",
+            &["x", "x", "y"],
+            SchemaCoverage::Exhaustive,
+            SchemaOrder::Proven,
+        ),
+        ("u", &["z"], SchemaCoverage::Exhaustive, SchemaOrder::Proven),
+    ]);
+    let ambiguous = |statement: &StatementAnalysis| match &statement.output.columns[0].lineage {
+        Lineage::Partial { known, unresolved } => {
+            assert!(known.is_empty(), "known: {known:?}");
+            assert!(
+                matches!(
+                    unresolved.as_slice(),
+                    [Unresolved::Ambiguous { column, candidates }]
+                        if column.value == "x"
+                            && candidates == &[Candidate::Relation(relation("dup"))]
+                ),
+                "unresolved: {unresolved:?}"
+            );
+        }
+        other => panic!("expected an ambiguous partial lineage, got {other:?}"),
+    };
+
+    ambiguous(&analyze("SELECT x FROM dup", &catalog));
+    ambiguous(&analyze("SELECT dup.x FROM dup", &catalog));
+    ambiguous(&analyze("SELECT x FROM dup CROSS JOIN u", &catalog));
+
+    // A name listed once is unaffected, and a star keeps both listed slots.
+    let single = analyze("SELECT y FROM dup", &catalog);
+    assert_eq!(
+        single.output.columns[0].lineage,
+        Lineage::Complete(vec![source("dup", "y")])
+    );
+    let star = analyze("SELECT * FROM dup", &catalog);
+    assert_eq!(star.output.columns.len(), 3);
+}

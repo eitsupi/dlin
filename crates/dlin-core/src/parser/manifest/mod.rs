@@ -141,7 +141,7 @@ pub struct ManifestNode {
     pub path: Option<String>,
     pub original_file_path: Option<String>,
     #[serde(default)]
-    pub columns: HashMap<String, ManifestColumn>,
+    pub columns: indexmap::IndexMap<String, ManifestColumn>,
     pub compiled_code: Option<String>,
     #[serde(default)]
     pub database: Option<String>,
@@ -161,7 +161,7 @@ pub struct ManifestSource {
     pub path: Option<String>,
     pub original_file_path: Option<String>,
     #[serde(default)]
-    pub columns: HashMap<String, ManifestColumn>,
+    pub columns: indexmap::IndexMap<String, ManifestColumn>,
     #[serde(default)]
     pub database: Option<String>,
     #[serde(default)]
@@ -174,6 +174,10 @@ pub struct ManifestSource {
 #[derive(Debug, Deserialize)]
 pub struct ManifestColumn {
     pub name: String,
+    /// The `quote` setting from the column's YAML. `None` means it was not
+    /// specified, which is distinct from an explicit `false`.
+    #[serde(default)]
+    pub quote: Option<bool>,
 }
 
 /// An exposure entry in the manifest
@@ -253,6 +257,15 @@ pub struct ManifestConfig {
     pub materialized: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub contract: Option<ManifestContractConfig>,
+}
+
+/// The `contract` entry of a node config.
+#[derive(Debug, Default, Deserialize)]
+pub struct ManifestContractConfig {
+    #[serde(default)]
+    pub enforced: bool,
 }
 
 impl ManifestNode {

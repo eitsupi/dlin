@@ -184,6 +184,7 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
                 name.to_string(),
                 crate::parser::manifest::ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -202,6 +203,7 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
                 name.to_string(),
                 crate::parser::manifest::ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -273,6 +275,7 @@ fn test_cross_model_rebases_diagnostic_across_rename() {
                 name.to_string(),
                 crate::parser::manifest::ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -708,11 +711,12 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
     // lowercase id. stg_payments has no matching column, so its presence in
     // the join lets the catalog resolve id to stg_orders.ID unambiguously.
     let upstream = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
-    upstream.columns.remove("order_id");
+    upstream.columns.shift_remove("order_id");
     upstream.columns.insert(
         "ID".to_string(),
         ManifestColumn {
             name: "ID".to_string(),
+            quote: None,
         },
     );
     upstream.compiled_code =
@@ -726,6 +730,7 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })

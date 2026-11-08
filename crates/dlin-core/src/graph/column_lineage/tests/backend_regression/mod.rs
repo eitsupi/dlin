@@ -37,7 +37,7 @@ const STAR_HINT: &str = "column may be introduced via SELECT * that could not be
 /// them, so their columns become the catalog its SQL is analyzed against.
 type Upstream<'a> = &'a [(&'a str, &'a [&'a str])];
 
-fn manifest_columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
+fn manifest_columns(names: &[&str]) -> indexmap::IndexMap<String, ManifestColumn> {
     names
         .iter()
         .map(|name| {
@@ -45,6 +45,7 @@ fn manifest_columns(names: &[&str]) -> HashMap<String, ManifestColumn> {
                 name.to_string(),
                 ManifestColumn {
                     name: name.to_string(),
+                    quote: None,
                 },
             )
         })
@@ -102,6 +103,34 @@ fn analyze(
     yaml_columns: &[&str],
 ) -> ModelColumnLineage {
     let manifest = make_manifest(sql, upstream, yaml_columns);
+    compute_column_lineage(
+        &manifest,
+        ROOT_MODEL,
+        dialect,
+        &mut ColumnLineageCache::disabled(),
+    )
+}
+
+/// Analyze `sql` with upstream models defined by SQL (`(name, SQL)` pairs).
+/// Each upstream model provides the output of its SQL, in SQL order.
+fn analyze_over_sql_models(
+    sql: &str,
+    dialect: DlinDialect,
+    upstream: &[(&str, &str)],
+) -> ModelColumnLineage {
+    let mut manifest = make_manifest(sql, &[], &[]);
+    let mut depends_on = Vec::new();
+    for (name, upstream_sql) in upstream {
+        let node = make_node(name, vec![], &[], Some(upstream_sql));
+        depends_on.push(node.unique_id.clone());
+        manifest.nodes.insert(node.unique_id.clone(), node);
+    }
+    manifest
+        .nodes
+        .get_mut(&format!("model.proj.{ROOT_MODEL}"))
+        .unwrap()
+        .depends_on
+        .nodes = depends_on;
     compute_column_lineage(
         &manifest,
         ROOT_MODEL,

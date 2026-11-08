@@ -1,12 +1,10 @@
 use crate::parser::manifest::Manifest;
 use std::collections::{HashMap, HashSet};
 
-use super::backend::DlinDialect;
 use super::backend::sqllineage::{
     analyze_parsed, lineage_failure, parse_sql, resolve_statement_output, statement_error,
 };
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
-use super::schema;
 use super::{
     ColumnLineageAnalysis, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
     TransformationType, find_model_by_name, find_model_by_unique_id,
@@ -198,14 +196,7 @@ fn resolve_source_recursive(
         // missing field only repeats the full SQL analysis and turns a linear
         // row-value expansion into quadratic work.
         let on_demand = should_retry_missing_column(&upstream_result.errors, &source.column)
-            .then(|| {
-                compute_single_column_lineage(
-                    ctx.analysis.manifest,
-                    &model_unique_id,
-                    &source.column,
-                    ctx.analysis.dialect,
-                )
-            })
+            .then(|| compute_single_column_lineage(ctx.analysis, &model_unique_id, &source.column))
             .flatten();
         let transformation = on_demand
             .as_ref()
@@ -259,15 +250,16 @@ fn should_retry_missing_column(errors: &[ColumnLineageError], column: &str) -> b
 }
 
 fn compute_single_column_lineage(
-    manifest: &Manifest,
+    analysis: &mut ColumnLineageAnalysis<'_>,
     model_name: &str,
     column_name: &str,
-    dialect: DlinDialect,
 ) -> Option<(Vec<InternalColumnSource>, TransformationType)> {
+    let manifest = analysis.manifest;
+    let dialect = analysis.dialect;
     let node = find_model_by_unique_id(manifest, model_name)
         .or_else(|| find_model_by_name(manifest, model_name))?;
     let compiled_code = node.compiled_code.as_ref()?;
-    let catalog = schema::build_schema_from_manifest(manifest, node, dialect);
+    let catalog = analysis.schema.catalog_for(node);
     let parsed = parse_sql(compiled_code, dialect).ok()?;
     let statement = analyze_parsed(&parsed, dialect, catalog.as_ref())
         .into_single()
