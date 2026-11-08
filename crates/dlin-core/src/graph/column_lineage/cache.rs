@@ -10,8 +10,18 @@ use super::backend::DlinDialect;
 pub(super) const COLUMN_LINEAGE_CACHE_FILENAME: &str = "column_lineage_cache.json";
 pub(super) const CACHE_DIR: &str = ".dlin_cache";
 
-/// The package version is the sole persistent cache compatibility boundary.
-/// Cache formats are intentionally not versioned independently.
+/// Identity of the analysis semantics that produced cached results.
+///
+/// A cache file is reused only when both the package version and this id
+/// match. Bump it whenever the analysis semantics change in a way that can
+/// alter stored results (schema evidence, adoption policy, coverage policy)
+/// without a package version bump, so a development build never reuses
+/// results computed under the old semantics.
+pub(super) const ANALYSIS_SEMANTICS_ID: &str = "schema-evidence-1";
+
+/// The package version and [`ANALYSIS_SEMANTICS_ID`] together are the
+/// persistent cache compatibility boundary. Cache formats are intentionally
+/// not versioned independently.
 fn package_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -34,6 +44,10 @@ pub(super) struct ColumnLineageCacheFile {
     /// dlin version that created this cache
     #[serde(default)]
     pub(super) version: String,
+    /// Analysis semantics id that produced this cache. A missing value (a
+    /// cache written before the id existed) never matches.
+    #[serde(default)]
+    pub(super) semantics_id: String,
     /// Per-model cached entries keyed by canonical manifest unique_id
     entries: HashMap<String, ColumnLineageCacheEntry>,
 }
@@ -59,7 +73,8 @@ impl ColumnLineageCache {
     }
 
     /// Load the cache from disk, or create an empty one.
-    /// Entries are discarded when the dlin version doesn't match.
+    /// Entries are discarded when the dlin version or the analysis semantics id
+    /// doesn't match.
     pub fn load(project_dir: &Path, cache_dir: Option<&Path>) -> Self {
         let cache_path = match cache_dir {
             Some(dir) => dir.join(COLUMN_LINEAGE_CACHE_FILENAME),
@@ -72,7 +87,7 @@ impl ColumnLineageCache {
         let entries = std::fs::read_to_string(&cache_path)
             .ok()
             .and_then(|content| serde_json::from_str::<ColumnLineageCacheFile>(&content).ok())
-            .filter(|cf| cf.version == version)
+            .filter(|cf| cf.version == version && cf.semantics_id == ANALYSIS_SEMANTICS_ID)
             .map(|cf| cf.entries)
             .unwrap_or_default();
         Self {
@@ -142,6 +157,7 @@ impl ColumnLineageCache {
         };
         let cf = ColumnLineageCacheFile {
             version: self.version.clone(),
+            semantics_id: ANALYSIS_SEMANTICS_ID.to_string(),
             entries: self.entries.clone(),
         };
         if let Some(parent) = cache_path.parent() {

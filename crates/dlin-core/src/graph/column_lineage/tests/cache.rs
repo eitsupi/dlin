@@ -616,3 +616,319 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         .digest_for_node(&external_manifest, external);
     assert!(!external_digest.persistent_cache_safe);
 }
+
+/// Declared columns in declaration order, each with its raw `quote` setting.
+type ColumnSpec<'a> = &'a [(&'a str, Option<bool>)];
+
+fn declared(columns: ColumnSpec<'_>) -> indexmap::IndexMap<String, ManifestColumn> {
+    columns
+        .iter()
+        .map(|(name, quote)| {
+            (
+                (*name).to_string(),
+                ManifestColumn {
+                    name: (*name).to_string(),
+                    quote: *quote,
+                },
+            )
+        })
+        .collect()
+}
+
+/// A model `m` reading `SELECT * FROM src` over a source `src`, and a model
+/// `d` reading `m`. Columns are set after decoding because a JSON object does
+/// not carry a reliable declaration order in these tests. `contract` is the
+/// `enforced` setting: `None` leaves the contract entry out.
+fn schema_inputs_manifest(
+    source_columns: ColumnSpec<'_>,
+    model_columns: ColumnSpec<'_>,
+    contract: Option<bool>,
+) -> Manifest {
+    let mut manifest: Manifest = serde_json::from_value(serde_json::json!({
+        "nodes": {
+            "model.proj.m": {
+                "unique_id": "model.proj.m",
+                "name": "m",
+                "resource_type": "model",
+                "depends_on": {"nodes": ["source.proj.raw.src"]},
+                "compiled_code": "SELECT * FROM src",
+                "config": {
+                    "contract": contract.map(|enforced| serde_json::json!({"enforced": enforced}))
+                }
+            },
+            "model.proj.d": {
+                "unique_id": "model.proj.d",
+                "name": "d",
+                "resource_type": "model",
+                "depends_on": {"nodes": ["model.proj.m"]},
+                "compiled_code": "SELECT * FROM m"
+            }
+        },
+        "sources": {
+            "source.proj.raw.src": {
+                "unique_id": "source.proj.raw.src",
+                "name": "src",
+                "source_name": "raw",
+                "resource_type": "source"
+            }
+        }
+    }))
+    .unwrap();
+    manifest.nodes.get_mut("model.proj.m").unwrap().columns = declared(model_columns);
+    manifest
+        .sources
+        .get_mut("source.proj.raw.src")
+        .unwrap()
+        .columns = declared(source_columns);
+    manifest
+}
+
+fn digests_of(manifest: &Manifest) -> (u64, u64) {
+    let digest = |name: &str| {
+        let node = super::super::find_model_by_name(manifest, name).unwrap();
+        super::super::schema::compute_semantic_digest(manifest, node)
+    };
+    (digest("m"), digest("d"))
+}
+
+fn assert_digests_differ(before: &Manifest, after: &Manifest) {
+    let (model_before, downstream_before) = digests_of(before);
+    let (model_after, downstream_after) = digests_of(after);
+    assert_ne!(model_before, model_after, "reading model digest");
+    assert_ne!(
+        downstream_before, downstream_after,
+        "downstream model digest"
+    );
+}
+
+const PLAIN: ColumnSpec<'static> = &[("z", None), ("a", None)];
+
+#[test]
+fn test_semantic_digest_changes_when_source_column_quote_changes() {
+    let with_quote = |quote| schema_inputs_manifest(&[("z", quote), ("a", None)], &[], None);
+    let unset = with_quote(None);
+    let explicit_false = with_quote(Some(false));
+    let explicit_true = with_quote(Some(true));
+
+    assert_digests_differ(&unset, &explicit_true);
+    assert_digests_differ(&explicit_false, &explicit_true);
+    // Unset and an explicit `false` are different raw declarations.
+    assert_digests_differ(&unset, &explicit_false);
+}
+
+#[test]
+fn test_semantic_digest_changes_when_model_column_quote_changes() {
+    let with_quote = |quote| schema_inputs_manifest(PLAIN, &[("a", quote)], None);
+    let unset = with_quote(None);
+    let explicit_false = with_quote(Some(false));
+    let explicit_true = with_quote(Some(true));
+
+    assert_digests_differ(&unset, &explicit_true);
+    assert_digests_differ(&explicit_false, &explicit_true);
+    assert_digests_differ(&unset, &explicit_false);
+}
+
+#[test]
+fn test_semantic_digest_changes_when_yaml_column_order_changes() {
+    assert_digests_differ(
+        &schema_inputs_manifest(&[("z", None), ("a", None)], &[], None),
+        &schema_inputs_manifest(&[("a", None), ("z", None)], &[], None),
+    );
+    assert_digests_differ(
+        &schema_inputs_manifest(PLAIN, &[("z", None), ("a", None)], None),
+        &schema_inputs_manifest(PLAIN, &[("a", None), ("z", None)], None),
+    );
+}
+
+#[test]
+fn test_semantic_digest_changes_when_contract_enforcement_changes() {
+    let with_contract = |enforced| schema_inputs_manifest(PLAIN, &[("a", None)], enforced);
+    let absent = with_contract(None);
+    let not_enforced = with_contract(Some(false));
+    let enforced = with_contract(Some(true));
+
+    assert_digests_differ(&absent, &not_enforced);
+    assert_digests_differ(&not_enforced, &enforced);
+    assert_digests_differ(&absent, &enforced);
+}
+
+#[test]
+fn test_semantic_digest_is_stable_for_identical_schema_inputs() {
+    let build = || schema_inputs_manifest(PLAIN, &[("a", Some(true))], Some(true));
+    assert_eq!(digests_of(&build()), digests_of(&build()));
+}
+
+fn cache_file_path(project_dir: &std::path::Path) -> std::path::PathBuf {
+    project_dir
+        .join(CACHE_DIR)
+        .join(COLUMN_LINEAGE_CACHE_FILENAME)
+}
+
+fn seeded_cache_file(project_dir: &std::path::Path) -> ColumnLineageCacheFile {
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    cache.insert(
+        "m",
+        DlinDialect::Generic,
+        0,
+        ModelColumnLineage {
+            model: "m".to_string(),
+            traced_columns: 0,
+            total_columns: 0,
+            columns: vec![],
+            errors: vec![],
+        }
+        .into(),
+    );
+    cache.save();
+    serde_json::from_str(&std::fs::read_to_string(cache_file_path(project_dir)).unwrap()).unwrap()
+}
+
+#[test]
+fn test_column_cache_stores_and_uses_matching_semantics_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = seeded_cache_file(tmp.path());
+    assert_eq!(file.semantics_id, ANALYSIS_SEMANTICS_ID);
+
+    let reloaded = ColumnLineageCache::load(tmp.path(), None);
+    assert!(reloaded.get("m", DlinDialect::Generic, 0).is_some());
+}
+
+#[test]
+fn test_column_cache_ignores_file_with_different_semantics_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut file = seeded_cache_file(tmp.path());
+    file.semantics_id = format!("{ANALYSIS_SEMANTICS_ID}-other");
+    std::fs::write(
+        cache_file_path(tmp.path()),
+        serde_json::to_string(&file).unwrap(),
+    )
+    .unwrap();
+
+    let reloaded = ColumnLineageCache::load(tmp.path(), None);
+    assert!(reloaded.get("m", DlinDialect::Generic, 0).is_none());
+}
+
+#[test]
+fn test_column_cache_ignores_file_without_semantics_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    seeded_cache_file(tmp.path());
+    let path = cache_file_path(tmp.path());
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("semantics_id");
+    std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+    let reloaded = ColumnLineageCache::load(tmp.path(), None);
+    assert!(reloaded.get("m", DlinDialect::Generic, 0).is_none());
+}
+
+/// Edits to the source YAML that dlin makes through the manifest. dlin cannot
+/// read catalog.json yet, so catalog evidence replacing YAML evidence (the
+/// engine contract cases E4 and E5) is modelled through the only input dlin
+/// does read: the declared columns of the source.
+fn e1_manifest(source_columns: &[&str]) -> Manifest {
+    let columns: Vec<_> = source_columns.iter().map(|name| (*name, None)).collect();
+    schema_inputs_manifest(&columns, &[], None)
+}
+
+fn pairs_by_column(result: &ModelColumnLineage) -> Vec<(String, Vec<(String, String)>)> {
+    let mut pairs: Vec<_> = result
+        .columns
+        .iter()
+        .map(|entry| {
+            let mut sources: Vec<_> = entry
+                .sources
+                .iter()
+                .map(|source| (source.table.clone(), source.column.clone()))
+                .collect();
+            sources.sort();
+            (entry.column.clone(), sources)
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+fn compute_persisted(
+    project_dir: &std::path::Path,
+    manifest: &Manifest,
+) -> (ModelColumnLineage, u64) {
+    let mut cache = ColumnLineageCache::load(project_dir, None);
+    let result = compute_column_lineage(manifest, "m", DlinDialect::PostgreSQL, &mut cache);
+    cache.save();
+    (result, digests_of(manifest).0)
+}
+
+#[test]
+fn test_persistent_cache_does_not_reuse_results_when_yaml_evidence_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+
+    // E1: the YAML list `[z, a]` is the assumed exhaustive schema.
+    let e1 = e1_manifest(&["z", "a"]);
+    let (e1_result, e1_digest) = compute_persisted(project_dir, &e1);
+    assert!(
+        e1_result.errors.is_empty(),
+        "errors: {:?}",
+        e1_result.errors
+    );
+    let e1_pairs = pairs_by_column(&e1_result);
+    assert_eq!(
+        e1_pairs.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+
+    // E4: the same columns with the order refined to `[a, z]`.
+    let e4 = e1_manifest(&["a", "z"]);
+    let (e4_result, e4_digest) = compute_persisted(project_dir, &e4);
+    assert_ne!(e1_digest, e4_digest);
+    assert!(
+        e4_result.errors.is_empty(),
+        "errors: {:?}",
+        e4_result.errors
+    );
+    let e4_pairs = pairs_by_column(&e4_result);
+    assert_eq!(e4_pairs.len(), 2, "both columns are still traced");
+    // The old entry was replaced, not hit: only the new digest is stored.
+    let after_e4 = ColumnLineageCache::load(project_dir, None);
+    assert!(
+        after_e4
+            .get("model.proj.m", DlinDialect::PostgreSQL, e1_digest)
+            .is_none()
+    );
+    assert!(
+        after_e4
+            .get("model.proj.m", DlinDialect::PostgreSQL, e4_digest)
+            .is_some()
+    );
+
+    // Everything known before stays known after the refinement.
+    for (column, sources) in &e1_pairs {
+        let refined = e4_pairs
+            .iter()
+            .find(|(name, _)| name == column)
+            .unwrap_or_else(|| panic!("column {column} was lost by the refinement"));
+        for source in sources {
+            assert!(
+                refined.1.contains(source),
+                "source {source:?} of {column} was lost by the refinement"
+            );
+        }
+    }
+
+    // E5: the assumption that `[z, a]` is exhaustive is replaced.
+    let e5 = e1_manifest(&["a", "z", "extra"]);
+    let (e5_result, e5_digest) = compute_persisted(project_dir, &e5);
+    assert_ne!(e4_digest, e5_digest);
+    assert!(
+        e5_result.errors.is_empty(),
+        "errors: {:?}",
+        e5_result.errors
+    );
+    let e5_pairs = pairs_by_column(&e5_result);
+    assert!(
+        e5_pairs.iter().any(|(column, sources)| column == "extra"
+            && sources == &[("src".to_string(), "extra".to_string())]),
+        "SELECT * must include the new column: {e5_pairs:?}"
+    );
+}

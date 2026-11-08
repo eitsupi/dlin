@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use super::cache::{CACHE_DIR, COLUMN_LINEAGE_CACHE_FILENAME, ColumnLineageCacheFile};
+use super::cache::{
+    ANALYSIS_SEMANTICS_ID, CACHE_DIR, COLUMN_LINEAGE_CACHE_FILENAME, ColumnLineageCacheFile,
+};
 use super::impact::build_downstream_model_map;
 use super::*;
 use crate::parser::manifest::{

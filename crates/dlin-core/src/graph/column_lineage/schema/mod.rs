@@ -13,8 +13,8 @@ use crate::parser::manifest::Manifest;
 /// Per-analysis memoization for semantic manifest digests.
 ///
 /// Digests are intentionally kept in memory only. A `ColumnLineageAnalysis`
-/// owns one for the lifetime of a manifest analysis session, while the dlin
-/// package version remains the sole persistent cache compatibility boundary.
+/// owns one for the lifetime of a manifest analysis session. Persistent cache
+/// compatibility is decided separately by the cache file header.
 #[derive(Debug, Default)]
 pub(super) struct SemanticDigestCache {
     digests: HashMap<String, u64>,
@@ -150,6 +150,15 @@ fn append_node_local_parts(parts: &mut Vec<String>, node: &crate::parser::manife
     parts.push(format!("database:{:?}", node.database));
     parts.push(format!("schema:{:?}", node.schema));
     append_columns(parts, &node.columns);
+    // Absent, `enforced: false` and `enforced: true` give different coverage
+    // bases, so the three states stay distinct.
+    parts.push(format!(
+        "contract_enforced:{:?}",
+        node.config
+            .contract
+            .as_ref()
+            .map(|contract| contract.enforced)
+    ));
     parts.push(format!("compiled_code:{:?}", node.compiled_code));
 }
 
@@ -165,13 +174,15 @@ fn append_source_local_parts(
     append_columns(parts, &source.columns);
 }
 
+/// Append the declared columns in declaration order with their raw `quote`
+/// setting. The order is the display order of YAML evidence and decides how a
+/// star expands over a YAML-only relation, and an unset `quote` differs from
+/// an explicit `false`, so neither is normalized away.
 fn append_columns(
     parts: &mut Vec<String>,
     columns: &indexmap::IndexMap<String, crate::parser::manifest::ManifestColumn>,
 ) {
-    let mut names = columns.keys().collect::<Vec<_>>();
-    names.sort_unstable();
-    for name in names {
-        parts.push(format!("column:{name}"));
+    for (name, column) in columns {
+        parts.push(format!("column:{name}:quote={:?}", column.quote));
     }
 }
