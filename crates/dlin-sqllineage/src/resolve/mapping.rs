@@ -1,20 +1,19 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use super::binding::derive_transform;
 use super::catalog;
 use super::context::{EvalContext, EvalKey};
-use super::lineage::collect_output_sources;
-use super::model::{ModelStore, OutputModels, Width};
-use super::star::expand_star;
+use super::model::{ModelStore, OutputModel, OutputModels};
+use super::setop_legacy::{merge_operands, retag};
+use super::star::projection_mappings;
 
 use crate::Ident;
-use crate::Unresolved;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, OutputPlan, VirtualColumnState};
+use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
 
 pub(super) fn wildcard_mapping(
@@ -33,6 +32,9 @@ pub(super) fn wildcard_mapping(
             table: source_table,
         }],
         transform: TransformKind::Direct,
+        slot: None,
+        unpublished_tail: false,
+        merged_in: false,
     }
 }
 
@@ -64,9 +66,20 @@ pub(super) fn known_empty_dependency(node_id: NodeId, graph: &RawGraph) -> bool 
 
 #[derive(Default)]
 pub(super) struct ScopeMappingCache {
-    entries: HashMap<usize, ScopeMappingEntry>,
+    /// The mappings of each published model of a scope, by publication.
+    entries: HashMap<u32, ScopeMappingEntry>,
     /// The structural models mappings are evaluated from.
     pub(super) models: ModelStore,
+}
+
+#[cfg(test)]
+impl ScopeMappingCache {
+    pub(super) fn is_cached(&self, scope: usize) -> bool {
+        self.models
+            .cached(scope)
+            .and_then(|model| model.publication)
+            .is_some_and(|publication| self.entries.contains_key(&publication))
+    }
 }
 
 /// Mappings already computed for a scope. A scope still being computed is on
@@ -88,368 +101,113 @@ pub(super) fn scope_mapping_computations() -> usize {
     SCOPE_MAPPING_COMPUTATIONS.with(Cell::get)
 }
 
+/// The mappings of a scope that is being computed, or that the budget no
+/// longer allows computing, cannot be known. This is not an empty list of
+/// mappings: a caller has to turn it into an unresolved value of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cut;
+
 /// Resolve a scope's output plan into ordered mappings. Set-operation
 /// branches are resolved independently so catalog expansion happens before
 /// their positional merge.
+///
+/// A result computed while a cycle was cut depends on where the walk started
+/// and is returned without being kept.
 pub(super) fn resolve_scope_mappings(
-    scope: usize,
+    scope: ScopeId,
     cx: &mut EvalContext<'_, '_>,
-) -> Arc<[ColumnMapping]> {
-    if let Some(mappings) = cx.mapping_cache.entries.get(&scope) {
-        return mappings.clone();
+) -> Result<Arc<[ColumnMapping]>, Cut> {
+    let view = models(cx).scope(scope);
+    mappings_of(scope, &view, cx)
+}
+
+/// The mappings of `scope` for one publication of its model. The mappings
+/// carry the identities that publication gave its outputs, so a reader that
+/// holds one of them reads the mappings of the model it read.
+pub(super) fn mappings_of(
+    scope: ScopeId,
+    view: &Rc<OutputModel>,
+    cx: &mut EvalContext<'_, '_>,
+) -> Result<Arc<[ColumnMapping]>, Cut> {
+    let publication = view
+        .publication
+        .expect("the mappings of a scope are those of a published model");
+    if let Some(mappings) = cx.mapping_cache.entries.get(&publication) {
+        return Ok(mappings.clone());
     }
-    // A scope that is being computed cannot safely publish a partially
-    // materialized result. Returning no mappings preserves the existing
-    // fallback to raw output resolution and does not cache an incomplete
-    // entry as resolved.
-    // TODO: re-entry or an exhausted budget must surface as an unresolved
-    // value, not as an empty list that readers treat as "no dependencies".
+    let generation = cx.cut_generation();
     if !cx.enter(EvalKey::Mappings(scope)) {
-        return Arc::from([]);
+        return Err(Cut);
     }
-    let graph = cx.graph;
     #[cfg(test)]
     SCOPE_MAPPING_COMPUTATIONS.with(|computations| computations.set(computations.get() + 1));
+    let computed = compute_scope_mappings(scope, view, cx);
+    cx.leave(EvalKey::Mappings(scope));
+    let mappings: Arc<[ColumnMapping]> = match computed {
+        Ok(mappings) => mappings.into(),
+        Err(cut) => {
+            // A forwarding invariant can fail without an entry being refused.
+            // Make every failed mapping walk visible to caches above it.
+            cx.record_cut();
+            return Err(cut);
+        }
+    };
+    if cx.cut_generation() == generation {
+        cx.mapping_cache
+            .entries
+            .insert(publication, mappings.clone());
+    }
+    Ok(mappings)
+}
 
+pub(super) fn models<'x, 'a, 'c>(cx: &'x mut EvalContext<'a, 'c>) -> OutputModels<'a, 'c, 'x> {
+    OutputModels::new(cx.graph, cx.catalog, &mut cx.mapping_cache.models)
+}
+
+/// The publication of `operand` that `reader` forwarded, whose outputs the
+/// operand's mappings have to be tagged with to be read for `reader`.
+pub(super) fn operand_view(
+    reader: &OutputModel,
+    operand: ScopeId,
+    cx: &mut EvalContext<'_, '_>,
+) -> Rc<OutputModel> {
+    match reader.forwarded.first() {
+        Some(pair) => {
+            let publication = cx.mapping_cache.models.arena.publication(pair.from);
+            models(cx).view(publication)
+        }
+        None => models(cx).scope(operand),
+    }
+}
+
+fn compute_scope_mappings(
+    scope: ScopeId,
+    view: &Rc<OutputModel>,
+    cx: &mut EvalContext<'_, '_>,
+) -> Result<Vec<ColumnMapping>, Cut> {
+    let graph = cx.graph;
     let mappings = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => {
-            let mut mappings = Vec::new();
-            let mut next_ordinal = Some(0usize);
-            for col in graph.scopes.output_columns(scope) {
-                match &graph.nodes[col.node_id] {
-                    RawNode::Output { name, .. } => {
-                        let mut visited = HashSet::new();
-                        let (sources, edge_kinds, has_back, inherited_transform) =
-                            collect_output_sources(col.node_id, cx, &mut visited);
-                        let transform = merge_transform(
-                            &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
-                            &inherited_transform,
-                        );
-                        mappings.push(ColumnMapping {
-                            star_position: crate::types::StarPosition::Inferred,
-                            ordinal: next_ordinal,
-                            output_name: graph
-                                .output_names
-                                .get(&col.node_id)
-                                .cloned()
-                                .or_else(|| Some(crate::OutputName::Explicit(name.clone()))),
-                            target: ColumnRef {
-                                table: None,
-                                column: name.clone(),
-                            },
-                            sources: if has_back {
-                                vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }]
-                            } else {
-                                sources
-                            },
-                            transform,
-                        });
-                        next_ordinal = next_ordinal.map(|ordinal| ordinal + 1);
-                    }
-                    RawNode::Star { .. } => {
-                        let start = mappings.len();
-                        let star_width =
-                            OutputModels::new(graph, cx.catalog, &mut cx.mapping_cache.models)
-                                .star(col.node_id)
-                                .width;
-                        expand_star(col.node_id, cx, &mut mappings);
-                        let base = next_ordinal;
-                        for mapping in &mut mappings[start..] {
-                            mapping.star_position = mapping.star_position.shifted(base);
-                            mapping.ordinal = mapping
-                                .ordinal
-                                .and_then(|ordinal| base.map(|base| base + ordinal));
-                        }
-                        next_ordinal = match (base, star_width) {
-                            (Some(base), Width::Exact(width)) => Some(base + width),
-                            _ => None,
-                        };
-                    }
-                    _ => {}
-                }
-            }
+            let mut mappings = projection_mappings(scope, view, cx);
             if let Some(cat) = cx.catalog {
                 catalog::apply_catalog(&mut mappings, cat);
             }
             mappings
         }
-        OutputPlan::Delegate(child) => resolve_scope_mappings(child, cx).iter().cloned().collect(),
+        OutputPlan::Delegate(child) => {
+            let child_view = operand_view(view, child, cx);
+            let mut mappings = mappings_of(child, &child_view, cx)?.to_vec();
+            retag(&mut mappings, view)?;
+            mappings
+        }
         OutputPlan::SetOperation {
             left,
             right,
             recursive,
-        } => {
-            let unknown_reasons =
-                OutputModels::new(graph, cx.catalog, &mut cx.mapping_cache.models)
-                    .scope(scope)
-                    .unknown_reasons
-                    .clone();
-            let left_mappings = resolve_scope_mappings(left, cx)
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            let right_mappings = if recursive {
-                Vec::new()
-            } else {
-                resolve_scope_mappings(right, cx).iter().cloned().collect()
-            };
-            let mut merged = if !recursive
-                && (mappings_have_unknown_shape(&left_mappings)
-                    || mappings_have_unknown_shape(&right_mappings)
-                    || !unknown_reasons.is_empty())
-            {
-                merge_unknown_shape_mappings(left_mappings, right_mappings)
-            } else if !recursive {
-                merge_proven_positions(left_mappings, &right_mappings)
-            } else {
-                // The branch resolvers expand stars independently. Preserve the
-                // left branch's names and order, as SQL set operations do.
-                let mut merged = Vec::with_capacity(left_mappings.len());
-                for (idx, left_mapping) in left_mappings.into_iter().enumerate() {
-                    if let Some(right_mapping) = right_mappings.get(idx) {
-                        let (sources, transform) =
-                            merge_branch_sources(&left_mapping, right_mapping);
-                        if recursive {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources: vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }],
-                                transform,
-                            });
-                        } else {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources,
-                                transform,
-                            });
-                        }
-                    } else {
-                        let sources = left_mapping.sources;
-                        let transform = left_mapping.transform;
-                        if recursive {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources: vec![ColumnOrigin::Recursive {
-                                    base_sources: sources,
-                                }],
-                                transform,
-                            });
-                        } else {
-                            merged.push(ColumnMapping {
-                                star_position: crate::types::StarPosition::Inferred,
-                                ordinal: left_mapping.ordinal,
-                                output_name: left_mapping.output_name.clone(),
-                                target: left_mapping.target,
-                                sources,
-                                transform,
-                            });
-                        }
-                    }
-                }
-                merged
-            };
-            // Attach every unknown-width source to each mapping produced by
-            // this set operation, including mappings retained by an early
-            // unknown-star merge and recursive set operations.
-            for mapping in &mut merged {
-                append_unsupported_reasons(&mut mapping.sources, &unknown_reasons);
-            }
-            merged
-        }
+            correspondence,
+        } => merge_operands(view, left, right, recursive, correspondence, cx)?,
     };
-    let mappings: Arc<[ColumnMapping]> = mappings.into();
-    cx.leave(EvalKey::Mappings(scope));
-    cx.mapping_cache.entries.insert(scope, mappings.clone());
-    mappings
-}
-
-/// Align set-operation contributions only where both mappings carry the same
-/// proven ordinal. Display order is not evidence of correspondence.
-fn merge_proven_positions(left: Vec<ColumnMapping>, right: &[ColumnMapping]) -> Vec<ColumnMapping> {
-    left.into_iter()
-        .map(|mut left_mapping| {
-            let aligned = left_mapping.ordinal.and_then(|ordinal| {
-                right
-                    .iter()
-                    .find(|mapping| mapping.ordinal == Some(ordinal))
-            });
-            if let Some(right_mapping) = aligned {
-                let (sources, transform) = merge_branch_sources(&left_mapping, right_mapping);
-                left_mapping.sources = sources;
-                left_mapping.transform = transform;
-            } else if left_mapping.output_name.is_some() {
-                left_mapping
-                    .sources
-                    .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
-            }
-            left_mapping
-        })
-        .collect()
-}
-
-pub(super) fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
-    mappings.iter().any(|mapping| mapping.output_name.is_none())
-}
-
-fn merge_unknown_shape_mappings(
-    left: Vec<ColumnMapping>,
-    right: Vec<ColumnMapping>,
-) -> Vec<ColumnMapping> {
-    let left_barrier = first_unknown_mapping(&left).unwrap_or(left.len());
-    let right_barrier = first_unknown_mapping(&right).unwrap_or(right.len());
-
-    // A leading unknown star determines the output names for the set
-    // operation. When the left side is already a merged set (and therefore
-    // contains named slots contributed by an earlier operand), a right-only
-    // tail would publish names that the leading operand never declared. Keep
-    // the left candidates and their existing wildcard provenance; a direct
-    // two-branch `SELECT * UNION SELECT a, b` still retains the right branch
-    // names because there are no prior named slots to preserve.
-    if left_barrier == 0 && left.len() > 1 && right_barrier == right.len() {
-        return left
-            .into_iter()
-            .map(|mut mapping| {
-                if mapping.output_name.is_some() && mapping.ordinal.is_none() {
-                    mapping
-                        .sources
-                        .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
-                }
-                mapping
-            })
-            .collect();
-    }
-
-    let prefix_len = left_barrier.min(right_barrier);
-    let left_unknown = wildcard_sources(&left);
-    let right_unknown = wildcard_sources(&right);
-    let mut merged = Vec::with_capacity(left.len() + right.len() - prefix_len);
-
-    for (left_mapping, right_mapping) in left.iter().zip(right.iter()).take(prefix_len) {
-        let mut mapping = left_mapping.clone();
-        if left_mapping.ordinal.is_some() && left_mapping.ordinal == right_mapping.ordinal {
-            let (sources, transform) = merge_branch_sources(left_mapping, right_mapping);
-            mapping.sources = sources;
-            mapping.transform = transform;
-        } else if left_mapping.output_name.is_some() {
-            mapping
-                .sources
-                .push(ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown));
-        }
-        merged.push(mapping);
-    }
-    // Catalog evidence can prove an individual position beyond an unknown
-    // interval. Such a slot still aligns with exactly that position, rather
-    // than losing a guaranteed branch contribution at the prefix barrier.
-    let proven_left: Vec<_> = left.iter().filter_map(|mapping| mapping.ordinal).collect();
-    merged.extend(left.into_iter().skip(prefix_len).map(|mut mapping| {
-        if let Some(other) = mapping
-            .ordinal
-            .and_then(|ordinal| right.iter().find(|other| other.ordinal == Some(ordinal)))
-        {
-            let (sources, transform) = merge_branch_sources(&mapping, other);
-            mapping.sources = sources;
-            mapping.transform = transform;
-            mapping
-        } else {
-            append_unknown_sources(mapping, &right_unknown)
-        }
-    }));
-    merged.extend(
-        right
-            .into_iter()
-            .skip(prefix_len)
-            .filter(|mapping| {
-                !mapping
-                    .ordinal
-                    .is_some_and(|ordinal| proven_left.contains(&ordinal))
-            })
-            .map(|mapping| append_unknown_sources(mapping, &left_unknown)),
-    );
-    merged
-}
-
-fn append_unsupported_reasons(sources: &mut Vec<ColumnOrigin>, reasons: &[&'static str]) {
-    for &what in reasons {
-        if !sources.iter().any(|source| {
-            matches!(source, ColumnOrigin::Unresolved(Unresolved::Unsupported { what: existing }) if *existing == what)
-        }) {
-            sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
-        }
-    }
-}
-
-/// Merge two positional branch mappings while retaining the fact that one
-/// branch was source-free. An empty source list is meaningful for literals;
-/// dropping it would overclaim complete lineage from the other branch.
-fn merge_branch_sources(
-    left: &ColumnMapping,
-    right: &ColumnMapping,
-) -> (Vec<ColumnOrigin>, TransformKind) {
-    let mut sources = left.sources.clone();
-    sources.extend(right.sources.clone());
-    if left.sources.is_empty() != right.sources.is_empty() {
-        sources.push(ColumnOrigin::SourceFree {
-            column: left.target.column.clone(),
-        });
-    }
-    (sources, merge_transform(&left.transform, &right.transform))
-}
-
-fn first_unknown_mapping(mappings: &[ColumnMapping]) -> Option<usize> {
-    mappings
-        .iter()
-        .position(|mapping| mappings_have_unknown_shape(std::slice::from_ref(mapping)))
-}
-
-pub(super) fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> {
-    let mut sources = Vec::new();
-    for mapping in mappings {
-        for source in &mapping.sources {
-            match source {
-                ColumnOrigin::Wildcard { .. } => sources.push(source.clone()),
-                source if source.is_unknown_star() => sources.push(source.clone()),
-                ColumnOrigin::Recursive { base_sources } => sources.extend(
-                    base_sources
-                        .iter()
-                        .filter(|source| {
-                            matches!(source, ColumnOrigin::Wildcard { .. })
-                                || source.is_unknown_star()
-                        })
-                        .cloned(),
-                ),
-                _ => {}
-            }
-        }
-    }
-    sources
-}
-
-fn append_unknown_sources(
-    mut mapping: ColumnMapping,
-    unknown_sources: &[ColumnOrigin],
-) -> ColumnMapping {
-    if !unknown_sources.is_empty() {
-        mapping.ordinal = None;
-    }
-    if mapping.sources.is_empty() && !unknown_sources.is_empty() {
-        mapping.sources.push(ColumnOrigin::SourceFree {
-            column: mapping.target.column.clone(),
-        });
-    }
-    mapping.sources.extend(unknown_sources.iter().cloned());
-    mapping
+    Ok(mappings)
 }
 
 pub(super) fn merge_transform(left: &TransformKind, right: &TransformKind) -> TransformKind {
@@ -469,56 +227,5 @@ pub(super) fn merge_transform(left: &TransformKind, right: &TransformKind) -> Tr
         TransformKind::Unknown
     } else {
         TransformKind::Direct
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{mappings_have_unknown_shape, wildcard_sources};
-    use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
-    use crate::{Ident, Quote};
-
-    #[test]
-    fn only_typed_unknown_stars_create_unknown_shape_barriers() {
-        for recursive in [false, true] {
-            for quoted in [false, true] {
-                let name = if quoted {
-                    Ident::quoted("*", Quote::Double)
-                } else {
-                    Ident::unquoted("*")
-                };
-                let origin = if quoted {
-                    ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
-                        column: name.clone(),
-                    })
-                } else {
-                    ColumnOrigin::UnknownStar
-                };
-                let origin = if recursive {
-                    ColumnOrigin::Recursive {
-                        base_sources: vec![origin],
-                    }
-                } else {
-                    origin
-                };
-                let mappings = [ColumnMapping {
-                    star_position: crate::types::StarPosition::Inferred,
-                    ordinal: None,
-                    output_name: if quoted {
-                        Some(crate::OutputName::Explicit(name.clone()))
-                    } else {
-                        None
-                    },
-                    target: ColumnRef {
-                        table: None,
-                        column: name,
-                    },
-                    sources: vec![origin],
-                    transform: TransformKind::Direct,
-                }];
-                assert_eq!(mappings_have_unknown_shape(&mappings), !quoted);
-                assert_eq!(wildcard_sources(&mappings).is_empty(), quoted);
-            }
-        }
     }
 }

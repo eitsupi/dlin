@@ -1,8 +1,15 @@
 use crate::catalog::CatalogContext;
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
+use crate::types::{ColumnMapping, ColumnOrigin};
 
-/// Apply `Catalog` to refine unresolved column origins.
-pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &CatalogContext<'_>) {
+/// Apply `Catalog` to refine unresolved column origins. The mappings keep their
+/// number and order.
+///
+/// A star over a relation the catalog lists is expanded when the model of the
+/// scope is built, so no wildcard of such a relation reaches this function. That
+/// relies on the catalog answering consistently within one analysis: a catalog
+/// whose answer for a relation changed between lookups would leave a wildcard
+/// mapping that is not expanded here.
+pub(crate) fn apply_catalog(mappings: &mut [ColumnMapping], catalog: &CatalogContext<'_>) {
     for mapping in mappings.iter_mut() {
         for source in &mut mapping.sources {
             if let ColumnOrigin::Ambiguous { column, candidates } = source
@@ -20,186 +27,5 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &Catalog
                 *column = canonical;
             }
         }
-    }
-
-    // Rebuild the list so that every expansion takes the position of the
-    // wildcard it replaces; appending would move all expanded columns behind
-    // the columns that were written after the star.
-    let mut result = Vec::with_capacity(mappings.len());
-    let mut position = Some(0usize);
-    for mapping in mappings.drain(..) {
-        if let [ColumnOrigin::Wildcard { table }] = mapping.sources.as_slice()
-            && let Some(entry) = catalog.entry(table)
-            && entry.coverage == crate::SchemaCoverage::Exhaustive
-            && entry.order == crate::SchemaOrder::Proven
-        {
-            let base = mapping.ordinal.or(position);
-            let mut columns = entry.columns.iter().collect::<Vec<_>>();
-            columns.sort_by_key(|column| column.ordinal);
-            for column in columns {
-                let col_name = column.name.clone();
-                result.push(ColumnMapping {
-                    star_position: crate::types::StarPosition::Inferred,
-                    ordinal: column
-                        .ordinal
-                        .and_then(|ordinal| base.and_then(|base| base.checked_add(ordinal))),
-                    output_name: Some(crate::OutputName::Explicit(col_name.clone())),
-                    target: ColumnRef {
-                        table: mapping.target.table.clone(),
-                        column: col_name.clone(),
-                    },
-                    sources: vec![ColumnOrigin::Concrete {
-                        table: table.clone(),
-                        column: col_name,
-                    }],
-                    transform: TransformKind::Direct,
-                });
-            }
-            position = base.and_then(|base| base.checked_add(entry.columns.len()));
-        } else {
-            position = if mapping.output_name.is_some() {
-                position.and_then(|position| position.checked_add(1))
-            } else {
-                None
-            };
-            result.push(mapping);
-        }
-    }
-    *mappings = result;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::apply_catalog;
-    use crate::catalog::CatalogContext;
-    use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
-
-    struct Columns;
-
-    impl crate::Catalog for Columns {
-        fn lookup(&self, relation: &crate::Relation) -> Option<crate::CatalogEntry<'_>> {
-            let names = match relation.name.value.as_str() {
-                "t" => vec!["x", "y"],
-                "u" => vec!["p"],
-                _ => return None,
-            };
-            Some(crate::CatalogEntry {
-                coverage: crate::SchemaCoverage::Exhaustive,
-                order: crate::SchemaOrder::Proven,
-                unknown_segments: std::borrow::Cow::Borrowed(&[]),
-                evidence: std::borrow::Cow::Borrowed(&[]),
-                relation: relation.clone(),
-                columns: names
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ordinal, name)| crate::CatalogColumn {
-                        ordinal: Some(ordinal),
-                        name: crate::Ident::unquoted(name),
-                        data_type: None,
-                        fields: None,
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            })
-        }
-    }
-
-    fn named(name: &str) -> ColumnMapping {
-        ColumnMapping {
-            star_position: crate::types::StarPosition::Inferred,
-            ordinal: None,
-            output_name: Some(crate::OutputName::Explicit(crate::Ident::unquoted(name))),
-            target: ColumnRef {
-                table: None,
-                column: crate::Ident::unquoted(name),
-            },
-            sources: vec![ColumnOrigin::Concrete {
-                table: TableRef::new("src"),
-                column: crate::Ident::unquoted(name),
-            }],
-            transform: TransformKind::Direct,
-        }
-    }
-
-    fn star(table: &str) -> ColumnMapping {
-        ColumnMapping {
-            star_position: crate::types::StarPosition::Inferred,
-            ordinal: None,
-            output_name: None,
-            target: ColumnRef {
-                table: None,
-                column: crate::Ident::unquoted("*"),
-            },
-            sources: vec![ColumnOrigin::Wildcard {
-                table: TableRef::new(table),
-            }],
-            transform: TransformKind::Direct,
-        }
-    }
-
-    fn targets(mappings: &[ColumnMapping]) -> Vec<&str> {
-        mappings
-            .iter()
-            .map(|mapping| mapping.target.column.value.as_str())
-            .collect()
-    }
-
-    #[test]
-    fn expanded_star_replaces_the_wildcard_in_place() {
-        let mut mappings = vec![named("a"), star("t"), named("b")];
-        apply_catalog(
-            &mut mappings,
-            &CatalogContext::new(&Columns, crate::Dialect::Generic),
-        );
-        assert_eq!(targets(&mappings), ["a", "x", "y", "b"]);
-    }
-
-    #[test]
-    fn several_stars_are_each_expanded_in_place() {
-        let mut mappings = vec![star("t"), named("a"), star("u"), named("b"), star("t")];
-        apply_catalog(
-            &mut mappings,
-            &CatalogContext::new(&Columns, crate::Dialect::Generic),
-        );
-        assert_eq!(targets(&mappings), ["x", "y", "a", "p", "b", "x", "y"]);
-    }
-
-    #[test]
-    fn star_without_catalog_columns_is_kept_where_it_was() {
-        let mut mappings = vec![named("a"), star("unknown"), star("t"), named("b")];
-        apply_catalog(
-            &mut mappings,
-            &CatalogContext::new(&Columns, crate::Dialect::Generic),
-        );
-        assert_eq!(targets(&mappings), ["a", "*", "x", "y", "b"]);
-        assert!(matches!(
-            mappings[1].sources.as_slice(),
-            [ColumnOrigin::Wildcard { table }] if table.table == crate::Ident::unquoted("unknown")
-        ));
-    }
-    #[test]
-    fn fallback_catalog_expansion_offsets_proven_positions_by_the_known_prefix() {
-        let mut prefix = named("prefix");
-        prefix.ordinal = Some(0);
-        let mut mappings = vec![prefix, star("t")];
-        apply_catalog(
-            &mut mappings,
-            &CatalogContext::new(&Columns, crate::Dialect::Generic),
-        );
-        assert_eq!(
-            mappings
-                .iter()
-                .map(|mapping| mapping.ordinal)
-                .collect::<Vec<_>>(),
-            vec![Some(0), Some(1), Some(2)]
-        );
-
-        // A preceding unknown width must not become a guessed offset.
-        let mut mappings = vec![star("unknown"), star("t")];
-        apply_catalog(
-            &mut mappings,
-            &CatalogContext::new(&Columns, crate::Dialect::Generic),
-        );
-        assert!(mappings.iter().all(|mapping| mapping.ordinal.is_none()));
     }
 }

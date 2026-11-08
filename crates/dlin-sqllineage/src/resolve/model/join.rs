@@ -236,7 +236,8 @@ fn take_key(
                         table: table.clone(),
                         column: key.clone(),
                     }),
-                    UnknownProvider::Scope { scope, .. } => {
+                    UnknownProvider::Segment { scope, .. }
+                    | UnknownProvider::SetOperation { op: scope, .. } => {
                         if !values.iter().any(
                             |value| matches!(value, ValueId::ScopeName { scope: seen, .. } if seen == scope),
                         ) {
@@ -415,6 +416,7 @@ fn fold_groups(
                 .or(right_side.names)
                 .unwrap_or_else(|| (key.clone(), OutputName::Explicit(key.clone())));
             output.push(OutputElement::Column(ColumnSlot {
+                id: None,
                 ordinal: Some(output.len()),
                 name,
                 output_name,

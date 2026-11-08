@@ -16,11 +16,14 @@ mod choose;
 mod input;
 mod join;
 mod options;
+mod slot;
 
 pub(super) use build::{ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::{InputLookup, RangeRef};
+pub(crate) use slot::OutputRef;
+pub(super) use slot::{Forwarding, SegmentId, SlotId};
 
 use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
@@ -54,13 +57,14 @@ pub(super) enum ValueId {
     Physical { table: Rc<TableRef>, column: Ident },
     /// The expression of an output column or a REPLACE item.
     Expr(NodeId),
-    /// A slot of a CTE or derived table.
-    ScopeSlot { scope: ScopeId, index: usize },
+    /// A column that a CTE or derived table publishes, as its reader sees it.
+    Forward(SlotId),
     /// A column a USING key takes from a CTE or derived table that lists no
     /// slot of that name, found the way a direct reference finds it.
     ScopeName { scope: ScopeId, column: Ident },
-    /// A slot of a set operation, which combines the operands positionally.
-    SetOperation { scope: ScopeId, index: usize },
+    /// A column of a set operation, which combines its operands positionally:
+    /// the merge of `op` standing for the column of its left operand.
+    SetMerged { op: ScopeId, left: SlotId },
     /// A column of a virtual source such as a lateral expansion.
     VirtualColumn {
         source: VirtualSourceId,
@@ -68,7 +72,11 @@ pub(super) enum ValueId {
     },
     /// A column of the right operand of a set operation, found by name among
     /// the mappings the operation merges in beyond its left operand.
-    Tail { scope: ScopeId, column: Ident },
+    Tail {
+        scope: ScopeId,
+        publication: u32,
+        column: Ident,
+    },
     /// A column that is named but sits behind segments the analysis cannot
     /// enumerate.
     Named {
@@ -95,8 +103,12 @@ pub(super) enum ValueId {
 pub(super) enum UnknownProvider {
     /// A physical relation without catalog columns.
     Relation(Rc<TableRef>),
-    /// An unknown element of a CTE or derived table.
-    Scope { scope: ScopeId, index: usize },
+    /// A segment that a CTE or derived table publishes, as its reader sees
+    /// it. `scope` is the publisher.
+    Segment { scope: ScopeId, id: SegmentId },
+    /// A segment of a set operation: the merge of `op` standing for the
+    /// segment of its left operand.
+    SetOperation { op: ScopeId, left: SegmentId },
     /// A shape the analysis does not model.
     Opaque(OpaqueReason),
 }
@@ -111,6 +123,8 @@ pub(super) enum OpaqueReason {
     Ambiguous(NodeId),
     /// A source whose columns are not modeled, such as VALUES.
     UnknownWidth,
+    /// A shape whose correspondence is not implemented.
+    Unsupported(&'static str),
     /// A scope that reads itself.
     Recursive,
 }
@@ -166,6 +180,10 @@ pub(super) enum SlotOrigin {
 /// A column with a known name.
 #[derive(Debug, Clone)]
 pub(super) struct ColumnSlot {
+    /// The identity the owning scope gave the column when it published its
+    /// model. `None` in star models and in the models of FROM clauses, which
+    /// are views of other scopes' outputs and publish nothing themselves.
+    pub id: Option<SlotId>,
     /// The name the column is published under.
     pub name: Ident,
     pub output_name: OutputName,
@@ -185,6 +203,9 @@ pub(super) struct ColumnSlot {
 /// publish.
 #[derive(Debug, Clone)]
 pub(super) struct UnknownSegment {
+    /// The identity the owning scope gave the segment when it published its
+    /// model; `None` wherever [`ColumnSlot::id`] is.
+    pub id: Option<SegmentId>,
     /// Physical schemas responsible for this interval, retained across scopes.
     pub schema_relations: Vec<crate::Relation>,
     pub position: crate::types::StarPosition,
@@ -193,9 +214,41 @@ pub(super) struct UnknownSegment {
     pub domain: NameDomain,
 }
 
+impl ColumnSlot {
+    /// The identity of a column of a published model.
+    pub(super) fn published(&self) -> SlotId {
+        self.id
+            .expect("only the columns of published models are read")
+    }
+
+    /// The published column this one forwards, when it forwards one.
+    fn forwards(&self) -> Option<OutputRef> {
+        match self.value {
+            ValueId::Forward(id) | ValueId::SetMerged { left: id, .. } => Some(OutputRef::Slot(id)),
+            _ => None,
+        }
+    }
+}
+
 impl UnknownSegment {
+    /// The identity of a segment of a published model.
+    pub(super) fn published(&self) -> SegmentId {
+        self.id
+            .expect("only the segments of published models are read")
+    }
+
+    /// The published segment this one forwards, when it forwards one.
+    fn forwards(&self) -> Option<OutputRef> {
+        match self.provider {
+            UnknownProvider::Segment { id, .. }
+            | UnknownProvider::SetOperation { left: id, .. } => Some(OutputRef::Segment(id)),
+            _ => None,
+        }
+    }
+
     fn opaque(reason: OpaqueReason) -> Self {
         Self {
+            id: None,
             schema_relations: Vec::new(),
             position: crate::types::StarPosition::Inferred,
             provider: UnknownProvider::Opaque(reason),
@@ -222,8 +275,16 @@ pub(super) enum OutputElement {
 pub(super) struct BranchTail {
     /// The set operation that merges them in.
     pub scope: ScopeId,
+    /// The publication of the operation's model that lists this tail, which
+    /// is the one the operation's mappings are read for.
+    pub publication: u32,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
+    /// How far the projection that published the tail moved the columns it
+    /// stands for: the number of columns before the star that carries it.
+    /// `None` when that number is not known. A scope that only re-expresses
+    /// another scope's output starts again at zero.
+    pub offset: Option<usize>,
 }
 
 /// All candidates for a name, built on first use. Names are compared by the
@@ -252,6 +313,13 @@ pub(super) struct OutputModel {
     /// index of the range that reads them. The elements a range contributes are
     /// weighed by the model they came from.
     pub reads: Vec<(usize, Rc<OutputModel>)>,
+    /// For a scope that only re-expresses one other scope's output (a
+    /// delegating scope, the merge of a set operation), which output of that
+    /// scope each of its own outputs stands for. Empty for every other model.
+    pub forwarded: Vec<Forwarding>,
+    /// Which publication of its scope this model is. `None` for the models of
+    /// stars and FROM clauses, which publish nothing.
+    pub publication: Option<u32>,
 }
 
 /// The elements of a model that may carry one name.
@@ -292,6 +360,8 @@ impl OutputModel {
             unknown_reasons,
             invalid: Vec::new(),
             reads: Vec::new(),
+            forwarded: Vec::new(),
+            publication: None,
         }
     }
 
@@ -303,13 +373,43 @@ impl OutputModel {
         )
     }
 
-    /// The number of elements that stand for a column or a segment of the
-    /// output, as opposed to merged-in tails.
-    pub(super) fn listed_len(&self) -> usize {
-        self.elements
+    /// Whether `forwarded` pairs every output that `source` publishes with
+    /// exactly one output of this model, which `owner` publishes. A model
+    /// that fails this has lost track of which output is which.
+    pub(super) fn check_forwarding(
+        &self,
+        arena: &slot::SlotArena,
+        owner: ScopeId,
+        source_scope: ScopeId,
+        source: &OutputModel,
+    ) -> Result<(), &'static str> {
+        for (index, pair) in self.forwarded.iter().enumerate() {
+            if arena.owner(pair.from) != source_scope {
+                return Err("a forwarded output is not published by the forwarded scope");
+            }
+            if arena.owner(pair.to) != owner {
+                return Err("a forwarding output is not published by the reader");
+            }
+            if self.forwarded[..index]
+                .iter()
+                .any(|seen| seen.from == pair.from || seen.to == pair.to)
+            {
+                return Err("an output is forwarded twice");
+            }
+        }
+        let source: Vec<_> = source
+            .elements
             .iter()
-            .filter(|element| !matches!(element, OutputElement::Tail(_)))
-            .count()
+            .filter_map(OutputElement::output_ref)
+            .collect();
+        if source.len() != self.forwarded.len()
+            || !source
+                .iter()
+                .all(|output| self.forwarded.iter().any(|pair| pair.from == *output))
+        {
+            return Err("an output of the forwarded scope has no correspondence");
+        }
+        Ok(())
     }
 
     pub(super) fn has_unknown_segment(&self) -> bool {
@@ -335,7 +435,13 @@ impl OutputModel {
         for &index in unlisted {
             match &self.elements[index] {
                 OutputElement::Unknown(segment)
-                    if !matches!(segment.provider, UnknownProvider::Opaque(_))
+                    if (!matches!(segment.provider, UnknownProvider::Opaque(_))
+                        || matches!(
+                            segment.provider,
+                            UnknownProvider::Opaque(OpaqueReason::Unsupported(
+                                "BY NAME set operation"
+                            ))
+                        ))
                         && segment.domain.admits(name, dialect) =>
                 {
                     matches.unknown.push(index);
@@ -374,6 +480,26 @@ struct Group {
     elements: Vec<OutputElement>,
 }
 
+impl OutputElement {
+    /// The published output this element forwards, when it forwards one.
+    pub(super) fn forwards(&self) -> Option<OutputRef> {
+        match self {
+            Self::Column(slot) => slot.forwards(),
+            Self::Unknown(segment) => segment.forwards(),
+            Self::Tail(_) => None,
+        }
+    }
+
+    /// This element's own identity, once its scope has published it.
+    pub(super) fn output_ref(&self) -> Option<OutputRef> {
+        match self {
+            Self::Column(slot) => slot.id.map(OutputRef::Slot),
+            Self::Unknown(segment) => segment.id.map(OutputRef::Segment),
+            Self::Tail(_) => None,
+        }
+    }
+}
+
 /// The providers and range variables of the unknown segments that may publish
 /// `name`.
 fn unknown_publishers(
@@ -396,3 +522,43 @@ fn unknown_publishers(
 
 #[cfg(test)]
 mod tests;
+
+impl UnknownProvider {
+    /// Whether an unknown name depends on unimplemented BY NAME
+    /// correspondence. Follow published segments without evaluating values,
+    /// so ambiguity can retain this reason without claiming any candidate.
+    pub(in crate::resolve) fn has_by_name_reason(
+        &self,
+        graph: &crate::graph::RawGraph,
+        arena: &slot::SlotArena,
+    ) -> bool {
+        let mut provider = self.clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            provider = match provider {
+                Self::Relation(_) => return false,
+                Self::Opaque(OpaqueReason::Unsupported("BY NAME set operation")) => return true,
+                Self::Opaque(_) => return false,
+                Self::Segment { id, .. } => {
+                    if !seen.insert(id) {
+                        return false;
+                    }
+                    arena.segment(id).provider.clone()
+                }
+                Self::SetOperation { op, left } => {
+                    if graph
+                        .scopes
+                        .unknown_output_reasons(op)
+                        .contains(&"BY NAME set operation")
+                    {
+                        return true;
+                    }
+                    if !seen.insert(left) {
+                        return false;
+                    }
+                    arena.segment(left).provider.clone()
+                }
+            };
+        }
+    }
+}

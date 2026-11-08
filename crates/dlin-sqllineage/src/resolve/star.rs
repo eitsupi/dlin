@@ -5,23 +5,26 @@
 //! into lineage: it never re-reads EXCLUDE/ILIKE/REPLACE/RENAME or join
 //! merges.
 
+mod slot_eval;
+
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
-use super::context::{EvalContext, EvalKey};
-use super::lineage::{collect_leaf_origins, collect_output_sources, flatten_mapping_sources};
-use super::mapping::{
-    known_empty_dependency, merge_transform, resolve_scope_mappings, wildcard_mapping,
-};
+use super::context::EvalContext;
+use super::lineage::{collect_leaf_origins, collect_output_sources};
+use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
-    BranchTail, Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, RangeRef, UnknownProvider, UnknownSegment, ValueId,
+    Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
+    OutputModels, OutputRef, RangeRef, UnknownProvider, ValueId,
 };
-use super::target::{StarTarget, resolve_star_target, same_column_name};
+use super::target::{StarTarget, resolve_star_target};
+use slot_eval::cut_segment;
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
-use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, VirtualColumnState};
+use crate::graph::scope::{
+    Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence, VirtualColumnState,
+};
 use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
 use crate::{Candidate, Ident, Unresolved};
 
@@ -35,19 +38,20 @@ pub(super) enum Unlisted {
     Sources(Vec<ColumnOrigin>),
 }
 
-/// Expand a Star node (qualified or unqualified) into `ColumnMapping`s, one
-/// per element of its model.
-pub(super) fn expand_star(
-    node_id: NodeId,
+/// The mappings of a projection scope, one per element of its published
+/// model: a listed column, an unknown segment (when it stands for columns at
+/// all) or the columns a set operation merges in.
+pub(super) fn projection_mappings(
+    scope: ScopeId,
+    model: &OutputModel,
     cx: &mut EvalContext<'_, '_>,
-    mappings: &mut Vec<ColumnMapping>,
-) {
+) -> Vec<ColumnMapping> {
     let mut evaluator = Evaluator { cx };
-    let model = evaluator.star_model(node_id);
+    let mut mappings = Vec::with_capacity(model.elements.len());
     for element in &model.elements {
         match element {
             OutputElement::Column(slot) => {
-                let (sources, transform) = evaluator.value(&slot.value);
+                let (sources, transform) = evaluator.projected_value(scope, slot);
                 mappings.push(ColumnMapping {
                     star_position: crate::types::StarPosition::Inferred,
                     output_name: Some(slot.output_name.clone()),
@@ -58,14 +62,34 @@ pub(super) fn expand_star(
                     },
                     sources,
                     transform,
+                    slot: Some(OutputRef::Slot(slot.published())),
+                    unpublished_tail: false,
+                    merged_in: false,
                 });
             }
             OutputElement::Unknown(segment) => {
-                mappings.extend(evaluator.unknown_mapping(segment));
+                let id = segment.published();
+                mappings.extend(evaluator.segment_mapping(id).map(|mapping| ColumnMapping {
+                    slot: Some(OutputRef::Segment(id)),
+                    unpublished_tail: false,
+                    merged_in: false,
+                    ..mapping
+                }));
             }
-            OutputElement::Tail(tail) => mappings.extend(evaluator.tail_mappings(tail)),
+            OutputElement::Tail(tail) => {
+                for mut mapping in evaluator.tail_mappings(tail) {
+                    mapping.merged_in = false;
+                    mapping.unpublished_tail = true;
+                    mapping.star_position = mapping.star_position.shifted(tail.offset);
+                    mapping.ordinal = mapping.ordinal.and_then(|ordinal| {
+                        tail.offset.and_then(|offset| offset.checked_add(ordinal))
+                    });
+                    mappings.push(mapping);
+                }
+            }
         }
     }
+    mappings
 }
 
 /// The origins of the column a CTE or derived table publishes under `name`,
@@ -100,6 +124,15 @@ pub(super) fn input_name_sources(
     Evaluator { cx }.input(lookup, name)
 }
 
+/// The id of the column at `index` of a published model, which the model's
+/// name lookup returned.
+fn listed_slot(model: &OutputModel, index: usize) -> super::model::SlotId {
+    match &model.elements[index] {
+        OutputElement::Column(slot) => slot.published(),
+        _ => unreachable!("a name lookup returns the index of a listed column"),
+    }
+}
+
 /// `ColumnOrigin` has no equality of its own; its debug form covers every field.
 /// Two relations often reach the same underlying column, and a merged column
 /// lists it once. Distinct spellings stay apart.
@@ -121,10 +154,6 @@ impl Evaluator<'_, '_, '_> {
         OutputModels::new(cx.graph, cx.catalog, store)
     }
 
-    fn star_model(&mut self, node_id: NodeId) -> Rc<OutputModel> {
-        self.models().star(node_id)
-    }
-
     fn scope_model(&mut self, scope: ScopeId) -> Rc<OutputModel> {
         self.models().scope(scope)
     }
@@ -139,18 +168,11 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
             ValueId::Expr(node_id) => {
-                let (sources, edge_kinds, _, inherited) =
-                    collect_output_sources(*node_id, self.cx, &mut HashSet::new());
-                let transform = merge_transform(
-                    &derive_transform(&self.cx.graph.nodes[*node_id], &edge_kinds),
-                    &inherited,
-                );
+                let (sources, _, transform) = self.expression(*node_id);
                 (sources, transform)
             }
-            ValueId::ScopeSlot { scope, index } | ValueId::SetOperation { scope, index } => {
-                let (sources, _, transform) = self.scope_slot(*scope, *index, false);
-                (sources, transform)
-            }
+            ValueId::Forward(id) => self.slot_value(*id),
+            ValueId::SetMerged { op, left } => self.merged_slot_value(*op, *left),
             ValueId::SchemaDependent { value, relations } => {
                 let (mut sources, transform) = value.as_deref().map_or_else(
                     || (Vec::new(), TransformKind::Direct),
@@ -176,9 +198,14 @@ impl Evaluator<'_, '_, '_> {
                     },
                     |(sources, _, transform)| (sources, transform),
                 ),
-            ValueId::Tail { scope, column } => {
-                (self.tail_column(*scope, column), TransformKind::Direct)
-            }
+            ValueId::Tail {
+                scope,
+                publication,
+                column,
+            } => (
+                self.tail_column(*scope, *publication, column),
+                TransformKind::Direct,
+            ),
             ValueId::VirtualColumn { source, index } => {
                 (self.virtual_column(*source, *index), TransformKind::Direct)
             }
@@ -205,6 +232,49 @@ impl Evaluator<'_, '_, '_> {
         }
     }
 
+    /// The origins and transform of the expression of an output node, with
+    /// whether it reads the recursive CTE it belongs to.
+    fn expression(&mut self, node_id: NodeId) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+        let (sources, edge_kinds, has_back, inherited) =
+            collect_output_sources(node_id, self.cx, &mut HashSet::new());
+        let transform = merge_transform(
+            &derive_transform(&self.cx.graph.nodes[node_id], &edge_kinds),
+            &inherited,
+        );
+        (sources, has_back, transform)
+    }
+
+    /// The origins and transform of a column in the mappings of the
+    /// projection `scope` that published it. A column the projection lists
+    /// itself that reads its own recursive CTE is marked as recursive in the
+    /// mappings, while a reader that names the column does not see the mark.
+    fn projected_value(
+        &mut self,
+        scope: ScopeId,
+        slot: &ColumnSlot,
+    ) -> (Vec<ColumnOrigin>, TransformKind) {
+        if let ValueId::Expr(node_id) = slot.value
+            && self
+                .cx
+                .graph
+                .scopes
+                .output_columns(scope)
+                .iter()
+                .any(|column| column.node_id == node_id)
+        {
+            let (sources, has_back, transform) = self.expression(node_id);
+            let sources = if has_back {
+                vec![ColumnOrigin::Recursive {
+                    base_sources: sources,
+                }]
+            } else {
+                sources
+            };
+            return (sources, transform);
+        }
+        self.slot_value(slot.published())
+    }
+
     /// The origins and transform of a column that a reference to `name`
     /// reads, with whether they read the recursive CTE the column belongs to.
     /// A column read this way is spelled as the reference spells it.
@@ -222,7 +292,7 @@ impl Evaluator<'_, '_, '_> {
                 false,
                 TransformKind::Direct,
             ),
-            ValueId::ScopeSlot { scope, index } => self.scope_slot(*scope, *index, true),
+            ValueId::Forward(id) => self.slot_read(*id),
             ValueId::SchemaDependent { value, relations } => {
                 let (mut sources, has_back, transform) = value.as_deref().map_or_else(
                     || (Vec::new(), false, TransformKind::Direct),
@@ -286,8 +356,10 @@ impl Evaluator<'_, '_, '_> {
                 // The value is not known, but what would produce it is: an
                 // aggregate over an ambiguous column is still an aggregation.
                 let mut transform = TransformKind::Direct;
+                let mut by_name = false;
                 for value in &values {
-                    let (_, _, listed) = self.read_value(value, name);
+                    let (sources, _, listed) = self.read_value(value, name);
+                    by_name |= has_by_name_reason(&sources);
                     transform = merge_transform(&transform, &listed);
                 }
                 let origin = if typed {
@@ -311,7 +383,13 @@ impl Evaluator<'_, '_, '_> {
                             .collect(),
                     }
                 };
-                Some((vec![origin], false, transform))
+                let mut sources = vec![origin];
+                if by_name {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                }
+                Some((sources, false, transform))
             }
         }
     }
@@ -326,7 +404,9 @@ impl Evaluator<'_, '_, '_> {
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
         let model = self.scope_model(scope);
         match model.choose(name) {
-            Choice::Column(index, _) => return Some(self.scope_slot(scope, index, true)),
+            Choice::Column(index, _) => {
+                return Some(self.slot_read(listed_slot(&model, index)));
+            }
             Choice::Ambiguous(ambiguity) => {
                 let mut candidates = ambiguity.candidates;
                 if candidates.is_empty() {
@@ -340,15 +420,27 @@ impl Evaluator<'_, '_, '_> {
                     ));
                 }
                 let mut transform = TransformKind::Direct;
+                let mut by_name = model.unknown_reasons.contains(&"BY NAME set operation")
+                    || model.matches(name).unknown.iter().any(|&index| {
+                        matches!(&model.elements[index], OutputElement::Unknown(segment)
+                            if segment.provider.has_by_name_reason(self.cx.graph, &self.cx.mapping_cache.models.arena))
+                    });
                 for &index in &ambiguity.listed {
-                    let (_, _, listed) = self.scope_slot(scope, index, true);
+                    let (sources, _, listed) = self.slot_read(listed_slot(&model, index));
+                    by_name |= has_by_name_reason(&sources);
                     transform = merge_transform(&transform, &listed);
                 }
                 let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: name.clone(),
                     candidates,
                 });
-                return Some((vec![ambiguous], false, transform));
+                let mut sources = vec![ambiguous];
+                if by_name {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                }
+                return Some((sources, false, transform));
             }
             Choice::Possible(..) | Choice::Absent => {}
         }
@@ -369,201 +461,38 @@ impl Evaluator<'_, '_, '_> {
         }
     }
 
-    /// The value of a scope's output column at the position its model lists
-    /// it, with whether it reads the recursive CTE it belongs to. A set
-    /// operation can merge more or fewer mappings than its left operand lists
-    /// columns, so its mappings are matched by name instead. `flatten` unwraps
-    /// the recursive marker of a set operation's mapping.
-    fn scope_slot(
+    /// The mapping a segment with this provider stands for, at `position`
+    /// unless the provider knows a position of its own.
+    fn provider_mapping(
         &mut self,
-        scope: ScopeId,
-        index: usize,
-        flatten: bool,
-    ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
-        let model = self.scope_model(scope);
-        // TODO: an index that names no listed column must surface as an
-        // unresolved value, not as an empty, direct source list.
-        let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
-            return (Vec::new(), false, TransformKind::Direct);
-        };
-        let ambiguous = || {
-            (
-                vec![ColumnOrigin::Ambiguous {
-                    column: slot.name.clone(),
-                    candidates: Vec::new(),
-                }],
-                false,
-                TransformKind::Direct,
-            )
-        };
-        if !self.cx.enter(EvalKey::Slot { scope, index }) {
-            return ambiguous();
-        }
-        let result = if matches!(
-            self.cx.graph.scopes.output_plan(scope),
-            OutputPlan::SetOperation { .. }
-        ) {
-            let mappings = self.scope_mappings(scope);
-            let found = if mappings.len() >= model.listed_len() {
-                mappings.get(index)
-            } else {
-                mappings.iter().find(|mapping| {
-                    mapping.output_name.is_some()
-                        && same_column_name(
-                            &mapping.target.column,
-                            &slot.name,
-                            self.cx.graph.dialect,
-                        )
-                })
-            };
-            found.map_or_else(ambiguous, |mapping| {
-                if flatten {
-                    let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-                    (sources, has_back, mapping.transform.clone())
-                } else {
-                    (mapping.sources.clone(), false, mapping.transform.clone())
-                }
-            })
-        } else {
-            let (sources, transform) = self.value(&slot.value);
-            (sources, false, transform)
-        };
-        self.cx.leave(EvalKey::Slot { scope, index });
-        result
-    }
-
-    /// The origins of the first right-operand column of a set operation that
-    /// has the name `name`.
-    fn tail_named(
-        &mut self,
-        model: &OutputModel,
-        name: &Ident,
-    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let dialect = self.cx.graph.dialect;
-        for element in &model.elements {
-            let OutputElement::Tail(tail) = element else {
-                continue;
-            };
-            if let Some(mapping) = self.tail_mappings(tail).into_iter().find(|mapping| {
-                mapping.output_name.is_some()
-                    && same_column_name(&mapping.target.column, name, dialect)
-            }) {
-                let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-                return Some((sources, has_back, mapping.transform));
-            }
-        }
-        None
-    }
-
-    /// The mappings a set operation merges in beyond those its left operand
-    /// lists, minus the names the star's modifiers rule out.
-    fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
-        let aligned = self.aligned_len(tail.scope);
-        let dialect = self.cx.graph.dialect;
-        self.scope_mappings(tail.scope)
-            .iter()
-            .skip(aligned)
-            .filter(|mapping| {
-                mapping.output_name.is_none() || tail.domain.admits(&mapping.target.column, dialect)
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// What the right operand of a set operation merges in under `column`:
-    /// the origins of mappings with that name, and a named wildcard for each
-    /// relation it hides behind a star. A tail that has neither leaves the
-    /// column unresolved.
-    fn tail_column(&mut self, scope: ScopeId, column: &Ident) -> Vec<ColumnOrigin> {
-        let aligned = self.aligned_len(scope);
-        let dialect = self.cx.graph.dialect;
-        let mut sources = Vec::new();
-        for mapping in self.scope_mappings(scope).iter().skip(aligned) {
-            if mapping.output_name.is_none() {
-                for source in &mapping.sources {
-                    if let ColumnOrigin::Wildcard { table } = source {
-                        sources.push(ColumnOrigin::NamedWildcard {
-                            table: table.clone(),
-                            column: column.clone(),
-                        });
-                    }
-                }
-            } else if same_column_name(&mapping.target.column, column, dialect) {
-                sources.extend(mapping.sources.iter().cloned());
-            }
-        }
-        if sources.is_empty() {
-            sources.push(ColumnOrigin::Ambiguous {
-                column: column.clone(),
-                candidates: Vec::new(),
-            });
-        }
-        sources
-    }
-
-    /// How many leading mappings of a scope stand for the columns its model
-    /// lists; a set operation appends what its right operand adds after them.
-    fn aligned_len(&mut self, scope: ScopeId) -> usize {
-        match self.cx.graph.scopes.output_plan(scope) {
-            OutputPlan::Projection => self.scope_mappings(scope).len(),
-            OutputPlan::Delegate(child) => self.aligned_len(*child),
-            OutputPlan::SetOperation { left, .. } => self.aligned_len(*left),
-        }
-    }
-
-    fn scope_mappings(&mut self, scope: ScopeId) -> std::sync::Arc<[ColumnMapping]> {
-        resolve_scope_mappings(scope, self.cx)
-    }
-
-    /// The mapping standing for an unknown element of a scope's output.
-    fn unknown_slot(&mut self, scope: ScopeId, index: usize) -> Option<ColumnMapping> {
-        let model = self.scope_model(scope);
-        let Some(OutputElement::Unknown(segment)) = model.elements.get(index) else {
-            return None;
-        };
-        if !matches!(
-            self.cx.graph.scopes.output_plan(scope),
-            OutputPlan::SetOperation { .. }
-        ) {
-            // TODO: re-entry must surface as an unresolved value, not as a
-            // missing mapping that reads as "nothing published".
-            if !self.cx.enter(EvalKey::Slot { scope, index }) {
-                return None;
-            }
-            let mapping = self.unknown_mapping(segment);
-            self.cx.leave(EvalKey::Slot { scope, index });
-            return mapping;
-        }
-        let mappings = self.scope_mappings(scope);
-        if mappings.len() >= model.listed_len() {
-            return mappings.get(index).cloned();
-        }
-        let ordinal = model.elements[..index]
-            .iter()
-            .filter(|element| matches!(element, OutputElement::Unknown(_)))
-            .count();
-        mappings
-            .iter()
-            .filter(|mapping| mapping.output_name.is_none())
-            .nth(ordinal)
-            .cloned()
-    }
-
-    fn unknown_mapping(&mut self, segment: &UnknownSegment) -> Option<ColumnMapping> {
-        let mut mapping = match &segment.provider {
+        provider: &UnknownProvider,
+        position: crate::types::StarPosition,
+    ) -> Option<ColumnMapping> {
+        let mut mapping = match provider {
             UnknownProvider::Relation(table) => Some(wildcard_mapping(None, (**table).clone())),
-            UnknownProvider::Scope { scope, index } => self.unknown_slot(*scope, *index),
+            UnknownProvider::Segment { id, .. } => self.segment_mapping(*id),
+            UnknownProvider::SetOperation { op, left } => {
+                match self.merged_counterpart(*op, OutputRef::Segment(*left)) {
+                    Some(OutputRef::Segment(merged)) => self.segment_mapping(merged),
+                    _ => Some(cut_segment()),
+                }
+            }
             UnknownProvider::Opaque(
                 reason @ (OpaqueReason::FieldPath(star)
                 | OpaqueReason::Expression(star)
                 | OpaqueReason::Ambiguous(star)),
             ) => Some(self.opaque_star(*star, *reason)),
+            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
+                let mut mapping = cut_segment();
+                mapping.sources = vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })];
+                Some(mapping)
+            }
             UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
         };
         if let Some(mapping) = &mut mapping
-            && !matches!(segment.position, crate::types::StarPosition::Inferred)
+            && !matches!(position, crate::types::StarPosition::Inferred)
         {
-            mapping.star_position = segment.position;
+            mapping.star_position = position;
         }
         mapping
     }
@@ -588,8 +517,7 @@ impl Evaluator<'_, '_, '_> {
             (OpaqueReason::FieldPath(_), StarTarget::FieldPath { binding, path }) => {
                 let mut sources = Vec::new();
                 if let Some(field) = path.first()
-                    && let Some(origin) =
-                        resolve_captured_binding(field, binding, self.cx, &mut HashSet::new())
+                    && let Some(origin) = resolve_captured_binding(field, binding, self.cx)
                 {
                     sources.push(origin);
                 }
@@ -618,6 +546,9 @@ impl Evaluator<'_, '_, '_> {
             target: star_name(),
             sources,
             transform: TransformKind::Direct,
+            slot: None,
+            unpublished_tail: false,
+            merged_in: false,
         }
     }
 
@@ -661,35 +592,22 @@ impl Evaluator<'_, '_, '_> {
                 table: (**table).clone(),
                 column: column.clone(),
             }],
-            UnknownProvider::Scope { scope, index } => {
-                // TODO: re-entry must surface as an unresolved value, not as
-                // an empty source list.
-                if !self.cx.enter(EvalKey::Slot {
-                    scope: *scope,
-                    index: *index,
-                }) {
-                    return Vec::new();
+            UnknownProvider::Segment { id, .. } => self.segment_sources(*id, column),
+            UnknownProvider::SetOperation { op, left } => {
+                match self.merged_counterpart(*op, crate::resolve::OutputRef::Segment(*left)) {
+                    Some(crate::resolve::OutputRef::Segment(merged)) => self
+                        .segment_mapping(merged)
+                        .map_or_else(Vec::new, |mapping| {
+                            named_wildcard_sources(mapping.sources, column)
+                        }),
+                    _ => vec![ColumnOrigin::Ambiguous {
+                        column: column.clone(),
+                        candidates: Vec::new(),
+                    }],
                 }
-                let model = self.scope_model(*scope);
-                let mut sources = match model.elements.get(*index) {
-                    Some(OutputElement::Unknown(segment)) => {
-                        self.provider_sources(&segment.provider, column)
-                    }
-                    _ => Vec::new(),
-                };
-                // The right operand of a set operation contributes to every
-                // position, though the model lists only the left one.
-                if let OutputPlan::SetOperation { right, .. } =
-                    self.cx.graph.scopes.output_plan(*scope)
-                    && let Unlisted::Sources(more) = self.unlisted(*right, column)
-                {
-                    sources.extend(more);
-                }
-                self.cx.leave(EvalKey::Slot {
-                    scope: *scope,
-                    index: *index,
-                });
-                sources
+            }
+            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
+                vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })]
             }
             UnknownProvider::Opaque(_) => Vec::new(),
         }
@@ -730,7 +648,22 @@ impl Evaluator<'_, '_, '_> {
             // provenance is collected from both operands. An operand that
             // rules the name out stays an explicit uncertainty marker because
             // its unknown-width slot cannot be aligned safely.
-            OutputPlan::SetOperation { left, right, .. } => {
+            OutputPlan::SetOperation {
+                left,
+                right,
+                correspondence,
+                ..
+            } => {
+                if *correspondence == SetCorrespondence::ByName {
+                    let mut sources = match self.unlisted(*left, name) {
+                        Unlisted::Sources(sources) => sources,
+                        Unlisted::Denied | Unlisted::None => Vec::new(),
+                    };
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                        what: "BY NAME set operation",
+                    }));
+                    return Unlisted::Sources(sources);
+                }
                 let mut sources = match self.unlisted(*left, name) {
                     Unlisted::Denied => return Unlisted::Denied,
                     Unlisted::Sources(sources) => sources,
@@ -752,4 +685,37 @@ impl Evaluator<'_, '_, '_> {
             }
         }
     }
+}
+
+/// Give the wildcard sources in a merged segment the name the reader asked
+/// for, keeping unresolved origins and recursive markers from the merge.
+fn named_wildcard_sources(sources: Vec<ColumnOrigin>, column: &Ident) -> Vec<ColumnOrigin> {
+    sources
+        .into_iter()
+        .map(|source| match source {
+            ColumnOrigin::Wildcard { table } => ColumnOrigin::NamedWildcard {
+                table,
+                column: column.clone(),
+            },
+            ColumnOrigin::Recursive { base_sources } => ColumnOrigin::Recursive {
+                base_sources: named_wildcard_sources(base_sources, column),
+            },
+            ColumnOrigin::UnknownStar => ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
+                column: column.clone(),
+            }),
+            source => source,
+        })
+        .collect()
+}
+
+/// Ambiguity discards possible value sources, but keeps the reason that a
+/// candidate's set-operation correspondence could not be evaluated.
+fn has_by_name_reason(sources: &[ColumnOrigin]) -> bool {
+    sources.iter().any(|source| match source {
+        ColumnOrigin::Unresolved(Unresolved::Unsupported {
+            what: "BY NAME set operation",
+        }) => true,
+        ColumnOrigin::Recursive { base_sources } => has_by_name_reason(base_sources),
+        _ => false,
+    })
 }

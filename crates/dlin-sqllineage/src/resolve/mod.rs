@@ -5,6 +5,7 @@ mod context;
 mod lineage;
 mod mapping;
 mod model;
+mod setop_legacy;
 mod star;
 mod target;
 mod topo;
@@ -13,6 +14,7 @@ mod width;
 use context::EvalContext;
 use mapping::{ScopeMappingCache, resolve_scope_mappings};
 use model::OutputModels;
+pub(crate) use model::OutputRef;
 use width::{graph_has_unresolved_stars, validate_set_arities};
 
 use crate::catalog::CatalogContext;
@@ -93,10 +95,28 @@ pub(crate) fn resolve(
     // table is only presentation metadata and is attached once here. Keeping
     // it out of the cache key avoids materializing the same scope once per
     // output column and cannot alter source resolution.
-    let mut mappings = resolve_scope_mappings(root, &mut cx)
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let Ok(mappings) = resolve_scope_mappings(root, &mut cx) else {
+        // Nothing is being evaluated yet, so the root cannot be re-entered.
+        warnings.push(Warning {
+            kind: WarningKind::UnexpectedCycle,
+            location: None,
+        });
+        return Ok(analysis::assemble(
+            &[],
+            &graph.tables,
+            if graph.scopes.has_unknown_output_width(root) {
+                &[]
+            } else {
+                &graph.target_columns
+            },
+            &warnings,
+            statement_type,
+            false,
+            graph.dialect,
+            catalog,
+        ));
+    };
+    let mut mappings = mappings.iter().cloned().collect::<Vec<_>>();
     for mapping in &mut mappings {
         mapping.target.table.clone_from(&output_table);
     }

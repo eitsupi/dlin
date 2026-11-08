@@ -1,13 +1,13 @@
 use std::rc::Rc;
 
 use super::{
-    InputLookup, ModelStore, OutputElement, OutputModel, OutputModels, UnknownProvider, ValueId,
-    Width,
+    Forwarding, InputLookup, ModelStore, OutputElement, OutputModel, OutputModels, OutputRef,
+    SegmentId, SlotId, UnknownProvider, ValueId, Width,
 };
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::RawNode;
-use crate::graph::scope::{OutputPlan, ScopeTree};
+use crate::graph::scope::{OutputPlan, ScopeId, ScopeTree};
 use crate::{Dialect, Ident};
 
 struct Tables(Vec<(&'static str, Vec<&'static str>)>);
@@ -241,7 +241,6 @@ fn set_operation_keeps_the_columns_its_right_operand_adds_as_a_tail() {
     let mut models = OutputModels::new(&graph, None, &mut store);
     let model = models.scope(ScopeTree::root());
     assert_eq!(layout(&model), ["?", "~"]);
-    assert_eq!(model.listed_len(), 1);
     assert_eq!(model.width, Width::Unknown);
 }
 
@@ -323,7 +322,12 @@ fn scope_models_are_built_once_and_forward_child_slots() {
     let OutputElement::Column(slot) = &root.elements[0] else {
         unreachable!();
     };
-    assert!(matches!(slot.value, ValueId::ScopeSlot { index: 0, .. }));
+    // The root forwards the CTE's first column, not whatever has its name.
+    let ValueId::Forward(child) = slot.value else {
+        panic!("expected a forwarded column, got {:?}", slot.value);
+    };
+    let child = store.arena.slot(child);
+    assert_eq!(child.name, Ident::unquoted("x"));
 }
 
 #[test]
@@ -491,4 +495,276 @@ fn a_key_taken_from_several_unknown_relations_is_uncertain() {
         .map(|range| range.name.value.as_str())
         .collect();
     assert_eq!(names, ["a", "b", "c"]);
+}
+
+// Identity of published outputs
+
+/// The model of the root scope of `sql`, with the store that defines its ids.
+fn published(sql: &str) -> (RawGraph, ModelStore, Rc<OutputModel>) {
+    let graph = graph(sql);
+    let mut store = ModelStore::default();
+    let root = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    (graph, store, root)
+}
+
+fn scope_model(graph: &RawGraph, store: &mut ModelStore, scope: ScopeId) -> Rc<OutputModel> {
+    OutputModels::new(graph, None, store).scope(scope)
+}
+
+/// The ids of the columns of a published model, in output order.
+fn slot_ids(model: &OutputModel) -> Vec<SlotId> {
+    model
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Column(slot) => Some(slot.id.expect("a published column has an id")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ids of the unknown segments of a published model, in output order.
+fn segment_ids(model: &OutputModel) -> Vec<SegmentId> {
+    model
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Unknown(segment) => {
+                Some(segment.id.expect("a published segment has an id"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The models a root model is read through, root first, ending at the model
+/// that defines its columns itself.
+fn chain(graph: &RawGraph, store: &mut ModelStore, root: &Rc<OutputModel>) -> Vec<Rc<OutputModel>> {
+    let mut models = vec![root.clone()];
+    loop {
+        let scope = match models.last().and_then(|model| model.elements.first()) {
+            Some(OutputElement::Column(slot)) => match slot.value {
+                ValueId::Forward(id) => store.arena.slot(id).owner,
+                _ => break,
+            },
+            Some(OutputElement::Unknown(segment)) => match segment.provider {
+                UnknownProvider::Segment { scope, .. } => scope,
+                _ => break,
+            },
+            _ => break,
+        };
+        models.push(scope_model(graph, store, scope));
+    }
+    models
+}
+
+fn all_distinct<T: PartialEq>(ids: &[T]) -> bool {
+    ids.iter()
+        .enumerate()
+        .all(|(index, id)| !ids[..index].contains(id))
+}
+
+#[test]
+fn columns_with_the_same_name_are_published_under_different_ids() {
+    let (graph, store, root) = published("SELECT t.a AS x, t.b AS x FROM t");
+    let ids = slot_ids(&root);
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    // The name finds both columns and each one's id is its own.
+    let x_positions = root.slots_named(&Ident::unquoted("x"));
+    assert_eq!(x_positions, [0, 1]);
+    for id in &ids {
+        let def = store.arena.slot(*id);
+        assert_eq!(def.owner, ScopeTree::root());
+        assert_eq!(def.name, Ident::unquoted("x"));
+    }
+    // Each definition holds the expression of its own column.
+    let [first, second] = [0, 1].map(|index| match &store.arena.slot(ids[index]).value {
+        ValueId::Expr(node) => *node,
+        other => panic!("expected an expression, got {other:?}"),
+    });
+    assert_ne!(first, second);
+    let output_names: Vec<_> = [first, second]
+        .into_iter()
+        .map(|node| match &graph.nodes[node] {
+            RawNode::Output { name, .. } => name.value.clone(),
+            other => panic!("expected an output node, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(output_names, ["x", "x"]);
+}
+
+#[test]
+fn anonymous_columns_are_published_under_different_ids_in_every_scope() {
+    let (graph, mut store, root) =
+        published("WITH c AS (SELECT t.a + 1, t.b + 1 FROM t) SELECT * FROM c");
+    let models = chain(&graph, &mut store, &root);
+    // The root delegates to its body, which reads the CTE.
+    assert_eq!(models.len(), 3);
+    let ids: Vec<_> = models.iter().map(|model| slot_ids(model)).collect();
+    assert!(ids.iter().all(|ids| ids.len() == 2));
+    // Every reader publishes new ids, defined by the column it forwards.
+    assert!(all_distinct(&ids.concat()), "{ids:?}");
+    for (reader, child) in ids.iter().zip(&ids[1..]) {
+        for (id, forwarded) in reader.iter().zip(child) {
+            let def = store.arena.slot(*id);
+            assert!(
+                matches!(def.value, ValueId::Forward(target) if target == *forwarded),
+                "{:?}",
+                def.value
+            );
+        }
+    }
+    for id in &ids[2] {
+        assert!(matches!(store.arena.slot(*id).value, ValueId::Expr(_)));
+    }
+}
+
+#[test]
+fn a_column_after_an_unknown_segment_keeps_its_own_id() {
+    let (graph, mut store, root) =
+        published("WITH c AS (SELECT *, t.x AS y, t.z AS w FROM t) SELECT * FROM c");
+    let models = chain(&graph, &mut store, &root);
+    let [.., child] = models.as_slice() else {
+        unreachable!();
+    };
+    assert_eq!(layout(child), ["?", "y", "w"]);
+    let segments = segment_ids(child);
+    let columns = slot_ids(child);
+    assert_eq!((segments.len(), columns.len()), (1, 2));
+    assert_ne!(columns[0], columns[1]);
+    assert!(matches!(
+        store.arena.segment(segments[0]).provider,
+        UnknownProvider::Relation(_)
+    ));
+    // Each reader publishes its own ids for the same three outputs.
+    for reader in &models[..models.len() - 1] {
+        assert_eq!(layout(reader), ["?", "y", "w"]);
+        assert_ne!(segment_ids(reader), segments);
+        assert!(all_distinct(&[slot_ids(reader), columns.clone()].concat()));
+    }
+}
+
+#[test]
+fn two_stars_of_one_relation_are_two_segments() {
+    let (store, root) = {
+        let (_, store, root) = published("SELECT *, * FROM t");
+        (store, root)
+    };
+    let ids = segment_ids(&root);
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    let [first, second] = [0, 1].map(|index| store.arena.segment(ids[index]));
+    assert!(matches!(
+        (&first.provider, &second.provider),
+        (UnknownProvider::Relation(a), UnknownProvider::Relation(b)) if a == b
+    ));
+}
+
+#[test]
+fn a_published_model_keeps_its_ids_when_it_is_read_again() {
+    let (graph, mut store, root) = published("SELECT t.a AS x, t.b AS y FROM t");
+    let ids = slot_ids(&root);
+    let again = scope_model(&graph, &mut store, ScopeTree::root());
+    assert!(Rc::ptr_eq(&root, &again));
+    assert_eq!(slot_ids(&again), ids);
+}
+
+#[test]
+fn the_elements_of_star_models_are_not_published() {
+    let model = first_star("SELECT * FROM t", &[("t", vec!["x", "y"])]);
+    assert!(model.elements.iter().all(|element| match element {
+        OutputElement::Column(slot) => slot.id.is_none(),
+        OutputElement::Unknown(segment) => segment.id.is_none(),
+        OutputElement::Tail(_) => true,
+    }));
+}
+
+#[test]
+fn the_model_of_a_cut_cycle_publishes_its_segment() {
+    let graph = graph("WITH RECURSIVE t AS (SELECT * FROM t UNION ALL SELECT 1) SELECT * FROM t");
+    let mut store = ModelStore::default();
+    let root = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    assert!(root.has_unknown_segment());
+    let ids = segment_ids(&root);
+    assert!(!ids.is_empty());
+    assert!(all_distinct(&ids));
+}
+
+#[test]
+fn callers_above_a_cycle_are_not_cached_with_a_model_built_from_the_cut() {
+    let graph =
+        graph("WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT * FROM a");
+    let mut store = ModelStore::default();
+    let first = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    let first_ids = segment_ids(&first);
+    assert!(!first_ids.is_empty());
+    assert!(store.cached(ScopeTree::root()).is_none());
+
+    let second = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    assert!(!Rc::ptr_eq(&first, &second));
+    assert_ne!(segment_ids(&second), first_ids);
+}
+
+/// A reader whose `forwarded` pairs are `pairs`, checked against the model of
+/// the root CTE `c` it claims to forward.
+fn check_forwarding_of(
+    mut pairs: impl FnMut(&[SlotId], &[SlotId]) -> Vec<Forwarding>,
+) -> Result<(), &'static str> {
+    let graph = graph("WITH c AS (SELECT t.a AS x, t.b AS y FROM t) SELECT * FROM c");
+    let mut store = ModelStore::default();
+    let root = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    let OutputPlan::Delegate(body) = *graph.scopes.output_plan(ScopeTree::root()) else {
+        panic!("the root delegates to its body");
+    };
+    let body_model = scope_model(&graph, &mut store, body);
+    let mut reader = OutputModel::new(Vec::new(), Vec::new(), Dialect::Generic);
+    reader.forwarded = pairs(&slot_ids(&body_model), &slot_ids(&root));
+    reader.check_forwarding(&store.arena, ScopeTree::root(), body, &body_model)
+}
+
+fn pair(from: SlotId, to: SlotId) -> Forwarding {
+    Forwarding {
+        from: OutputRef::Slot(from),
+        to: OutputRef::Slot(to),
+    }
+}
+
+#[test]
+fn a_complete_correspondence_is_consistent() {
+    assert_eq!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[1], root[1])]),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_forwarded_output_without_a_correspondence_is_detected() {
+    assert!(check_forwarding_of(|body, root| vec![pair(body[0], root[0])]).is_err());
+}
+
+#[test]
+fn an_output_forwarded_twice_is_detected() {
+    assert!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[0], root[1])])
+            .is_err()
+    );
+    assert!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[1], root[0])])
+            .is_err()
+    );
+}
+
+#[test]
+fn an_output_of_another_scope_is_detected() {
+    // The reader's own outputs are not the forwarded scope's.
+    assert!(
+        check_forwarding_of(|body, _| vec![pair(body[0], body[0]), pair(body[1], body[1])])
+            .is_err()
+    );
+    // And the forwarded outputs are not the reader's.
+    assert!(
+        check_forwarding_of(|_, root| vec![pair(root[0], root[0]), pair(root[1], root[1])])
+            .is_err()
+    );
 }

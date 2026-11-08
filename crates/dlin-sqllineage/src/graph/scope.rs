@@ -212,8 +212,16 @@ pub(crate) enum OutputPlan {
         left: ScopeId,
         right: ScopeId,
         recursive: bool,
+        correspondence: SetCorrespondence,
     },
     Delegate(ScopeId),
+}
+
+/// Whether set-operation outputs correspond by ordinal or by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetCorrespondence {
+    Positional,
+    ByName,
 }
 
 #[derive(Debug, Clone)]
@@ -591,8 +599,15 @@ impl ScopeTree {
             || match self.output_plan(scope) {
                 OutputPlan::Projection => false,
                 OutputPlan::Delegate(child) => self.has_unknown_output_width(*child),
-                OutputPlan::SetOperation { left, right, .. } => {
-                    self.has_unknown_output_width(*left) || self.has_unknown_output_width(*right)
+                OutputPlan::SetOperation {
+                    left,
+                    right,
+                    correspondence,
+                    ..
+                } => {
+                    *correspondence == SetCorrespondence::ByName
+                        || self.has_unknown_output_width(*left)
+                        || self.has_unknown_output_width(*right)
                 }
             }
     }
@@ -611,7 +626,15 @@ impl ScopeTree {
                     }
                 }
             }
-            OutputPlan::SetOperation { left, right, .. } => {
+            OutputPlan::SetOperation {
+                left,
+                right,
+                correspondence,
+                ..
+            } => {
+                if *correspondence == SetCorrespondence::ByName {
+                    reasons.push("BY NAME set operation");
+                }
                 let mut branches = self.unknown_output_reasons(*left);
                 branches.extend(self.unknown_output_reasons(*right));
                 for reason in branches {
@@ -630,6 +653,11 @@ impl ScopeTree {
 
     pub fn output_plan(&self, scope: ScopeId) -> &OutputPlan {
         &self.scopes[scope].output_plan
+    }
+
+    #[cfg(test)]
+    pub fn scope_count(&self) -> usize {
+        self.scopes.len()
     }
 
     pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {

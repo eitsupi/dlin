@@ -1,4 +1,4 @@
-use sqlparser::ast::{Query, SetExpr};
+use sqlparser::ast::{Query, SetExpr, SetQuantifier};
 
 use crate::build::{LineageBuilder, relation};
 use crate::graph::scope::{OutputPlan, ScopeId, ScopeKind};
@@ -97,7 +97,12 @@ impl LineageBuilder {
             SetExpr::Select(select) => {
                 self.visit_select(select);
             }
-            SetExpr::SetOperation { left, right, .. } => {
+            SetExpr::SetOperation {
+                left,
+                right,
+                set_quantifier,
+                ..
+            } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(left, target_values);
                 let left_outputs: Vec<(crate::Ident, crate::graph::node::NodeId)> = self
@@ -120,12 +125,23 @@ impl LineageBuilder {
                 let is_recursive = self
                     .cte_of_body_scope(self.current_scope)
                     .is_some_and(|cte| self.self_references[references_before..].contains(&cte));
+                let correspondence = match set_quantifier {
+                    SetQuantifier::ByName
+                    | SetQuantifier::AllByName
+                    | SetQuantifier::DistinctByName => {
+                        crate::graph::scope::SetCorrespondence::ByName
+                    }
+                    SetQuantifier::All | SetQuantifier::Distinct | SetQuantifier::None => {
+                        crate::graph::scope::SetCorrespondence::Positional
+                    }
+                };
                 self.graph.scopes.set_output_plan(
                     self.current_scope,
                     OutputPlan::SetOperation {
                         left: left_scope,
                         right: right_scope,
                         recursive: is_recursive,
+                        correspondence,
                     },
                 );
 

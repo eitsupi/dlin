@@ -8,15 +8,16 @@ use std::rc::Rc;
 use super::super::target::{StarTarget, resolve_star_target};
 use super::input::{InputModel, Invalidity};
 use super::options::apply_options;
+use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
-    BranchTail, ColumnSlot, NameDomain, OpaqueReason, OutputElement, OutputModel, RangeRef,
-    SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
+    BranchTail, ColumnSlot, Forwarding, NameDomain, OpaqueReason, OutputElement, OutputModel,
+    RangeRef, SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence};
 use crate::types::TableRef;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,13 +31,31 @@ pub(super) enum CacheKey {
 ///
 /// A model that was built while a cycle was cut (a recursive CTE reading
 /// itself) is not kept, because it depends on where the walk started.
+///
+/// The store also owns the arena that defines every column and segment a scope
+/// has published.
 #[derive(Default)]
 pub(in crate::resolve) struct ModelStore {
+    pub(in crate::resolve) arena: SlotArena,
+    /// How many times a scope has published its model.
+    publications: u32,
+    /// Every model a scope published, by publication. A scope whose model is
+    /// built again while a cycle is cut publishes again, and a reader holds
+    /// the outputs of the publication it read.
+    views: HashMap<u32, Rc<OutputModel>>,
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
     pub(super) inputs: HashMap<BindingEnv, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
     /// Models under construction, each flagged when a cycle was cut beneath it.
     pub(super) active: Vec<(CacheKey, bool)>,
+}
+
+#[cfg(test)]
+impl ModelStore {
+    /// The model a scope has cached, when it has one.
+    pub(in crate::resolve) fn cached(&self, scope: ScopeId) -> Option<&Rc<OutputModel>> {
+        self.scopes.get(&scope)
+    }
 }
 
 /// Builds models for a statement into a [`ModelStore`].
@@ -63,17 +82,29 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         self.graph
     }
 
+    /// The model that was published as `publication`.
+    pub(in crate::resolve) fn view(&self, publication: u32) -> Rc<OutputModel> {
+        self.store
+            .views
+            .get(&publication)
+            .expect("a publication is registered when its model is built")
+            .clone()
+    }
+
     pub(in crate::resolve) fn scope(&mut self, scope: ScopeId) -> Rc<OutputModel> {
         if let Some(model) = self.store.scopes.get(&scope) {
             return model.clone();
         }
         if self.enter(CacheKey::Scope(scope)) {
-            return Rc::new(OutputModel::opaque(
-                OpaqueReason::Recursive,
-                self.graph.dialect,
-            ));
+            let mut model = OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect);
+            let publication = self.next_publication();
+            self.publish(scope, publication, &mut model.elements);
+            model.publication = Some(publication);
+            return self.register(publication, model);
         }
-        let model = Rc::new(self.build_scope(scope));
+        let model = self.build_scope(scope);
+        let publication = model.publication.expect("a scope's model is published");
+        let model = self.register(publication, model);
         if self.leave() {
             self.store.scopes.insert(scope, model.clone());
         }
@@ -103,16 +134,12 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     }
 
     /// Start building a model. Returns `true` when the key is already under
-    /// construction: the cycle is cut and every model built since then is
-    /// marked as not reusable.
+    /// construction: the cycle is cut and every active model is marked as not
+    /// reusable, including callers above the cycle entry that may retain a model
+    /// built from the cut result.
     pub(super) fn enter(&mut self, key: CacheKey) -> bool {
-        if let Some(position) = self
-            .store
-            .active
-            .iter()
-            .position(|(active, _)| *active == key)
-        {
-            for (_, tainted) in &mut self.store.active[position + 1..] {
+        if self.store.active.iter().any(|(active, _)| *active == key) {
+            for (_, tainted) in &mut self.store.active[..] {
                 *tainted = true;
             }
             return true;
@@ -126,10 +153,25 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         self.store.active.pop().is_some_and(|(_, tainted)| !tainted)
     }
 
+    fn next_publication(&mut self) -> u32 {
+        let publication = self.store.publications;
+        self.store.publications += 1;
+        publication
+    }
+
+    fn register(&mut self, publication: u32, model: OutputModel) -> Rc<OutputModel> {
+        let model = Rc::new(model);
+        self.store.views.insert(publication, model.clone());
+        model
+    }
+
     fn build_scope(&mut self, scope: ScopeId) -> OutputModel {
         let graph = self.graph;
+        let publication = self.next_publication();
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
+        // The scope and the model whose output this scope only re-expresses.
+        let mut source = None;
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
@@ -150,7 +192,11 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 OutputElement::Unknown(segment) => {
                                     segment.position = segment.position.shifted(base_ordinal);
                                 }
-                                OutputElement::Tail(_) => {}
+                                OutputElement::Tail(tail) => {
+                                    tail.offset = tail.offset.and_then(|offset| {
+                                        base_ordinal.and_then(|base| base.checked_add(offset))
+                                    });
+                                }
                             }
                             elements.push(element);
                         }
@@ -160,6 +206,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         reads.extend(star.reads.iter().cloned());
                     } else {
                         elements.push(OutputElement::Column(ColumnSlot {
+                            id: None,
                             name: column.name.clone(),
                             output_name: graph
                                 .output_names
@@ -180,25 +227,55 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
                 invalid.push(Invalidity::Whole(model.clone()));
-                forward_scope(*child, &model, &Rc::from([]), false)
+                let elements = forward_scope(*child, &model, &Rc::from([]), None);
+                source = Some((*child, model));
+                elements
             }
             // The left operand defines the names of a set operation.
             OutputPlan::SetOperation {
-                left, recursive, ..
+                left,
+                recursive,
+                correspondence,
+                ..
             } => {
                 let model = self.scope(*left);
                 invalid.push(Invalidity::Whole(model.clone()));
-                let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
-                if !recursive {
+                let mut elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
+                if *correspondence == SetCorrespondence::ByName {
+                    // No right-operand names are enumerated until name-based
+                    // correspondence is implemented. Keep the unknown remainder
+                    // separate from the left operand's listed names.
+                    elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
+                    if !elements
+                        .iter()
+                        .any(|element| matches!(element, OutputElement::Unknown(_)))
+                    {
+                        let mut remainder = UnknownSegment::opaque(OpaqueReason::Unsupported(
+                            "BY NAME set operation",
+                        ));
+                        remainder.position = crate::types::StarPosition::Unproven;
+                        remainder.domain.removed = elements
+                            .iter()
+                            .filter_map(|element| match element {
+                                OutputElement::Column(slot) => Some(slot.name.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        elements.push(OutputElement::Unknown(remainder));
+                    }
+                } else if !recursive {
                     // This operation's tail covers whatever the left operand
                     // already carried.
                     elements.retain(|element| !matches!(element, OutputElement::Tail(_)));
                     elements.push(OutputElement::Tail(BranchTail {
                         scope,
+                        publication,
                         ranges: Rc::from([]),
                         domain: NameDomain::default(),
+                        offset: Some(0),
                     }));
                 }
+                source = Some((*left, model));
                 elements
             }
         };
@@ -213,6 +290,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
+        let forwarded = self.publish(scope, publication, &mut elements);
         let mut model = OutputModel::new(
             elements,
             graph.scopes.unknown_output_reasons(scope),
@@ -220,7 +298,58 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         );
         model.invalid = invalid;
         model.reads = reads;
+        model.publication = Some(publication);
+        if let Some((source_scope, source)) = source {
+            model.forwarded = forwarded;
+            if let Err(problem) =
+                model.check_forwarding(&self.store.arena, scope, source_scope, &source)
+            {
+                debug_assert!(false, "scope {scope} publishes inconsistently: {problem}");
+            }
+        }
         model
+    }
+
+    /// Give each column and segment of a scope's model its identity and record
+    /// its definition. The elements of star and FROM-clause models are views
+    /// of other outputs and are never published.
+    ///
+    /// An element copied from another model (a star's, or a forwarded
+    /// scope's) may still carry an identity that belongs to that model, so
+    /// every element gets a new one. Returns which published output each
+    /// element that forwards one stands for.
+    fn publish(
+        &mut self,
+        scope: ScopeId,
+        publication: u32,
+        elements: &mut [OutputElement],
+    ) -> Vec<Forwarding> {
+        let mut forwarded = Vec::new();
+        for element in elements.iter_mut() {
+            match element {
+                OutputElement::Column(slot) => {
+                    slot.id = Some(self.store.arena.add_slot(SlotDef {
+                        owner: scope,
+                        name: slot.name.clone(),
+                        value: slot.value.clone(),
+                        publication,
+                    }));
+                }
+                OutputElement::Unknown(segment) => {
+                    segment.id = Some(self.store.arena.add_segment(SegmentDef {
+                        owner: scope,
+                        provider: segment.provider.clone(),
+                        position: segment.position,
+                        publication,
+                    }));
+                }
+                OutputElement::Tail(_) => {}
+            }
+            if let (Some(from), Some(to)) = (element.forwards(), element.output_ref()) {
+                forwarded.push(Forwarding { from, to });
+            }
+        }
+        forwarded
     }
 
     fn build_star(
@@ -273,7 +402,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             Binding::Table(table) => self.relation_part(&Rc::new(table.clone()), &ranges),
             Binding::Cte(child) | Binding::DerivedTable(child) => {
                 let model = self.scope(*child);
-                forward_scope(*child, &model, &ranges, false)
+                forward_scope(*child, &model, &ranges, None)
             }
             Binding::VirtualSource(source) => self
                 .graph
@@ -284,6 +413,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 .enumerate()
                 .map(|(index, column)| {
                     OutputElement::Column(ColumnSlot {
+                        id: None,
                         name: column.name.clone(),
                         output_name: OutputName::Explicit(column.name.clone()),
                         ordinal: Some(index),
@@ -303,6 +433,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     fn relation_part(&self, table: &Rc<TableRef>, ranges: &Rc<[RangeRef]>) -> Vec<OutputElement> {
         let Some(entry) = self.catalog.and_then(|catalog| catalog.entry(table)) else {
             return vec![OutputElement::Unknown(UnknownSegment {
+                id: None,
                 schema_relations: vec![super::super::analysis::plain_relation(table)],
                 position: crate::types::StarPosition::Inferred,
                 provider: UnknownProvider::Relation(table.clone()),
@@ -319,6 +450,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut elements = Vec::new();
         for column in &columns {
             elements.push(OutputElement::Column(ColumnSlot {
+                id: None,
                 name: column.name.clone(),
                 output_name: OutputName::Explicit(column.name.clone()),
                 ordinal: column.ordinal,
@@ -384,6 +516,7 @@ fn relation_unknown(
     canonical_relation: &crate::Relation,
 ) -> OutputElement {
     OutputElement::Unknown(UnknownSegment {
+        id: None,
         schema_relations: vec![canonical_relation.clone()],
         position: segment.after_ordinal.map_or(
             crate::types::StarPosition::Unproven,
@@ -399,42 +532,55 @@ fn relation_unknown(
 }
 
 /// Re-express the output of a scope under the range variables of the star
-/// that reads it. `set_operation` marks slots that combine several operands.
+/// that reads it. Every element names the published output it forwards.
+/// `merged_by` is the set operation whose left operand `scope` is, when the
+/// elements are that operation's own.
 pub(super) fn forward_scope(
     scope: ScopeId,
     model: &OutputModel,
     ranges: &Rc<[RangeRef]>,
-    set_operation: bool,
+    merged_by: Option<ScopeId>,
 ) -> Vec<OutputElement> {
     model
         .elements
         .iter()
-        .enumerate()
-        .map(|(index, element)| match element {
-            OutputElement::Column(slot) => OutputElement::Column(ColumnSlot {
-                name: slot.name.clone(),
-                output_name: slot.output_name.clone(),
-                ordinal: slot.ordinal,
-                ranges: ranges.clone(),
-                candidate_ranges: ranges.clone(),
-                value: if set_operation {
-                    ValueId::SetOperation { scope, index }
-                } else {
-                    ValueId::ScopeSlot { scope, index }
-                },
-                origin: SlotOrigin::Forwarded(slot.name.clone()),
-            }),
-            OutputElement::Unknown(segment) => OutputElement::Unknown(UnknownSegment {
-                schema_relations: segment.schema_relations.clone(),
-                position: segment.position,
-                provider: UnknownProvider::Scope { scope, index },
-                ranges: ranges.clone(),
-                domain: segment.domain.clone(),
-            }),
+        .map(|element| match element {
+            OutputElement::Column(slot) => {
+                let id = slot.published();
+                OutputElement::Column(ColumnSlot {
+                    id: None,
+                    name: slot.name.clone(),
+                    output_name: slot.output_name.clone(),
+                    ordinal: slot.ordinal,
+                    ranges: ranges.clone(),
+                    candidate_ranges: ranges.clone(),
+                    value: match merged_by {
+                        Some(op) => ValueId::SetMerged { op, left: id },
+                        None => ValueId::Forward(id),
+                    },
+                    origin: SlotOrigin::Forwarded(slot.name.clone()),
+                })
+            }
+            OutputElement::Unknown(segment) => {
+                let id = segment.published();
+                OutputElement::Unknown(UnknownSegment {
+                    id: None,
+                    schema_relations: segment.schema_relations.clone(),
+                    position: segment.position,
+                    provider: match merged_by {
+                        Some(op) => UnknownProvider::SetOperation { op, left: id },
+                        None => UnknownProvider::Segment { scope, id },
+                    },
+                    ranges: ranges.clone(),
+                    domain: segment.domain.clone(),
+                })
+            }
             OutputElement::Tail(tail) => OutputElement::Tail(BranchTail {
                 scope: tail.scope,
+                publication: tail.publication,
                 ranges: ranges.clone(),
                 domain: tail.domain.clone(),
+                offset: Some(0),
             }),
         })
         .collect()
