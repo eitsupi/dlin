@@ -209,6 +209,8 @@ fn cross_model_partial_keeps_terminal_and_unresolved_origin() {
         &mut ColumnLineageCache::disabled(),
     );
 
+    assert_eq!(result.traced_columns, 0);
+    assert_eq!(result.total_columns, 1);
     let total = entry(&result, "total");
     assert!(total.lineage.is_partial(), "{total:?}");
     assert_eq!(known_pairs(total), [("raw.source_table", "x")]);

@@ -176,6 +176,14 @@ pub(crate) struct InternalModelColumnLineage {
 }
 
 impl InternalModelColumnLineage {
+    /// Number of listed columns whose value lineage is `Complete`.
+    pub(crate) fn complete_column_count(&self) -> usize {
+        self.columns
+            .iter()
+            .filter(|entry| entry.lineage.is_complete())
+            .count()
+    }
+
     pub(crate) fn into_public(self) -> ModelColumnLineage {
         ModelColumnLineage {
             model: self.model,

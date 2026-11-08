@@ -9,6 +9,8 @@ use crate::graph::column_lineage::{
 /// Suffix appended to a node label that has an unresolved part.
 const PARTIAL_MARK: &str = "(partial)";
 const UNRESOLVED_MARK: &str = "(unresolved)";
+/// Fill of the DOT note nodes that report gaps without a column.
+const GAP_NOTE_COLOR: &str = "#F5B7B1";
 
 /// Nodes (model, column) that carry a visible marker, with the marker text.
 type NodeMarks = BTreeMap<(String, String), &'static str>;
@@ -419,6 +421,31 @@ fn gap_marks(report: &ColumnImpactReport) -> NodeMarks {
     marks
 }
 
+/// Labels of the gaps that have no column to mark: dependent models that
+/// failed analysis and dependency kinds that were not collected. They are
+/// drawn as standalone note nodes so that an impact search that could not look
+/// somewhere never reads as "no impact".
+fn gap_notes(reports: &[ColumnImpactReport]) -> BTreeSet<String> {
+    let mut notes = BTreeSet::new();
+    for report in reports {
+        for (_, gap) in report.gaps() {
+            match gap {
+                TraceGap::AnalysisFailed { model, .. } => {
+                    notes.insert(format!("{model}: analysis failed"));
+                }
+                TraceGap::NotCollected { kind } => {
+                    notes.insert(format!(
+                        "{} dependencies not collected",
+                        dependency_kind_label(*kind)
+                    ));
+                }
+                TraceGap::UnresolvedLineage { .. } | TraceGap::UnresolvedColumn { .. } => {}
+            }
+        }
+    }
+    notes
+}
+
 pub fn render_column_impact_mermaid(reports: &[ColumnImpactReport]) {
     super::handle_stdout_result(render_column_impact_mermaid_to_writer(
         reports,
@@ -516,6 +543,9 @@ pub fn render_column_impact_mermaid_to_writer<W: Write>(
             )?;
         }
         writeln!(w, "  end")?;
+    }
+    for (i, note) in gap_notes(reports).iter().enumerate() {
+        writeln!(w, "  gap{i}[\"{}\"]", super::mermaid_escape(note))?;
     }
 
     writeln!(w)?;
@@ -619,7 +649,14 @@ pub fn render_column_graph_dot_to_writer<W: Write>(
         }
     }
 
-    write_dot_column_graph(w, &model_columns, &column_transformation, &marks, &edges)
+    write_dot_column_graph(
+        w,
+        &model_columns,
+        &column_transformation,
+        &marks,
+        &BTreeSet::new(),
+        &edges,
+    )
 }
 
 // ── Column impact (downstream) — DOT ─────────────────────────────────────────
@@ -683,7 +720,14 @@ pub fn render_column_impact_dot_to_writer<W: Write>(
         }
     }
 
-    write_dot_column_graph(w, &model_columns, &column_transformation, &marks, &edges)
+    write_dot_column_graph(
+        w,
+        &model_columns,
+        &column_transformation,
+        &marks,
+        &gap_notes(reports),
+        &edges,
+    )
 }
 
 // ── DOT shared rendering ──────────────────────────────────────────────────────
@@ -693,6 +737,7 @@ fn write_dot_column_graph<W: Write>(
     model_columns: &BTreeMap<String, BTreeSet<String>>,
     column_transformation: &BTreeMap<String, BTreeMap<String, TransformationType>>,
     marks: &NodeMarks,
+    notes: &BTreeSet<String>,
     edges: &[(String, String, String, String, String)],
 ) -> io::Result<()> {
     writeln!(w, "digraph column_lineage {{")?;
@@ -744,6 +789,13 @@ fn write_dot_column_graph<W: Write>(
             )?;
         }
         writeln!(w, "  }}")?;
+    }
+    for (i, note) in notes.iter().enumerate() {
+        writeln!(
+            w,
+            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{GAP_NOTE_COLOR}"];"#,
+            dot_escape(note)
+        )?;
     }
 
     writeln!(w)?;

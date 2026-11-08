@@ -353,16 +353,14 @@ pub(super) fn compute_column_lineage_internal(
         }
     }
 
-    let result = InternalModelColumnLineage {
+    let mut result = InternalModelColumnLineage {
         model: display_name.to_string(),
-        traced_columns: columns
-            .iter()
-            .filter(|entry| entry.lineage.is_complete())
-            .count(),
+        traced_columns: 0,
         total_columns: total,
         columns,
         errors,
     };
+    result.traced_columns = result.complete_column_count();
 
     if semantic_digest.persistent_cache_safe {
         analysis

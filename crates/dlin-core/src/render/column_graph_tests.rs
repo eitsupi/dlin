@@ -1,7 +1,7 @@
 use super::*;
 use crate::graph::column_lineage::{
-    ColumnLineageEntry, ColumnSource, ConfirmedImpact, DependencyKind, DependencyRef,
-    ExplorationStatus, ImpactEdge, ImpactScope, KindExploration, ModelColumnLineage,
+    ColumnLineageEntry, ColumnLineageErrorKind, ColumnSource, ConfirmedImpact, DependencyKind,
+    DependencyRef, ExplorationStatus, ImpactEdge, ImpactScope, KindExploration, ModelColumnLineage,
     ModelOutputRef, TraceGap, UnresolvedContribution, UnresolvedReason, ValueLineage,
 };
 
@@ -627,4 +627,99 @@ fn test_impact_mermaid_and_dot_mark_gap_nodes() {
     assert!(mermaid.contains("total (partial)"), "{mermaid}");
     let dot = impact_dot(&[report]);
     assert!(dot.contains("total (partial)"), "{dot}");
+}
+
+fn gap_report(scope: ImpactScope, exploration: Vec<KindExploration>) -> ColumnImpactReport {
+    let mut report = impact_report("source_model", "x", vec![]);
+    report.scope = scope;
+    report.exploration = exploration;
+    report
+}
+
+fn failed_exploration() -> KindExploration {
+    KindExploration {
+        kind: DependencyKind::Value,
+        status: ExplorationStatus::Incomplete {
+            gaps: vec![TraceGap::AnalysisFailed {
+                unique_id: "model.proj.broken\"model".to_string(),
+                model: "broken\"model".to_string(),
+                error: ColumnLineageErrorKind::ParseFailure,
+            }],
+        },
+    }
+}
+
+fn row_not_collected_exploration() -> Vec<KindExploration> {
+    vec![
+        KindExploration {
+            kind: DependencyKind::Value,
+            status: ExplorationStatus::Complete,
+        },
+        KindExploration {
+            kind: DependencyKind::Row,
+            status: ExplorationStatus::Incomplete {
+                gaps: vec![TraceGap::NotCollected {
+                    kind: DependencyKind::Row,
+                }],
+            },
+        },
+    ]
+}
+
+#[test]
+fn test_impact_diagrams_show_failed_dependent_model() {
+    let report = gap_report(ImpactScope::ValueOnly, vec![failed_exploration()]);
+
+    let plain = impact_plain(std::slice::from_ref(&report));
+    assert!(
+        plain.contains("analysis of broken\"model failed"),
+        "{plain}"
+    );
+
+    let mermaid = impact_mermaid(std::slice::from_ref(&report));
+    assert!(
+        mermaid.contains("gap0[\"broken#quot;model: analysis failed\"]"),
+        "{mermaid}"
+    );
+    assert!(!mermaid.contains("-->"), "{mermaid}");
+
+    let dot = impact_dot(&[report]);
+    assert!(
+        dot.contains(
+            r##""gap0" [label="broken\"model: analysis failed", shape=note, fillcolor="#F5B7B1"];"##
+        ),
+        "{dot}"
+    );
+}
+
+#[test]
+fn test_impact_diagrams_show_kind_not_collected() {
+    let report = gap_report(ImpactScope::ValueAndRow, row_not_collected_exploration());
+
+    let plain = impact_plain(std::slice::from_ref(&report));
+    assert!(
+        plain.contains("row dependencies are not collected"),
+        "{plain}"
+    );
+
+    let mermaid = impact_mermaid(std::slice::from_ref(&report));
+    assert!(
+        mermaid.contains("gap0[\"row dependencies not collected\"]"),
+        "{mermaid}"
+    );
+
+    let dot = impact_dot(&[report]);
+    assert!(
+        dot.contains(
+            r##""gap0" [label="row dependencies not collected", shape=note, fillcolor="#F5B7B1"];"##
+        ),
+        "{dot}"
+    );
+}
+
+#[test]
+fn test_impact_diagrams_have_no_gap_notes_when_complete() {
+    let report = impact_report("leaf", "x", vec![]);
+    assert!(!impact_mermaid(std::slice::from_ref(&report)).contains("gap0"));
+    assert!(!impact_dot(&[report]).contains("gap0"));
 }

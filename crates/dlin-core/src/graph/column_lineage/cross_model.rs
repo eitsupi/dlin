@@ -77,6 +77,7 @@ fn compute_cross_model_inner(
         unresolved.dedup();
         entry.lineage = ValueLineage::new(sources, unresolved);
     }
+    result.traced_columns = result.complete_column_count();
 
     result
 }
