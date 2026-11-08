@@ -73,6 +73,35 @@ pub(crate) struct SchemaEvidence {
 }
 
 impl SchemaEvidence {
+    /// Whether both schemas make the same claim about the relation: same
+    /// coverage and order, the same column identifiers with the same
+    /// ordinals, and the same unknown segments. Evidence identity, provenance
+    /// and the display order of the columns are not part of the claim.
+    pub(crate) fn same_claim_as(&self, other: &Self) -> bool {
+        fn column_keys(schema: &SchemaEvidence) -> Vec<(&sqllineage::Ident, Option<usize>)> {
+            let mut keys: Vec<_> = schema
+                .columns
+                .iter()
+                .map(|column| (&column.name, column.ordinal))
+                .collect();
+            keys.sort_unstable();
+            keys
+        }
+        fn segment_keys(schema: &SchemaEvidence) -> Vec<Option<usize>> {
+            let mut keys: Vec<_> = schema
+                .unknown_segments
+                .iter()
+                .map(|segment| segment.after_ordinal)
+                .collect();
+            keys.sort_unstable();
+            keys
+        }
+        self.coverage == other.coverage
+            && self.order == other.order
+            && column_keys(self) == column_keys(other)
+            && segment_keys(self) == segment_keys(other)
+    }
+
     /// An ordered, exhaustive enumeration with proven ordinals `0..n`.
     fn enumerated(
         id: String,

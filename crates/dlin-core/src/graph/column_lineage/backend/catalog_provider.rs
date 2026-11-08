@@ -52,7 +52,14 @@ impl CatalogAdapter<'_> {
             coverage: schema.coverage,
             order: schema.order,
             unknown_segments: Cow::Owned(schema.unknown_segments.clone()),
-            evidence: Cow::Owned(vec![sqllineage::EvidenceRef(schema.id.0.clone())]),
+            evidence: Cow::Owned(
+                table
+                    .evidence_ids
+                    .iter()
+                    .cloned()
+                    .map(sqllineage::EvidenceRef)
+                    .collect(),
+            ),
         })
     }
 }
@@ -298,8 +305,33 @@ mod tests {
         columns: &[(&str, Option<bool>)],
         dialect: DlinDialect,
     ) {
-        let evidence = crate::graph::column_lineage::schema::evidence::yaml_schema_evidence(
+        register_yaml_evidence(
+            snapshot,
             &format!("source.proj.raw.{name}"),
+            name,
+            columns,
+            dialect,
+        );
+    }
+
+    /// Register the relation `src` from the YAML declaration of `subject`.
+    fn register_yaml_as(
+        snapshot: &mut CatalogSnapshot,
+        subject: &str,
+        columns: &[(&str, Option<bool>)],
+    ) {
+        register_yaml_evidence(snapshot, subject, "src", columns, DlinDialect::Generic);
+    }
+
+    fn register_yaml_evidence(
+        snapshot: &mut CatalogSnapshot,
+        subject: &str,
+        name: &str,
+        columns: &[(&str, Option<bool>)],
+        dialect: DlinDialect,
+    ) {
+        let evidence = crate::graph::column_lineage::schema::evidence::yaml_schema_evidence(
+            subject,
             &yaml_columns(columns),
             None,
             dialect,
@@ -338,6 +370,72 @@ mod tests {
                 "yaml:source.proj.raw.src".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn consistent_registrations_expose_every_evidence_id() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.a.src",
+            &[("z", None), ("a", None)],
+        );
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("z", None), ("a", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+        assert_eq!(
+            entry.evidence.as_ref(),
+            [
+                sqllineage::EvidenceRef("yaml:source.proj.a.src".to_string()),
+                sqllineage::EvidenceRef("yaml:source.proj.b.src".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reordered_consistent_registration_keeps_the_first_display_order() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.a.src",
+            &[("z", None), ("a", None)],
+        );
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("a", None), ("z", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        let entry = sqllineage::Catalog::lookup(&adapter, &relation("src")).unwrap();
+
+        let names: Vec<_> = entry
+            .columns
+            .iter()
+            .map(|c| c.name.value.as_str())
+            .collect();
+        assert_eq!(names, ["z", "a"]);
+        assert_eq!(entry.evidence.len(), 2);
+    }
+
+    #[test]
+    fn contradicting_registration_has_no_entry() {
+        let mut snapshot = CatalogSnapshot::new();
+        register_yaml_as(&mut snapshot, "source.proj.a.src", &[("z", None)]);
+        register_yaml_as(
+            &mut snapshot,
+            "source.proj.b.src",
+            &[("z", None), ("a", None)],
+        );
+        let adapter = CatalogAdapter::new(&snapshot, DlinDialect::Generic);
+
+        assert!(sqllineage::Catalog::lookup(&adapter, &relation("src")).is_none());
     }
 
     #[test]

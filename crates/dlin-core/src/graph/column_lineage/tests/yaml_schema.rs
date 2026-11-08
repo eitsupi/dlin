@@ -83,3 +83,93 @@ fn quoted_yaml_column_matches_a_quoted_reference_in_snowflake() {
     assert_eq!(result.columns[0].column, "id");
     assert_eq!(pairs(&result.columns[0]), [("src", "id")]);
 }
+
+/// Two models-of-record for one physical table: two source definitions with
+/// different `source_name` that share database, schema and identifier.
+fn shared_table_manifest(first: serde_json::Value, second: serde_json::Value) -> Manifest {
+    let source = |source_name: &str, columns: serde_json::Value| {
+        let id = format!("source.proj.{source_name}.events");
+        (
+            id.clone(),
+            serde_json::json!({
+                "unique_id": id,
+                "name": "events",
+                "source_name": source_name,
+                "resource_type": "source",
+                "database": "db",
+                "schema": "raw",
+                "identifier": "events",
+                "columns": columns
+            }),
+        )
+    };
+    let sources: serde_json::Map<_, _> = [source("first", first), source("second", second)]
+        .into_iter()
+        .collect();
+    serde_json::from_value(serde_json::json!({
+        "nodes": {
+            "model.proj.m": {
+                "unique_id": "model.proj.m",
+                "name": "m",
+                "resource_type": "model",
+                "depends_on": {
+                    "nodes": ["source.proj.first.events", "source.proj.second.events"]
+                },
+                "compiled_code": "SELECT * FROM db.raw.events",
+                "columns": {}
+            }
+        },
+        "sources": sources
+    }))
+    .unwrap()
+}
+
+/// Source definitions that declare the same columns for one physical table
+/// (even in a different listing order) do not contradict each other.
+#[test]
+fn star_over_a_table_shared_by_consistent_source_definitions_expands() {
+    for second in [
+        serde_json::json!({"id": {"name": "id"}, "ts": {"name": "ts"}}),
+        serde_json::json!({"ts": {"name": "ts"}, "id": {"name": "id"}}),
+    ] {
+        let manifest = shared_table_manifest(
+            serde_json::json!({"id": {"name": "id"}, "ts": {"name": "ts"}}),
+            second,
+        );
+        let result = trace(&manifest, DlinDialect::PostgreSQL);
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let mut names: Vec<_> = result
+            .columns
+            .iter()
+            .map(|entry| entry.column.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["id", "ts"]);
+        for entry in &result.columns {
+            assert_eq!(
+                pairs(entry),
+                [("db.raw.events", entry.column.as_str())],
+                "column {}",
+                entry.column
+            );
+        }
+    }
+}
+
+/// Source definitions that disagree about the columns of one physical table
+/// leave the star unexpanded.
+#[test]
+fn star_over_a_table_shared_by_contradicting_source_definitions_is_not_expanded() {
+    let manifest = shared_table_manifest(
+        serde_json::json!({"id": {"name": "id"}, "ts": {"name": "ts"}}),
+        serde_json::json!({"id": {"name": "id"}, "ts": {"name": "ts"}, "extra": {"name": "extra"}}),
+    );
+    let result = trace(&manifest, DlinDialect::PostgreSQL);
+
+    assert!(
+        result.columns.iter().all(|entry| entry.column != "id"),
+        "columns: {:?}",
+        result.columns
+    );
+}

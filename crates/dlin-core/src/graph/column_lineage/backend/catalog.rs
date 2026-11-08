@@ -23,6 +23,9 @@ pub struct CatalogTable {
     /// The typed schema: column spellings and ordinals, coverage, order,
     /// unknown segments and the evidence it rests on.
     pub(crate) schema: SchemaEvidence,
+    /// Ids of every registration that makes the same claim as `schema`,
+    /// including its own.
+    pub(crate) evidence_ids: BTreeSet<String>,
 }
 
 impl CatalogTable {
@@ -81,16 +84,21 @@ impl CatalogSnapshot {
     }
 
     /// Register one physical relation and its schema. Registering the same
-    /// relation again with a different schema marks it as conflicted.
+    /// relation again with the same claim keeps the first schema and adds the
+    /// new evidence id. A contradicting claim marks the relation as conflicted.
     pub(crate) fn add_relation(
         &mut self,
         relation: RelationRef,
         preferred_name: impl Into<String>,
         schema: SchemaEvidence,
     ) {
-        if let Some(existing) = self.tables.get(&relation)
-            && existing.schema != schema
+        if let Some(existing) = self.tables.get_mut(&relation)
+            && existing.schema.same_claim_as(&schema)
         {
+            existing.evidence_ids.insert(schema.id.0);
+            return;
+        }
+        if self.tables.contains_key(&relation) {
             self.conflicted.insert(relation.clone());
         }
         self.tables.insert(
@@ -98,6 +106,7 @@ impl CatalogSnapshot {
             CatalogTable {
                 name: preferred_name.into(),
                 relation: relation.clone(),
+                evidence_ids: BTreeSet::from([schema.id.0.clone()]),
                 schema,
             },
         );
@@ -253,7 +262,9 @@ impl CatalogSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::column_lineage::schema::evidence::{EvidencedColumn, yaml_schema_evidence};
+    use crate::graph::column_lineage::schema::evidence::{
+        EvidenceId, EvidencedColumn, yaml_schema_evidence,
+    };
     use crate::parser::manifest::ManifestColumn;
 
     fn schema(names: &[&str]) -> SchemaEvidence {
@@ -274,6 +285,11 @@ mod tests {
             })
             .collect();
         yaml_schema_evidence("source.p.s.t", &columns, None, DlinDialect::Generic).unwrap()
+    }
+
+    fn with_id(mut schema: SchemaEvidence, id: &str) -> SchemaEvidence {
+        schema.id = EvidenceId(id.to_string());
+        schema
     }
 
     fn register(catalog: &mut CatalogSnapshot, schema: SchemaEvidence) {
@@ -302,18 +318,54 @@ mod tests {
     }
 
     #[test]
-    fn same_names_with_different_quote_specification_conflict() {
+    fn unset_and_false_quote_specification_make_the_same_claim() {
         let mut catalog = CatalogSnapshot::new();
         register(&mut catalog, yaml(&[("a", None)]));
         register(&mut catalog, yaml(&[("a", Some(false))]));
+        assert!(!is_conflicted(&catalog));
+    }
+
+    #[test]
+    fn display_order_difference_under_unknown_order_is_not_a_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None), ("b", None)]));
+        register(&mut catalog, yaml(&[("b", None), ("a", None)]));
+        assert!(!is_conflicted(&catalog));
+        let table = catalog.tables().next().unwrap();
+        assert_eq!(table.column_names(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn different_evidence_ids_with_the_same_claim_coexist() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, with_id(yaml(&[("a", None)]), "yaml:second"));
+        register(&mut catalog, with_id(yaml(&[("a", None)]), "yaml:first"));
+        register(&mut catalog, with_id(yaml(&[("a", None)]), "yaml:second"));
+        assert!(!is_conflicted(&catalog));
+        let table = catalog
+            .resolve_table_exact(
+                &RelationRef::from_manifest(None, None, "t"),
+                DlinDialect::Generic,
+            )
+            .unwrap();
+        assert_eq!(table.schema.id.0, "yaml:second");
+        let ids: Vec<_> = table.evidence_ids.iter().map(String::as_str).collect();
+        assert_eq!(ids, ["yaml:first", "yaml:second"]);
+    }
+
+    #[test]
+    fn different_column_sets_conflict() {
+        let mut catalog = CatalogSnapshot::new();
+        register(&mut catalog, yaml(&[("a", None)]));
+        register(&mut catalog, yaml(&[("a", None), ("b", None)]));
         assert!(is_conflicted(&catalog));
     }
 
     #[test]
-    fn same_names_with_different_order_conflict() {
+    fn proven_order_difference_conflicts() {
         let mut catalog = CatalogSnapshot::new();
-        register(&mut catalog, yaml(&[("a", None), ("b", None)]));
-        register(&mut catalog, yaml(&[("b", None), ("a", None)]));
+        register(&mut catalog, schema(&["a", "b"]));
+        register(&mut catalog, schema(&["b", "a"]));
         assert!(is_conflicted(&catalog));
     }
 
