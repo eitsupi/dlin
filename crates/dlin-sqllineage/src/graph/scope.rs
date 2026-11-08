@@ -632,6 +632,11 @@ impl ScopeTree {
         &self.scopes[scope].output_plan
     }
 
+    #[cfg(test)]
+    pub fn scope_count(&self) -> usize {
+        self.scopes.len()
+    }
+
     pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {
         let at = self.scopes[parent].binding_log.len();
         self.scopes[parent].anonymous_derived.push((at, child));

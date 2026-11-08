@@ -33,6 +33,21 @@ pub(super) fn evaluate<R>(
     body(&mut Evaluator { cx: &mut cx })
 }
 
+/// [`evaluate`] with a budget of `limit` steps.
+pub(super) fn evaluate_limited<R>(
+    graph: &RawGraph,
+    limit: u64,
+    body: impl FnOnce(&mut Evaluator<'_, '_, '_>) -> R,
+) -> R {
+    let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
+    for (index, edge) in graph.edges.iter().enumerate() {
+        incoming[edge.to].push(index);
+    }
+    let mut cx = EvalContext::new(graph, &incoming, None, ScopeMappingCache::default());
+    cx.set_step_limit(limit);
+    body(&mut Evaluator { cx: &mut cx })
+}
+
 /// The scope of the CTE `name`, read from the root query.
 pub(super) fn cte(graph: &RawGraph, name: &str) -> ScopeId {
     let mut scope = ScopeTree::root();
@@ -58,8 +73,8 @@ pub(super) fn slot_ids(model: &OutputModel) -> Vec<SlotId> {
         .collect()
 }
 
-/// A short rendering of origins: `t.a` for a concrete column, the debug form
-/// of anything else.
+/// A short rendering of origins: `t.a` for a concrete column, `?a` for the
+/// unresolved marker of the column `a`, and the debug form of anything else.
 pub(super) fn show(origins: &[ColumnOrigin]) -> Vec<String> {
     origins
         .iter()
@@ -67,7 +82,113 @@ pub(super) fn show(origins: &[ColumnOrigin]) -> Vec<String> {
             ColumnOrigin::Concrete { table, column } => {
                 format!("{}.{}", table.table.value, column.value)
             }
+            ColumnOrigin::Ambiguous { column, candidates } if candidates.is_empty() => {
+                format!("?{}", column.value)
+            }
+            ColumnOrigin::NamedWildcard { table, column } => {
+                format!("{}.*:{}", table.table.value, column.value)
+            }
+            ColumnOrigin::Wildcard { table } => format!("{}.*", table.table.value),
+            ColumnOrigin::UnknownStar => "*?".to_owned(),
             other => format!("{other:?}"),
         })
         .collect()
+}
+
+/// A derived table scope with one output column `name` that reads the column
+/// `read` of the derived table `source` through a whole-row candidate, the
+/// way a reference that the scope's model does not settle is read.
+pub(super) fn derived_reading(
+    graph: &mut RawGraph,
+    name: &str,
+    read: &str,
+    source: Option<ScopeId>,
+) -> (
+    ScopeId,
+    crate::graph::node::NodeId,
+    crate::graph::node::NodeId,
+) {
+    use crate::graph::edge::EdgeKind;
+    use crate::graph::scope::{Binding, ScopeColumn, ScopeKind};
+    let scope = graph
+        .scopes
+        .push(ScopeTree::root(), ScopeKind::DerivedTable);
+    let env = graph.scopes.env(scope);
+    let output = graph.add_output(Ident::unquoted(name), EdgeKind::Direct);
+    let candidate = graph.add_row_value_candidate(
+        Ident::unquoted(read),
+        env,
+        source.map(Binding::DerivedTable),
+    );
+    graph.add_edge(candidate, output, EdgeKind::Direct);
+    graph.scopes.add_output_column(
+        scope,
+        ScopeColumn {
+            name: Ident::unquoted(name),
+            node_id: output,
+        },
+    );
+    (scope, output, candidate)
+}
+
+/// Point the whole-row candidate `candidate` at `source`, once that scope exists.
+pub(super) fn bind_candidate(
+    graph: &mut RawGraph,
+    candidate: crate::graph::node::NodeId,
+    source: ScopeId,
+) {
+    match &mut graph.nodes[candidate] {
+        crate::graph::node::RawNode::RowValueCandidate { binding, .. } => {
+            *binding = Some(crate::graph::scope::Binding::DerivedTable(source));
+        }
+        other => panic!("expected a whole-row candidate, got {other:?}"),
+    }
+}
+
+/// Add an output `name` to the root that reads the column `read` of the
+/// derived table `source`.
+pub(super) fn root_reading(graph: &mut RawGraph, name: &str, read: &str, source: ScopeId) {
+    use crate::graph::edge::EdgeKind;
+    use crate::graph::scope::{Binding, ScopeColumn};
+    let env = graph.scopes.env(ScopeTree::root());
+    let output = graph.add_output(Ident::unquoted(name), EdgeKind::Direct);
+    let reference = graph.add_ref_with_binding(
+        Ident::unquoted(read),
+        None,
+        env,
+        Some(Binding::DerivedTable(source)),
+    );
+    graph.add_edge(reference, output, EdgeKind::Direct);
+    graph.scopes.add_output_column(
+        ScopeTree::root(),
+        ScopeColumn {
+            name: Ident::unquoted(name),
+            node_id: output,
+        },
+    );
+}
+
+/// Two derived tables that read each other: `a.x` is `b.y` and `b.y` is
+/// `a.x`. The root outputs `p` (from `a.x`) and `q` (from `b.y`).
+pub(super) struct Pair {
+    pub graph: RawGraph,
+    pub a: ScopeId,
+    pub b: ScopeId,
+    /// The candidates inside `a` and `b`.
+    pub candidates: [crate::graph::node::NodeId; 2],
+}
+
+pub(super) fn pair() -> Pair {
+    let mut graph = RawGraph::new(Dialect::Generic);
+    let (a, _, a_reads) = derived_reading(&mut graph, "x", "y", None);
+    let (b, _, b_reads) = derived_reading(&mut graph, "y", "x", Some(a));
+    bind_candidate(&mut graph, a_reads, b);
+    root_reading(&mut graph, "p", "x", a);
+    root_reading(&mut graph, "q", "y", b);
+    Pair {
+        graph,
+        a,
+        b,
+        candidates: [a_reads, b_reads],
+    }
 }

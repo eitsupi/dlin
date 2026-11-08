@@ -14,8 +14,17 @@
 //! path, so re-entry is detected no matter which path started the walk. A
 //! detected cycle is not an answer: the caller reports the value as
 //! indeterminate.
+//!
+//! A value computed while a cycle was being cut depends on where the walk
+//! started: entering the cycle elsewhere cuts it elsewhere. Such a value must
+//! not be kept in a cache, or the answer would depend on the order in which
+//! outputs happen to be asked for. Every refused entry is counted, and an
+//! evaluation that saw the count change while it ran has seen a cut and keeps
+//! nothing. That covers the evaluation that was re-entered and every
+//! evaluation above it, because all of them were running when the count
+//! changed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::mapping::ScopeMappingCache;
 use super::model::{SegmentId, SlotId};
@@ -24,7 +33,7 @@ use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::NodeId;
 use crate::graph::scope::ScopeId;
-use crate::types::ColumnOrigin;
+use crate::types::{ColumnMapping, ColumnOrigin, TransformKind};
 
 /// Something whose evaluation can be in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +64,13 @@ impl Budget {
     }
 }
 
+/// What a published column evaluates to, as its own scope states it.
+#[derive(Debug, Clone)]
+pub(super) struct SlotValue {
+    pub sources: Vec<ColumnOrigin>,
+    pub transform: TransformKind,
+}
+
 pub(super) struct EvalContext<'a, 'c> {
     pub graph: &'a RawGraph,
     /// Edges into each node.
@@ -64,8 +80,16 @@ pub(super) struct EvalContext<'a, 'c> {
     pub resolved: Vec<Option<ColumnOrigin>>,
     /// Already computed: the mappings and models of each scope.
     pub mapping_cache: ScopeMappingCache,
+    /// Already computed: the value of each published column.
+    pub slot_values: HashMap<SlotId, SlotValue>,
+    /// Already computed: the mapping a published segment stands for, `None`
+    /// when it stands for no columns. Only the segment as a whole is cached;
+    /// what it contributes under one name depends on the name.
+    pub segment_mappings: HashMap<SegmentId, Option<ColumnMapping>>,
     /// Currently being evaluated.
     stack: HashSet<EvalKey>,
+    /// How many entries were refused so far.
+    cuts: u64,
     budget: Budget,
 }
 
@@ -82,7 +106,10 @@ impl<'a, 'c> EvalContext<'a, 'c> {
             catalog,
             resolved: vec![None; graph.nodes.len()],
             mapping_cache,
+            slot_values: HashMap::new(),
+            segment_mappings: HashMap::new(),
             stack: HashSet::new(),
+            cuts: 0,
             budget: Budget::default(),
         }
     }
@@ -93,10 +120,18 @@ impl<'a, 'c> EvalContext<'a, 'c> {
     /// caller must call [`Self::leave`] with the same key.
     #[must_use]
     pub(super) fn enter(&mut self, key: EvalKey) -> bool {
-        if !self.budget.charge() {
-            return false;
+        if self.budget.charge() && self.stack.insert(key) {
+            return true;
         }
-        self.stack.insert(key)
+        self.cuts += 1;
+        false
+    }
+
+    /// A reading of the cut count. An evaluation that started at one reading
+    /// and finished at another has seen a cut, and what it computed may only
+    /// be returned, not kept.
+    pub(super) fn cut_generation(&self) -> u64 {
+        self.cuts
     }
 
     /// Finish evaluating `key`, which the caller entered.
@@ -124,8 +159,11 @@ mod tests {
         let graph = RawGraph::new(Dialect::Generic);
         let mut cx = context(&graph);
         let key = EvalKey::Node(1);
+        let generation = cx.cut_generation();
         assert!(cx.enter(key));
+        assert_eq!(cx.cut_generation(), generation);
         assert!(!cx.enter(key));
+        assert_ne!(cx.cut_generation(), generation);
         // A different key is independent of the one being evaluated.
         assert!(cx.enter(EvalKey::Mappings(0)));
         cx.leave(EvalKey::Mappings(0));
@@ -140,6 +178,9 @@ mod tests {
         cx.set_step_limit(2);
         assert!(cx.enter(EvalKey::Node(0)));
         assert!(cx.enter(EvalKey::Node(1)));
+        let generation = cx.cut_generation();
         assert!(!cx.enter(EvalKey::Node(2)));
+        // Running out of budget is a cut like re-entry.
+        assert_ne!(cx.cut_generation(), generation);
     }
 }

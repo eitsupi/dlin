@@ -20,6 +20,7 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Opt
     if let Some(ref origin) = cx.resolved[node_id] {
         return Some(origin.clone());
     }
+    let generation = cx.cut_generation();
 
     let origin = match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -69,7 +70,11 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Opt
         RawNode::Output { .. } => None,
     };
 
-    cx.resolved[node_id].clone_from(&origin);
+    // An origin found while a cycle was cut depends on where the walk
+    // started, so it is returned and not kept.
+    if cx.cut_generation() == generation {
+        cx.resolved[node_id].clone_from(&origin);
+    }
     origin
 }
 

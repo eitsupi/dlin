@@ -69,6 +69,13 @@ pub(super) struct ScopeMappingCache {
     pub(super) models: ModelStore,
 }
 
+#[cfg(test)]
+impl ScopeMappingCache {
+    pub(super) fn is_cached(&self, scope: usize) -> bool {
+        self.entries.contains_key(&scope)
+    }
+}
+
 /// Mappings already computed for a scope. A scope still being computed is on
 /// the evaluation stack instead, so an entry here is always complete.
 type ScopeMappingEntry = Arc<[ColumnMapping]>;
@@ -88,28 +95,45 @@ pub(super) fn scope_mapping_computations() -> usize {
     SCOPE_MAPPING_COMPUTATIONS.with(Cell::get)
 }
 
+/// The mappings of a scope that is being computed, or that the budget no
+/// longer allows computing, cannot be known. This is not an empty list of
+/// mappings: a caller has to turn it into an unresolved value of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cut;
+
 /// Resolve a scope's output plan into ordered mappings. Set-operation
 /// branches are resolved independently so catalog expansion happens before
 /// their positional merge.
+///
+/// A result computed while a cycle was cut depends on where the walk started
+/// and is returned without being kept.
 pub(super) fn resolve_scope_mappings(
     scope: usize,
     cx: &mut EvalContext<'_, '_>,
-) -> Arc<[ColumnMapping]> {
+) -> Result<Arc<[ColumnMapping]>, Cut> {
     if let Some(mappings) = cx.mapping_cache.entries.get(&scope) {
-        return mappings.clone();
+        return Ok(mappings.clone());
     }
-    // A scope that is being computed cannot safely publish a partially
-    // materialized result. Returning no mappings does not cache an incomplete
-    // entry as resolved.
-    // TODO: re-entry or an exhausted budget must surface as an unresolved
-    // value, not as an empty list that readers treat as "no dependencies".
+    let generation = cx.cut_generation();
     if !cx.enter(EvalKey::Mappings(scope)) {
-        return Arc::from([]);
+        return Err(Cut);
     }
-    let graph = cx.graph;
     #[cfg(test)]
     SCOPE_MAPPING_COMPUTATIONS.with(|computations| computations.set(computations.get() + 1));
+    let computed = compute_scope_mappings(scope, cx);
+    cx.leave(EvalKey::Mappings(scope));
+    let mappings: Arc<[ColumnMapping]> = computed?.into();
+    if cx.cut_generation() == generation {
+        cx.mapping_cache.entries.insert(scope, mappings.clone());
+    }
+    Ok(mappings)
+}
 
+fn compute_scope_mappings(
+    scope: usize,
+    cx: &mut EvalContext<'_, '_>,
+) -> Result<Vec<ColumnMapping>, Cut> {
+    let graph = cx.graph;
     let mappings = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => {
             let mut mappings = Vec::new();
@@ -174,7 +198,7 @@ pub(super) fn resolve_scope_mappings(
             }
             mappings
         }
-        OutputPlan::Delegate(child) => resolve_scope_mappings(child, cx).iter().cloned().collect(),
+        OutputPlan::Delegate(child) => resolve_scope_mappings(child, cx)?.iter().cloned().collect(),
         OutputPlan::SetOperation {
             left,
             right,
@@ -185,7 +209,7 @@ pub(super) fn resolve_scope_mappings(
                     .scope(scope)
                     .unknown_reasons
                     .clone();
-            let left_mappings = resolve_scope_mappings(left, cx)
+            let left_mappings = resolve_scope_mappings(left, cx)?
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
@@ -207,7 +231,7 @@ pub(super) fn resolve_scope_mappings(
                     })
                     .collect()
             } else {
-                let right_mappings = resolve_scope_mappings(right, cx)
+                let right_mappings = resolve_scope_mappings(right, cx)?
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>();
@@ -229,10 +253,7 @@ pub(super) fn resolve_scope_mappings(
             merged
         }
     };
-    let mappings: Arc<[ColumnMapping]> = mappings.into();
-    cx.leave(EvalKey::Mappings(scope));
-    cx.mapping_cache.entries.insert(scope, mappings.clone());
-    mappings
+    Ok(mappings)
 }
 
 /// Align set-operation contributions only where both mappings carry the same
