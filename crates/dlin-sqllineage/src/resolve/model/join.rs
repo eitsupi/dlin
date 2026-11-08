@@ -236,7 +236,8 @@ fn take_key(
                         table: table.clone(),
                         column: key.clone(),
                     }),
-                    UnknownProvider::Scope { scope, .. } => {
+                    UnknownProvider::Segment { scope, .. }
+                    | UnknownProvider::SetOperation { op: scope, .. } => {
                         if !values.iter().any(
                             |value| matches!(value, ValueId::ScopeName { scope: seen, .. } if seen == scope),
                         ) {

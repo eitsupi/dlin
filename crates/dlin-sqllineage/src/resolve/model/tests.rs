@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use super::{
-    InputLookup, ModelStore, OutputElement, OutputModel, OutputModels, SegmentId, SlotId,
-    UnknownProvider, ValueId, Width,
+    Forwarding, InputLookup, ModelStore, OutputElement, OutputModel, OutputModels, OutputRef,
+    SegmentId, SlotId, UnknownProvider, ValueId, Width,
 };
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
@@ -323,7 +323,13 @@ fn scope_models_are_built_once_and_forward_child_slots() {
     let OutputElement::Column(slot) = &root.elements[0] else {
         unreachable!();
     };
-    assert!(matches!(slot.value, ValueId::ScopeSlot { index: 0, .. }));
+    // The root forwards the CTE's first column, not whatever has its name.
+    let ValueId::Forward(child) = slot.value else {
+        panic!("expected a forwarded column, got {:?}", slot.value);
+    };
+    let child = store.arena.slot(child);
+    assert_eq!(child.index, 0);
+    assert_eq!(child.name, Ident::unquoted("x"));
 }
 
 #[test]
@@ -540,11 +546,11 @@ fn chain(graph: &RawGraph, store: &mut ModelStore, root: &Rc<OutputModel>) -> Ve
     loop {
         let scope = match models.last().and_then(|model| model.elements.first()) {
             Some(OutputElement::Column(slot)) => match slot.value {
-                ValueId::ScopeSlot { scope, .. } => scope,
+                ValueId::Forward(id) => store.arena.slot(id).owner,
                 _ => break,
             },
             Some(OutputElement::Unknown(segment)) => match segment.provider {
-                UnknownProvider::Scope { scope, .. } => scope,
+                UnknownProvider::Segment { scope, .. } => scope,
                 _ => break,
             },
             _ => break,
@@ -602,14 +608,15 @@ fn anonymous_columns_are_published_under_different_ids_in_every_scope() {
     assert!(ids.iter().all(|ids| ids.len() == 2));
     // Every reader publishes new ids, defined by the column it forwards.
     assert!(all_distinct(&ids.concat()), "{ids:?}");
-    for ids in &ids[..2] {
-        for (index, id) in ids.iter().enumerate() {
+    for (reader, child) in ids.iter().zip(&ids[1..]) {
+        for (index, (id, forwarded)) in reader.iter().zip(child).enumerate() {
             let def = store.arena.slot(*id);
             assert_eq!(def.index, index);
-            assert!(matches!(
-                def.value,
-                ValueId::ScopeSlot { index: forwarded, .. } if forwarded == index
-            ));
+            assert!(
+                matches!(def.value, ValueId::Forward(target) if target == *forwarded),
+                "{:?}",
+                def.value
+            );
         }
     }
     for id in &ids[2] {
@@ -654,7 +661,7 @@ fn two_stars_of_one_relation_are_two_segments() {
     let ids = segment_ids(&root);
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
-    let [first, second] = [0, 1].map(|index| store.arena.segment(ids[index]).clone());
+    let [first, second] = [0, 1].map(|index| store.arena.segment(ids[index]));
     assert!(matches!(
         (&first.provider, &second.provider),
         (UnknownProvider::Relation(a), UnknownProvider::Relation(b)) if a == b
@@ -689,4 +696,67 @@ fn the_model_of_a_cut_cycle_publishes_its_segment() {
     let ids = segment_ids(&root);
     assert!(!ids.is_empty());
     assert!(all_distinct(&ids));
+}
+
+/// A reader whose `forwarded` pairs are `pairs`, checked against the model of
+/// the root CTE `c` it claims to forward.
+fn check_forwarding_of(
+    mut pairs: impl FnMut(&[SlotId], &[SlotId]) -> Vec<Forwarding>,
+) -> Result<(), &'static str> {
+    let graph = graph("WITH c AS (SELECT t.a AS x, t.b AS y FROM t) SELECT * FROM c");
+    let mut store = ModelStore::default();
+    let root = OutputModels::new(&graph, None, &mut store).scope(ScopeTree::root());
+    let OutputPlan::Delegate(body) = *graph.scopes.output_plan(ScopeTree::root()) else {
+        panic!("the root delegates to its body");
+    };
+    let body_model = scope_model(&graph, &mut store, body);
+    let mut reader = OutputModel::new(Vec::new(), Vec::new(), Dialect::Generic);
+    reader.forwarded = pairs(&slot_ids(&body_model), &slot_ids(&root));
+    reader.check_forwarding(&store.arena, ScopeTree::root(), body, &body_model)
+}
+
+fn pair(from: SlotId, to: SlotId) -> Forwarding {
+    Forwarding {
+        from: OutputRef::Slot(from),
+        to: OutputRef::Slot(to),
+    }
+}
+
+#[test]
+fn a_complete_correspondence_is_consistent() {
+    assert_eq!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[1], root[1])]),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_forwarded_output_without_a_correspondence_is_detected() {
+    assert!(check_forwarding_of(|body, root| vec![pair(body[0], root[0])]).is_err());
+}
+
+#[test]
+fn an_output_forwarded_twice_is_detected() {
+    assert!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[0], root[1])])
+            .is_err()
+    );
+    assert!(
+        check_forwarding_of(|body, root| vec![pair(body[0], root[0]), pair(body[1], root[0])])
+            .is_err()
+    );
+}
+
+#[test]
+fn an_output_of_another_scope_is_detected() {
+    // The reader's own outputs are not the forwarded scope's.
+    assert!(
+        check_forwarding_of(|body, _| vec![pair(body[0], body[0]), pair(body[1], body[1])])
+            .is_err()
+    );
+    // And the forwarded outputs are not the reader's.
+    assert!(
+        check_forwarding_of(|_, root| vec![pair(root[0], root[0]), pair(root[1], root[1])])
+            .is_err()
+    );
 }

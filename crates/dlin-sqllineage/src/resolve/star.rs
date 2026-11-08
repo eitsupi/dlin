@@ -5,20 +5,20 @@
 //! into lineage: it never re-reads EXCLUDE/ILIKE/REPLACE/RENAME or join
 //! merges.
 
+mod slot_eval;
+
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding};
-use super::context::{EvalContext, EvalKey};
-use super::lineage::{collect_leaf_origins, collect_output_sources, flatten_mapping_sources};
-use super::mapping::{
-    known_empty_dependency, merge_transform, resolve_scope_mappings, wildcard_mapping,
-};
+use super::context::EvalContext;
+use super::lineage::{collect_leaf_origins, collect_output_sources};
+use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
-    BranchTail, Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, RangeRef, UnknownProvider, UnknownSegment, ValueId,
+    Choice, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel, OutputModels,
+    RangeRef, UnknownProvider, UnknownSegment, ValueId,
 };
-use super::target::{StarTarget, resolve_star_target, same_column_name};
+use super::target::{StarTarget, resolve_star_target};
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, VirtualColumnState};
@@ -100,6 +100,15 @@ pub(super) fn input_name_sources(
     Evaluator { cx }.input(lookup, name)
 }
 
+/// The id of the column at `index` of a published model, which the model's
+/// name lookup returned.
+fn listed_slot(model: &OutputModel, index: usize) -> super::model::SlotId {
+    match &model.elements[index] {
+        OutputElement::Column(slot) => slot.published(),
+        _ => unreachable!("a name lookup returns the index of a listed column"),
+    }
+}
+
 /// `ColumnOrigin` has no equality of its own; its debug form covers every field.
 /// Two relations often reach the same underlying column, and a merged column
 /// lists it once. Distinct spellings stay apart.
@@ -147,10 +156,8 @@ impl Evaluator<'_, '_, '_> {
                 );
                 (sources, transform)
             }
-            ValueId::ScopeSlot { scope, index } | ValueId::SetOperation { scope, index } => {
-                let (sources, _, transform) = self.scope_slot(*scope, *index, false);
-                (sources, transform)
-            }
+            ValueId::Forward(id) => self.slot_value(*id),
+            ValueId::SetMerged { op, left } => self.merged_slot_value(*op, *left),
             ValueId::SchemaDependent { value, relations } => {
                 let (mut sources, transform) = value.as_deref().map_or_else(
                     || (Vec::new(), TransformKind::Direct),
@@ -222,7 +229,7 @@ impl Evaluator<'_, '_, '_> {
                 false,
                 TransformKind::Direct,
             ),
-            ValueId::ScopeSlot { scope, index } => self.scope_slot(*scope, *index, true),
+            ValueId::Forward(id) => self.slot_read(*id),
             ValueId::SchemaDependent { value, relations } => {
                 let (mut sources, has_back, transform) = value.as_deref().map_or_else(
                     || (Vec::new(), false, TransformKind::Direct),
@@ -326,7 +333,9 @@ impl Evaluator<'_, '_, '_> {
     ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
         let model = self.scope_model(scope);
         match model.choose(name) {
-            Choice::Column(index, _) => return Some(self.scope_slot(scope, index, true)),
+            Choice::Column(index, _) => {
+                return Some(self.slot_read(listed_slot(&model, index)));
+            }
             Choice::Ambiguous(ambiguity) => {
                 let mut candidates = ambiguity.candidates;
                 if candidates.is_empty() {
@@ -341,7 +350,7 @@ impl Evaluator<'_, '_, '_> {
                 }
                 let mut transform = TransformKind::Direct;
                 for &index in &ambiguity.listed {
-                    let (_, _, listed) = self.scope_slot(scope, index, true);
+                    let (_, _, listed) = self.slot_read(listed_slot(&model, index));
                     transform = merge_transform(&transform, &listed);
                 }
                 let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
@@ -369,190 +378,21 @@ impl Evaluator<'_, '_, '_> {
         }
     }
 
-    /// The value of a scope's output column at the position its model lists
-    /// it, with whether it reads the recursive CTE it belongs to. A set
-    /// operation can merge more or fewer mappings than its left operand lists
-    /// columns, so its mappings are matched by name instead. `flatten` unwraps
-    /// the recursive marker of a set operation's mapping.
-    fn scope_slot(
-        &mut self,
-        scope: ScopeId,
-        index: usize,
-        flatten: bool,
-    ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
-        let model = self.scope_model(scope);
-        // TODO: an index that names no listed column must surface as an
-        // unresolved value, not as an empty, direct source list.
-        let Some(OutputElement::Column(slot)) = model.elements.get(index) else {
-            return (Vec::new(), false, TransformKind::Direct);
-        };
-        let ambiguous = || {
-            (
-                vec![ColumnOrigin::Ambiguous {
-                    column: slot.name.clone(),
-                    candidates: Vec::new(),
-                }],
-                false,
-                TransformKind::Direct,
-            )
-        };
-        if !self.cx.enter(EvalKey::Slot { scope, index }) {
-            return ambiguous();
-        }
-        let result = if matches!(
-            self.cx.graph.scopes.output_plan(scope),
-            OutputPlan::SetOperation { .. }
-        ) {
-            let mappings = self.scope_mappings(scope);
-            let found = if mappings.len() >= model.listed_len() {
-                mappings.get(index)
-            } else {
-                mappings.iter().find(|mapping| {
-                    mapping.output_name.is_some()
-                        && same_column_name(
-                            &mapping.target.column,
-                            &slot.name,
-                            self.cx.graph.dialect,
-                        )
-                })
-            };
-            found.map_or_else(ambiguous, |mapping| {
-                if flatten {
-                    let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-                    (sources, has_back, mapping.transform.clone())
-                } else {
-                    (mapping.sources.clone(), false, mapping.transform.clone())
-                }
-            })
-        } else {
-            let (sources, transform) = self.value(&slot.value);
-            (sources, false, transform)
-        };
-        self.cx.leave(EvalKey::Slot { scope, index });
-        result
-    }
-
-    /// The origins of the first right-operand column of a set operation that
-    /// has the name `name`.
-    fn tail_named(
-        &mut self,
-        model: &OutputModel,
-        name: &Ident,
-    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let dialect = self.cx.graph.dialect;
-        for element in &model.elements {
-            let OutputElement::Tail(tail) = element else {
-                continue;
-            };
-            if let Some(mapping) = self.tail_mappings(tail).into_iter().find(|mapping| {
-                mapping.output_name.is_some()
-                    && same_column_name(&mapping.target.column, name, dialect)
-            }) {
-                let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
-                return Some((sources, has_back, mapping.transform));
-            }
-        }
-        None
-    }
-
-    /// The mappings a set operation merges in beyond those its left operand
-    /// lists, minus the names the star's modifiers rule out.
-    fn tail_mappings(&mut self, tail: &BranchTail) -> Vec<ColumnMapping> {
-        let aligned = self.aligned_len(tail.scope);
-        let dialect = self.cx.graph.dialect;
-        self.scope_mappings(tail.scope)
-            .iter()
-            .skip(aligned)
-            .filter(|mapping| {
-                mapping.output_name.is_none() || tail.domain.admits(&mapping.target.column, dialect)
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// What the right operand of a set operation merges in under `column`:
-    /// the origins of mappings with that name, and a named wildcard for each
-    /// relation it hides behind a star. A tail that has neither leaves the
-    /// column unresolved.
-    fn tail_column(&mut self, scope: ScopeId, column: &Ident) -> Vec<ColumnOrigin> {
-        let aligned = self.aligned_len(scope);
-        let dialect = self.cx.graph.dialect;
-        let mut sources = Vec::new();
-        for mapping in self.scope_mappings(scope).iter().skip(aligned) {
-            if mapping.output_name.is_none() {
-                for source in &mapping.sources {
-                    if let ColumnOrigin::Wildcard { table } = source {
-                        sources.push(ColumnOrigin::NamedWildcard {
-                            table: table.clone(),
-                            column: column.clone(),
-                        });
-                    }
-                }
-            } else if same_column_name(&mapping.target.column, column, dialect) {
-                sources.extend(mapping.sources.iter().cloned());
-            }
-        }
-        if sources.is_empty() {
-            sources.push(ColumnOrigin::Ambiguous {
-                column: column.clone(),
-                candidates: Vec::new(),
-            });
-        }
-        sources
-    }
-
-    /// How many leading mappings of a scope stand for the columns its model
-    /// lists; a set operation appends what its right operand adds after them.
-    fn aligned_len(&mut self, scope: ScopeId) -> usize {
-        match self.cx.graph.scopes.output_plan(scope) {
-            OutputPlan::Projection => self.scope_mappings(scope).len(),
-            OutputPlan::Delegate(child) => self.aligned_len(*child),
-            OutputPlan::SetOperation { left, .. } => self.aligned_len(*left),
-        }
-    }
-
-    fn scope_mappings(&mut self, scope: ScopeId) -> std::sync::Arc<[ColumnMapping]> {
-        resolve_scope_mappings(scope, self.cx)
-    }
-
-    /// The mapping standing for an unknown element of a scope's output.
-    fn unknown_slot(&mut self, scope: ScopeId, index: usize) -> Option<ColumnMapping> {
-        let model = self.scope_model(scope);
-        let Some(OutputElement::Unknown(segment)) = model.elements.get(index) else {
-            return None;
-        };
-        if !matches!(
-            self.cx.graph.scopes.output_plan(scope),
-            OutputPlan::SetOperation { .. }
-        ) {
-            // TODO: re-entry must surface as an unresolved value, not as a
-            // missing mapping that reads as "nothing published".
-            if !self.cx.enter(EvalKey::Slot { scope, index }) {
-                return None;
-            }
-            let mapping = self.unknown_mapping(segment);
-            self.cx.leave(EvalKey::Slot { scope, index });
-            return mapping;
-        }
-        let mappings = self.scope_mappings(scope);
-        if mappings.len() >= model.listed_len() {
-            return mappings.get(index).cloned();
-        }
-        let ordinal = model.elements[..index]
-            .iter()
-            .filter(|element| matches!(element, OutputElement::Unknown(_)))
-            .count();
-        mappings
-            .iter()
-            .filter(|mapping| mapping.output_name.is_none())
-            .nth(ordinal)
-            .cloned()
-    }
-
     fn unknown_mapping(&mut self, segment: &UnknownSegment) -> Option<ColumnMapping> {
-        let mut mapping = match &segment.provider {
+        self.provider_mapping(&segment.provider, segment.position)
+    }
+
+    /// The mapping a segment with this provider stands for, at `position`
+    /// unless the provider knows a position of its own.
+    fn provider_mapping(
+        &mut self,
+        provider: &UnknownProvider,
+        position: crate::types::StarPosition,
+    ) -> Option<ColumnMapping> {
+        let mut mapping = match provider {
             UnknownProvider::Relation(table) => Some(wildcard_mapping(None, (**table).clone())),
-            UnknownProvider::Scope { scope, index } => self.unknown_slot(*scope, *index),
+            UnknownProvider::Segment { id, .. }
+            | UnknownProvider::SetOperation { left: id, .. } => self.segment_mapping(*id),
             UnknownProvider::Opaque(
                 reason @ (OpaqueReason::FieldPath(star)
                 | OpaqueReason::Expression(star)
@@ -561,9 +401,9 @@ impl Evaluator<'_, '_, '_> {
             UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
         };
         if let Some(mapping) = &mut mapping
-            && !matches!(segment.position, crate::types::StarPosition::Inferred)
+            && !matches!(position, crate::types::StarPosition::Inferred)
         {
-            mapping.star_position = segment.position;
+            mapping.star_position = position;
         }
         mapping
     }
@@ -660,36 +500,8 @@ impl Evaluator<'_, '_, '_> {
                 table: (**table).clone(),
                 column: column.clone(),
             }],
-            UnknownProvider::Scope { scope, index } => {
-                // TODO: re-entry must surface as an unresolved value, not as
-                // an empty source list.
-                if !self.cx.enter(EvalKey::Slot {
-                    scope: *scope,
-                    index: *index,
-                }) {
-                    return Vec::new();
-                }
-                let model = self.scope_model(*scope);
-                let mut sources = match model.elements.get(*index) {
-                    Some(OutputElement::Unknown(segment)) => {
-                        self.provider_sources(&segment.provider, column)
-                    }
-                    _ => Vec::new(),
-                };
-                // The right operand of a set operation contributes to every
-                // position, though the model lists only the left one.
-                if let OutputPlan::SetOperation { right, .. } =
-                    self.cx.graph.scopes.output_plan(*scope)
-                    && let Unlisted::Sources(more) = self.unlisted(*right, column)
-                {
-                    sources.extend(more);
-                }
-                self.cx.leave(EvalKey::Slot {
-                    scope: *scope,
-                    index: *index,
-                });
-                sources
-            }
+            UnknownProvider::Segment { id, .. }
+            | UnknownProvider::SetOperation { left: id, .. } => self.segment_sources(*id, column),
             UnknownProvider::Opaque(_) => Vec::new(),
         }
     }

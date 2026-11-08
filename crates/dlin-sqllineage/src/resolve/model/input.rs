@@ -547,7 +547,7 @@ impl OutputModels<'_, '_, '_> {
         let mut anonymous = Vec::new();
         for child in graph.scopes.anonymous_derived(env) {
             let model = self.scope(child);
-            anonymous.extend(forward_scope(child, &model, &Rc::from([]), false));
+            anonymous.extend(forward_scope(child, &model, &Rc::from([]), None));
         }
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;

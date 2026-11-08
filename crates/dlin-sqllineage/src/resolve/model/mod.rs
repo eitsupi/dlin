@@ -22,7 +22,7 @@ pub(super) use build::{ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::{InputLookup, RangeRef};
-pub(super) use slot::{SegmentId, SlotId};
+pub(super) use slot::{Forwarding, OutputRef, SegmentId, SlotId};
 
 use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
@@ -56,13 +56,14 @@ pub(super) enum ValueId {
     Physical { table: Rc<TableRef>, column: Ident },
     /// The expression of an output column or a REPLACE item.
     Expr(NodeId),
-    /// A slot of a CTE or derived table.
-    ScopeSlot { scope: ScopeId, index: usize },
+    /// A column that a CTE or derived table publishes, as its reader sees it.
+    Forward(SlotId),
     /// A column a USING key takes from a CTE or derived table that lists no
     /// slot of that name, found the way a direct reference finds it.
     ScopeName { scope: ScopeId, column: Ident },
-    /// A slot of a set operation, which combines the operands positionally.
-    SetOperation { scope: ScopeId, index: usize },
+    /// A column of a set operation, which combines its operands positionally:
+    /// the merge of `op` standing for the column of its left operand.
+    SetMerged { op: ScopeId, left: SlotId },
     /// A column of a virtual source such as a lateral expansion.
     VirtualColumn {
         source: VirtualSourceId,
@@ -97,8 +98,12 @@ pub(super) enum ValueId {
 pub(super) enum UnknownProvider {
     /// A physical relation without catalog columns.
     Relation(Rc<TableRef>),
-    /// An unknown element of a CTE or derived table.
-    Scope { scope: ScopeId, index: usize },
+    /// A segment that a CTE or derived table publishes, as its reader sees
+    /// it. `scope` is the publisher.
+    Segment { scope: ScopeId, id: SegmentId },
+    /// A segment of a set operation: the merge of `op` standing for the
+    /// segment of its left operand.
+    SetOperation { op: ScopeId, left: SegmentId },
     /// A shape the analysis does not model.
     Opaque(OpaqueReason),
 }
@@ -171,7 +176,6 @@ pub(super) struct ColumnSlot {
     /// The identity the owning scope gave the column when it published its
     /// model. `None` in star models and in the models of FROM clauses, which
     /// are views of other scopes' outputs and publish nothing themselves.
-    #[allow(dead_code, reason = "ids are published before any reader follows them")]
     pub id: Option<SlotId>,
     /// The name the column is published under.
     pub name: Ident,
@@ -194,7 +198,6 @@ pub(super) struct ColumnSlot {
 pub(super) struct UnknownSegment {
     /// The identity the owning scope gave the segment when it published its
     /// model; `None` wherever [`ColumnSlot::id`] is.
-    #[allow(dead_code, reason = "ids are published before any reader follows them")]
     pub id: Option<SegmentId>,
     /// Physical schemas responsible for this interval, retained across scopes.
     pub schema_relations: Vec<crate::Relation>,
@@ -204,7 +207,38 @@ pub(super) struct UnknownSegment {
     pub domain: NameDomain,
 }
 
+impl ColumnSlot {
+    /// The identity of a column of a published model.
+    pub(super) fn published(&self) -> SlotId {
+        self.id
+            .expect("only the columns of published models are read")
+    }
+
+    /// The published column this one forwards, when it forwards one.
+    fn forwards(&self) -> Option<OutputRef> {
+        match self.value {
+            ValueId::Forward(id) | ValueId::SetMerged { left: id, .. } => Some(OutputRef::Slot(id)),
+            _ => None,
+        }
+    }
+}
+
 impl UnknownSegment {
+    /// The identity of a segment of a published model.
+    pub(super) fn published(&self) -> SegmentId {
+        self.id
+            .expect("only the segments of published models are read")
+    }
+
+    /// The published segment this one forwards, when it forwards one.
+    fn forwards(&self) -> Option<OutputRef> {
+        match self.provider {
+            UnknownProvider::Segment { id, .. }
+            | UnknownProvider::SetOperation { left: id, .. } => Some(OutputRef::Segment(id)),
+            _ => None,
+        }
+    }
+
     fn opaque(reason: OpaqueReason) -> Self {
         Self {
             id: None,
@@ -264,6 +298,10 @@ pub(super) struct OutputModel {
     /// index of the range that reads them. The elements a range contributes are
     /// weighed by the model they came from.
     pub reads: Vec<(usize, Rc<OutputModel>)>,
+    /// For a scope that only re-expresses one other scope's output (a
+    /// delegating scope, the merge of a set operation), which output of that
+    /// scope each of its own outputs stands for. Empty for every other model.
+    pub forwarded: Vec<Forwarding>,
 }
 
 /// The elements of a model that may carry one name.
@@ -304,6 +342,7 @@ impl OutputModel {
             unknown_reasons,
             invalid: Vec::new(),
             reads: Vec::new(),
+            forwarded: Vec::new(),
         }
     }
 
@@ -313,6 +352,45 @@ impl OutputModel {
             Vec::new(),
             dialect,
         )
+    }
+
+    /// Whether `forwarded` pairs every output that `source` publishes with
+    /// exactly one output of this model, which `owner` publishes. A model
+    /// that fails this has lost track of which output is which.
+    pub(super) fn check_forwarding(
+        &self,
+        arena: &slot::SlotArena,
+        owner: ScopeId,
+        source_scope: ScopeId,
+        source: &OutputModel,
+    ) -> Result<(), &'static str> {
+        for (index, pair) in self.forwarded.iter().enumerate() {
+            if arena.owner(pair.from) != source_scope {
+                return Err("a forwarded output is not published by the forwarded scope");
+            }
+            if arena.owner(pair.to) != owner {
+                return Err("a forwarding output is not published by the reader");
+            }
+            if self.forwarded[..index]
+                .iter()
+                .any(|seen| seen.from == pair.from || seen.to == pair.to)
+            {
+                return Err("an output is forwarded twice");
+            }
+        }
+        let source: Vec<_> = source
+            .elements
+            .iter()
+            .filter_map(OutputElement::output_ref)
+            .collect();
+        if source.len() != self.forwarded.len()
+            || !source
+                .iter()
+                .all(|output| self.forwarded.iter().any(|pair| pair.from == *output))
+        {
+            return Err("an output of the forwarded scope has no correspondence");
+        }
+        Ok(())
     }
 
     /// The number of elements that stand for a column or a segment of the
@@ -384,6 +462,26 @@ impl OutputModel {
 struct Group {
     members: Vec<Ident>,
     elements: Vec<OutputElement>,
+}
+
+impl OutputElement {
+    /// The published output this element forwards, when it forwards one.
+    pub(super) fn forwards(&self) -> Option<OutputRef> {
+        match self {
+            Self::Column(slot) => slot.forwards(),
+            Self::Unknown(segment) => segment.forwards(),
+            Self::Tail(_) => None,
+        }
+    }
+
+    /// This element's own identity, once its scope has published it.
+    pub(super) fn output_ref(&self) -> Option<OutputRef> {
+        match self {
+            Self::Column(slot) => slot.id.map(OutputRef::Slot),
+            Self::Unknown(segment) => segment.id.map(OutputRef::Segment),
+            Self::Tail(_) => None,
+        }
+    }
 }
 
 /// The providers and range variables of the unknown segments that may publish

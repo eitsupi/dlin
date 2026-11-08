@@ -28,9 +28,26 @@ pub(in crate::resolve) struct SlotId(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(in crate::resolve) struct SegmentId(u32);
 
+/// A published column or segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(in crate::resolve) enum OutputRef {
+    Slot(SlotId),
+    Segment(SegmentId),
+}
+
+/// A published output of a reader and the output of the scope it forwards
+/// that it stands for. Readers record it when they publish, from the target
+/// each forwarded element names, never by comparing positions afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::resolve) struct Forwarding {
+    /// The forwarded scope's output.
+    pub from: OutputRef,
+    /// The reader's own output.
+    pub to: OutputRef,
+}
+
 /// The definition of a published column.
 #[derive(Debug)]
-#[allow(dead_code, reason = "ids are published before any reader follows them")]
 pub(in crate::resolve) struct SlotDef {
     /// The scope whose model publishes the column.
     pub owner: ScopeId,
@@ -44,10 +61,11 @@ pub(in crate::resolve) struct SlotDef {
 
 /// The definition of a published segment.
 #[derive(Debug)]
-#[allow(dead_code, reason = "ids are published before any reader follows them")]
 pub(in crate::resolve) struct SegmentDef {
     /// The scope whose model publishes the segment.
     pub owner: ScopeId,
+    /// The segment's element index in the owner's model, tails included.
+    pub index: usize,
     pub provider: UnknownProvider,
     /// The position the owner's model gives the segment.
     pub position: StarPosition,
@@ -78,13 +96,22 @@ impl SlotArena {
         id
     }
 
-    #[cfg(test)]
-    pub(super) fn slot(&self, id: SlotId) -> &Rc<SlotDef> {
-        &self.slots[id.0 as usize]
+    /// The definition of a published column. An id comes from this arena, so
+    /// every id has a definition.
+    pub(in crate::resolve) fn slot(&self, id: SlotId) -> Rc<SlotDef> {
+        self.slots[id.0 as usize].clone()
     }
 
-    #[cfg(test)]
-    pub(super) fn segment(&self, id: SegmentId) -> &Rc<SegmentDef> {
-        &self.segments[id.0 as usize]
+    /// The definition of a published segment.
+    pub(in crate::resolve) fn segment(&self, id: SegmentId) -> Rc<SegmentDef> {
+        self.segments[id.0 as usize].clone()
+    }
+
+    /// The scope that published `output`.
+    pub(in crate::resolve) fn owner(&self, output: OutputRef) -> ScopeId {
+        match output {
+            OutputRef::Slot(id) => self.slots[id.0 as usize].owner,
+            OutputRef::Segment(id) => self.segments[id.0 as usize].owner,
+        }
     }
 }

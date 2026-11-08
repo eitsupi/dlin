@@ -18,6 +18,7 @@
 use std::collections::HashSet;
 
 use super::mapping::ScopeMappingCache;
+use super::model::{SegmentId, SlotId};
 
 use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
@@ -30,8 +31,10 @@ use crate::types::ColumnOrigin;
 pub(super) enum EvalKey {
     /// The sources collected for a node.
     Node(NodeId),
-    /// The value of an output slot of a scope.
-    Slot { scope: ScopeId, index: usize },
+    /// The value of a published column.
+    Slot(SlotId),
+    /// What a published segment contributes.
+    Segment(SegmentId),
     /// The mappings of a scope.
     Mappings(ScopeId),
 }
@@ -120,7 +123,7 @@ mod tests {
     fn re_entering_a_key_on_the_stack_is_refused_and_finished_keys_can_be_entered_again() {
         let graph = RawGraph::new(Dialect::Generic);
         let mut cx = context(&graph);
-        let key = EvalKey::Slot { scope: 0, index: 1 };
+        let key = EvalKey::Node(1);
         assert!(cx.enter(key));
         assert!(!cx.enter(key));
         // A different key is independent of the one being evaluated.

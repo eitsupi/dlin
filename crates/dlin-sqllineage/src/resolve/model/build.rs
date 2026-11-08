@@ -10,8 +10,8 @@ use super::input::{InputModel, Invalidity};
 use super::options::apply_options;
 use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
-    BranchTail, ColumnSlot, NameDomain, OpaqueReason, OutputElement, OutputModel, RangeRef,
-    SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
+    BranchTail, ColumnSlot, Forwarding, NameDomain, OpaqueReason, OutputElement, OutputModel,
+    RangeRef, SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
@@ -36,7 +36,7 @@ pub(super) enum CacheKey {
 /// has published.
 #[derive(Default)]
 pub(in crate::resolve) struct ModelStore {
-    pub(super) arena: SlotArena,
+    pub(in crate::resolve) arena: SlotArena,
     scopes: HashMap<ScopeId, Rc<OutputModel>>,
     pub(super) inputs: HashMap<BindingEnv, Rc<InputModel>>,
     stars: HashMap<NodeId, Rc<OutputModel>>,
@@ -134,6 +134,8 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let graph = self.graph;
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
+        // The scope and the model whose output this scope only re-expresses.
+        let mut source = None;
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
@@ -185,7 +187,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             OutputPlan::Delegate(child) => {
                 let model = self.scope(*child);
                 invalid.push(Invalidity::Whole(model.clone()));
-                forward_scope(*child, &model, &Rc::from([]), false)
+                let elements = forward_scope(*child, &model, &Rc::from([]), None);
+                source = Some((*child, model));
+                elements
             }
             // The left operand defines the names of a set operation.
             OutputPlan::SetOperation {
@@ -193,7 +197,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             } => {
                 let model = self.scope(*left);
                 invalid.push(Invalidity::Whole(model.clone()));
-                let mut elements = forward_scope(*left, &model, &Rc::from([]), true);
+                let mut elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
                 if !recursive {
                     // This operation's tail covers whatever the left operand
                     // already carried.
@@ -204,6 +208,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         domain: NameDomain::default(),
                     }));
                 }
+                source = Some((*left, model));
                 elements
             }
         };
@@ -218,7 +223,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
-        self.publish(scope, &mut elements);
+        let forwarded = self.publish(scope, &mut elements);
         let mut model = OutputModel::new(
             elements,
             graph.scopes.unknown_output_reasons(scope),
@@ -226,17 +231,30 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         );
         model.invalid = invalid;
         model.reads = reads;
+        if let Some((source_scope, source)) = source {
+            model.forwarded = forwarded;
+            if let Err(problem) =
+                model.check_forwarding(&self.store.arena, scope, source_scope, &source)
+            {
+                debug_assert!(false, "scope {scope} publishes inconsistently: {problem}");
+            }
+        }
         model
     }
 
     /// Give each column and segment of a scope's model its identity and record
     /// its definition. The elements of star and FROM-clause models are views
     /// of other outputs and are never published.
-    fn publish(&mut self, scope: ScopeId, elements: &mut [OutputElement]) {
+    ///
+    /// An element copied from another model (a star's, or a forwarded
+    /// scope's) may still carry an identity that belongs to that model, so
+    /// every element gets a new one. Returns which published output each
+    /// element that forwards one stands for.
+    fn publish(&mut self, scope: ScopeId, elements: &mut [OutputElement]) -> Vec<Forwarding> {
+        let mut forwarded = Vec::new();
         for (index, element) in elements.iter_mut().enumerate() {
             match element {
                 OutputElement::Column(slot) => {
-                    debug_assert!(slot.id.is_none(), "a column is published once");
                     slot.id = Some(self.store.arena.add_slot(SlotDef {
                         owner: scope,
                         name: slot.name.clone(),
@@ -245,16 +263,20 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     }));
                 }
                 OutputElement::Unknown(segment) => {
-                    debug_assert!(segment.id.is_none(), "a segment is published once");
                     segment.id = Some(self.store.arena.add_segment(SegmentDef {
                         owner: scope,
+                        index,
                         provider: segment.provider.clone(),
                         position: segment.position,
                     }));
                 }
                 OutputElement::Tail(_) => {}
             }
+            if let (Some(from), Some(to)) = (element.forwards(), element.output_ref()) {
+                forwarded.push(Forwarding { from, to });
+            }
         }
+        forwarded
     }
 
     fn build_star(
@@ -307,7 +329,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             Binding::Table(table) => self.relation_part(&Rc::new(table.clone()), &ranges),
             Binding::Cte(child) | Binding::DerivedTable(child) => {
                 let model = self.scope(*child);
-                forward_scope(*child, &model, &ranges, false)
+                forward_scope(*child, &model, &ranges, None)
             }
             Binding::VirtualSource(source) => self
                 .graph
@@ -437,40 +459,49 @@ fn relation_unknown(
 }
 
 /// Re-express the output of a scope under the range variables of the star
-/// that reads it. `set_operation` marks slots that combine several operands.
+/// that reads it. Every element names the published output it forwards.
+/// `merged_by` is the set operation whose left operand `scope` is, when the
+/// elements are that operation's own.
 pub(super) fn forward_scope(
     scope: ScopeId,
     model: &OutputModel,
     ranges: &Rc<[RangeRef]>,
-    set_operation: bool,
+    merged_by: Option<ScopeId>,
 ) -> Vec<OutputElement> {
     model
         .elements
         .iter()
-        .enumerate()
-        .map(|(index, element)| match element {
-            OutputElement::Column(slot) => OutputElement::Column(ColumnSlot {
-                id: None,
-                name: slot.name.clone(),
-                output_name: slot.output_name.clone(),
-                ordinal: slot.ordinal,
-                ranges: ranges.clone(),
-                candidate_ranges: ranges.clone(),
-                value: if set_operation {
-                    ValueId::SetOperation { scope, index }
-                } else {
-                    ValueId::ScopeSlot { scope, index }
-                },
-                origin: SlotOrigin::Forwarded(slot.name.clone()),
-            }),
-            OutputElement::Unknown(segment) => OutputElement::Unknown(UnknownSegment {
-                id: None,
-                schema_relations: segment.schema_relations.clone(),
-                position: segment.position,
-                provider: UnknownProvider::Scope { scope, index },
-                ranges: ranges.clone(),
-                domain: segment.domain.clone(),
-            }),
+        .map(|element| match element {
+            OutputElement::Column(slot) => {
+                let id = slot.published();
+                OutputElement::Column(ColumnSlot {
+                    id: None,
+                    name: slot.name.clone(),
+                    output_name: slot.output_name.clone(),
+                    ordinal: slot.ordinal,
+                    ranges: ranges.clone(),
+                    candidate_ranges: ranges.clone(),
+                    value: match merged_by {
+                        Some(op) => ValueId::SetMerged { op, left: id },
+                        None => ValueId::Forward(id),
+                    },
+                    origin: SlotOrigin::Forwarded(slot.name.clone()),
+                })
+            }
+            OutputElement::Unknown(segment) => {
+                let id = segment.published();
+                OutputElement::Unknown(UnknownSegment {
+                    id: None,
+                    schema_relations: segment.schema_relations.clone(),
+                    position: segment.position,
+                    provider: match merged_by {
+                        Some(op) => UnknownProvider::SetOperation { op, left: id },
+                        None => UnknownProvider::Segment { scope, id },
+                    },
+                    ranges: ranges.clone(),
+                    domain: segment.domain.clone(),
+                })
+            }
             OutputElement::Tail(tail) => OutputElement::Tail(BranchTail {
                 scope: tail.scope,
                 ranges: ranges.clone(),
