@@ -382,7 +382,8 @@ fn output_names_keep_their_sql_spelling() {
 fn analysis_findings_that_are_not_errors_do_not_reject_the_model() {
     // A lineage cycle is reported by the engine but never rejected here.
     use sqllineage::{
-        Diagnostic, DiagnosticKind, Output, Severity, Shape, StatementAnalysis, StatementKind,
+        Diagnostic, DiagnosticKind, Output, RowDependencies, Severity, Shape, StatementAnalysis,
+        StatementKind,
     };
     let cycle = StatementAnalysis {
         kind: StatementKind::Query,
@@ -398,6 +399,7 @@ fn analysis_findings_that_are_not_errors_do_not_reject_the_model() {
             kind: DiagnosticKind::UnexpectedCycle,
             location: None,
         }],
+        row_dependencies: RowDependencies::NotCollected,
     };
     assert_eq!(super::backend::sqllineage::statement_error(&cycle), None);
     assert_eq!(

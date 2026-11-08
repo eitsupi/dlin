@@ -148,15 +148,10 @@ fn cli_ordered_schema_aligns_select_star_union_columns() {
 }
 
 #[test]
-fn top_level_except_traces_both_operands() {
+fn top_level_except_traces_only_the_left_operand() {
     let result = generic("select id from t1 except select id from t2", &[]);
     assert_no_errors(&result);
-    assert_resolved(
-        &result,
-        "id",
-        &[("t1", "id"), ("t2", "id")],
-        TransformationType::Direct,
-    );
+    assert_resolved(&result, "id", &[("t1", "id")], TransformationType::Direct);
 }
 
 #[test]

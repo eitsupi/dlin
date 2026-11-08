@@ -453,7 +453,7 @@ pub fn duplicate_name(name: Ident, ordinals: Vec<usize>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dlin_sqllineage::{DiagnosticKind, Output, StatementKind};
+    use dlin_sqllineage::{DiagnosticKind, Output, RowDependencies, StatementKind};
 
     fn case() -> Case {
         Case::new(
@@ -480,6 +480,7 @@ mod tests {
             },
             has_unresolved_stars: false,
             diagnostics: vec![],
+            row_dependencies: RowDependencies::NotCollected,
         }
     }
 

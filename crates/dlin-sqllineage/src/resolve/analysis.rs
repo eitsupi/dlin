@@ -8,8 +8,8 @@ use crate::types::{
 };
 use crate::{
     Candidate, Diagnostic, DiagnosticKind, Dialect, Ident, Lineage, Location, Output, OutputColumn,
-    OutputName, Relation, Severity, Shape, SourceColumn, StatementAnalysis, StatementKind,
-    Transform, UnexpandedStar, Unresolved,
+    OutputName, Relation, RowDependencies, Severity, Shape, SourceColumn, StatementAnalysis,
+    StatementKind, Transform, UnexpandedStar, Unresolved,
 };
 
 /// Assemble resolved output slots without revisiting the SQL syntax tree.
@@ -151,6 +151,7 @@ pub(super) fn assemble(
         },
         has_unresolved_stars,
         diagnostics,
+        row_dependencies: RowDependencies::NotCollected,
     }
 }
 
@@ -338,6 +339,7 @@ pub(crate) fn semantic_failure(
         },
         has_unresolved_stars: false,
         diagnostics,
+        row_dependencies: RowDependencies::NotCollected,
     }
 }
 

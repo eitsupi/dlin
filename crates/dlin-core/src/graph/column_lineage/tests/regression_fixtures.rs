@@ -480,6 +480,13 @@ fn test_known_manifest_source_succeeds_alongside_external_join_star() {
 #[test]
 fn test_set_operations_with_unresolved_star_branches_are_conservative() {
     for operator in ["UNION", "INTERSECT", "EXCEPT"] {
+        // EXCEPT takes values from its left operand only, so the unknown star
+        // on its right does not make the left values indeterminate.
+        let (traced, failed): (&[&str], &[&str]) = if operator == "EXCEPT" {
+            (&["explicit_col", "id"], &[])
+        } else {
+            (&["id"], &["explicit_col"])
+        };
         let mut manifest = make_test_manifest();
         manifest
             .nodes
@@ -514,7 +521,7 @@ fn test_set_operations_with_unresolved_star_branches_are_conservative() {
             &mut ColumnLineageCache::disabled(),
         );
 
-        assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+        assert_exact_column_outcomes(&result, traced, failed);
 
         for wrapper in [
             format!("WITH combined AS ({set_operation}) SELECT id, explicit_col FROM combined"),
@@ -533,7 +540,7 @@ fn test_set_operations_with_unresolved_star_branches_are_conservative() {
                 &mut ColumnLineageCache::disabled(),
             );
 
-            assert_exact_column_outcomes(&result, &["id"], &["explicit_col"]);
+            assert_exact_column_outcomes(&result, traced, failed);
         }
     }
 }

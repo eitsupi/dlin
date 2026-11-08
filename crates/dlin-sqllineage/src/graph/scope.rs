@@ -623,6 +623,8 @@ impl ScopeTree {
             OutputPlan::SetOperation {
                 left,
                 right,
+                recursive,
+                operator,
                 correspondence,
                 ..
             } => {
@@ -630,9 +632,13 @@ impl ScopeTree {
                     reasons.push("BY NAME set operation");
                 }
                 // Value incompleteness follows both operands even though
-                // the output namespace and shape follow only the left.
+                // the output namespace and shape follow only the left. A
+                // non-recursive EXCEPT takes values from the left only, so
+                // what is unknown on its right does not affect them.
                 let mut branches = self.unknown_output_reasons(*left);
-                branches.extend(self.unknown_output_reasons(*right));
+                if *recursive || *operator != SetOperator::Except {
+                    branches.extend(self.unknown_output_reasons(*right));
+                }
                 for reason in branches {
                     if !reasons.contains(&reason) {
                         reasons.push(reason);
