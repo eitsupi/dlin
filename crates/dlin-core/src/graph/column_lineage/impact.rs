@@ -350,6 +350,7 @@ pub(super) fn compute_column_impact(
     let mut gaps = BTreeSet::new();
     let mut errors = Vec::new();
     let initial_uid = initial_node.unique_id.clone();
+    let original_input_uid = initial_uid.clone();
     let input_reachable = downstream_model_ids(manifest, &initial_uid);
     let mut lineage_cache: HashMap<String, InternalModelColumnLineage> = HashMap::new();
     ensure_lineage(analysis, &mut lineage_cache, &initial_uid);
@@ -575,6 +576,7 @@ pub(super) fn compute_column_impact(
                                 unresolved_relevance(
                                     &contribution.reason,
                                     dep_uid,
+                                    (&original_input_uid, &reference),
                                     &input_reachable,
                                     manifest,
                                     dialect,
@@ -807,6 +809,7 @@ fn combine_relevance(results: impl IntoIterator<Item = RelationRelevance>) -> Re
 fn unresolved_relevance(
     reason: &UnresolvedReason,
     owner_uid: &str,
+    original_input: (&str, &Ident),
     input_reachable: &BTreeSet<String>,
     manifest: &Manifest,
     dialect: super::DlinDialect,
@@ -814,16 +817,27 @@ fn unresolved_relevance(
     let related = |relation: &RelationRef| {
         relation_relevance(relation, owner_uid, input_reachable, manifest, dialect)
     };
+    let named = |relation: &RelationRef, column: &Ident| {
+        named_relation_relevance(
+            relation,
+            column,
+            owner_uid,
+            original_input,
+            input_reachable,
+            manifest,
+            dialect,
+        )
+    };
     match reason {
-        UnresolvedReason::BehindStar { relation }
-        | UnresolvedReason::NamedBehindStar { relation, .. } => related(relation),
-        UnresolvedReason::AbsentOutput { relation, .. } => related(relation),
+        UnresolvedReason::BehindStar { relation } => related(relation),
+        UnresolvedReason::NamedBehindStar { relation, column }
+        | UnresolvedReason::AbsentOutput { relation, column } => named(relation, column),
         UnresolvedReason::AmbiguousOutput {
             relation,
+            column,
             candidates,
-            ..
         } => {
-            let relation_result = related(relation);
+            let relation_result = named(relation, column);
             if candidates.is_empty() {
                 relation_result
             } else if relation_result == RelationRelevance::Unrelated {
@@ -843,7 +857,7 @@ fn unresolved_relevance(
             let possible = combine_relevance(
                 possible_sources
                     .iter()
-                    .map(|source| related(&source.relation)),
+                    .map(|source| named(&source.relation, &source.column)),
             );
             if possible == RelationRelevance::Relevant {
                 RelationRelevance::Relevant
@@ -854,10 +868,10 @@ fn unresolved_relevance(
             }
         }
         UnresolvedReason::Ambiguous {
+            column,
             candidates: unresolved,
-            ..
         } => combine_relevance(unresolved.iter().map(|candidate| match candidate {
-            UnresolvedCandidate::Relation { relation } => related(relation),
+            UnresolvedCandidate::Relation { relation } => named(relation, column),
             UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => {
                 RelationRelevance::Unknown
             }
@@ -868,6 +882,42 @@ fn unresolved_relevance(
         | UnresolvedReason::Unsupported { .. }
         | UnresolvedReason::TraceBoundary { .. } => RelationRelevance::Unknown,
     }
+}
+
+fn named_relation_relevance(
+    relation: &RelationRef,
+    column: &Ident,
+    owner_uid: &str,
+    original_input: (&str, &Ident),
+    input_reachable: &BTreeSet<String>,
+    manifest: &Manifest,
+    dialect: super::DlinDialect,
+) -> RelationRelevance {
+    let resolved =
+        super::cross_model::resolve_resource(manifest, owner_uid, relation, column, dialect);
+    if resolved.reason == super::TraceBoundaryReason::AmbiguousModel {
+        return relation_relevance(relation, owner_uid, input_reachable, manifest, dialect);
+    }
+    if let Some(model_uid) = resolved.model_unique_id {
+        if model_uid == original_input.0 {
+            return match same_column_key(column, original_input.1, dialect) {
+                Some(true) => RelationRelevance::Relevant,
+                Some(false) => RelationRelevance::Unrelated,
+                None => RelationRelevance::Unknown,
+            };
+        }
+        if input_reachable.contains(&model_uid) {
+            // A downstream model is reachable from the input, but its output
+            // column name does not prove whether the original input contributed.
+            return RelationRelevance::Unknown;
+        }
+        return RelationRelevance::Unrelated;
+    }
+    relation_relevance(relation, owner_uid, input_reachable, manifest, dialect)
+}
+
+fn same_column_key(left: &Ident, right: &Ident, dialect: super::DlinDialect) -> Option<bool> {
+    Some(left.column_key(dialect)? == right.column_key(dialect)?)
 }
 
 /// Resolve whether a relation is on an input-reachable model, is a known
@@ -964,4 +1014,86 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
     }
 
     map
+}
+
+#[cfg(test)]
+mod impact_relevance_tests {
+    use super::*;
+    use crate::parser::manifest::{DependsOn, ManifestConfig, ManifestNode};
+
+    fn model_node(unique_id: &str, name: &str, dependencies: &[&str]) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: DependsOn {
+                nodes: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            },
+            config: ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: Default::default(),
+            compiled_code: Some("SELECT 1".to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+
+    #[test]
+    fn named_input_column_comparison_uses_dialect_identifier_keys() {
+        let input_uid = "model.proj.input";
+        let owner_uid = "model.proj.owner";
+        let manifest = Manifest {
+            nodes: HashMap::from([
+                (input_uid.to_string(), model_node(input_uid, "input", &[])),
+                (
+                    owner_uid.to_string(),
+                    model_node(owner_uid, "owner", &[input_uid]),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let reachable = BTreeSet::from([input_uid.to_string(), owner_uid.to_string()]);
+        let relation = RelationRef::from_manifest(None, None, "input");
+        let original_column = Ident::parse_reference("Id");
+
+        assert_eq!(
+            named_relation_relevance(
+                &relation,
+                &Ident::parse_reference("id"),
+                owner_uid,
+                (input_uid, &original_column),
+                &reachable,
+                &manifest,
+                super::super::DlinDialect::Snowflake,
+            ),
+            RelationRelevance::Relevant
+        );
+        assert_eq!(
+            named_relation_relevance(
+                &relation,
+                &Ident::parse_reference("\"id\""),
+                owner_uid,
+                (input_uid, &original_column),
+                &reachable,
+                &manifest,
+                super::super::DlinDialect::Snowflake,
+            ),
+            RelationRelevance::Unrelated
+        );
+        assert_eq!(
+            named_relation_relevance(
+                &relation,
+                &Ident::parse_reference("\"id\""),
+                owner_uid,
+                (input_uid, &original_column),
+                &reachable,
+                &manifest,
+                super::super::DlinDialect::BigQuery,
+            ),
+            RelationRelevance::Relevant
+        );
+    }
 }

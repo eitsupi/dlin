@@ -541,6 +541,159 @@ fn open_relation_matching_an_unrelated_global_model_stays_unknown_without_depend
 }
 
 #[test]
+fn different_unresolved_column_from_original_input_is_unrelated() {
+    let root = "model.proj.root";
+    let child = "model.proj.child";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        root.to_string(),
+        model(
+            root,
+            "root",
+            &[],
+            "SELECT x, y, y FROM raw",
+            &["x", "y", "y"],
+        ),
+    );
+    nodes.insert(
+        child.to_string(),
+        model(
+            child,
+            "child",
+            &[root],
+            "SELECT root.y AS y FROM root",
+            &["y"],
+        ),
+    );
+    let manifest = Manifest {
+        nodes,
+        ..Default::default()
+    };
+
+    let mut cache = ColumnLineageCache::disabled();
+    let mut analysis = ColumnLineageAnalysis::new(&manifest, DlinDialect::Generic, &mut cache);
+    let child_lineage = analysis.compute_column_lineage("child");
+    let output = child_lineage.output.as_ref().unwrap();
+    assert!(
+        matches!(
+            output.columns[0].lineage.unresolved(),
+            [contribution]
+                if matches!(
+                    contribution.reason,
+                    UnresolvedReason::Ambiguous {
+                        ref column,
+                        candidates: ref unresolved,
+                    } if column == &Ident::parse_reference("y")
+                        && matches!(unresolved.as_slice(), [UnresolvedCandidate::Relation { relation }] if relation.to_string() == "root")
+                )
+        ),
+        "unexpected unresolved reason: {:?}",
+        output.columns[0].lineage.unresolved()
+    );
+
+    let report = impact(&manifest, root, "x", ImpactScope::ValueOnly);
+    assert!(report.confirmed.is_empty(), "{report:?}");
+    assert!(report.possible.is_empty(), "{report:?}");
+    assert!(report.proves_no_impact(), "{report:?}");
+    assert!(
+        !report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::UnresolvedLineage { at, .. } if at.model == "child")
+        }),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn named_column_matching_the_unidentified_original_input_keeps_a_gap() {
+    let root = "model.proj.root";
+    let child = "model.proj.child";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        root.to_string(),
+        model(root, "root", &[], "SELECT x, x FROM raw", &["x", "x"]),
+    );
+    nodes.insert(
+        child.to_string(),
+        model(
+            child,
+            "child",
+            &[root],
+            "SELECT root.x AS x FROM root",
+            &["x"],
+        ),
+    );
+    let manifest = Manifest {
+        nodes,
+        ..Default::default()
+    };
+
+    let report = impact(&manifest, root, "x", ImpactScope::ValueOnly);
+    assert!(
+        report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::UnresolvedLineage { at, reasons }
+                if at.model == "child" && matches!(reasons.as_slice(),
+                    [UnresolvedReason::Ambiguous { column, .. }] if column.value == "x"))
+        }),
+        "{report:?}"
+    );
+    assert!(!report.proves_no_impact(), "{report:?}");
+}
+
+#[test]
+fn a_different_column_on_a_downstream_model_remains_unknown() {
+    let root = "model.proj.root";
+    let middle = "model.proj.middle";
+    let leaf = "model.proj.leaf";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        root.to_string(),
+        model(root, "root", &[], "SELECT x FROM raw", &["x"]),
+    );
+    nodes.insert(
+        middle.to_string(),
+        model(
+            middle,
+            "middle",
+            &[root],
+            "SELECT root.x AS x, root.x AS y, root.x AS y FROM root",
+            &["x", "y", "y"],
+        ),
+    );
+    nodes.insert(
+        leaf.to_string(),
+        model(
+            leaf,
+            "leaf",
+            &[middle],
+            "SELECT middle.y AS y FROM middle",
+            &["y"],
+        ),
+    );
+    let manifest = Manifest {
+        nodes,
+        ..Default::default()
+    };
+
+    let report = impact(&manifest, root, "x", ImpactScope::ValueOnly);
+    assert!(
+        report
+            .confirmed
+            .iter()
+            .any(|path| { path.target.model == "middle" && path.target.column == "x" }),
+        "{report:?}"
+    );
+    assert!(
+        report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::UnresolvedLineage { at, reasons }
+                if at.model == "leaf" && matches!(reasons.as_slice(),
+                    [UnresolvedReason::Ambiguous { column, .. }] if column.value == "y"))
+        }),
+        "{report:?}"
+    );
+    assert!(!report.proves_no_impact(), "{report:?}");
+}
+
+#[test]
 fn partial_lineage_keeps_known_paths_and_excludes_only_declared_unrelated_remainder() {
     let source_model = "model.proj.source_model";
     let partial_model = "model.proj.partial_model";
