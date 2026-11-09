@@ -1,6 +1,5 @@
 ---
-source: crates/dlin-core/src/render/column_graph.rs
-assertion_line: 924
+source: crates/dlin-core/src/render/column_graph_tests.rs
 expression: "impact_dot(&[report])"
 ---
 digraph column_lineage {
@@ -20,5 +19,5 @@ digraph column_lineage {
     "n1_0" [label="order_id", fillcolor="#D5D8DC"];
   }
 
-  "n1_0" -> "n0_0" [label="direct"];
+  "n1_0" -> "n0_0" [label="value direct"];
 }

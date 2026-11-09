@@ -325,6 +325,18 @@ pub(crate) fn resolve_unique(
     }
 }
 
+pub(crate) fn matching_indices(
+    query: &RelationRef,
+    candidates: &[RelationRef],
+    dialect: DlinDialect,
+) -> Vec<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| query.matches(candidate, dialect).then_some(index))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentifierCasePolicy {
     Preserve,

@@ -3,7 +3,9 @@ use crate::graph::column_lineage::{
     ColumnLineageErrorKind, ColumnSource, ConfirmedImpact, DependencyKind, DependencyRef,
     ExplorationStatus, Ident, ImpactEdge, ImpactScope, KindExploration, ModelColumnLineage,
     ModelOutputRef, ModelPathHop, OutputName, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
-    Quote, TraceGap, UnexpandedStar, UnresolvedContribution, UnresolvedReason, ValueLineage,
+    PossibleImpact, Quote, RelationRef, TraceBoundary, TraceBoundaryPolicy, TraceBoundaryReason,
+    TraceGap, TraceResource, TraceResourceKind, UnexpandedStar, UnresolvedContribution,
+    UnresolvedReason, ValueLineage,
 };
 
 fn output_ref(model: &str, slot: usize, column: &str) -> ModelOutputRef {
@@ -51,6 +53,7 @@ fn lineage_of(
     shape: OutputShape,
 ) -> ModelColumnLineage {
     let mut report = ModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: format!("model.{model}"),
         model: model.to_string(),
         output: Some(OutputSlots { columns, shape }),
@@ -70,6 +73,7 @@ fn impact_report(model: &str, column: &str, confirmed: Vec<ConfirmedImpact>) -> 
         input: Some(output_ref(model, 0, column)),
         scope: ImpactScope::ValueOnly,
         confirmed,
+        possible: vec![],
         exploration: vec![KindExploration {
             kind: DependencyKind::Value,
             status: ExplorationStatus::Complete,
@@ -106,6 +110,48 @@ fn impacted(
         kind: DependencyKind::Value,
         transformation,
         path,
+    }
+}
+
+fn possible_from(confirmed: ConfirmedImpact) -> PossibleImpact {
+    PossibleImpact {
+        target: confirmed.target,
+        kind: confirmed.kind,
+        transformation: confirmed.transformation,
+        path: confirmed.path,
+    }
+}
+
+fn trace_boundary(root: &ModelOutputRef, reason: TraceBoundaryReason) -> TraceBoundary {
+    let (unique_id, name, kind, relation) = if reason == TraceBoundaryReason::SourceFree {
+        (
+            Some(root.unique_id.clone()),
+            root.model.clone(),
+            TraceResourceKind::Model,
+            RelationRef::parse(&root.model).unwrap(),
+        )
+    } else {
+        (
+            Some("source.proj.raw.orders".to_string()),
+            "raw.orders".to_string(),
+            TraceResourceKind::Source,
+            RelationRef::parse("raw.orders").unwrap(),
+        )
+    };
+    TraceBoundary {
+        root: root.clone(),
+        at: root.clone(),
+        reason,
+        resource: TraceResource {
+            unique_id,
+            name,
+            kind,
+            relation,
+            column: Some(Ident::unquoted("id")),
+            candidates: vec![],
+            policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+        },
+        model_path: vec![],
     }
 }
 
@@ -580,20 +626,26 @@ fn test_mermaid_and_dot_mark_partial_columns() {
 
 fn incomplete_report(confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
     let mut report = impact_report("source_model", "x", confirmed);
-    report.exploration = vec![KindExploration {
-        kind: DependencyKind::Value,
-        status: ExplorationStatus::Incomplete {
-            gaps: vec![
-                TraceGap::UnresolvedLineage {
+    report.scope = ImpactScope::ValueAndRow;
+    report.exploration = vec![
+        KindExploration {
+            kind: DependencyKind::Value,
+            status: ExplorationStatus::Incomplete {
+                gaps: vec![TraceGap::UnresolvedLineage {
                     at: output_ref("partial_model", 0, "total"),
                     reasons: vec![behind_star_reason()],
-                },
-                TraceGap::NotCollected {
-                    kind: DependencyKind::Row,
-                },
-            ],
+                }],
+            },
         },
-    }];
+        KindExploration {
+            kind: DependencyKind::Row,
+            status: ExplorationStatus::Incomplete {
+                gaps: vec![TraceGap::NotCollected {
+                    kind: DependencyKind::Row,
+                }],
+            },
+        },
+    ];
     report
 }
 
@@ -601,10 +653,10 @@ fn incomplete_report(confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
 fn test_impact_plain_never_reports_no_impact_for_incomplete_exploration() {
     let output = impact_plain(&[incomplete_report(vec![])]);
     assert!(
-        output.contains("no confirmed impact; exploration incomplete"),
+        output.contains("0 confirmed, 0 possible; exploration incomplete"),
         "{output}"
     );
-    assert!(!output.contains("no impact)"), "{output}");
+    assert!(!output.contains("(no impact"), "{output}");
     assert!(
         output.contains("unresolved lineage at partial_model.total"),
         "{output}"
@@ -624,11 +676,11 @@ fn test_impact_plain_lists_confirmed_impacts_next_to_the_gaps() {
     )];
     let output = impact_plain(&[incomplete_report(confirmed)]);
     assert!(
-        output.contains("1 impacted column; exploration incomplete"),
+        output.contains("1 confirmed, 0 possible; exploration incomplete"),
         "{output}"
     );
     assert!(
-        output.contains("value exploration incomplete (2 gaps):"),
+        output.contains("value exploration incomplete (1 gap):"),
         "{output}"
     );
 }
@@ -636,8 +688,98 @@ fn test_impact_plain_lists_confirmed_impacts_next_to_the_gaps() {
 #[test]
 fn test_impact_plain_says_no_impact_only_when_complete() {
     let output = impact_plain(&[impact_report("leaf", "x", vec![])]);
-    assert!(output.contains("leaf.x (no impact)"), "{output}");
+    assert!(
+        output.contains("leaf.x (no impact; scope: value only)"),
+        "{output}"
+    );
     assert!(!output.contains("exploration incomplete"), "{output}");
+}
+
+#[test]
+fn impact_plain_labels_scope_possible_count_and_possible_path() {
+    let confirmed = impacted(
+        "model.orders",
+        ("stg_orders", "order_id"),
+        vec![("orders", "order_id", TransformationType::Direct)],
+    );
+    let mut report = impact_report("stg_orders", "order_id", vec![confirmed.clone()]);
+    report.possible.push(possible_from(confirmed));
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["possible"].as_array().unwrap().len(), 1);
+    assert_eq!(json["possible"][0]["kind"], "value");
+    let output = impact_plain(&[report]);
+    assert!(
+        output.contains("1 confirmed, 1 possible; scope: value only"),
+        "{output}"
+    );
+    assert!(output.contains("possible:"), "{output}");
+    assert!(output.contains("⇢  orders"), "{output}");
+    assert!(!output.contains("no impact"), "{output}");
+
+    let possible_only = possible_from(impacted(
+        "model.orders",
+        ("stg_orders", "order_id"),
+        vec![("orders", "order_id", TransformationType::Direct)],
+    ));
+    let mut report = impact_report("stg_orders", "order_id", vec![]);
+    report.possible.push(possible_only);
+    assert!(!report.proves_no_impact());
+    let output = impact_plain(&[report]);
+    assert!(output.contains("0 confirmed, 1 possible"), "{output}");
+    assert!(!output.contains("no impact"), "{output}");
+}
+
+#[test]
+fn impact_diagrams_keep_confirmed_and_possible_edges_separate() {
+    let confirmed = impacted(
+        "model.orders",
+        ("stg_orders", "order_id"),
+        vec![("orders", "order_id", TransformationType::Direct)],
+    );
+    let mut report = impact_report("stg_orders", "order_id", vec![confirmed.clone()]);
+    report.possible.push(possible_from(confirmed));
+    let mermaid = impact_mermaid(std::slice::from_ref(&report));
+    assert!(mermaid.contains(" -->|\"value direct\"|"), "{mermaid}");
+    assert!(
+        mermaid.contains(" -.->|\"possible: value direct\"|"),
+        "{mermaid}"
+    );
+    let dot = impact_dot(&[report]);
+    assert!(dot.contains("style=dashed"), "{dot}");
+    assert!(dot.contains("label=\"value direct\""), "{dot}");
+    assert!(dot.contains("label=\"possible: value direct\""), "{dot}");
+}
+
+#[test]
+fn upstream_graph_displays_external_and_failed_boundaries_distinctly() {
+    let mut report = make_lineage("orders", vec![("id", TransformationType::Direct, vec![])]);
+    let root = output_ref("orders", 0, "id");
+    report.boundaries = vec![
+        trace_boundary(&root, TraceBoundaryReason::ExternalRelation),
+        trace_boundary(&root, TraceBoundaryReason::SourceFree),
+        trace_boundary(&root, TraceBoundaryReason::AnalysisFailed),
+        trace_boundary(&root, TraceBoundaryReason::MissingDefinition),
+    ];
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["boundaries"].as_array().unwrap().len(), 4);
+    assert_eq!(json["boundaries"][0]["at"]["column"], "id");
+    assert!(json["boundaries"][0]["resource"].get("policy").is_some());
+    let plain = graph_plain(std::slice::from_ref(&report));
+    assert!(plain.contains("boundary: external relation"), "{plain}");
+    assert!(plain.contains("boundary: source-free output"), "{plain}");
+    assert!(plain.contains("boundary: analysis failed"), "{plain}");
+    assert!(plain.contains("boundary: missing definition"), "{plain}");
+    let mermaid = graph_mermaid(std::slice::from_ref(&report));
+    assert!(mermaid.contains("external relation"), "{mermaid}");
+    assert!(mermaid.contains("source-free output"), "{mermaid}");
+    assert!(mermaid.contains("analysis failed"), "{mermaid}");
+    assert!(mermaid.contains("missing definition"), "{mermaid}");
+    assert!(mermaid.contains("fill:#D5F5E3"), "{mermaid}");
+    assert!(mermaid.contains("fill:#F5B7B1"), "{mermaid}");
+    let dot = graph_dot(&[report]);
+    assert!(dot.contains("fillcolor=\"#D5F5E3\""), "{dot}");
+    assert!(dot.contains("fillcolor=\"#F5B7B1\""), "{dot}");
+    assert!(dot.contains("missing definition"), "{dot}");
 }
 
 #[test]

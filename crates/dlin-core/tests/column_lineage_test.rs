@@ -248,8 +248,8 @@ fn test_dependency_sql_output_is_not_merged_with_yaml_columns() {
     assert_eq!(result.value_complete_columns, 5);
 
     // Across the model boundary the reference to `id` matches two outputs of
-    // the passthrough model, so neither is chosen: the source stays at the
-    // passthrough model and the output is partial, with the candidates listed.
+    // the passthrough model, so neither is a proven source: the output is
+    // partial, with the candidates listed in its unresolved contribution.
     let cross = compute_cross_model_column_lineage(&manifest, "mart_yaml_star");
     let ids: Vec<_> = cross
         .slots()
@@ -267,10 +267,7 @@ fn test_dependency_sql_output_is_not_merged_with_yaml_columns() {
             dlin_core::graph::column_lineage::UnresolvedReason::AmbiguousOutput { candidates, .. }
                 if candidates.len() == 2
         ));
-        assert_eq!(
-            slot.lineage.known()[0].table,
-            "shop.main.stg_orders_passthrough"
-        );
+        assert!(slot.lineage.known().is_empty());
     }
     assert_eq!(cross.value_partial_columns, 2);
 }

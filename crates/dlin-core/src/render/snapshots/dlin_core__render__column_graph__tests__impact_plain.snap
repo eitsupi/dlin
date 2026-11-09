@@ -1,6 +1,6 @@
 ---
-source: crates/dlin-core/src/render/column_graph.rs
+source: crates/dlin-core/src/render/column_graph_tests.rs
 expression: "impact_plain(&[report])"
 ---
-stg_orders.order_id (1 impacted column)
-  order_id  →  orders (direct)
+stg_orders.order_id (1 confirmed, 0 possible; scope: value only)
+  order_id  →  orders (direct, value)

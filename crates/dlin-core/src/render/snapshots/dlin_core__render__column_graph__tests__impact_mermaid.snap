@@ -1,5 +1,5 @@
 ---
-source: crates/dlin-core/src/render/column_graph.rs
+source: crates/dlin-core/src/render/column_graph_tests.rs
 expression: "impact_mermaid(&[report])"
 ---
 flowchart LR
@@ -10,4 +10,4 @@ flowchart LR
     n1_0["order_id"]
   end
 
-  n1_0 -->|"direct"|n0_0
+  n1_0 -->|"value direct"|n0_0

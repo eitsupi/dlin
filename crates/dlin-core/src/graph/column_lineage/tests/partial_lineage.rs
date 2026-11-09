@@ -426,14 +426,15 @@ fn complete_chain_is_complete_and_row_is_not_collected() {
 }
 
 #[test]
-fn no_dependents_proves_no_impact_only_when_every_requested_kind_is_complete() {
+fn no_dependents_proves_no_impact_for_every_requested_kind() {
     let manifest = manifest(&[("leaf", &[], Some("SELECT 1 AS x"), &["x"])]);
     let value = impact(&manifest, "leaf", "x", ImpactScope::ValueOnly);
     assert!(value.confirmed.is_empty());
     assert!(value.proves_no_impact());
 
     let both = impact(&manifest, "leaf", "x", ImpactScope::ValueAndRow);
-    assert!(!both.proves_no_impact());
+    assert!(both.proves_no_impact());
+    assert_eq!(both.exploration[1].status, ExplorationStatus::Complete);
 }
 
 #[test]

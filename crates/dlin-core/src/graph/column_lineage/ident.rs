@@ -52,8 +52,9 @@ impl Ident {
         }
     }
 
-    /// Read a column name typed by a user. A name wrapped in double quotes or
-    /// backticks is a quoted identifier; anything else is unquoted.
+    /// Read a column name typed by a user. A name wrapped in double quotes,
+    /// backticks, or SQL Server brackets is a quoted identifier; anything
+    /// else is unquoted.
     pub fn parse_reference(input: &str) -> Self {
         for (delimiter, quote) in [('"', Quote::Double), ('`', Quote::Backtick)] {
             if let Some(inner) = input
@@ -63,6 +64,12 @@ impl Ident {
                 let doubled = format!("{delimiter}{delimiter}");
                 return Self::quoted(inner.replace(&doubled, &delimiter.to_string()), quote);
             }
+        }
+        if let Some(inner) = input
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            return Self::quoted(inner.replace("]]", "]"), Quote::Bracket);
         }
         Self::unquoted(input)
     }
@@ -142,13 +149,27 @@ mod tests {
             Ident::parse_reference("`a``b`"),
             Ident::quoted("a`b", Quote::Backtick)
         );
+        assert_eq!(
+            Ident::parse_reference("[Id]"),
+            Ident::quoted("Id", Quote::Bracket)
+        );
+        assert_eq!(
+            Ident::parse_reference("[a]]b]"),
+            Ident::quoted("a]b", Quote::Bracket)
+        );
         assert_eq!(Ident::parse_reference("\""), Ident::unquoted("\""));
     }
 
     #[test]
     fn display_round_trips_the_quote_style() {
-        for text in ["id", "\"Id\"", "`Id`"] {
+        for text in ["id", "\"Id\"", "`Id`", "[Id]", "[a]]b]"] {
             assert_eq!(Ident::parse_reference(text).to_string(), text);
+        }
+        for ident in [
+            Ident::quoted("Id", Quote::Bracket),
+            Ident::quoted("a]b", Quote::Bracket),
+        ] {
+            assert_eq!(Ident::parse_reference(&ident.to_string()), ident);
         }
     }
 

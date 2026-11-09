@@ -1,4 +1,35 @@
 use super::*;
+
+#[test]
+fn resource_classification_changes_invalidate_dependent_cache_entries() {
+    let mut manifest = make_test_manifest();
+    let digest = |manifest: &Manifest| {
+        super::super::schema::compute_semantic_digest(
+            manifest,
+            &manifest.nodes["model.proj.orders"],
+        )
+    };
+    let original = digest(&manifest);
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .resource_type = "snapshot".into();
+    assert_ne!(original, digest(&manifest));
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .resource_type = "model".into();
+    assert_eq!(original, digest(&manifest));
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .config
+        .materialized = Some("ephemeral".into());
+    assert_ne!(original, digest(&manifest));
+}
 #[test]
 fn test_column_cache_hit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -6,6 +37,7 @@ fn test_column_cache_hit() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "test_model".to_string(),
         model: "test_model".to_string(),
         output: Some(OutputSlots {
@@ -85,6 +117,7 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
     let unique_id = node.unique_id.clone();
     let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
     let sentinel = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: unique_id.clone(),
         model: "canonical-cache-sentinel".to_string(),
         output: None,
@@ -130,6 +163,7 @@ fn test_column_cache_miss_on_semantic_digest_change() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -149,6 +183,7 @@ fn test_column_cache_miss_on_dialect_change() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -168,6 +203,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -190,6 +226,7 @@ fn test_column_cache_version_invalidation() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -216,6 +253,7 @@ fn test_column_cache_version_invalidation() {
 fn test_column_cache_disabled() {
     let mut cache = ColumnLineageCache::disabled();
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -236,6 +274,7 @@ fn test_column_cache_fresh() {
     // Populate cache
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -251,6 +290,7 @@ fn test_column_cache_fresh() {
     // But can save new entries
     let mut fresh = ColumnLineageCache::fresh(project_dir, None);
     let lineage2 = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m2".to_string(),
         model: "m2".to_string(),
         output: None,
@@ -272,6 +312,7 @@ fn test_column_cache_ignores_manifest_stat_change_when_semantics_match() {
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
     let lineage = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "m".to_string(),
         model: "m".to_string(),
         output: None,
@@ -303,6 +344,7 @@ fn test_compute_column_lineage_reuses_result_when_manifest_stat_changes() {
     let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
 
     let sentinel = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "manifest-stat-cache-sentinel".to_string(),
         model: "manifest-stat-cache-sentinel".to_string(),
         output: None,
@@ -338,6 +380,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     let initial_hash = super::super::schema::compute_semantic_digest(&manifest, downstream);
 
     let sentinel = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "upstream-alias-cache-sentinel".to_string(),
         model: "upstream-alias-cache-sentinel".to_string(),
         output: None,
@@ -427,6 +470,7 @@ fn test_unrelated_manifest_change_reuses_cached_lineage() {
     let unique_id = node.unique_id.clone();
     let digest = super::super::schema::compute_semantic_digest(&manifest, node);
     let sentinel = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "unrelated-change-sentinel".to_string(),
         model: "unrelated-change-sentinel".to_string(),
         output: None,
@@ -516,6 +560,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
     assert!(!digest.persistent_cache_safe);
 
     let sentinel = InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "cycle-cache-sentinel".to_string(),
         model: "cycle-cache-sentinel".to_string(),
         output: None,
@@ -748,6 +793,7 @@ fn seeded_cache_file(project_dir: &std::path::Path) -> ColumnLineageCacheFile {
         DlinDialect::Generic,
         0,
         InternalModelColumnLineage {
+            boundaries: Vec::new(),
             unique_id: "m".to_string(),
             model: "m".to_string(),
             output: None,

@@ -147,6 +147,9 @@ pub(super) fn compute_semantic_digest(
 
 fn append_node_local_parts(parts: &mut Vec<String>, node: &crate::parser::manifest::ManifestNode) {
     parts.push(format!("relation:{}", node.relation_name()));
+    parts.push(format!("resource_type:{}", node.resource_type));
+    parts.push(format!("materialized:{:?}", node.config.materialized));
+    parts.push("trace_boundary_policy:snapshot_unsupported_seed_external".to_string());
     parts.push(format!("database:{:?}", node.database));
     parts.push(format!("schema:{:?}", node.schema));
     append_columns(parts, &node.columns);
