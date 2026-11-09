@@ -46,12 +46,22 @@ fn impact(
     column: &str,
     scope: ImpactScope,
 ) -> ColumnImpactReport {
+    impact_with_dialect(manifest, model, column, scope, DlinDialect::Generic)
+}
+
+fn impact_with_dialect(
+    manifest: &Manifest,
+    model: &str,
+    column: &str,
+    scope: ImpactScope,
+    dialect: DlinDialect,
+) -> ColumnImpactReport {
     compute_column_impact_with_scope(
         manifest,
         model,
         column,
         scope,
-        DlinDialect::Generic,
+        dialect,
         &mut ColumnLineageCache::disabled(),
     )
 }
@@ -160,6 +170,12 @@ fn ambiguous_model_relation_creates_possible_paths_through_known_downstream_edge
             .any(|path| path.target.model == "downstream"),
         "possible paths must continue through later known edges: {:?}",
         report.possible
+    );
+    assert!(
+        report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::AmbiguousModel { at, .. } if at.model == "ambiguous_reader")
+        }),
+        "{report:?}"
     );
     assert!(!report.proves_no_impact());
 }
@@ -691,6 +707,117 @@ fn a_different_column_on_a_downstream_model_remains_unknown() {
         "{report:?}"
     );
     assert!(!report.proves_no_impact(), "{report:?}");
+}
+
+#[test]
+fn ambiguous_model_does_not_create_a_gap_for_a_different_input_column() {
+    let root = "model.proj.root";
+    let other = "model.proj.other";
+    let child = "model.proj.child";
+    let mut root_node = model(root, "root", &[], "SELECT x, y FROM raw_root", &["x", "y"]);
+    root_node.alias = Some("shared".to_string());
+    let mut other_node = model(
+        other,
+        "other",
+        &[],
+        "SELECT x, y FROM raw_other",
+        &["x", "y"],
+    );
+    other_node.alias = Some("shared".to_string());
+    let mut nodes = HashMap::new();
+    nodes.insert(root.to_string(), root_node);
+    nodes.insert(other.to_string(), other_node);
+    nodes.insert(
+        child.to_string(),
+        model(
+            child,
+            "child",
+            &[root, other],
+            "SELECT shared.y AS y FROM shared",
+            &["y"],
+        ),
+    );
+    let manifest = Manifest {
+        nodes,
+        ..Default::default()
+    };
+
+    let report = impact(&manifest, root, "x", ImpactScope::ValueOnly);
+    assert!(report.confirmed.is_empty(), "{report:?}");
+    assert!(report.possible.is_empty(), "{report:?}");
+    assert!(report.proves_no_impact(), "{report:?}");
+    assert!(
+        !report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::AmbiguousModel { at, .. } if at.model == "child")
+        }),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn bracket_quoted_frontier_slot_keeps_possible_impact_through_ambiguous_models() {
+    let root = "model.proj.root";
+    let middle = "model.proj.middle";
+    let other = "model.proj.other";
+    let child = "model.proj.child";
+    let middle_node = model(
+        middle,
+        "middle",
+        &[root],
+        "SELECT root.[X] AS [X] FROM root",
+        &["X"],
+    );
+    let other_node = model(other, "other", &[], "SELECT [X] FROM raw_other", &["X"]);
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        root.to_string(),
+        model(root, "root", &[], "SELECT [X] FROM raw_root", &["X"]),
+    );
+    nodes.insert(middle.to_string(), middle_node);
+    nodes.insert(other.to_string(), other_node);
+    nodes.insert(
+        child.to_string(),
+        model(
+            child,
+            "child",
+            &[middle, other],
+            "SELECT [X] FROM middle CROSS JOIN other",
+            &["X"],
+        ),
+    );
+    let manifest = Manifest {
+        nodes,
+        ..Default::default()
+    };
+
+    for input_column in ["X", "[X]"] {
+        let report = impact_with_dialect(
+            &manifest,
+            root,
+            input_column,
+            ImpactScope::ValueOnly,
+            DlinDialect::TSQL,
+        );
+        assert!(
+            report
+                .confirmed
+                .iter()
+                .any(|impact| { impact.target.model == "middle" && impact.target.column == "[X]" }),
+            "{input_column}: {report:?}"
+        );
+        assert!(
+            report
+                .possible
+                .iter()
+                .any(|impact| { impact.target.model == "child" && impact.target.column == "[X]" }),
+            "{input_column}: {report:?}"
+        );
+        assert!(report.gaps().iter().any(|(_, gap)| {
+            matches!(gap, TraceGap::UnresolvedLineage { at, reasons }
+                if at.model == "child" && matches!(reasons.as_slice(),
+                    [UnresolvedReason::Ambiguous { column, .. }] if column.quote == Some(Quote::Bracket)))
+        }), "{input_column}: {report:?}");
+    }
 }
 
 #[test]

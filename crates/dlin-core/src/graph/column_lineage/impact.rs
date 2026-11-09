@@ -510,16 +510,12 @@ pub(super) fn compute_column_impact(
                         if !reads_source {
                             continue;
                         }
-                        if relation_is_ambiguous {
-                            let model_candidates = relation_matches
+                        let model_candidates = relation_is_ambiguous.then(|| {
+                            relation_matches
                                 .iter()
                                 .map(|index| candidates[*index].0.unique_id.clone())
-                                .collect();
-                            gaps.insert(TraceGap::AmbiguousModel {
-                                at: output.clone(),
-                                candidates: model_candidates,
-                            });
-                        }
+                                .collect::<Vec<_>>()
+                        });
                         let source_slot_id = match &source_input {
                             ImpactInput::Slot(id) => *id,
                             ImpactInput::Name(name) => {
@@ -527,6 +523,12 @@ pub(super) fn compute_column_impact(
                                 let matches_name = key.is_some() && key == name.column_key(dialect);
                                 references_source |= matches_name && !relation_is_ambiguous;
                                 possible_source |= matches_name && relation_is_ambiguous;
+                                if matches_name && let Some(candidates) = &model_candidates {
+                                    gaps.insert(TraceGap::AmbiguousModel {
+                                        at: output.clone(),
+                                        candidates: candidates.clone(),
+                                    });
+                                }
                                 continue;
                             }
                         };
@@ -534,10 +536,24 @@ pub(super) fn compute_column_impact(
                             Some(SlotLookup::Unique(id)) => {
                                 references_source |= id == source_slot_id && !relation_is_ambiguous;
                                 possible_source |= id == source_slot_id && relation_is_ambiguous;
+                                if id == source_slot_id
+                                    && let Some(candidates) = &model_candidates
+                                {
+                                    gaps.insert(TraceGap::AmbiguousModel {
+                                        at: output.clone(),
+                                        candidates: candidates.clone(),
+                                    });
+                                }
                             }
                             Some(SlotLookup::Ambiguous(ids)) if ids.contains(&source_slot_id) => {
                                 if relation_is_ambiguous {
                                     possible_source = true;
+                                    if let Some(candidates) = &model_candidates {
+                                        gaps.insert(TraceGap::AmbiguousModel {
+                                            at: output.clone(),
+                                            candidates: candidates.clone(),
+                                        });
+                                    }
                                 } else {
                                     gaps.insert(TraceGap::AmbiguousInput {
                                         at: output.clone(),
@@ -566,7 +582,7 @@ pub(super) fn compute_column_impact(
                                 .output
                                 .as_ref()
                                 .and_then(|output| output.slot(*id))
-                                .map(|slot| Ident::parse_reference(&slot.name.to_string())),
+                                .and_then(|slot| slot.name.ident().cloned()),
                         };
                         let unresolved = entry
                             .lineage
