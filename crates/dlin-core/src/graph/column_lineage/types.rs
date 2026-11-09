@@ -1,9 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::backend::DlinDialect;
+use super::ident::Ident;
 use super::relation::RelationRef;
+
+/// Hint attached to a diagnostic about a column that may sit behind an
+/// unexpanded star.
+pub(crate) const OPEN_SHAPE_HINT: &str = "column may be introduced via SELECT * that could not be expanded; \
+     define upstream columns in the model YAML to enable full resolution";
 
 /// Error kind discriminator for column lineage errors.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -13,9 +21,7 @@ pub enum ColumnLineageErrorKind {
     ModelNotFound,
     /// The model has no compiled SQL (run `dbt compile` first).
     NoCompiledCode,
-    /// Output columns could not be determined (no YAML columns and SQL inference failed).
-    ColumnInferenceFailed,
-    /// The compiled SQL could not be parsed.
+    /// The compiled SQL could not be parsed or analysed as one query.
     ParseFailure,
     /// Lineage for a specific column could not be traced.
     ColumnNotFound,
@@ -24,6 +30,12 @@ pub enum ColumnLineageErrorKind {
     /// A specific column could not be proven due to incomplete semantic information.
     /// This preserves the nearest honest lineage terminal and is non-fatal to CLI callers.
     ColumnIndeterminate,
+    /// A column declared in YAML is not in the enumerated SQL output of a
+    /// closed output. Non-fatal.
+    DeclaredColumnNotInOutput,
+    /// A column declared in YAML is not among the enumerated SQL outputs of an
+    /// open output, where an unexpanded star may still provide it. Non-fatal.
+    DeclaredColumnNotEnumerated,
     /// The lineage backend violated its response contract.
     Internal,
 }
@@ -35,9 +47,16 @@ pub enum ColumnLineageErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnLineageError {
     pub kind: ColumnLineageErrorKind,
-    /// Output column the diagnostic is about; `None` for model-level diagnostics.
+    /// Display name of the column the diagnostic is about: an output column,
+    /// or a column that the YAML declares and the SQL output does not list.
+    /// `None` for model-level diagnostics.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
+    /// The output slot the diagnostic is about, when it is about one slot of
+    /// the model's output. It tells columns with the same name apart. A
+    /// declared-only column has no slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<OutputSlotId>,
     pub what: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
@@ -52,9 +71,61 @@ impl std::fmt::Display for ColumnLineageError {
 }
 
 impl ColumnLineageError {
-    /// Return the output column associated with this diagnostic.
+    /// A model-level diagnostic.
+    pub(crate) fn model(kind: ColumnLineageErrorKind, what: String) -> Self {
+        Self {
+            kind,
+            column: None,
+            slot: None,
+            what,
+            why: None,
+            hint: None,
+        }
+    }
+
+    /// A diagnostic about one output slot.
+    pub(crate) fn for_slot(
+        kind: ColumnLineageErrorKind,
+        output: &ModelOutputRef,
+        detail: &str,
+        hint: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            column: Some(output.column.clone()),
+            slot: Some(output.slot),
+            what: format!("column '{}': {detail}", output.column),
+            why: None,
+            hint,
+        }
+    }
+
+    /// A diagnostic about a column name that is not an output slot.
+    pub(crate) fn for_name(
+        kind: ColumnLineageErrorKind,
+        column: &str,
+        detail: &str,
+        hint: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            column: Some(column.to_string()),
+            slot: None,
+            what: format!("column '{column}': {detail}"),
+            why: None,
+            hint,
+        }
+    }
+
+    /// Return the display name of the output column associated with this
+    /// diagnostic.
     pub fn column_name(&self) -> Option<&str> {
         self.column.as_deref()
+    }
+
+    /// Return the output slot associated with this diagnostic.
+    pub fn slot(&self) -> Option<OutputSlotId> {
+        self.slot
     }
 
     pub fn is_column_scoped(&self) -> bool {
@@ -62,59 +133,109 @@ impl ColumnLineageError {
     }
 
     pub fn is_fatal(&self) -> bool {
-        !matches!(self.kind, ColumnLineageErrorKind::ColumnIndeterminate)
+        !matches!(
+            self.kind,
+            ColumnLineageErrorKind::ColumnIndeterminate
+                | ColumnLineageErrorKind::DeclaredColumnNotInOutput
+                | ColumnLineageErrorKind::DeclaredColumnNotEnumerated
+        )
     }
 
-    /// Re-associate a column-scoped diagnostic with the output column whose
+    /// Whether this diagnostic says the model as a whole could not be
+    /// analysed. Only such diagnostics are meaningful to the models that read
+    /// the failed model.
+    pub fn is_model_failure(&self) -> bool {
+        !self.is_column_scoped() && self.is_fatal()
+    }
+
+    /// Re-associate a slot-scoped diagnostic with the root output whose
     /// lineage traversal surfaced it. This keeps the structured identity and
-    /// the historical human-readable prefix consistent for API consumers.
-    pub fn rebase_column(&self, column: &str) -> Self {
+    /// the human-readable prefix consistent for API consumers.
+    pub(crate) fn rebase_to(&self, root: &ModelOutputRef) -> Self {
         if !self.is_column_scoped() {
             return self.clone();
         }
         let mut rebased = self.clone();
-        rebased.column = Some(column.to_string());
+        rebased.column = Some(root.column.clone());
+        rebased.slot = Some(root.slot);
         if let Some(rest) = self.what.strip_prefix("column '")
             && let Some((_, detail)) = rest.split_once("':")
         {
-            rebased.what = format!("column '{column}':{detail}");
+            rebased.what = format!("column '{}':{detail}", root.column);
         }
         rebased
     }
 }
 
-/// Column lineage result for a single model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Column lineage result for a single model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelColumnLineage {
+    /// The manifest unique id of the model, or the name that was asked for
+    /// when no such model exists.
+    pub unique_id: String,
     pub model: String,
-    /// Number of output columns whose value lineage is `Complete`.
-    ///
-    /// Columns with a `Partial` lineage are listed in `columns` but are not
-    /// counted here, so this is not the length of `columns`. It is also not a
-    /// measure of how far tracing reached.
-    pub traced_columns: usize,
-    /// Total number of columns attempted (0 when model/SQL could not be loaded)
-    pub total_columns: usize,
-    pub columns: Vec<ColumnLineageEntry>,
+    /// The model's output slots in SQL order, or `None` when the SQL could
+    /// not be analysed (see `errors`).
+    pub output: Option<OutputSlots<ColumnSource>>,
+    /// Number of output slots listed in `output`. Unexpanded star segments are
+    /// not counted, so this is not the width of the model.
+    pub listed_columns: usize,
+    /// Listed slots whose value lineage is `Complete`, constants included.
+    pub value_complete_columns: usize,
+    /// Listed slots whose value lineage is `Partial`.
+    pub value_partial_columns: usize,
     pub errors: Vec<ColumnLineageError>,
 }
 
-/// Lineage for a single output column
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ColumnLineageEntry {
-    pub column: String,
-    pub transformation: TransformationType,
-    /// Known sources of the value, and what remains unresolved.
-    pub lineage: ValueLineage<ColumnSource>,
-}
-
 impl ModelColumnLineage {
-    /// Number of listed columns whose value lineage is `Complete`.
-    pub fn complete_column_count(&self) -> usize {
-        self.columns
-            .iter()
-            .filter(|entry| entry.lineage.is_complete())
-            .count()
+    /// Recompute the three counts from `output`. All are 0 without an output.
+    pub fn recount(&mut self) {
+        let (listed, complete, partial) =
+            self.output.as_ref().map_or((0, 0, 0), OutputSlots::counts);
+        self.listed_columns = listed;
+        self.value_complete_columns = complete;
+        self.value_partial_columns = partial;
+    }
+
+    /// Keep only the output slots that the requested column names select, and
+    /// the diagnostics of those slots.
+    ///
+    /// Each name is looked up with the dialect's identifier rules. A name that
+    /// matches several slots selects none of them and is reported as
+    /// ambiguous. A name that matches no slot is reported as not found, or as
+    /// indeterminate when an unexpanded star may provide it. Nothing changes
+    /// when the model has no output.
+    pub fn select_columns(&mut self, requested: &[&str], dialect: DlinDialect) {
+        let Some(output) = self.output.as_mut() else {
+            return;
+        };
+        let names: BTreeSet<&str> = requested.iter().copied().collect();
+        let mut keep = BTreeSet::new();
+        let mut diagnostics = Vec::new();
+        for name in names {
+            let lookup = output.lookup(&Ident::parse_reference(name), dialect);
+            if let SlotLookup::Unique(id) = lookup {
+                keep.insert(id);
+            }
+            diagnostics.extend(output.lookup_error(name, &lookup));
+        }
+        output.columns.retain(|slot| keep.contains(&slot.id));
+        // Keep the model-level diagnostics and those of the selected slots.
+        // A declared-only column has no slot, and a requested name that
+        // matched nothing is reported by the lookup instead.
+        self.errors.retain(|error| match error.slot() {
+            Some(slot) => keep.contains(&slot),
+            None => !error.is_column_scoped(),
+        });
+        // A model that failed as a whole already explains why nothing was
+        // found; an ambiguous name is still reported.
+        let failed = self.errors.iter().any(ColumnLineageError::is_model_failure);
+        self.errors.extend(
+            diagnostics
+                .into_iter()
+                .filter(|error| !failed || error.kind == ColumnLineageErrorKind::ColumnAmbiguous),
+        );
+        self.recount();
     }
 }
 
@@ -136,74 +257,277 @@ pub enum TransformationType {
     Unknown,
 }
 
+// --- Output slots ---
+
+/// Position of a slot within one model result: its index in
+/// [`OutputSlots::columns`] when the result was built. It is not a persistent
+/// identity and is separate from the SQL position of the column.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct OutputSlotId(usize);
+
+impl OutputSlotId {
+    pub fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl fmt::Display for OutputSlotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
+
+/// The name of an output column, as the SQL gave it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(tag = "kind", content = "ident", rename_all = "snake_case")]
+pub enum OutputName {
+    /// Named by an alias or a target column list.
+    Explicit(Ident),
+    /// Named after the column or field the expression reads.
+    Inferred(Ident),
+    /// The SQL gives the expression no name.
+    Anonymous,
+}
+
+impl OutputName {
+    /// The identifier, unless the output is anonymous.
+    pub fn ident(&self) -> Option<&Ident> {
+        match self {
+            Self::Explicit(ident) | Self::Inferred(ident) => Some(ident),
+            Self::Anonymous => None,
+        }
+    }
+}
+
+/// Display form of the name. An anonymous output is shown as `?column?`; that
+/// text is for display only and never identifies a column.
+impl fmt::Display for OutputName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.ident() {
+            Some(ident) => ident.fmt(f),
+            None => f.write_str("?column?"),
+        }
+    }
+}
+
+/// One output column of a model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputSlot<S> {
+    pub id: OutputSlotId,
+    /// Zero-based SQL position, when the engine proved it. It is `None` for a
+    /// column after an unexpanded star.
+    pub ordinal: Option<usize>,
+    pub name: OutputName,
+    pub transformation: TransformationType,
+    /// Known sources of the value, and what remains unresolved.
+    pub lineage: ValueLineage<S>,
+}
+
+/// A star projection that could not be expanded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UnexpandedStar {
+    /// Relation the star reads, or `None` when it is not known.
+    pub relation: Option<RelationRef>,
+    /// Ordinal of the last known output column before the star, or `None`
+    /// when no earlier column has a known position.
+    pub after_ordinal: Option<usize>,
+}
+
+/// Whether the listed slots are every output column.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputShape {
+    /// Every output column is listed.
+    Closed,
+    /// Unexpanded stars may contribute columns that are not listed.
+    Open { unexpanded: Vec<UnexpandedStar> },
+}
+
+/// The output slots of one model, in SQL order, with duplicates and quoting
+/// kept.
+///
+/// `S` is the representation of a source column: the public result and the
+/// internal result differ only there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputSlots<S> {
+    pub columns: Vec<OutputSlot<S>>,
+    pub shape: OutputShape,
+}
+
+/// Result of looking a column name up in the slots of a model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotLookup {
+    /// Exactly one slot has this name.
+    Unique(OutputSlotId),
+    /// More than one slot has this name. None of them is chosen.
+    Ambiguous(Vec<OutputSlotId>),
+    /// No listed slot has this name. When the shape is open, an unexpanded
+    /// star may still provide it.
+    Absent,
+}
+
+impl<S> OutputSlots<S> {
+    /// The slot with this id.
+    pub fn slot(&self, id: OutputSlotId) -> Option<&OutputSlot<S>> {
+        self.columns
+            .get(id.index())
+            .filter(|slot| slot.id == id)
+            .or_else(|| self.columns.iter().find(|slot| slot.id == id))
+    }
+
+    /// Find the slots named `name`, comparing names by the dialect's column
+    /// identifier rules. Anonymous slots never match.
+    pub fn lookup(&self, name: &Ident, dialect: DlinDialect) -> SlotLookup {
+        let Ok(engine) = dialect.to_engine_dialect() else {
+            return SlotLookup::Absent;
+        };
+        let wanted = name.engine_key(engine);
+        let matches: Vec<OutputSlotId> = self
+            .columns
+            .iter()
+            .filter(|slot| {
+                slot.name
+                    .ident()
+                    .is_some_and(|ident| ident.engine_key(engine) == wanted)
+            })
+            .map(|slot| slot.id)
+            .collect();
+        match matches.as_slice() {
+            [] => SlotLookup::Absent,
+            [id] => SlotLookup::Unique(*id),
+            _ => SlotLookup::Ambiguous(matches),
+        }
+    }
+
+    /// The diagnostic for a lookup of `name` that did not find exactly one
+    /// slot: ambiguous when several slots have the name, not found when the
+    /// shape is closed, and indeterminate when an unexpanded star may provide
+    /// it. `None` when the lookup found a slot.
+    pub(crate) fn lookup_error(
+        &self,
+        name: &str,
+        lookup: &SlotLookup,
+    ) -> Option<ColumnLineageError> {
+        match lookup {
+            SlotLookup::Unique(_) => None,
+            SlotLookup::Ambiguous(ids) => Some(ColumnLineageError::for_name(
+                ColumnLineageErrorKind::ColumnAmbiguous,
+                name,
+                &format!(
+                    "{} output columns have this name; it does not select one of them",
+                    ids.len()
+                ),
+                None,
+            )),
+            SlotLookup::Absent if self.shape == OutputShape::Closed => {
+                Some(ColumnLineageError::for_name(
+                    ColumnLineageErrorKind::ColumnNotFound,
+                    name,
+                    "not found in model output",
+                    None,
+                ))
+            }
+            SlotLookup::Absent => Some(ColumnLineageError::for_name(
+                ColumnLineageErrorKind::ColumnIndeterminate,
+                name,
+                "not among the enumerated model outputs",
+                Some(OPEN_SHAPE_HINT.to_string()),
+            )),
+        }
+    }
+
+    /// Listed, value-complete and value-partial slot counts.
+    fn counts(&self) -> (usize, usize, usize) {
+        let complete = self
+            .columns
+            .iter()
+            .filter(|slot| slot.lineage.is_complete())
+            .count();
+        (self.columns.len(), complete, self.columns.len() - complete)
+    }
+}
+
 /// A source column reference
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ColumnSource {
     /// Source table/model name as it appears in SQL (e.g. "stg_orders", "`raw`.`orders`")
     pub table: String,
-    /// Source column name
-    pub column: String,
-    /// Cross-model path: (model_name, column_name, transformation) triples for intermediate hops
-    /// traversed to reach this source. Ordered from the target model outward toward the leaf source.
+    /// Source column name, with the quote style it was written with.
+    pub column: Ident,
+    /// Cross-model path: the model outputs traversed to reach this source, as
+    /// hops ordered from the target model outward toward the leaf source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_path: Vec<(String, String, TransformationType)>,
+    pub model_path: Vec<ModelPathHop>,
 }
 
-/// Internal source representation. The public `ColumnSource.table` remains a
-/// rendered string for JSON/API compatibility; analysis and cache code keeps
-/// the structural relation until the final conversion boundary.
+/// Internal source representation. The public `ColumnSource.table` is a
+/// rendered string; analysis and cache code keeps the structural relation
+/// until the final conversion boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InternalColumnSource {
     pub relation: RelationRef,
-    pub column: String,
-    pub model_path: Vec<(String, String, TransformationType)>,
+    pub column: Ident,
+    pub model_path: Vec<ModelPathHop>,
 }
 
+/// The internal form of a model result.
+///
+/// Unknown fields are rejected so that a cache entry written in an older
+/// layout fails to parse instead of reading as a result without output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct InternalColumnLineageEntry {
-    pub column: String,
-    pub transformation: TransformationType,
-    pub lineage: ValueLineage<InternalColumnSource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct InternalModelColumnLineage {
+    pub unique_id: String,
     pub model: String,
-    pub traced_columns: usize,
-    pub total_columns: usize,
-    pub columns: Vec<InternalColumnLineageEntry>,
+    pub output: Option<OutputSlots<InternalColumnSource>>,
     pub errors: Vec<ColumnLineageError>,
 }
 
 impl InternalModelColumnLineage {
-    /// Number of listed columns whose value lineage is `Complete`.
-    pub(crate) fn complete_column_count(&self) -> usize {
-        self.columns
-            .iter()
-            .filter(|entry| entry.lineage.is_complete())
-            .count()
+    /// A result for a model whose SQL was not analysed.
+    pub(crate) fn failed(unique_id: &str, model: &str, error: ColumnLineageError) -> Self {
+        Self {
+            unique_id: unique_id.to_string(),
+            model: model.to_string(),
+            output: None,
+            errors: vec![error],
+        }
     }
 
     pub(crate) fn into_public(self) -> ModelColumnLineage {
-        ModelColumnLineage {
+        let mut public = ModelColumnLineage {
+            unique_id: self.unique_id,
             model: self.model,
-            traced_columns: self.traced_columns,
-            total_columns: self.total_columns,
-            columns: self
-                .columns
-                .into_iter()
-                .map(|entry| ColumnLineageEntry {
-                    column: entry.column,
-                    transformation: entry.transformation,
-                    lineage: entry.lineage.map_known(|source| ColumnSource {
-                        table: source.relation.render(),
-                        column: source.column,
-                        model_path: source.model_path,
-                    }),
-                })
-                .collect(),
+            output: self.output.map(|output| OutputSlots {
+                columns: output
+                    .columns
+                    .into_iter()
+                    .map(|slot| OutputSlot {
+                        id: slot.id,
+                        ordinal: slot.ordinal,
+                        name: slot.name,
+                        transformation: slot.transformation,
+                        lineage: slot.lineage.map_known(|source| ColumnSource {
+                            table: source.relation.render(),
+                            column: source.column,
+                            model_path: source.model_path,
+                        }),
+                    })
+                    .collect(),
+                shape: output.shape,
+            }),
+            listed_columns: 0,
+            value_complete_columns: 0,
+            value_partial_columns: 0,
             errors: normalize_column_lineage_errors(self.errors),
-        }
+        };
+        public.recount();
+        public
     }
 }
 
@@ -215,20 +539,23 @@ impl InternalModelColumnLineage {
 pub(crate) fn normalize_column_lineage_errors(
     errors: Vec<ColumnLineageError>,
 ) -> Vec<ColumnLineageError> {
+    type GroupKey = (
+        Option<OutputSlotId>,
+        String,
+        ColumnLineageErrorKind,
+        String,
+        Option<String>,
+    );
     let mut normalized = Vec::with_capacity(errors.len());
-    let mut groups =
-        HashMap::<(String, ColumnLineageErrorKind, String, Option<String>), usize>::new();
+    let mut groups = HashMap::<GroupKey, usize>::new();
 
     for error in errors {
         let Some(column) = error.column_name() else {
             normalized.push(error);
             continue;
         };
-        if !error.is_column_scoped() {
-            normalized.push(error);
-            continue;
-        }
         let key = (
+            error.slot(),
             column.to_string(),
             error.kind,
             error.what.clone(),
@@ -256,46 +583,28 @@ fn diagnostic_precedes(candidate: &ColumnLineageError, current: &ColumnLineageEr
     }
 }
 
-impl From<ModelColumnLineage> for InternalModelColumnLineage {
-    fn from(public: ModelColumnLineage) -> Self {
-        Self {
-            model: public.model,
-            traced_columns: public.traced_columns,
-            total_columns: public.total_columns,
-            columns: public
-                .columns
-                .into_iter()
-                .map(|entry| InternalColumnLineageEntry {
-                    column: entry.column,
-                    transformation: entry.transformation,
-                    lineage: entry.lineage.map_known(|source| InternalColumnSource {
-                        relation: RelationRef::parse(&source.table)
-                            .unwrap_or_else(|_| RelationRef::bare(source.table)),
-                        column: source.column,
-                        model_path: source.model_path,
-                    }),
-                })
-                .collect(),
-            errors: public.errors,
-        }
-    }
-}
-
 // --- Value lineage ---
 
-/// Identity of one output column of a dbt model.
+/// Identity of one output slot of a dbt model.
 ///
-/// `unique_id` is the stable identity; `model` is the display name used by the
-/// rest of the report.
+/// `unique_id` and `slot` are the identity; `model` and `column` are the
+/// display names used by the rest of the report. Two slots with the same
+/// display name differ in `slot`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModelOutputRef {
     pub unique_id: String,
     pub model: String,
+    pub slot: OutputSlotId,
     pub column: String,
 }
 
-/// One hop of a cross-model path: `(model_name, column_name, transformation)`.
-pub type ModelPathHop = (String, String, TransformationType);
+/// One hop of a cross-model path: the model output that was traversed and the
+/// transformation that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModelPathHop {
+    pub output: ModelOutputRef,
+    pub transformation: TransformationType,
+}
 
 /// The sources that supply the value of one output column, and whether that
 /// list is the whole story.
@@ -447,15 +756,22 @@ pub enum UnresolvedReason {
     /// A named output may come from a column hidden behind an unexpanded star.
     NamedBehindStar {
         relation: RelationRef,
-        column: String,
+        column: Ident,
     },
     /// A column could come from more than one candidate.
     Ambiguous {
-        column: String,
+        column: Ident,
         candidates: Vec<UnresolvedCandidate>,
     },
+    /// A column read from another model matches more than one of that model's
+    /// output columns, so none of them is chosen.
+    AmbiguousOutput {
+        relation: RelationRef,
+        column: Ident,
+        candidates: Vec<ModelOutputRef>,
+    },
     /// A column could not be bound to a relation in scope.
-    Unbound { column: String },
+    Unbound { column: Ident },
     /// Recursive lineage is represented by its known base sources only.
     Recursive,
     /// A whole-row alias is used where a column source is expected.
@@ -521,6 +837,15 @@ impl std::fmt::Display for UnresolvedReason {
                     candidates.join(", ")
                 )
             }
+            Self::AmbiguousOutput {
+                relation,
+                column,
+                candidates,
+            } => write!(
+                f,
+                "{column} matches {} output columns of {relation}",
+                candidates.len()
+            ),
             Self::Unbound { column } => write!(f, "'{column}' is not bound to a relation"),
             Self::Recursive => write!(f, "recursive lineage is limited to its base sources"),
             Self::RowValue { alias } => write!(f, "whole-row value '{alias}'"),
@@ -533,7 +858,7 @@ impl std::fmt::Display for UnresolvedReason {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UnresolvedSource {
     pub relation: RelationRef,
-    pub column: String,
+    pub column: Ident,
 }
 
 /// A candidate source of an ambiguous column.
@@ -602,6 +927,7 @@ mod tests {
         ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnNotFound,
             column,
+            slot: None,
             what: what.to_string(),
             why: why.map(str::to_string),
             hint: hint.map(str::to_string),
@@ -614,6 +940,7 @@ mod tests {
             ColumnLineageError {
                 kind: ColumnLineageErrorKind::ParseFailure,
                 column: None,
+                slot: None,
                 what: "parse".to_string(),
                 why: None,
                 hint: None,
@@ -641,6 +968,7 @@ mod tests {
             ColumnLineageError {
                 kind: ColumnLineageErrorKind::ParseFailure,
                 column: None,
+                slot: None,
                 what: "column 'dup_col': same".to_string(),
                 why: None,
                 hint: None,
@@ -658,6 +986,7 @@ mod tests {
         let structured = ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnIndeterminate,
             column: Some("col_a".to_string()),
+            slot: None,
             what: "row value could not be expanded".to_string(),
             why: None,
             hint: None,
@@ -665,6 +994,7 @@ mod tests {
         let message_only = ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnNotFound,
             column: None,
+            slot: None,
             what: "column 'col_a': not found".to_string(),
             why: None,
             hint: None,

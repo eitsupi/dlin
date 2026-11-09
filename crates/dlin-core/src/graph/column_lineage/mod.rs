@@ -1,9 +1,10 @@
-use crate::parser::manifest::Manifest;
-use std::collections::HashMap;
+use crate::parser::manifest::{Manifest, ManifestNode};
+use std::collections::{HashMap, HashSet};
 
 mod backend;
 mod cache;
 mod cross_model;
+mod ident;
 mod impact;
 mod relation;
 mod schema;
@@ -12,14 +13,15 @@ mod tests;
 mod types;
 
 use backend::sqllineage::{
-    OutputFailureKind, analyze_parsed, discovered_output_names, lineage_failure, parse_sql,
-    resolve_statement_output, single_lineage_statement, unresolved_reason,
+    OutputFailureKind, analyze_parsed, lineage_failure, parse_sql, single_lineage_statement,
+    unresolved_reason,
 };
 pub use backend::{
     CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
     debug_parse_sql_ast_debug, debug_parse_sql_json, debug_trace_column_json,
 };
 pub use cache::ColumnLineageCache;
+pub use ident::{Ident, Quote};
 pub use impact::{
     ColumnImpactReport, ConfirmedImpact, DependencyKind, DependencyRef, ExplorationStatus,
     ImpactEdge, ImpactScope, KindExploration, TraceGap,
@@ -27,86 +29,34 @@ pub use impact::{
 pub use relation::RelationRef;
 use schema::{SchemaContext, SemanticDigestCache};
 pub use types::{
-    ColumnLineageEntry, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
-    ModelColumnLineage, ModelOutputRef, SchemaDependencyKind, SetCorrespondence, SetOperand,
-    SetOperationKind, SetOperator, SetQuantifier, TransformationType, UnresolvedCandidate,
+    ColumnLineageError, ColumnLineageErrorKind, ColumnSource, ModelColumnLineage, ModelOutputRef,
+    ModelPathHop, OutputName, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
+    SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind, SetOperator,
+    SetQuantifier, SlotLookup, TransformationType, UnexpandedStar, UnresolvedCandidate,
     UnresolvedContribution, UnresolvedReason, UnresolvedSource, ValueLineage,
 };
 use types::{
-    InternalColumnLineageEntry, InternalColumnSource, InternalModelColumnLineage,
+    InternalColumnSource, InternalModelColumnLineage, OPEN_SHAPE_HINT,
     normalize_column_lineage_errors,
 };
 
-fn output_failure_state(kind: OutputFailureKind) -> &'static str {
-    match kind {
-        OutputFailureKind::NotFound => "not_found",
-        OutputFailureKind::Ambiguous => "ambiguous",
-        OutputFailureKind::Indeterminate => "indeterminate",
-    }
-}
-
-fn column_resolution_error_with_message(
-    column: &str,
-    state: &str,
-    detail: String,
-    has_open_shape: bool,
-) -> ColumnLineageError {
-    let (kind, hint) = match state {
-        "ambiguous" => (ColumnLineageErrorKind::ColumnAmbiguous, None),
-        "not_found" => (ColumnLineageErrorKind::ColumnNotFound, None),
-        _ => (
-            ColumnLineageErrorKind::ColumnIndeterminate,
-            has_open_shape.then(|| {
-                "column may be introduced via SELECT * that could not be expanded; \
-                 define upstream columns in the model YAML to enable full resolution"
-                    .to_string()
-            }),
-        ),
-    };
-    ColumnLineageError {
-        kind,
-        column: Some(column.to_string()),
-        what: format!("column '{column}': {detail}"),
-        why: None,
-        hint,
-    }
-}
-
-fn parse_failure(model: &str, total: usize, reason: String) -> InternalModelColumnLineage {
-    InternalModelColumnLineage {
-        model: model.to_string(),
-        traced_columns: 0,
-        total_columns: total,
-        columns: vec![],
-        errors: vec![ColumnLineageError {
+fn parse_failure(node: &ManifestNode, reason: String) -> InternalModelColumnLineage {
+    let model = node.name.as_str();
+    InternalModelColumnLineage::failed(
+        &node.unique_id,
+        model,
+        ColumnLineageError {
             kind: ColumnLineageErrorKind::ParseFailure,
             column: None,
+            slot: None,
             what: format!("failed to parse SQL for '{model}'"),
             why: Some(reason),
             hint: Some(
                 "Check the SQL with `dlin debug parse-sql`; ensure the correct --dialect is set"
                     .to_string(),
             ),
-        }],
-    }
-}
-
-fn column_inference_failure(model: &str) -> InternalModelColumnLineage {
-    InternalModelColumnLineage {
-        model: model.to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
-        errors: vec![ColumnLineageError {
-            kind: ColumnLineageErrorKind::ColumnInferenceFailed,
-            column: None,
-            what: format!("model '{model}': could not determine output columns"),
-            why: Some("YAML has no columns defined and SQL column inference failed".to_string()),
-            hint: Some(
-                "Add column definitions to the model's YAML, or ensure the SQL is parseable by `dlin debug parse-sql`".to_string(),
-            ),
-        }],
-    }
+        },
+    )
 }
 
 /// A per-manifest column-lineage analysis session.
@@ -232,19 +182,17 @@ pub(super) fn compute_column_lineage_internal(
     let node = match node {
         Some(n) => n,
         None => {
-            return InternalModelColumnLineage {
-                model: model_name.to_string(),
-                traced_columns: 0,
-                total_columns: 0,
-                columns: vec![],
-                errors: vec![ColumnLineageError {
-                    kind: ColumnLineageErrorKind::ModelNotFound,
-                    column: None,
-                    what: format!("model '{}' not found in manifest", model_name),
-                    why: None,
+            return InternalModelColumnLineage::failed(
+                model_name,
+                model_name,
+                ColumnLineageError {
                     hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
-                }],
-            };
+                    ..ColumnLineageError::model(
+                        ColumnLineageErrorKind::ModelNotFound,
+                        format!("model '{}' not found in manifest", model_name),
+                    )
+                },
+            );
         }
     };
 
@@ -257,21 +205,20 @@ pub(super) fn compute_column_lineage_internal(
     let compiled_code = match &node.compiled_code {
         Some(code) => code,
         None => {
-            return InternalModelColumnLineage {
-                model: display_name.to_string(),
-                traced_columns: 0,
-                total_columns: 0,
-                columns: vec![],
-                errors: vec![ColumnLineageError {
-                    kind: ColumnLineageErrorKind::NoCompiledCode,
-                    column: None,
-                    what: format!("model '{}' has no compiled_code", display_name),
+            return InternalModelColumnLineage::failed(
+                cache_key,
+                display_name,
+                ColumnLineageError {
                     why: Some("compiled SQL is required for column lineage analysis".to_string()),
                     hint: Some(
                         "Run `dbt compile` first; use `dlin check-manifest` to verify the manifest is up to date".to_string(),
                     ),
-                }],
-            };
+                    ..ColumnLineageError::model(
+                        ColumnLineageErrorKind::NoCompiledCode,
+                        format!("model '{}' has no compiled_code", display_name),
+                    )
+                },
+            );
         }
     };
 
@@ -295,72 +242,31 @@ pub(super) fn compute_column_lineage_internal(
 
     let parsed = match parse_sql(compiled_code, dialect) {
         Ok(parsed) => parsed,
-        Err(message) => {
-            if node.columns.is_empty() {
-                return column_inference_failure(display_name);
-            }
-            return parse_failure(display_name, node.columns.len(), message);
-        }
+        Err(message) => return parse_failure(node, message),
     };
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
-    let mut column_names: Vec<String> = node.columns.keys().cloned().collect();
-    column_names.extend(discovered_output_names(&analyzed, dialect));
-    column_names.sort();
-    column_names.dedup();
-
-    if column_names.is_empty() {
-        return column_inference_failure(display_name);
-    }
-
-    let total = column_names.len();
     let statement = match single_lineage_statement(&analyzed) {
         Ok(statement) => statement,
-        Err(detail) => return parse_failure(display_name, total, detail),
+        Err(detail) => return parse_failure(node, detail),
     };
 
-    let has_star_columns = statement.has_unresolved_stars;
-    let mut columns = Vec::new();
-    let mut errors = Vec::new();
-    for col_name in &column_names {
-        match resolve_statement_output(statement, col_name, false, dialect) {
-            Ok(output) => {
-                if let Some(failure) = lineage_failure(&output.lineage) {
-                    let state = output_failure_state(failure.kind);
-                    errors.push(column_resolution_error_with_message(
-                        col_name,
-                        state,
-                        failure.message,
-                        has_star_columns,
-                    ));
-                }
-                let origin = ModelOutputRef {
-                    unique_id: node.unique_id.clone(),
-                    model: display_name.to_string(),
-                    column: col_name.clone(),
-                };
-                columns.push(InternalColumnLineageEntry {
-                    column: col_name.clone(),
-                    transformation: backend::sqllineage::transformation(output.transform),
-                    lineage: value_lineage(&output.lineage, &origin, catalog.as_ref(), dialect),
-                });
-            }
-            Err(failure) => errors.push(column_resolution_error_with_message(
-                col_name,
-                output_failure_state(failure.kind),
-                failure.message,
-                has_star_columns,
-            )),
-        }
-    }
+    // The SQL output is the only source of output slots. Columns that the
+    // YAML declares and the SQL does not list are reported, not added.
+    let output = output_slots(node, &statement.output, catalog.as_ref(), dialect);
+    let mut errors = slot_errors(
+        node,
+        &statement.output,
+        &output,
+        statement.has_unresolved_stars,
+    );
+    errors.extend(declared_column_differences(node, &output, dialect));
 
-    let mut result = InternalModelColumnLineage {
+    let result = InternalModelColumnLineage {
+        unique_id: cache_key.to_string(),
         model: display_name.to_string(),
-        traced_columns: 0,
-        total_columns: total,
-        columns,
+        output: Some(output),
         errors,
     };
-    result.traced_columns = result.complete_column_count();
 
     if semantic_digest.persistent_cache_safe {
         analysis
@@ -371,6 +277,160 @@ pub(super) fn compute_column_lineage_internal(
         .lineage_results
         .insert(cache_key.to_string(), result.clone());
     result
+}
+
+/// The identity of one slot of `node`'s output.
+fn output_ref(node: &ManifestNode, slot: OutputSlotId, name: &OutputName) -> ModelOutputRef {
+    ModelOutputRef {
+        unique_id: node.unique_id.clone(),
+        model: node.name.clone(),
+        slot,
+        column: name.to_string(),
+    }
+}
+
+fn output_name(name: &sqllineage::OutputName) -> OutputName {
+    match name {
+        sqllineage::OutputName::Explicit(ident) => OutputName::Explicit(Ident::from_engine(ident)),
+        sqllineage::OutputName::Inferred(ident) => OutputName::Inferred(Ident::from_engine(ident)),
+        sqllineage::OutputName::Anonymous => OutputName::Anonymous,
+    }
+}
+
+/// The slots of the engine output of `node`, in the engine's order. Duplicate
+/// names stay separate slots, and an unexpanded star stays a shape entry.
+fn output_slots(
+    node: &ManifestNode,
+    output: &sqllineage::Output,
+    catalog: Option<&CatalogSnapshot>,
+    dialect: DlinDialect,
+) -> OutputSlots<InternalColumnSource> {
+    let columns = output
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let id = OutputSlotId::new(index);
+            let name = output_name(&column.name);
+            let origin = output_ref(node, id, &name);
+            OutputSlot {
+                id,
+                ordinal: column.ordinal,
+                lineage: value_lineage(&column.lineage, &origin, catalog, dialect),
+                transformation: backend::sqllineage::transformation(column.transform),
+                name,
+            }
+        })
+        .collect();
+    let shape = match &output.shape {
+        sqllineage::Shape::Closed => OutputShape::Closed,
+        sqllineage::Shape::Open { unexpanded } => OutputShape::Open {
+            unexpanded: unexpanded
+                .iter()
+                .map(|star| UnexpandedStar {
+                    relation: star
+                        .relation
+                        .as_ref()
+                        .map(|relation| backend::source_relation(relation, catalog, dialect)),
+                    after_ordinal: star.after_ordinal,
+                })
+                .collect(),
+        },
+    };
+    OutputSlots { columns, shape }
+}
+
+/// Diagnostics for the slots whose lineage the engine could not fully
+/// establish. Each one is scoped to its own slot. An indeterminate slot carries
+/// the star hint whenever any star of the statement, including a nested one,
+/// stayed unexpanded.
+fn slot_errors(
+    node: &ManifestNode,
+    output: &sqllineage::Output,
+    slots: &OutputSlots<InternalColumnSource>,
+    has_unresolved_stars: bool,
+) -> Vec<ColumnLineageError> {
+    output
+        .columns
+        .iter()
+        .zip(&slots.columns)
+        .filter_map(|(column, slot)| {
+            let failure = lineage_failure(&column.lineage)?;
+            let kind = match failure.kind {
+                OutputFailureKind::Ambiguous => ColumnLineageErrorKind::ColumnAmbiguous,
+                OutputFailureKind::Indeterminate => ColumnLineageErrorKind::ColumnIndeterminate,
+            };
+            let hint = (kind == ColumnLineageErrorKind::ColumnIndeterminate
+                && has_unresolved_stars)
+                .then(|| OPEN_SHAPE_HINT.to_string());
+            Some(ColumnLineageError::for_slot(
+                kind,
+                &output_ref(node, slot.id, &slot.name),
+                &failure.message,
+                hint,
+            ))
+        })
+        .collect()
+}
+
+/// Non-fatal diagnostics for columns that the model's YAML declares and that
+/// the SQL output does not list. They carry the declared name but no slot. Names are compared with the dialect's
+/// identifier rules. The wording depends on the shape: a closed output does
+/// not contain the column, while an open output only does not enumerate it.
+fn declared_column_differences(
+    node: &ManifestNode,
+    output: &OutputSlots<InternalColumnSource>,
+    dialect: DlinDialect,
+) -> Vec<ColumnLineageError> {
+    let Some(declared) = schema::evidence::yaml_schema_evidence(
+        &node.unique_id,
+        &node.columns,
+        node.config.contract.as_ref(),
+        dialect,
+    ) else {
+        return Vec::new();
+    };
+    let engine = dialect
+        .to_engine_dialect()
+        .expect("dialect checked during parsing");
+    let listed: HashSet<String> = output
+        .columns
+        .iter()
+        .filter_map(|slot| slot.name.ident())
+        .map(|ident| ident.engine_key(engine))
+        .collect();
+    declared
+        .columns
+        .iter()
+        .filter(|column| !listed.contains(column.name.column_key(engine).as_ref()))
+        .map(|column| {
+            let name = Ident::from_engine(&column.name).to_string();
+            let (kind, what, hint) = match output.shape {
+                OutputShape::Closed => (
+                    ColumnLineageErrorKind::DeclaredColumnNotInOutput,
+                    format!("column {name} is declared in YAML but is not in the SQL output"),
+                    None,
+                ),
+                OutputShape::Open { .. } => (
+                    ColumnLineageErrorKind::DeclaredColumnNotEnumerated,
+                    format!(
+                        "column {name} is declared in YAML but is not among the enumerated SQL outputs"
+                    ),
+                    Some(OPEN_SHAPE_HINT.to_string()),
+                ),
+            };
+            // The declared column has no output slot, so only its name
+            // identifies it.
+            ColumnLineageError {
+                kind,
+                column: Some(name),
+                slot: None,
+                what,
+                why: None,
+                hint,
+            }
+        })
+        .collect()
 }
 
 /// Convert an engine lineage into the typed value lineage of an output at
@@ -386,7 +446,7 @@ pub(super) fn value_lineage(
             .iter()
             .map(|source| InternalColumnSource {
                 relation: backend::source_relation(&source.relation, catalog, dialect),
-                column: source.column.value.clone(),
+                column: Ident::from_engine(&source.column),
                 model_path: vec![],
             })
             .collect()

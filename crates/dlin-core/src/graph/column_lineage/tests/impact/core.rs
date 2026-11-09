@@ -139,6 +139,26 @@ fn test_column_impact_model_not_found() {
     assert!(result.errors[0].what.contains("not found"));
 }
 
+/// The start model of these tests has no compiled SQL, so the input column is
+/// not an identified output: that is reported, and the dependents are still
+/// searched by the name that their SQL gives the column.
+fn assert_unanalysed_start(report: &ColumnImpactReport) {
+    assert_eq!(report.input, None);
+    assert!(!report.proves_no_impact());
+    assert!(
+        report.gaps().iter().any(|(_, gap)| matches!(
+            gap,
+            TraceGap::UnidentifiedInput { candidates, .. } if candidates.is_empty()
+        )),
+        "gaps: {:?}",
+        report.exploration
+    );
+    let [error] = report.errors.as_slice() else {
+        panic!("errors: {:?}", report.errors);
+    };
+    assert_eq!(error.kind, ColumnLineageErrorKind::NoCompiledCode);
+}
+
 #[test]
 fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
     let raw_id = "model.proj.raw_model";
@@ -231,11 +251,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(
-        raw_impact.errors.is_empty(),
-        "errors: {:?}",
-        raw_impact.errors
-    );
+    assert_unanalysed_start(&raw_impact);
     assert!(
         raw_impact
             .confirmed
@@ -260,11 +276,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(
-        staging_impact.errors.is_empty(),
-        "errors: {:?}",
-        staging_impact.errors
-    );
+    assert_unanalysed_start(&staging_impact);
     assert!(
         staging_impact
             .confirmed
@@ -349,7 +361,7 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert_unanalysed_start(&report);
     assert!(
         report
             .confirmed
@@ -424,7 +436,7 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert_unanalysed_start(&report);
     assert!(
         report
             .confirmed

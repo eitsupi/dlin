@@ -37,21 +37,12 @@ fn generic(sql: &str, yaml_columns: &[&str]) -> ModelColumnLineage {
     analyze(sql, yaml_columns, DlinDialect::Generic)
 }
 
-fn column_names(result: &ModelColumnLineage) -> Vec<&str> {
-    result
-        .columns
-        .iter()
-        .map(|entry| entry.column.as_str())
-        .collect()
+fn column_names(result: &ModelColumnLineage) -> Vec<String> {
+    result.names()
 }
 
-fn source_pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
-    entry
-        .lineage
-        .known()
-        .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
-        .collect()
+fn source_pairs(entry: &OutputSlot<ColumnSource>) -> Pairs {
+    known_pairs_of(entry)
 }
 
 /// The single error of a model-level failure.
@@ -67,7 +58,15 @@ fn assert_parse_failure(result: &ModelColumnLineage, why: &str) {
     assert_eq!(error.what, "failed to parse SQL for 'stg_orders'");
     assert_eq!(error.why.as_deref(), Some(why));
     assert_eq!(error.hint.as_deref(), Some(PARSE_HINT));
-    assert!(result.columns.is_empty());
+    assert_eq!(result.output, None);
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (0, 0, 0)
+    );
 }
 
 fn assert_column_error(
@@ -92,45 +91,47 @@ fn assert_column_error(
 fn unnamed_expressions_are_listed_as_question_mark_column() {
     let result = generic("SELECT 1, a FROM t", &[]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.total_columns, 2);
-    assert_eq!(result.traced_columns, 2);
+    assert_eq!(result.listed_columns, 2);
+    assert_eq!(result.value_complete_columns, 2);
     assert_eq!(column_names(&result), ["?column?", "a"]);
-    assert!(result.columns[0].lineage.known().is_empty());
-    assert_eq!(source_pairs(&result.columns[1]), [("t", "a")]);
+    assert!(result.slots()[0].lineage.known().is_empty());
+    assert_eq!(source_pairs(&result.slots()[1]), [("t", "a")]);
 
     let result = generic("SELECT a + 1, COUNT(*), a FROM t", &[]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.total_columns, 3);
+    assert_eq!(result.listed_columns, 3);
     assert_eq!(column_names(&result), ["?column?", "COUNT", "a"]);
     assert_eq!(
-        result.columns[0].transformation,
+        result.slots()[0].transformation,
         TransformationType::Expression
     );
-    assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
+    assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
     assert_eq!(
-        result.columns[1].transformation,
+        result.slots()[1].transformation,
         TransformationType::Aggregation
     );
 }
 
 #[test]
-fn several_unnamed_expressions_are_a_duplicate_output() {
+fn several_unnamed_expressions_are_separate_anonymous_slots() {
     let result = generic("SELECT 1, 2 FROM t", &[]);
-    assert_eq!(result.total_columns, 1);
-    assert_eq!(result.traced_columns, 0);
-    assert_column_error(
-        &result,
-        ColumnLineageErrorKind::ColumnAmbiguous,
-        "?column?",
-        "column '?column?': more than one sqllineage mapping matches output '?column?'",
-        None,
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.listed_columns, 2);
+    assert_eq!(result.value_complete_columns, 2);
+    // Anonymous outputs have no name to look up: `?column?` is display only.
+    for slot in result.slots() {
+        assert_eq!(slot.name, OutputName::Anonymous);
+    }
+    let output = result.output.as_ref().unwrap();
+    assert_eq!(
+        output.lookup(&Ident::unquoted("?column?"), DlinDialect::Generic),
+        SlotLookup::Absent
     );
 }
 
 #[test]
 fn set_operation_arity_mismatch_message() {
     let result = generic("SELECT a FROM t UNION ALL SELECT a, b FROM u", &["a"]);
-    assert_eq!(result.total_columns, 1);
     assert_parse_failure(
         &result,
         "SQL parse error: set operation arity mismatch: left has 1 columns, right has 2 columns",
@@ -138,12 +139,13 @@ fn set_operation_arity_mismatch_message() {
 }
 
 #[test]
-fn set_operation_arity_mismatch_without_yaml_columns_cannot_infer_outputs() {
+fn set_operation_arity_mismatch_without_yaml_columns_has_no_output() {
     let result = generic("SELECT a FROM t UNION ALL SELECT a, b FROM u", &[]);
     assert_eq!(
         only_error(&result).kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
+        ColumnLineageErrorKind::ParseFailure
     );
+    assert_eq!(result.output, None);
 }
 
 #[test]
@@ -170,13 +172,12 @@ fn empty_projection_wins_over_an_arity_mismatch() {
 #[test]
 fn duckdb_from_first_without_select_is_an_empty_projection() {
     let result = analyze("FROM t", &["x"], DlinDialect::DuckDB);
-    assert_eq!(result.total_columns, 1);
     assert_parse_failure(&result, "dlin found a SELECT with an empty projection");
 
     let result = analyze("FROM t", &[], DlinDialect::DuckDB);
     assert_eq!(
         only_error(&result).kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
+        ColumnLineageErrorKind::ParseFailure
     );
 }
 
@@ -185,20 +186,19 @@ fn from_first_with_a_select_list_is_not_an_empty_projection() {
     let result = analyze("FROM t SELECT a", &[], DlinDialect::DuckDB);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(column_names(&result), ["a"]);
-    assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
+    assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
 }
 
 #[test]
 fn multiple_statements_message() {
     let result = generic("SELECT a FROM t; SELECT b FROM u", &["a"]);
-    assert_eq!(result.total_columns, 1);
     assert_parse_failure(&result, "expected exactly one statement, found 2");
 
-    // Output names are only inferred from a single statement.
+    // Without YAML columns the failure is the same: no statement is analysed.
     let result = generic("SELECT a FROM t; SELECT b FROM u", &[]);
     assert_eq!(
         only_error(&result).kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
+        ColumnLineageErrorKind::ParseFailure
     );
 }
 
@@ -246,41 +246,45 @@ fn syntax_error_message_keeps_the_parser_text() {
 }
 
 #[test]
-fn missing_output_message() {
+fn declared_only_column_message() {
     let result = generic("SELECT a FROM t", &["x"]);
-    assert_eq!(result.traced_columns, 1);
-    assert_eq!(result.total_columns, 2);
-    assert_column_error(
-        &result,
-        ColumnLineageErrorKind::ColumnNotFound,
-        "x",
-        "column 'x': no sqllineage mapping for output 'x'",
-        None,
+    assert_eq!(result.listed_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
+    let error = only_error(&result);
+    assert_eq!(
+        error.kind,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput
     );
+    assert_eq!(error.column.as_deref(), Some("x"));
+    assert_eq!(error.slot(), None);
+    assert_eq!(
+        error.what,
+        "column x is declared in YAML but is not in the SQL output"
+    );
+    assert_eq!(error.hint, None);
 }
 
 #[test]
-fn duplicate_output_message() {
+fn duplicate_output_names_are_not_an_error() {
     let result = generic("SELECT a, a FROM t", &["a"]);
-    assert_column_error(
-        &result,
-        ColumnLineageErrorKind::ColumnAmbiguous,
-        "a",
-        "column 'a': more than one sqllineage mapping matches output 'a'",
-        None,
-    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(column_names(&result), ["a", "a"]);
+    assert_eq!(result.listed_columns, 2);
 }
 
 #[test]
-fn output_hidden_behind_star_message() {
+fn declared_column_behind_an_open_shape_message() {
     let result = generic("SELECT * FROM t", &["x"]);
-    assert_column_error(
-        &result,
-        ColumnLineageErrorKind::ColumnIndeterminate,
-        "x",
-        "column 'x': cannot match output 'x' because an unexpanded SELECT * leaves the output columns unknown",
-        Some(STAR_HINT),
+    let error = only_error(&result);
+    assert_eq!(
+        error.kind,
+        ColumnLineageErrorKind::DeclaredColumnNotEnumerated
     );
+    assert_eq!(
+        error.what,
+        "column x is declared in YAML but is not among the enumerated SQL outputs"
+    );
+    assert_eq!(error.hint.as_deref(), Some(STAR_HINT));
 }
 
 #[test]
@@ -411,39 +415,60 @@ fn analysis_findings_that_are_not_errors_do_not_reject_the_model() {
     );
 }
 
+/// The dialects whose column rules the identifier tests below compare.
+const IDENTIFIER_DIALECTS: [DlinDialect; 5] = [
+    DlinDialect::Generic,
+    DlinDialect::Snowflake,
+    DlinDialect::PostgreSQL,
+    DlinDialect::BigQuery,
+    DlinDialect::ClickHouse,
+];
+
 #[test]
-fn quoted_output_spellings_resolve_exactly_in_each_dialect() {
-    for dialect in [
-        DlinDialect::Generic,
-        DlinDialect::Snowflake,
-        DlinDialect::PostgreSQL,
-        DlinDialect::BigQuery,
-        DlinDialect::ClickHouse,
-    ] {
+fn quoted_output_spellings_keep_their_quotes_and_match_yaml_by_dialect_rules() {
+    for dialect in IDENTIFIER_DIALECTS {
         for name in ["MiXeD", "id", "ID"] {
-            let result = analyze(&format!("SELECT a AS \"{name}\" FROM t"), &[name], dialect);
-            assert!(
-                result.errors.is_empty(),
-                "{dialect:?}/{name}: {:?}",
-                result.errors
+            // Whether an unquoted YAML name and the quoted output name are the
+            // same column: Generic and Snowflake fold unquoted names to upper
+            // case, PostgreSQL to lower case, BigQuery ignores case, and
+            // ClickHouse compares the spelling exactly.
+            let same_column = matches!(
+                (dialect, name),
+                (DlinDialect::BigQuery | DlinDialect::ClickHouse, _)
+                    | (DlinDialect::Generic | DlinDialect::Snowflake, "ID")
+                    | (DlinDialect::PostgreSQL, "id")
             );
-            assert_eq!(result.total_columns, 1);
-            assert_eq!(result.traced_columns, 1);
-            assert_eq!(column_names(&result), [name]);
-            assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
+            let result = analyze(&format!("SELECT a AS \"{name}\" FROM t"), &[name], dialect);
+            assert_counts(&result, 1, 1, 0);
+            // The output keeps the quote it was written with.
+            assert_eq!(column_names(&result), [format!("\"{name}\"")]);
+            assert_eq!(
+                result.slots()[0].name,
+                OutputName::Explicit(Ident::quoted(name, Quote::Double))
+            );
+            assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
+            if same_column {
+                assert!(
+                    result.errors.is_empty(),
+                    "{dialect:?}/{name}: {:?}",
+                    result.errors
+                );
+            } else {
+                assert_declared_difference(
+                    &result,
+                    ColumnLineageErrorKind::DeclaredColumnNotInOutput,
+                    name,
+                    "is declared in YAML but is not in the SQL output",
+                );
+                assert_eq!(result.errors.len(), 1);
+            }
         }
     }
 }
 
 #[test]
-fn yaml_names_without_exact_spelling_use_dialect_lookup() {
-    for dialect in [
-        DlinDialect::Generic,
-        DlinDialect::Snowflake,
-        DlinDialect::PostgreSQL,
-        DlinDialect::BigQuery,
-        DlinDialect::ClickHouse,
-    ] {
+fn yaml_names_are_matched_to_outputs_by_dialect_rules_not_by_spelling() {
+    for dialect in IDENTIFIER_DIALECTS {
         for (alias, requested) in [("MiXeD", "mixed"), ("id", "ID"), ("ID", "id")] {
             let found = match dialect {
                 DlinDialect::BigQuery => true,
@@ -457,58 +482,48 @@ fn yaml_names_without_exact_spelling_use_dialect_lookup() {
                 &[requested],
                 dialect,
             );
-            assert_eq!(result.total_columns, 2);
-            assert_eq!(
-                result.traced_columns,
-                if found { 2 } else { 1 },
-                "{dialect:?}/{alias}: {result:?}"
-            );
-            for column in &result.columns {
-                assert_eq!(source_pairs(column), [("t", "a")]);
-            }
+            // The declared name never adds an output of its own.
+            assert_counts(&result, 1, 1, 0);
+            assert_eq!(column_names(&result), [format!("\"{alias}\"")]);
+            assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
             if found {
-                assert!(result.errors.is_empty());
+                assert!(result.errors.is_empty(), "{dialect:?}/{alias}");
             } else {
-                assert_column_error(
+                assert_declared_difference(
                     &result,
-                    ColumnLineageErrorKind::ColumnNotFound,
+                    ColumnLineageErrorKind::DeclaredColumnNotInOutput,
                     requested,
-                    &format!(
-                        "column '{requested}': no sqllineage mapping for output '{requested}'"
-                    ),
-                    None,
+                    "is declared in YAML but is not in the SQL output",
                 );
                 assert_eq!(result.errors.len(), 1);
-                assert_eq!(column_names(&result), [alias]);
             }
         }
     }
 }
 
 #[test]
-fn identical_display_names_distinguish_sql_duplicates_from_collisions() {
-    for dialect in [
-        DlinDialect::Generic,
-        DlinDialect::Snowflake,
-        DlinDialect::PostgreSQL,
-        DlinDialect::BigQuery,
-        DlinDialect::ClickHouse,
-    ] {
+fn differently_quoted_outputs_with_one_display_name_are_distinct_slots() {
+    for dialect in IDENTIFIER_DIALECTS {
         let result = analyze(r#"SELECT a AS id, b AS "id" FROM t"#, &[], dialect);
-        assert_eq!(result.total_columns, 1);
-        assert_eq!(result.traced_columns, 0);
-        let reason = if matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake) {
-            "cannot resolve output 'id' because distinct SQL identifiers share the same display name"
+        assert!(result.errors.is_empty(), "{dialect:?}: {:?}", result.errors);
+        assert_counts(&result, 2, 2, 0);
+        // The two spellings stay distinguishable in the result.
+        assert_eq!(column_names(&result), ["id", r#""id""#]);
+        assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
+        assert_eq!(source_pairs(&result.slots()[1]), [("t", "b")]);
+        // Whether a reference to the unquoted name finds one slot or both is
+        // the dialect's rule: Generic and Snowflake fold the unquoted name to
+        // upper case, which the quoted lower-case output does not match.
+        let output = result.output.as_ref().unwrap();
+        let lookup = output.lookup(&Ident::unquoted("id"), dialect);
+        if matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake) {
+            assert_eq!(lookup, SlotLookup::Unique(OutputSlotId::new(0)));
         } else {
-            "more than one sqllineage mapping matches output 'id'"
-        };
-        assert_column_error(
-            &result,
-            ColumnLineageErrorKind::ColumnAmbiguous,
-            "id",
-            &format!("column 'id': {reason}"),
-            None,
-        );
+            assert_eq!(
+                lookup,
+                SlotLookup::Ambiguous(vec![OutputSlotId::new(0), OutputSlotId::new(1)])
+            );
+        }
     }
 }
 
@@ -528,119 +543,95 @@ fn merged_using_star_production_output_keeps_both_sources_and_other_columns() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.total_columns, 7);
-    assert_eq!(result.traced_columns, 7);
+    assert_eq!(result.listed_columns, 7);
+    assert_eq!(result.value_complete_columns, 7);
+    // The merged USING column comes first, then the remaining columns of each
+    // side, in the order the schemas prove.
     assert_eq!(
         column_names(&result),
         [
-            "amount",
+            "order_id",
             "customer_id",
             "order_date",
-            "order_id",
-            "payment_id",
-            "payment_method",
             "status",
+            "payment_id",
+            "amount",
+            "payment_method",
         ]
     );
     assert_eq!(
-        source_pairs(&result.columns[0]),
-        [("stg_payments", "amount")]
-    );
-    assert_eq!(
-        source_pairs(&result.columns[1]),
-        [("stg_orders", "customer_id")]
-    );
-    assert_eq!(
-        source_pairs(&result.columns[2]),
-        [("stg_orders", "order_date")]
-    );
-    assert_eq!(
-        source_pairs(&result.columns[3]),
+        source_pairs(&result.slots()[0]),
         [("stg_orders", "order_id"), ("stg_payments", "order_id")]
     );
     assert_eq!(
-        source_pairs(&result.columns[4]),
+        source_pairs(&result.slots()[1]),
+        [("stg_orders", "customer_id")]
+    );
+    assert_eq!(
+        source_pairs(&result.slots()[2]),
+        [("stg_orders", "order_date")]
+    );
+    assert_eq!(source_pairs(&result.slots()[3]), [("stg_orders", "status")]);
+    assert_eq!(
+        source_pairs(&result.slots()[4]),
         [("stg_payments", "payment_id")]
     );
     assert_eq!(
-        source_pairs(&result.columns[5]),
+        source_pairs(&result.slots()[5]),
+        [("stg_payments", "amount")]
+    );
+    assert_eq!(
+        source_pairs(&result.slots()[6]),
         [("stg_payments", "payment_method")]
     );
-    assert_eq!(source_pairs(&result.columns[6]), [("stg_orders", "status")]);
 }
 
 #[test]
-fn differently_cased_outputs_resolve_by_sql_identity() {
-    for dialect in [
-        DlinDialect::Generic,
-        DlinDialect::Snowflake,
-        DlinDialect::PostgreSQL,
-        DlinDialect::BigQuery,
-        DlinDialect::ClickHouse,
-    ] {
+fn differently_cased_outputs_keep_their_own_lineage_in_sql_order() {
+    for dialect in IDENTIFIER_DIALECTS {
         let result = analyze(
             r#"SELECT a AS id, b AS "ID" FROM t"#,
             &["ID", "id"],
             dialect,
         );
-        assert_eq!(result.total_columns, 2);
+        assert!(result.errors.is_empty(), "{dialect:?}: {:?}", result.errors);
+        assert_counts(&result, 2, 2, 0);
+        assert_eq!(column_names(&result), ["id", r#""ID""#]);
+        // The quoted uppercase output keeps b's lineage; it is not folded
+        // onto the unquoted id output.
+        assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
+        assert_eq!(source_pairs(&result.slots()[1]), [("t", "b")]);
+        let output = result.output.as_ref().unwrap();
+        let lookup = output.lookup(&Ident::unquoted("id"), dialect);
         if matches!(dialect, DlinDialect::PostgreSQL | DlinDialect::ClickHouse) {
-            assert!(result.errors.is_empty(), "{dialect:?}: {:?}", result.errors);
-            assert_eq!(result.traced_columns, 2);
-            assert_eq!(column_names(&result), ["ID", "id"]);
-            // The quoted uppercase output must keep b's lineage, rather than
-            // folding the discovery name back onto the unquoted id output.
-            assert_eq!(source_pairs(&result.columns[0]), [("t", "b")]);
-            assert_eq!(source_pairs(&result.columns[1]), [("t", "a")]);
+            assert_eq!(lookup, SlotLookup::Unique(OutputSlotId::new(0)));
         } else {
-            assert_eq!(result.traced_columns, 0);
-            assert_eq!(result.errors.len(), 2);
-            for name in ["ID", "id"] {
-                assert_column_error(
-                    &result,
-                    ColumnLineageErrorKind::ColumnAmbiguous,
-                    name,
-                    &format!(
-                        "column '{name}': more than one sqllineage mapping matches output '{name}'"
-                    ),
-                    None,
-                );
-            }
+            assert_eq!(
+                lookup,
+                SlotLookup::Ambiguous(vec![OutputSlotId::new(0), OutputSlotId::new(1)])
+            );
         }
     }
 }
 
 #[test]
-fn unquoted_output_groups_include_every_spelling_of_the_sql_key() {
-    for dialect in [
-        DlinDialect::Generic,
-        DlinDialect::Snowflake,
-        DlinDialect::PostgreSQL,
-        DlinDialect::BigQuery,
-        DlinDialect::ClickHouse,
-    ] {
+fn unquoted_outputs_that_differ_only_in_case_are_two_slots() {
+    for dialect in IDENTIFIER_DIALECTS {
         let result = analyze("SELECT a AS Foo, b AS foo FROM t", &[], dialect);
-        assert_eq!(result.total_columns, 2);
+        assert!(result.errors.is_empty(), "{dialect:?}: {:?}", result.errors);
+        assert_counts(&result, 2, 2, 0);
+        assert_eq!(column_names(&result), ["Foo", "foo"]);
+        assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
+        assert_eq!(source_pairs(&result.slots()[1]), [("t", "b")]);
+        let lookup = result
+            .output
+            .as_ref()
+            .unwrap()
+            .lookup(&Ident::unquoted("foo"), dialect);
         if dialect == DlinDialect::ClickHouse {
-            assert!(result.errors.is_empty());
-            assert_eq!(result.traced_columns, 2);
-            assert_eq!(column_names(&result), ["Foo", "foo"]);
-            assert_eq!(source_pairs(&result.columns[0]), [("t", "a")]);
-            assert_eq!(source_pairs(&result.columns[1]), [("t", "b")]);
+            assert_eq!(lookup, SlotLookup::Unique(OutputSlotId::new(1)));
         } else {
-            assert_eq!(result.traced_columns, 0);
-            assert_eq!(result.errors.len(), 2);
-            for name in ["Foo", "foo"] {
-                assert_column_error(
-                    &result,
-                    ColumnLineageErrorKind::ColumnAmbiguous,
-                    name,
-                    &format!(
-                        "column '{name}': more than one sqllineage mapping matches output '{name}'"
-                    ),
-                    None,
-                );
-            }
+            assert!(matches!(lookup, SlotLookup::Ambiguous(ids) if ids.len() == 2));
         }
     }
 }

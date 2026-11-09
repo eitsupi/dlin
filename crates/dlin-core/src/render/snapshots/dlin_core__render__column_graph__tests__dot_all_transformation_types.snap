@@ -1,6 +1,5 @@
 ---
-source: crates/dlin-core/src/render/column_graph.rs
-assertion_line: 880
+source: crates/dlin-core/src/render/column_graph_tests.rs
 expression: "graph_dot(&[report])"
 ---
 digraph column_lineage {
@@ -12,11 +11,11 @@ digraph column_lineage {
     style=rounded;
 
     "n0_0" [label="id", fillcolor="#AED6F1"];
-    "n0_1" [label="id_cast", fillcolor="#D7BDE2"];
+    "n0_1" [label="total", fillcolor="#FAD7A0"];
     "n0_2" [label="label", fillcolor="#A9DFBF"];
-    "n0_3" [label="mystery", fillcolor="#D5D8DC"];
+    "n0_3" [label="id_cast", fillcolor="#D7BDE2"];
     "n0_4" [label="status", fillcolor="#F9E79F"];
-    "n0_5" [label="total", fillcolor="#FAD7A0"];
+    "n0_5" [label="mystery", fillcolor="#D5D8DC"];
   }
   subgraph cluster_1 {
     label="raw";
@@ -31,9 +30,9 @@ digraph column_lineage {
   }
 
   "n1_0" -> "n0_2" [label="expression"];
-  "n1_1" -> "n0_5" [label="aggregation"];
+  "n1_1" -> "n0_1" [label="aggregation"];
   "n1_2" -> "n0_4" [label="conditional"];
   "n1_3" -> "n0_0" [label="direct"];
-  "n1_4" -> "n0_1" [label="cast"];
-  "n1_5" -> "n0_3" [label="unknown"];
+  "n1_4" -> "n0_3" [label="cast"];
+  "n1_5" -> "n0_5" [label="unknown"];
 }

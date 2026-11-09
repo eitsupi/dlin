@@ -90,6 +90,41 @@ the relations that the model's SQL names. They are not replaced by the terminal
 sources of other models. Resolving those references to dbt nodes, and tracing
 through them, are separate derived operations on top of the analysis.
 
+### Output slots
+
+The `output` of a model result is `OutputSlots<S>`: the slots in SQL order and
+the shape. `S` is the representation of a source column, and it is the only
+difference between the public and the internal result.
+
+```text
+OutputSlots<S> { columns: [OutputSlot<S>], shape: OutputShape }
+OutputSlot<S>  { id, ordinal, name: OutputName, transformation, lineage: ValueLineage<S> }
+OutputName     = Explicit(Ident) | Inferred(Ident) | Anonymous
+OutputShape    = Closed | Open { unexpanded: [UnexpandedStar { relation, after_ordinal }] }
+```
+
+- The slots come from the engine's output columns, one for one. Nothing is
+  sorted or deduplicated by name, an anonymous expression is a slot without a
+  name, and an unexpanded star is a shape entry, not a slot.
+- `id` is the index of the slot in the result it belongs to. It is not a
+  persistent identity, and it is separate from `ordinal`, the SQL position that
+  the engine proved (`None` after an unexpanded star).
+- A name keeps its spelling and quote style (`Ident`). Names are compared only
+  through the dialect's column key, never by their text. A lookup by name gives
+  `Unique(slot)`, `Ambiguous(slots)` or `Absent`.
+- `output` is `None` when the SQL could not be analysed (no compiled SQL, a
+  parse failure, more than one statement). The model diagnostics say why. A
+  failure is never a closed output without columns.
+- The counts of the public result are computed from the slots when it is built.
+  An unexpanded star is not a slot, so it is not counted.
+- Columns that the YAML declares and the SQL output does not list are not
+  added. They are non-fatal diagnostics: a closed output "does not contain"
+  the column, while an open output only "does not enumerate" it, because an
+  unexpanded star may still provide it.
+- `ModelOutputRef` identifies a slot by the unique id of its model and the slot
+  id, and carries the display names. Diagnostics that are about one slot carry
+  its id too, so columns with the same name stay apart.
+
 ### Evidence and cache keys
 
 Schema evidence is part of what an analysis result depends on. Each cache layer
@@ -123,8 +158,12 @@ Tracing a column through models follows the typed lineage of each model's
   `unresolved` part is carried along instead of being dropped, so the known
   edges do not disappear because something else is unresolved.
 - Upstream columns are looked up by output slot, not by sorting names into a
-  set. Duplicate names and unknown positions stay distinguishable, and a
-  positional reference does not turn into a name match.
+  set. A source column `(relation, column)` is resolved to a dbt node, and the
+  column is looked up in that model's slots by the dialect's column key. A
+  unique match is followed by slot id. Several matches are never resolved by
+  taking the first: the source stays where it is and an `AmbiguousOutput`
+  reason makes the output partial. Duplicate names and unknown positions stay
+  distinguishable, and a positional reference does not turn into a name match.
 - A model that is referenced by name and cannot be identified (more than one
   candidate) is a boundary, not a guess.
 - The order of output slots that one model proves is preserved when another
@@ -241,6 +280,18 @@ cannot affect the result rows.
 - When a construct such as an unsupported expression prevents even listing
   candidates, `possible` is not filled with every column. A gap is recorded in
   `exploration` instead.
+- The input column is looked up in the slots of its model like any other
+  reference. A name that matches no listed slot, matches several, or belongs to
+  a model that could not be analysed is an `UnidentifiedInput` gap with a
+  diagnostic. The search still continues: the known sources of the dependents
+  are matched by relation and by the column key of the name, which their SQL
+  states explicitly, and the search goes on by slot from each match.
+- Paths, visited sets and targets are keyed by model and slot id, so outputs
+  with the same name are different targets.
+- A dependent model whose output is open is an `OpenOutput` gap, whether or not
+  its stars read the input: the columns that are not listed may depend on it.
+- A dependent output that reads a name shared by several outputs of the input
+  model, one of which is the input, is an `AmbiguousInput` gap.
 - The existence of the rows of a relation (for example `COUNT(*)`) is not
   expanded into value dependencies on all columns of that relation. A column
   input and the row set of a relation are different inputs.

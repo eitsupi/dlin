@@ -11,13 +11,13 @@ fn test_rename_detection() {
 
     assert_eq!(result.model, "stg_orders");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 4);
+    assert_eq!(result.slots().len(), 4);
 
     // order_id comes from orders.id (renamed)
     let order_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_id")
+        .find(|c| c.column() == "order_id")
         .unwrap();
     assert!(
         !order_id.lineage.known().is_empty(),
@@ -29,9 +29,9 @@ fn test_rename_detection() {
 
     // customer_id comes from orders.user_id (renamed)
     let customer_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "customer_id")
+        .find(|c| c.column() == "customer_id")
         .unwrap();
     assert_eq!(customer_id.lineage.known()[0].column, "user_id");
     assert_eq!(customer_id.transformation, TransformationType::Direct);
@@ -49,22 +49,22 @@ fn test_join_lineage() {
 
     assert_eq!(result.model, "orders");
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 3);
+    assert_eq!(result.slots().len(), 3);
 
     // total_amount is aliased from p.amount
     let total_amount = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "total_amount")
+        .find(|c| c.column() == "total_amount")
         .unwrap();
     assert!(!total_amount.lineage.known().is_empty());
     assert_eq!(total_amount.lineage.known()[0].column, "amount");
 
     // order_id comes from o.order_id
     let order_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_id")
+        .find(|c| c.column() == "order_id")
         .unwrap();
     assert_eq!(order_id.lineage.known()[0].column, "order_id");
 }
@@ -79,7 +79,7 @@ fn test_model_not_found() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_eq!(result.columns.len(), 0);
+    assert_eq!(result.slots().len(), 0);
     assert!(!result.errors.is_empty());
     assert!(result.errors[0].what.contains("not found"));
 }
@@ -100,7 +100,7 @@ fn test_no_compiled_code() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(result.columns.is_empty());
+    assert!(result.slots().is_empty());
     assert!(result.errors[0].what.contains("compiled_code"));
 }
 
@@ -123,7 +123,7 @@ fn test_no_yaml_columns_uses_sql_inference() {
 
     // SQL inference should find: customer_id, order_date, order_id, status
     assert_eq!(
-        result.columns.len(),
+        result.slots().len(),
         4,
         "should infer 4 columns from SQL: {:?}",
         result.errors
@@ -133,7 +133,8 @@ fn test_no_yaml_columns_uses_sql_inference() {
 
 #[test]
 fn test_no_columns_and_no_sql() {
-    // When YAML columns are empty AND compiled SQL cannot be parsed, error
+    // When compiled SQL cannot be parsed there is no output, with or without
+    // YAML columns.
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns.clear();
@@ -145,17 +146,21 @@ fn test_no_columns_and_no_sql() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(result.columns.is_empty());
-    assert!(!result.errors.is_empty());
-    assert!(
-        result.errors[0]
-            .what
-            .contains("could not determine output columns")
+    assert_eq!(result.output, None);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].kind, ColumnLineageErrorKind::ParseFailure);
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (0, 0, 0)
     );
 }
 
 #[test]
-fn test_yaml_and_sql_output_names_are_unioned() {
+fn test_yaml_only_column_is_reported_and_not_added_to_the_sql_output() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns = ["yaml_only"]
@@ -179,27 +184,21 @@ fn test_yaml_and_sql_output_names_are_unioned() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_eq!(result.total_columns, 2);
+    assert_eq!(result.names(), ["sql_only"]);
+    assert_eq!(result.listed_columns, 1);
+    let [error] = result.errors.as_slice() else {
+        panic!("expected one diagnostic: {:?}", result.errors);
+    };
     assert_eq!(
-        result
-            .columns
-            .iter()
-            .map(|column| column.column.as_str())
-            .collect::<Vec<_>>(),
-        vec!["sql_only"]
+        error.kind,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput
     );
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|error| error.what.contains("yaml_only")),
-        "YAML-only output must remain in the requested name set: {:?}",
-        result.errors
-    );
+    assert!(error.what.contains("yaml_only"), "what: {}", error.what);
+    assert!(!error.is_fatal());
 }
 
 #[test]
-fn test_parse_failure_keeps_yaml_output_names() {
+fn test_parse_failure_does_not_substitute_yaml_output_names() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns = ["yaml_only"]
@@ -223,8 +222,8 @@ fn test_parse_failure_keeps_yaml_output_names() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_eq!(result.total_columns, 1);
-    assert!(result.columns.is_empty());
+    assert_eq!(result.output, None);
+    assert_eq!(result.listed_columns, 0);
     assert_eq!(result.errors[0].kind, ColumnLineageErrorKind::ParseFailure);
 }
 
@@ -240,7 +239,9 @@ fn test_json_serialization() {
     let json = serde_json::to_string_pretty(&result).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["model"], "stg_orders");
-    assert!(parsed["columns"].is_array());
+    assert!(parsed["output"]["columns"].is_array());
+    assert_eq!(parsed["listed_columns"], 4);
+    assert_eq!(parsed["output"]["shape"]["kind"], "closed");
 }
 
 // --- Cross-model lineage tests ---
@@ -258,7 +259,7 @@ fn test_json_includes_new_fields() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     // transformation field should be present on all columns
-    for col in parsed["columns"].as_array().unwrap() {
+    for col in parsed["output"]["columns"].as_array().unwrap() {
         assert!(
             col["transformation"].is_string(),
             "transformation should be serialized: {:?}",
@@ -267,11 +268,11 @@ fn test_json_includes_new_fields() {
     }
 
     // model_path should be present on sources with cross-model hops
-    let customer_id = parsed["columns"]
+    let customer_id = parsed["output"]["columns"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["column"] == "customer_id")
+        .find(|c| c["name"]["ident"]["value"] == "customer_id")
         .unwrap();
     let first_source = &customer_id["lineage"]["known"][0];
     assert!(

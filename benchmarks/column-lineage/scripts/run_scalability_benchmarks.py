@@ -83,16 +83,21 @@ def upstream_labels(unique_ids: list[str]) -> dict[str, str]:
     return labels
 
 
+def column_name(slot: dict) -> str:
+    """The name of a dlin output column."""
+    return slot["name"]["ident"]["value"]
+
+
 def dlin_upstream_valid(stdout: Path, workload: dict) -> str:
     payload = json_text(stdout)
     assert isinstance(payload, list) and payload, "dlin upstream JSON is empty"
     query = workload["selected_queries"]["upstream"]
     expected_model = model_name(query["model"])
     entry = next(item for item in payload if item.get("model") == expected_model)
-    column = next(item for item in entry["columns"] if item["column"] == query["column"])
+    column = next(item for item in entry["output"]["columns"] if column_name(item) == query["column"])
     expected_source = source_name(query["expected_terminal_source_ids"][0])
     actual = {
-        (str(item.get("table", "")).split(".")[-1], item.get("column"))
+        (str(item.get("table", "")).split(".")[-1], item["column"]["value"])
         for item in column["lineage"]["known"]
     }
     assert actual == {(expected_source, query["column"])}, "dlin source mismatch"
@@ -105,13 +110,13 @@ def dlin_whole_valid(stdout: Path, workload: dict) -> str:
     query = workload["selected_queries"]["upstream"]
     entry = next(item for item in payload if item.get("model") == model_name(query["model"]))
     expected_columns = {f"c{i:04d}" for i in range(1, workload["parameters"]["width"] + 1)}
-    actual_columns = {item["column"] for item in entry["columns"]}
-    assert entry["traced_columns"] == len(expected_columns) and entry["total_columns"] == len(expected_columns), "dlin whole-model width mismatch"
+    actual_columns = {column_name(item) for item in entry["output"]["columns"]}
+    assert entry["listed_columns"] == len(expected_columns) and entry["value_complete_columns"] == len(expected_columns), "dlin whole-model width mismatch"
     assert actual_columns == expected_columns, "dlin whole-model columns mismatch"
     expected_source = source_name(query["expected_terminal_source_ids"][0])
-    for item in entry["columns"]:
+    for item in entry["output"]["columns"]:
         sources = item["lineage"]["known"]
-        assert len(sources) == 1 and expected_source in str(sources[0].get("table", "")) and sources[0].get("column") == item["column"], "dlin whole-model source mismatch"
+        assert len(sources) == 1 and expected_source in str(sources[0].get("table", "")) and sources[0]["column"]["value"] == column_name(item), "dlin whole-model source mismatch"
     return "dlin whole-model columns and terminal sources found"
 
 

@@ -4,8 +4,7 @@ use super::*;
 fn plain_select_resolves_each_column_directly() {
     let result = generic("select id, name from raw_table", &[]);
     assert_no_errors(&result);
-    assert_eq!(result.total_columns, 2);
-    assert_eq!(result.traced_columns, 2);
+    assert_counts(&result, 2, 2, 0);
     assert_resolved(
         &result,
         "id",
@@ -72,17 +71,23 @@ fn select_star_with_known_schema_resolves_the_named_column() {
 }
 
 #[test]
-fn select_star_with_unknown_schema_cannot_resolve_a_column() {
+fn select_star_with_unknown_schema_lists_nothing_and_stays_open() {
+    // The YAML declares `id`, but the SQL output does not enumerate it: it is
+    // reported, not added to the output.
     let result = generic("select * from unknown_table", &["id"]);
-    assert_eq!(result.total_columns, 1);
-    assert_eq!(result.traced_columns, 0);
-    let error = assert_column_error(
+    assert_counts(&result, 0, 0, 0);
+    let output = result.output.as_ref().expect("the SQL was analysed");
+    assert!(output.columns.is_empty());
+    assert!(matches!(
+        &output.shape,
+        OutputShape::Open { unexpanded } if unexpanded.len() == 1
+    ));
+    assert_declared_difference(
         &result,
+        ColumnLineageErrorKind::DeclaredColumnNotEnumerated,
         "id",
-        ColumnLineageErrorKind::ColumnIndeterminate,
-        "cannot match output",
+        "is declared in YAML but is not among the enumerated SQL outputs",
     );
-    assert_eq!(error.hint.as_deref(), Some(STAR_HINT));
 }
 
 /// Pins the fix for a bug where top-level `UNION`/`INTERSECT`/`EXCEPT`
@@ -95,8 +100,7 @@ fn top_level_union_all_traces_both_operands() {
         &[],
     );
     assert_no_errors(&result);
-    assert_eq!(result.total_columns, 2);
-    assert_eq!(result.traced_columns, 2);
+    assert_counts(&result, 2, 2, 0);
     assert_resolved(
         &result,
         "id",
@@ -176,15 +180,16 @@ fn generic_cte_union_with_source_free_branch_resolves() {
 }
 
 #[test]
-fn unresolvable_column_fails_with_column_resolution_kind() {
+fn yaml_only_column_is_reported_and_not_added_to_the_output() {
     let result = generic("select id from t1", &["totally_missing_column"]);
-    assert_column_error(
+    assert_eq!(result.names(), ["id"]);
+    assert_counts(&result, 1, 1, 0);
+    assert_declared_difference(
         &result,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput,
         "totally_missing_column",
-        ColumnLineageErrorKind::ColumnNotFound,
-        "no sqllineage mapping",
+        "is declared in YAML but is not in the SQL output",
     );
-    // The model itself still analyzes: its own column is traced.
     assert_resolved(&result, "id", &[("t1", "id")], TransformationType::Direct);
 }
 
@@ -193,7 +198,7 @@ fn unresolvable_column_fails_with_column_resolution_kind() {
 #[test]
 fn unparseable_sql_fails_with_parse_kind() {
     let result = generic("select from from", &["anything"]);
-    assert_parse_failure(&result, 1, "empty projection");
+    assert_parse_failure(&result, "empty projection");
     assert!(
         result
             .errors
@@ -203,5 +208,5 @@ fn unparseable_sql_fails_with_parse_kind() {
     );
 
     let result = generic("select * from", &["anything"]);
-    assert_parse_failure(&result, 1, "");
+    assert_parse_failure(&result, "");
 }

@@ -54,9 +54,9 @@ fn trace(manifest: &Manifest, model: &str) -> ModelColumnLineage {
 
 fn sources<'a>(result: &'a ModelColumnLineage, column: &str) -> Vec<(&'a str, &'a str)> {
     let entry = result
-        .columns
+        .slots()
         .iter()
-        .find(|entry| entry.column == column)
+        .find(|entry| entry.column() == column)
         .unwrap_or_else(|| {
             panic!(
                 "column '{column}' was not traced; errors: {:?}",
@@ -67,7 +67,7 @@ fn sources<'a>(result: &'a ModelColumnLineage, column: &str) -> Vec<(&'a str, &'
         .lineage
         .known()
         .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .map(|source| (source.table.as_str(), source.column.value.as_str()))
         .collect();
     pairs.sort_unstable();
     pairs
@@ -119,7 +119,7 @@ fn sql_order_of_an_upstream_model_pairs_positional_set_operations() {
         let result = trace(&manifest, "downstream");
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.slots().len(), 2);
         assert_eq!(
             sources(&result, "z"),
             [("first", "z"), ("second", "p")],
@@ -185,9 +185,7 @@ fn yaml_extra_column_is_not_provided_downstream() {
 
     let down = trace(&manifest, "down");
     assert!(down.errors.is_empty(), "errors: {:?}", down.errors);
-    let mut columns: Vec<_> = down.columns.iter().map(|c| c.column.as_str()).collect();
-    columns.sort_unstable();
-    assert_eq!(columns, ["a", "z"]);
+    assert_eq!(down.names(), ["z", "a"]);
 
     let catalog = SchemaContext::new(&manifest, DIALECT)
         .catalog_for(manifest.nodes.get(&model_id("down")).unwrap())
@@ -334,11 +332,11 @@ fn duplicate_output_names_are_kept_and_referenced_ambiguously() {
         let result = trace(&manifest, model);
         // The ambiguous reference is listed as a partial column with no known
         // source, explained by one diagnostic.
-        assert_eq!(result.columns.len(), 1, "model {model}: {result:?}");
-        assert!(result.columns[0].lineage.known().is_empty());
+        assert_eq!(result.slots().len(), 1, "model {model}: {result:?}");
+        assert!(result.slots()[0].lineage.known().is_empty());
         assert!(
             matches!(
-                result.columns[0].lineage.unresolved(),
+                result.slots()[0].lineage.unresolved(),
                 [UnresolvedContribution {
                     reason: UnresolvedReason::Ambiguous { .. },
                     ..
@@ -346,7 +344,10 @@ fn duplicate_output_names_are_kept_and_referenced_ambiguously() {
             ),
             "model {model}: {result:?}"
         );
-        assert_eq!(result.traced_columns, 0, "model {model}: {result:?}");
+        assert_eq!(
+            result.value_complete_columns, 0,
+            "model {model}: {result:?}"
+        );
         assert_eq!(result.errors.len(), 1, "model {model}: {result:?}");
         assert_eq!(
             result.errors[0].kind,

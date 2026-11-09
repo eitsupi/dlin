@@ -405,36 +405,47 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
     match direction {
         "upstream" => {
             let mut report = analysis.compute_cross_model_column_lineage(model);
-            report.columns.retain(|entry| entry.column == column);
-            if report.total_columns > 0 {
+            let cross_errors = std::mem::take(&mut report.errors);
+            report.select_columns(&[column], state.dialect);
+            // With the diagnostics cleared, what remains are the findings of the
+            // selection itself: the name was not found, or is ambiguous.
+            let lookup_errors = std::mem::take(&mut report.errors);
+            if report.output.is_none() {
+                report.errors = cross_errors;
+            } else {
                 // Collect the short names of models on the target column's lineage path.
                 // Table names from SQL may be fully qualified (e.g. "db.schema.model"); take
                 // the last dot-separated segment and strip quotes to get the model short name.
-                let upstream_models: HashSet<String> = report
-                    .columns
-                    .iter()
-                    .flat_map(|entry| {
-                        entry.lineage.known().iter().flat_map(|src| {
+                let selected = report.output.iter().flat_map(|output| &output.columns);
+                let upstream_models: HashSet<String> = selected
+                    .clone()
+                    .flat_map(|slot| {
+                        slot.lineage.known().iter().flat_map(|src| {
                             std::iter::once(normalize_table_short_name(&src.table))
-                                .chain(src.model_path.iter().map(|(m, _, _)| m.clone()))
+                                .chain(src.model_path.iter().map(|hop| hop.output.model.clone()))
                         })
                     })
                     .collect();
+                let selected_slots: HashSet<_> = selected.map(|slot| slot.id).collect();
                 // Partition cross-model errors:
                 // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when
                 //   their message references a model on the target column's lineage path.
                 //   This prevents errors from models used by *other* columns from leaking in.
-                // - Cross-model reports already rebase column-scoped diagnostics to the
-                //   requested output column, so retain only that exact column identity.
+                // - Cross-model reports already rebase slot diagnostics to the
+                //   requested output slot, so retain only that exact slot identity.
                 let mut cross_global_errors = Vec::new();
                 let mut cross_column_errors = Vec::new();
-                for err in report.errors.drain(..) {
+                for err in cross_errors {
                     if err.is_column_scoped() {
-                        if err.column_name() == Some(column) && !cross_column_errors.contains(&err)
+                        if err
+                            .slot()
+                            .is_some_and(|slot| selected_slots.contains(&slot))
+                            && !cross_column_errors.contains(&err)
                         {
                             cross_column_errors.push(err);
                         }
-                    } else if !upstream_models.is_empty()
+                    } else if err.is_model_failure()
+                        && !upstream_models.is_empty()
                         && error_names_upstream_model(&err.what, &upstream_models)
                     {
                         cross_global_errors.push(err);
@@ -452,27 +463,22 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                     .filter(|err| !err.is_column_scoped())
                     .collect();
 
-                let has_column_error = !cross_column_errors.is_empty();
-                let has_global_errors =
-                    !target_global_errors.is_empty() || !cross_global_errors.is_empty();
+                let explained = !cross_column_errors.is_empty()
+                    || target_global_errors
+                        .iter()
+                        .chain(&cross_global_errors)
+                        .any(|err| err.is_model_failure());
 
                 report.errors = target_global_errors;
                 report.errors.extend(cross_global_errors);
                 report.errors.extend(cross_column_errors);
-
-                report.traced_columns = report.complete_column_count();
-                report.total_columns = 1;
-                if report.columns.is_empty() && !has_column_error && !has_global_errors {
-                    report
-                        .errors
-                        .push(graph::column_lineage::ColumnLineageError {
-                            kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
-                            column: Some(column.to_string()),
-                            what: format!("column '{column}': not found in model output"),
-                            why: None,
-                            hint: None,
-                        });
-                }
+                report
+                    .errors
+                    .extend(lookup_errors.into_iter().filter(|err| {
+                        !explained
+                            || err.kind
+                                == graph::column_lineage::ColumnLineageErrorKind::ColumnAmbiguous
+                    }));
             }
             Ok(serde_json::to_value(&report)?)
         }

@@ -8,10 +8,10 @@
 //! under test, plus optional upstream models that supply the schemas of the
 //! tables the SQL reads, and then runs the production
 //! [`compute_column_lineage`] over it. Assertions are made on the public
-//! [`ModelColumnLineage`]: the traced columns (sources and transformation)
-//! and the errors (kind, column, message and hint). A column that discovery
-//! cannot name is requested the way a user would, by declaring it in the
-//! model's YAML columns.
+//! [`ModelColumnLineage`]: the output slots (sources and transformation) and
+//! the errors (kind, column, message and hint). The output is what the SQL
+//! says; columns that the model's YAML declares and the SQL does not list are
+//! reported as non-fatal diagnostics and never become outputs.
 //!
 //! Two regressions are pinned here. Top-level `UNION`/`INTERSECT`/`EXCEPT`
 //! statements are lineage-bearing, so their columns are traced rather than
@@ -21,10 +21,11 @@
 use std::collections::HashMap;
 
 use super::super::{
-    CatalogSnapshot, ColumnLineageCache, ColumnLineageEntry, ColumnLineageError,
-    ColumnLineageErrorKind, DlinDialect, ModelColumnLineage, TransformationType,
-    compute_column_lineage, debug_trace_column_json,
+    CatalogSnapshot, ColumnLineageCache, ColumnLineageError, ColumnLineageErrorKind, ColumnSource,
+    DlinDialect, Ident, ModelColumnLineage, OutputName, OutputShape, OutputSlot, Quote, SlotLookup,
+    TransformationType, compute_column_lineage, debug_trace_column_json,
 };
+use super::{ModelLineageTestExt, SlotTestExt, assert_counts, assert_declared_difference};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
 
 const ROOT_MODEL: &str = "root";
@@ -145,35 +146,25 @@ fn generic(sql: &str, yaml_columns: &[&str]) -> ModelColumnLineage {
     analyze(sql, DlinDialect::Generic, &[], yaml_columns)
 }
 
-fn column_names(result: &ModelColumnLineage) -> Vec<&str> {
-    result
-        .columns
-        .iter()
-        .map(|entry| entry.column.as_str())
-        .collect()
+fn entry<'a>(result: &'a ModelColumnLineage, column: &str) -> &'a OutputSlot<ColumnSource> {
+    result.slot_named(column)
 }
 
-fn entry<'a>(result: &'a ModelColumnLineage, column: &str) -> &'a ColumnLineageEntry {
-    result
-        .columns
-        .iter()
-        .find(|entry| entry.column == column)
-        .unwrap_or_else(|| {
-            panic!(
-                "column '{column}' was not traced; columns: {:?}, errors: {:?}",
-                column_names(result),
-                result.errors
-            )
-        })
-}
-
-fn source_pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
+fn source_pairs(entry: &OutputSlot<ColumnSource>) -> Vec<(String, String)> {
     entry
         .lineage
         .known()
         .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .map(|source| (source.table.clone(), source.column.to_string()))
         .collect()
+}
+
+fn assert_source_pairs(entry: &OutputSlot<ColumnSource>, sources: &[(&str, &str)], context: &str) {
+    let expected: Vec<(String, String)> = sources
+        .iter()
+        .map(|(table, column)| (table.to_string(), column.to_string()))
+        .collect();
+    assert_eq!(source_pairs(entry), expected, "sources for '{context}'");
 }
 
 fn assert_no_errors(result: &ModelColumnLineage) {
@@ -189,7 +180,11 @@ fn assert_resolved(
     transformation: TransformationType,
 ) {
     let traced = entry(result, column);
-    assert_eq!(source_pairs(traced), sources, "sources for '{column}'");
+    let expected: Vec<(String, String)> = sources
+        .iter()
+        .map(|(table, column)| (table.to_string(), column.to_string()))
+        .collect();
+    assert_eq!(source_pairs(traced), expected, "sources for '{column}'");
     assert_eq!(
         traced.transformation, transformation,
         "transformation for '{column}'"
@@ -208,12 +203,12 @@ fn assert_column_error<'a>(
 ) -> &'a ColumnLineageError {
     assert!(
         result
-            .columns
+            .slots()
             .iter()
-            .filter(|entry| entry.column == column)
+            .filter(|entry| entry.column() == column)
             .all(|entry| entry.lineage.is_partial()),
         "column '{column}' was unexpectedly traced completely: {:?}",
-        result.columns
+        result.slots()
     );
     let error = result
         .errors
@@ -236,9 +231,9 @@ fn assert_column_error<'a>(
     error
 }
 
-/// Assert a model-level parse failure: the only error, with no columns
-/// traced, counting `total_columns` requested columns.
-fn assert_parse_failure(result: &ModelColumnLineage, total_columns: usize, why: &str) {
+/// Assert a model-level parse failure: the only error, with no output and
+/// all counts zero.
+fn assert_parse_failure(result: &ModelColumnLineage, why: &str) {
     assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
     let error = &result.errors[0];
     assert_eq!(error.kind, ColumnLineageErrorKind::ParseFailure);
@@ -250,20 +245,8 @@ fn assert_parse_failure(result: &ModelColumnLineage, total_columns: usize, why: 
         "reason '{reason}' does not contain '{why}'"
     );
     assert_eq!(error.hint.as_deref(), Some(PARSE_HINT));
-    assert_eq!(result.total_columns, total_columns);
-    assert_eq!(result.traced_columns, 0);
-    assert!(result.columns.is_empty());
-}
-
-/// Assert that no output column could be determined at all.
-fn assert_column_inference_failed(result: &ModelColumnLineage) {
-    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
-    assert_eq!(
-        result.errors[0].kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
-    );
-    assert_eq!(result.total_columns, 0);
-    assert!(result.columns.is_empty());
+    assert_eq!(result.output, None);
+    assert_counts(result, 0, 0, 0);
 }
 
 mod basic;

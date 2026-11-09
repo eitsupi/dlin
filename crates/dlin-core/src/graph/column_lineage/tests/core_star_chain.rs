@@ -121,14 +121,14 @@ fn test_cte_alias_resolution() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.slots().len(), 2);
 
     // item_id should trace through stg_items to raw items.id
     // NOT stop at alias "base"
     let item_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "item_id")
+        .find(|c| c.column() == "item_id")
         .unwrap();
     assert!(
         item_id.lineage.known().iter().all(|s| s.table != "base"),
@@ -341,14 +341,18 @@ fn test_select_star_chain_with_join() {
         result.errors
     );
     assert_eq!(
-        result.columns.len(),
+        result.slots().len(),
         4,
         "should have 4 columns, got: {:?}",
-        result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
+        result.names()
     );
 
     // area should trace through to raw users source
-    let area = result.columns.iter().find(|c| c.column == "area").unwrap();
+    let area = result
+        .slots()
+        .iter()
+        .find(|c| c.column() == "area")
+        .unwrap();
     assert!(
         area.lineage
             .known()
@@ -360,9 +364,9 @@ fn test_select_star_chain_with_join() {
 
     // region_name should trace through to raw regions source
     let region = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "region_name")
+        .find(|c| c.column() == "region_name")
         .unwrap();
     assert!(
         region
@@ -572,14 +576,18 @@ fn test_select_star_chain_with_cte_alias_and_join() {
         result.errors
     );
     assert_eq!(
-        result.columns.len(),
+        result.slots().len(),
         4,
         "should have 4 columns, got: {:?}",
-        result.columns.iter().map(|c| &c.column).collect::<Vec<_>>()
+        result.names()
     );
 
     // area should trace through CTE alias "u" → import_users → stg_users → raw users
-    let area = result.columns.iter().find(|c| c.column == "area").unwrap();
+    let area = result
+        .slots()
+        .iter()
+        .find(|c| c.column() == "area")
+        .unwrap();
     assert!(
         area.lineage
             .known()
@@ -591,9 +599,9 @@ fn test_select_star_chain_with_cte_alias_and_join() {
 
     // region_name should trace through import_regions → stg_regions → raw regions
     let region = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "region_name")
+        .find(|c| c.column() == "region_name")
         .unwrap();
     assert!(
         region

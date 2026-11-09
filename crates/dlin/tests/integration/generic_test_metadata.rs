@@ -98,8 +98,8 @@ fn column_lineage_fixture_dir() -> std::path::PathBuf {
 
 #[test]
 fn test_column_lineage_column_filter_updates_counts() {
-    // When --column filter is applied, traced_columns and total_columns must
-    // reflect the filtered set, not the full model's counts.
+    // When --column filter is applied, the counts must reflect the selected
+    // columns, not the full model's counts.
     let fixture = column_lineage_fixture_dir();
     let output = std::process::Command::new(binary_path())
         .args([
@@ -126,24 +126,21 @@ fn test_column_lineage_column_filter_updates_counts() {
 
     let report = &reports[0];
     // Only the requested column should be present
-    let columns = report["columns"].as_array().unwrap();
+    let columns = report["output"]["columns"].as_array().unwrap();
     assert_eq!(columns.len(), 1, "only order_id should be in columns[]");
-    assert_eq!(columns[0]["column"], "order_id");
+    assert_eq!(columns[0]["name"]["ident"]["value"], "order_id");
     // Counts must reflect the filtered set
-    assert_eq!(
-        report["traced_columns"], 1,
-        "traced_columns should be 1 (filtered to 1 column)"
-    );
-    assert_eq!(
-        report["total_columns"], 1,
-        "total_columns should be 1 (requested 1 column)"
-    );
+    assert_eq!(report["listed_columns"], 1);
+    assert_eq!(report["value_complete_columns"], 1);
+    assert_eq!(report["value_partial_columns"], 0);
+    assert!(report.get("traced_columns").is_none());
+    assert!(report.get("total_columns").is_none());
 }
 
 #[test]
 fn test_column_lineage_column_filter_preserves_zero_counts_on_error() {
-    // When the model cannot be loaded (e.g. not found), total_columns is 0.
-    // Applying --column should NOT overwrite it with the filter size.
+    // When the model cannot be loaded (e.g. not found), there is no output and
+    // every count is 0. Applying --column should NOT change that.
     let fixture = column_lineage_fixture_dir();
     let output = std::process::Command::new(binary_path())
         .args([
@@ -166,27 +163,21 @@ fn test_column_lineage_column_filter_preserves_zero_counts_on_error() {
 
     let report = &reports[0];
     // Model not found → no analysis ran → counts must stay 0
-    assert_eq!(
-        report["traced_columns"], 0,
-        "traced_columns should remain 0 for a missing model"
-    );
-    assert_eq!(
-        report["total_columns"], 0,
-        "total_columns should remain 0 for a missing model, not overwritten by filter size"
-    );
-    // columns[] must be empty
-    assert!(report["columns"].as_array().unwrap().is_empty());
+    assert_eq!(report["listed_columns"], 0);
+    assert_eq!(report["value_complete_columns"], 0);
+    assert_eq!(report["value_partial_columns"], 0);
+    // There is no output at all, not an empty one
+    assert!(report["output"].is_null());
 }
 
 #[test]
 fn test_column_lineage_column_filter_suppresses_unrelated_errors() {
     // stg_partial_fail declares "ghost_col" in YAML but the SQL only outputs
-    // "order_id". Without a filter both columns are attempted; ghost_col fails.
-    // With --column order_id, ghost_col's error must be filtered out so that
-    // the exit code is 0 and errors[] is empty.
+    // "order_id". The declaration difference is reported without a filter, but
+    // it is not fatal. With --column order_id it is about an unrelated column
+    // and must not appear.
     let fixture = column_lineage_fixture_dir();
 
-    // First confirm that without a filter, ghost_col causes a non-zero exit.
     let unfiltered = std::process::Command::new(binary_path())
         .args([
             "column",
@@ -199,17 +190,23 @@ fn test_column_lineage_column_filter_suppresses_unrelated_errors() {
         .output()
         .expect("Failed to run binary");
     assert!(
-        !unfiltered.status.success(),
-        "expected non-zero exit when ghost_col fails"
+        unfiltered.status.success(),
+        "a YAML-only column is not fatal; stderr: {}",
+        String::from_utf8_lossy(&unfiltered.stderr)
     );
     let unfiltered_json: Vec<serde_json::Value> =
         serde_json::from_str(&String::from_utf8_lossy(&unfiltered.stdout)).unwrap();
+    let errors = unfiltered_json[0]["errors"].as_array().unwrap();
     assert!(
-        !unfiltered_json[0]["errors"].as_array().unwrap().is_empty(),
-        "expected errors[] to be non-empty without filter"
+        errors
+            .iter()
+            .any(|e| e["kind"] == "declared_column_not_in_output" && e["column"] == "ghost_col"),
+        "expected the declaration difference of ghost_col; errors: {errors:?}"
     );
+    // ghost_col is not an output column
+    assert_eq!(unfiltered_json[0]["listed_columns"], 1);
 
-    // Now with --column order_id: ghost_col's error must be suppressed.
+    // Now with --column order_id: ghost_col's diagnostic must be suppressed.
     let filtered = std::process::Command::new(binary_path())
         .args([
             "column",
@@ -231,12 +228,12 @@ fn test_column_lineage_column_filter_suppresses_unrelated_errors() {
     let reports: Vec<serde_json::Value> =
         serde_json::from_str(&String::from_utf8_lossy(&filtered.stdout)).unwrap();
     let report = &reports[0];
-    assert_eq!(report["traced_columns"], 1);
-    assert_eq!(report["total_columns"], 1);
-    assert_eq!(report["columns"].as_array().unwrap().len(), 1);
+    assert_eq!(report["listed_columns"], 1);
+    assert_eq!(report["value_complete_columns"], 1);
+    assert_eq!(report["output"]["columns"].as_array().unwrap().len(), 1);
     assert!(
         report["errors"].as_array().unwrap().is_empty(),
-        "ghost_col's error must not appear after --column order_id filter; errors: {:?}",
+        "ghost_col's diagnostic must not appear after --column order_id filter; errors: {:?}",
         report["errors"]
     );
 }
@@ -272,19 +269,16 @@ fn test_column_lineage_column_filter_errors_on_missing_column() {
         !report["errors"].as_array().unwrap().is_empty(),
         "errors[] must be non-empty when the requested column is missing"
     );
-    assert_eq!(
-        report["traced_columns"], 0,
-        "traced_columns must be 0 for a missing column"
-    );
-    assert_eq!(
-        report["total_columns"], 1,
-        "total_columns must equal the filter size (1 requested column)"
-    );
+    // Nothing was selected, so nothing is listed
+    assert_eq!(report["listed_columns"], 0);
+    assert_eq!(report["value_complete_columns"], 0);
+    assert_eq!(report["value_partial_columns"], 0);
+    assert_eq!(report["errors"][0]["kind"], "column_not_found");
 }
 
 #[test]
 fn test_column_lineage_column_filter_preserves_global_parse_error() {
-    // stg_bad_sql has valid YAML columns but invalid SQL, so total_columns > 0
+    // stg_bad_sql has valid YAML columns but invalid SQL, so there is no output
     // and analysis returns a "failed to parse SQL" global error. Applying
     // --column must NOT drop that error — it is not a per-column error.
     let fixture = column_lineage_fixture_dir();
@@ -586,19 +580,19 @@ fn test_column_lineage_source_physical_schema_differs_from_source_name() {
     assert_eq!(report["model"], "stg_accounts");
 
     // All 3 YAML columns should be traced successfully
-    let columns = report["columns"].as_array().unwrap();
+    let columns = report["output"]["columns"].as_array().unwrap();
     assert_eq!(
         columns.len(),
         3,
         "stg_accounts should have 3 traced columns, got: {:?}; errors: {:?}",
-        columns.iter().map(|c| &c["column"]).collect::<Vec<_>>(),
+        columns.iter().map(|c| &c["name"]).collect::<Vec<_>>(),
         report["errors"]
     );
 
     // account_id traces from raw.accounts.id (via SELECT * expansion)
     let account_id = columns
         .iter()
-        .find(|c| c["column"] == "account_id")
+        .find(|c| c["name"]["ident"]["value"] == "account_id")
         .expect("account_id column should be present");
     let sources = account_id["lineage"]["known"].as_array().unwrap();
     assert!(
@@ -606,7 +600,7 @@ fn test_column_lineage_source_physical_schema_differs_from_source_name() {
         "account_id should have sources after physical schema registration"
     );
     assert!(
-        sources.iter().any(|s| s["column"] == "id"),
+        sources.iter().any(|s| s["column"]["value"] == "id"),
         "account_id should trace to source column 'id'; got: {:?}",
         sources
     );

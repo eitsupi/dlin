@@ -12,8 +12,7 @@ fn bigquery_temporal_date_parts_are_not_columns() {
         &[],
     );
     assert_no_errors(&result);
-    assert_eq!(result.total_columns, 3);
-    assert_eq!(result.traced_columns, 3);
+    assert_counts(&result, 3, 3, 0);
     let expected: [(&str, &[(&str, &str)]); 3] = [
         ("monday_start", &[("events", "event_date")]),
         (
@@ -27,92 +26,91 @@ fn bigquery_temporal_date_parts_are_not_columns() {
     ];
     for (name, sources) in expected {
         let traced = entry(&result, name);
-        assert_eq!(source_pairs(traced), sources, "sources for {name}");
+        assert_source_pairs(traced, sources, name);
         assert!(
-            traced
-                .lineage
-                .known()
-                .iter()
-                .all(|source| !matches!(source.column.as_str(), "MONDAY" | "ISOWEEK" | "ISOYEAR")),
+            traced.lineage.known().iter().all(|source| !matches!(
+                source.column.value.as_str(),
+                "MONDAY" | "ISOWEEK" | "ISOYEAR"
+            )),
             "date parts must not be reported as columns: {traced:?}"
         );
     }
 }
 
 #[test]
-fn unmapped_requested_output_fails_without_affecting_others() {
+fn declared_only_column_does_not_affect_the_listed_outputs() {
     let result = generic("select id from orders", &["id", "missing"]);
-    assert_eq!(result.total_columns, 2);
-    assert_eq!(result.traced_columns, 1);
+    assert_counts(&result, 1, 1, 0);
     assert_resolved(
         &result,
         "id",
         &[("orders", "id")],
         TransformationType::Direct,
     );
-    assert_column_error(
+    assert_declared_difference(
         &result,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput,
         "missing",
-        ColumnLineageErrorKind::ColumnNotFound,
-        "no sqllineage mapping for output 'missing'",
+        "is declared in YAML but is not in the SQL output",
     );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
 }
 
 #[test]
-fn duplicate_output_name_fails_as_ambiguous() {
-    // The name is both declared in the YAML and produced twice by the SQL; it
-    // is still one column, and it cannot be told apart.
+fn duplicate_output_names_stay_separate_slots() {
+    // The name is both declared in the YAML and produced twice by the SQL.
+    // Each output is its own slot with its own lineage; nothing is reported
+    // because the SQL itself is valid.
     let result = generic(
         "select id as value, amount as value from orders",
         &["value"],
     );
-    assert_eq!(result.total_columns, 1);
-    assert_eq!(result.traced_columns, 0);
-    assert_column_error(
-        &result,
-        "value",
-        ColumnLineageErrorKind::ColumnAmbiguous,
-        "more than one sqllineage mapping matches output 'value'",
-    );
+    assert_no_errors(&result);
+    assert_counts(&result, 2, 2, 0);
+    let slots = result.slots();
+    assert_eq!(result.names(), ["value", "value"]);
+    assert_ne!(slots[0].id, slots[1].id);
+    assert_source_pairs(&slots[0], &[("orders", "id")], "first value");
+    assert_source_pairs(&slots[1], &[("orders", "amount")], "second value");
 }
 
 #[test]
 fn parse_failure_is_parse_failure() {
     let result = generic("select * from", &["value"]);
-    assert_parse_failure(&result, 1, "");
+    assert_parse_failure(&result, "");
 }
 
 #[test]
 fn empty_projection_is_parse_failure() {
     let result = generic("select from from", &["value"]);
-    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
+    assert_parse_failure(&result, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
 fn empty_projection_in_set_operation_branch_is_parse_failure() {
     let result = generic("select 1 union all select from foo", &["value"]);
-    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
+    assert_parse_failure(&result, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
 fn empty_projection_in_nested_subquery_is_parse_failure() {
     let result = generic("select id from (select from foo) as t", &["id"]);
-    assert_parse_failure(&result, 1, "dlin found a SELECT with an empty projection");
+    assert_parse_failure(&result, "dlin found a SELECT with an empty projection");
 }
 
 #[test]
 fn unsupported_dialect_is_reported_as_parse_failure() {
     let result = analyze("SELECT 1", DlinDialect::Presto, &[], &["value"]);
-    assert_parse_failure(&result, 1, "presto");
+    assert_parse_failure(&result, "presto");
 }
 
 #[test]
 fn discovery_plain_projection_names_outputs_by_alias() {
     let result = generic("SELECT id, amount AS total, status FROM orders", &[]);
     assert_no_errors(&result);
-    // Columns are reported in sorted order, not in projection order.
-    assert_eq!(column_names(&result), ["id", "status", "total"]);
-    assert_eq!(result.total_columns, 3);
+    // Columns are listed in projection order, not sorted.
+    assert_eq!(result.names(), ["id", "total", "status"]);
+    assert_counts(&result, 3, 3, 0);
     assert_resolved(
         &result,
         "total",
@@ -128,7 +126,7 @@ fn discovery_top_level_set_operation_uses_projection_names() {
         &[],
     );
     assert_no_errors(&result);
-    assert_eq!(column_names(&result), ["id", "total"]);
+    assert_eq!(result.names(), ["id", "total"]);
     assert_resolved(
         &result,
         "total",
@@ -138,19 +136,28 @@ fn discovery_top_level_set_operation_uses_projection_names() {
 }
 
 #[test]
-fn discovery_unexpanded_star_has_no_name() {
+fn discovery_unexpanded_star_lists_no_column_and_leaves_the_shape_open() {
     let result = generic("SELECT * FROM orders", &[]);
-    assert_column_inference_failed(&result);
+    assert_no_errors(&result);
+    assert_counts(&result, 0, 0, 0);
+    let output = result.output.as_ref().expect("the SQL was analysed");
+    assert!(output.columns.is_empty());
+    assert!(matches!(&output.shape, OutputShape::Open { unexpanded } if unexpanded.len() == 1));
 }
 
 #[test]
 fn discovery_preserves_quoted_star_output_name() {
     let result = generic(r#"SELECT id AS "*" FROM orders"#, &[]);
     assert_no_errors(&result);
-    assert_eq!(column_names(&result), ["*"]);
+    // The quoted spelling is part of the output name.
+    assert_eq!(result.names(), [r#""*""#]);
+    assert_eq!(
+        result.slots()[0].name,
+        OutputName::Explicit(Ident::quoted("*", Quote::Double))
+    );
     assert_resolved(
         &result,
-        "*",
+        r#""*""#,
         &[("orders", "id")],
         TransformationType::Direct,
     );
@@ -164,14 +171,18 @@ fn discovery_drops_field_path_star_but_keeps_explicit_star_alias() {
         &[],
         &[],
     );
-    assert_eq!(column_names(&result), ["*"]);
-    assert_eq!(result.total_columns, 1);
+    assert_eq!(result.names(), [r#""*""#]);
+    assert_counts(&result, 1, 1, 0);
     assert_resolved(
         &result,
-        "*",
+        r#""*""#,
         &[("source", "id")],
         TransformationType::Direct,
     );
+    assert!(matches!(
+        &result.output.as_ref().unwrap().shape,
+        OutputShape::Open { unexpanded } if unexpanded.len() == 1
+    ));
     assert_no_errors(&result);
 }
 
@@ -218,7 +229,9 @@ fn discovery_drops_field_path_star_without_forged_output_name() {
         &[],
         &[],
     );
-    assert_column_inference_failed(&result);
+    assert_counts(&result, 0, 0, 0);
+    assert!(result.slots().is_empty());
+    assert_no_errors(&result);
 }
 
 #[test]
@@ -230,8 +243,7 @@ fn discovery_expands_star_from_known_schema() {
         &[],
     );
     assert_no_errors(&result);
-    // Columns are reported in sorted order.
-    assert_eq!(column_names(&result), ["amount", "id"]);
+    assert_eq!(result.names(), ["id", "amount"]);
     assert_resolved(
         &result,
         "amount",
@@ -253,7 +265,7 @@ fn discovery_cte_uses_outer_projection() {
         &[],
     );
     assert_no_errors(&result);
-    assert_eq!(column_names(&result), ["outer_amount"]);
+    assert_eq!(result.names(), ["outer_amount"]);
     assert_resolved(
         &result,
         "outer_amount",
@@ -265,23 +277,16 @@ fn discovery_cte_uses_outer_projection() {
 #[test]
 fn discovery_records_duplicate_names() {
     let result = generic("SELECT id AS value, amount AS value FROM orders", &[]);
-    // The duplicated name is listed once and cannot be traced.
-    assert_eq!(result.total_columns, 1);
-    assert_eq!(result.traced_columns, 0);
-    assert_column_error(
-        &result,
-        "value",
-        ColumnLineageErrorKind::ColumnAmbiguous,
-        "more than one sqllineage mapping matches output 'value'",
-    );
+    // Both outputs are listed, in SQL order.
+    assert_counts(&result, 2, 2, 0);
+    assert_eq!(result.names(), ["value", "value"]);
+    assert_no_errors(&result);
 }
 
 #[test]
-fn discovery_parse_failure_does_not_name_columns() {
-    // Discovery cannot name columns of SQL that does not parse; without YAML
-    // columns the model's outputs are undetermined rather than a parse error.
+fn parse_failure_has_no_output_even_without_yaml_columns() {
     let result = generic("SELECT * FROM", &[]);
-    assert_column_inference_failed(&result);
+    assert_parse_failure(&result, "");
 }
 
 #[test]
@@ -293,8 +298,8 @@ fn discovered_names_are_all_traced_through_a_known_schema() {
         &[],
     );
     assert_no_errors(&result);
-    assert_eq!(column_names(&result), ["id", "status", "total"]);
-    assert_eq!(result.total_columns, result.traced_columns);
+    assert_eq!(result.names(), ["id", "total", "status"]);
+    assert_counts(&result, 3, 3, 0);
     assert_resolved(
         &result,
         "id",
@@ -316,7 +321,7 @@ fn discovered_names_are_all_traced_through_a_known_schema() {
 }
 
 #[test]
-fn discovery_groups_sql_names_without_changing_display_names() {
+fn outputs_keep_their_spelling_and_are_told_apart_by_the_dialect_rules() {
     for dialect in [
         DlinDialect::Generic,
         DlinDialect::Snowflake,
@@ -324,7 +329,7 @@ fn discovery_groups_sql_names_without_changing_display_names() {
         DlinDialect::BigQuery,
         DlinDialect::ClickHouse,
     ] {
-        for (sql, names, duplicate) in [
+        for (sql, names, shared_key) in [
             (
                 "SELECT a AS Foo, b AS foo FROM t",
                 ["Foo", "foo"],
@@ -332,55 +337,37 @@ fn discovery_groups_sql_names_without_changing_display_names() {
             ),
             (
                 r#"SELECT a AS id, b AS "ID" FROM t"#,
-                ["id", "ID"],
+                ["id", r#""ID""#],
                 !matches!(dialect, DlinDialect::PostgreSQL | DlinDialect::ClickHouse),
             ),
             (
                 r#"SELECT a AS id, b AS "id" FROM t"#,
-                ["id", "id"],
+                ["id", r#""id""#],
                 !matches!(dialect, DlinDialect::Generic | DlinDialect::Snowflake),
             ),
         ] {
             let context = format!("{dialect:?}: {sql}");
             let result = analyze(sql, dialect, &[], &[]);
-            // Display names are kept as written, and a name used by several
-            // outputs is listed once.
-            let mut expected_names = names.to_vec();
-            expected_names.sort();
-            expected_names.dedup();
-            assert_eq!(result.total_columns, expected_names.len(), "{context}");
-            let mut reported: Vec<&str> = column_names(&result);
-            reported.extend(
-                result
-                    .errors
-                    .iter()
-                    .map(|error| error.column.as_deref().expect("column-scoped error")),
-            );
-            reported.sort();
-            assert_eq!(reported, expected_names, "{context}");
-            if duplicate {
-                // Outputs sharing one SQL identifier cannot be told apart.
-                assert_eq!(result.traced_columns, 0, "{context}");
-                for name in &expected_names {
-                    assert_column_error(
-                        &result,
-                        name,
-                        ColumnLineageErrorKind::ColumnAmbiguous,
-                        &format!("more than one sqllineage mapping matches output '{name}'"),
+            // Both outputs are listed in SQL order, spelled as written, and
+            // none is an error.
+            assert_no_errors(&result);
+            assert_eq!(result.names(), names, "{context}");
+            assert_counts(&result, 2, 2, 0);
+            // Looking either name up finds both outputs exactly when the
+            // dialect gives them the same column key.
+            let output = result.output.as_ref().unwrap();
+            for slot in &output.columns {
+                let ident = slot.name.ident().expect("named output");
+                let lookup = output.lookup(ident, dialect);
+                if shared_key {
+                    assert_eq!(
+                        lookup,
+                        SlotLookup::Ambiguous(vec![output.columns[0].id, output.columns[1].id]),
+                        "{context}"
                     );
+                } else {
+                    assert_eq!(lookup, SlotLookup::Unique(slot.id), "{context}");
                 }
-            } else if names[0] == names[1] {
-                // Distinct SQL identifiers that display alike.
-                assert_eq!(result.traced_columns, 0, "{context}");
-                assert_column_error(
-                    &result,
-                    names[0],
-                    ColumnLineageErrorKind::ColumnAmbiguous,
-                    "distinct SQL identifiers share the same display name",
-                );
-            } else {
-                assert_no_errors(&result);
-                assert_eq!(result.traced_columns, 2, "{context}");
             }
         }
     }
