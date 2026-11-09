@@ -576,7 +576,7 @@ fn column_lineage_parse_failure_not_replaced_when_model_given_as_unique_id() {
 
 #[test]
 fn column_lineage_parse_failure_not_replaced_by_column_not_found() {
-    // stg_bad_sql has valid YAML columns (total_columns > 0) but unparseable SQL,
+    // stg_bad_sql has valid YAML columns but unparseable SQL (so it has no output),
     // so analysis returns a global ParseFailure error. A ColumnNotFound error must
     // NOT be synthesized on top of it, because the column may well exist — we just
     // cannot confirm it due to the SQL failure.
@@ -795,6 +795,7 @@ fn column_error_name_uses_structured_identity_only() {
     let error = ColumnLineageError {
         kind: ColumnLineageErrorKind::ColumnNotFound,
         column: Some("order_id".to_string()),
+        slot: None,
         what: "column 'order_id': not found in model output".to_string(),
         why: None,
         hint: None,
@@ -812,6 +813,7 @@ fn column_error_name_uses_structured_identity_only() {
         ColumnLineageError {
             kind: ColumnLineageErrorKind::ParseFailure,
             column: None,
+            slot: None,
             what: "failed to parse SQL".to_string(),
             why: None,
             hint: None,

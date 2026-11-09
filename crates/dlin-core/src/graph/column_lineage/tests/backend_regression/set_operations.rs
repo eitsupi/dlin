@@ -1,31 +1,50 @@
 use super::*;
 
 #[test]
-fn unknown_set_operation_outputs_are_indeterminate() {
-    let cases = [
-        (
-            "SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source",
-            ["id", "explicit_col"].as_slice(),
-        ),
-        (
-            "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source",
-            ["explicit_col"].as_slice(),
-        ),
-        (
-            "WITH u AS (SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source) SELECT id, explicit_col FROM u",
-            ["id", "explicit_col"].as_slice(),
-        ),
-    ];
-    for (sql, names) in cases {
-        let result = generic(sql, names);
-        for name in names {
-            assert_column_error(
-                &result,
-                name,
-                ColumnLineageErrorKind::ColumnIndeterminate,
-                "",
-            );
-        }
+fn unknown_set_operation_outputs_are_listed_only_as_far_as_they_are_proven() {
+    // A leading star of unknown schema decides the names of the whole
+    // operation, so nothing is listed and the shape is open.
+    let result = generic(
+        "SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source",
+        &[],
+    );
+    assert_no_errors(&result);
+    assert!(result.slots().is_empty());
+    assert!(matches!(
+        &result.output.as_ref().unwrap().shape,
+        OutputShape::Open { unexpanded } if unexpanded.len() == 1
+    ));
+
+    // The names come from the leading operand. The right operand's `id, *`
+    // cannot be aligned by position, which leaves `explicit_col` partial while
+    // `id` is complete.
+    let result = generic(
+        "SELECT id, 1 AS explicit_col FROM raw.orders UNION SELECT id, * FROM some_unknown_source",
+        &[],
+    );
+    assert_eq!(result.names(), ["id", "explicit_col"]);
+    assert_counts(&result, 2, 1, 1);
+    assert_column_error(
+        &result,
+        "explicit_col",
+        ColumnLineageErrorKind::ColumnIndeterminate,
+        "",
+    );
+
+    // Through a CTE the star's columns stay behind the wildcard.
+    let result = generic(
+        "WITH u AS (SELECT * FROM first_source UNION ALL SELECT id, explicit_col FROM second_source) SELECT id, explicit_col FROM u",
+        &[],
+    );
+    assert_eq!(result.names(), ["id", "explicit_col"]);
+    assert_counts(&result, 2, 0, 2);
+    for name in ["id", "explicit_col"] {
+        assert_column_error(
+            &result,
+            name,
+            ColumnLineageErrorKind::ColumnIndeterminate,
+            "",
+        );
     }
 }
 
@@ -82,52 +101,51 @@ fn nonleading_set_output_name_through_cte_is_indeterminate() {
 }
 
 #[test]
-fn nonleading_set_output_name_is_not_found() {
+fn nonleading_set_output_name_is_declared_only() {
     // c9 is named only by the non-leading operand. Set-operation output names
-    // come from c1 in the leading operand, so c9 has no output mapping.
+    // come from c1 in the leading operand, so c9 is not an output; the YAML
+    // declaration of it is reported.
     let result = generic("SELECT 1 AS c1 UNION ALL SELECT 2 AS c9", &["c9"]);
-    assert_column_error(
+    assert_eq!(result.names(), ["c1"]);
+    assert_declared_difference(
         &result,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput,
         "c9",
-        ColumnLineageErrorKind::ColumnNotFound,
-        "no sqllineage mapping for output 'c9'",
+        "is declared in YAML but is not in the SQL output",
     );
 }
 
 #[test]
-fn duplicate_output_ambiguity_takes_precedence() {
+fn duplicate_names_next_to_a_star_are_two_slots_after_the_unknown_segment() {
     // The name is used by two outputs while a star leaves the rest of the
-    // output unknown. The duplicate is reported, not the unknown star.
+    // output unknown. Both outputs are listed, in order, without a proven
+    // position because the star precedes them.
     let result = generic(
         "SELECT *, id AS explicit_col, amount AS explicit_col FROM first_source",
         &["explicit_col"],
     );
-    assert_column_error(
-        &result,
-        "explicit_col",
-        ColumnLineageErrorKind::ColumnAmbiguous,
-        "more than one sqllineage mapping matches output 'explicit_col'",
-    );
-}
-
-#[test]
-fn plain_star_without_set_operation_keeps_existing_behavior() {
-    let result = generic("SELECT * FROM orders", &["id"]);
-    assert_column_error(
-        &result,
-        "id",
-        ColumnLineageErrorKind::ColumnIndeterminate,
-        "unexpanded SELECT * leaves the output columns unknown",
-    );
+    assert_no_errors(&result);
+    assert_eq!(result.names(), ["explicit_col", "explicit_col"]);
+    assert_source_pairs(&result.slots()[0], &[("first_source", "id")], "first");
+    assert_source_pairs(&result.slots()[1], &[("first_source", "amount")], "second");
+    assert!(result.slots().iter().all(|slot| slot.ordinal.is_none()));
+    let output = result.output.as_ref().unwrap();
+    assert!(matches!(output.shape, OutputShape::Open { .. }));
+    assert!(matches!(
+        output.lookup(&Ident::unquoted("explicit_col"), DlinDialect::Generic),
+        SlotLookup::Ambiguous(ids) if ids.len() == 2
+    ));
 }
 
 #[test]
 fn plain_projection_resolves_case_folded_concrete_source() {
+    // The declared `Output_ID` and the output `output_id` are the same column
+    // under the dialect's rules, so nothing is reported.
     let result = generic("select ID as output_id from SOURCE_TABLE", &["Output_ID"]);
     assert_no_errors(&result);
     assert_resolved(
         &result,
-        "Output_ID",
+        "output_id",
         // The engine normalizes relation identifiers, while its expression
         // visitor preserves this source column spelling.
         &[("source_table", "ID")],
@@ -230,36 +248,27 @@ fn column_without_visible_binding_reports_indeterminate() {
 }
 
 #[test]
-fn unknown_star_is_indeterminate_and_reports_star_hint() {
-    let result = generic("select * from orders", &["id"]);
-    let error = assert_column_error(
-        &result,
-        "id",
-        ColumnLineageErrorKind::ColumnIndeterminate,
-        "",
-    );
-    // The hint is attached only when the statement has an unexpanded star.
-    assert_eq!(error.hint.as_deref(), Some(STAR_HINT));
-}
-
-#[test]
-fn unmapped_output_depends_on_unresolved_star_state() {
-    let without_star = generic("select id from orders", &["missing"]);
-    assert_column_error(
-        &without_star,
+fn declared_only_column_wording_depends_on_the_shape() {
+    let closed = generic("select id from orders", &["missing"]);
+    assert_declared_difference(
+        &closed,
+        ColumnLineageErrorKind::DeclaredColumnNotInOutput,
         "missing",
-        ColumnLineageErrorKind::ColumnNotFound,
-        "no sqllineage mapping for output 'missing'",
+        "is declared in YAML but is not in the SQL output",
     );
+    assert_eq!(closed.errors[0].hint, None);
 
-    let with_unexpanded_star = generic("select * from orders", &["missing"]);
-    let error = assert_column_error(
-        &with_unexpanded_star,
+    // With an unexpanded star the column is not proven absent, so the wording
+    // does not say it is missing and the star hint is attached.
+    let open = generic("select * from orders", &["missing"]);
+    assert_declared_difference(
+        &open,
+        ColumnLineageErrorKind::DeclaredColumnNotEnumerated,
         "missing",
-        ColumnLineageErrorKind::ColumnIndeterminate,
-        "unexpanded SELECT * leaves the output columns unknown",
+        "is declared in YAML but is not among the enumerated SQL outputs",
     );
-    assert_eq!(error.hint.as_deref(), Some(STAR_HINT));
+    assert!(!open.errors[0].what.contains("not in the SQL output"));
+    assert_eq!(open.errors[0].hint.as_deref(), Some(STAR_HINT));
 }
 
 #[test]
@@ -270,11 +279,12 @@ fn known_schema_expands_star_to_concrete_sources() {
         &[("orders", &["id", "amount"])],
         &["ID"],
     );
-    // A fully expanded star leaves no open shape, so nothing is reported.
+    // A fully expanded star leaves no open shape, so nothing is reported, and
+    // the declared `ID` is the output `id` under the dialect's rules.
     assert_no_errors(&result);
     assert_resolved(
         &result,
-        "ID",
+        "id",
         &[("orders", "id")],
         TransformationType::Direct,
     );
@@ -344,10 +354,10 @@ fn yaml_only_upstream_star_has_unknown_positional_alignment() {
 fn source_free_only_branch_resolves_without_sources() {
     let result = generic("SELECT CAST(NULL AS STRING) AS col_a", &[]);
     assert_no_errors(&result);
-    assert_eq!(result.traced_columns, 1);
+    assert_counts(&result, 1, 1, 0);
     assert!(
         entry(&result, "col_a").lineage.known().is_empty(),
         "unexpected sources: {:?}",
-        result.columns
+        result.slots()
     );
 }

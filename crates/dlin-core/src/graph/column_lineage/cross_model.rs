@@ -1,24 +1,23 @@
 use crate::parser::manifest::Manifest;
 use std::collections::{HashMap, HashSet};
 
-use super::backend::sqllineage::{
-    analyze_parsed, parse_sql, resolve_statement_output, statement_error,
-};
 use super::relation::{RelationRef, RelationResolution, resolve_unique};
 use super::{
-    ColumnLineageAnalysis, ColumnLineageError, InternalColumnSource, InternalModelColumnLineage,
-    ModelOutputRef, TransformationType, UnresolvedContribution, ValueLineage, find_model_by_name,
-    find_model_by_unique_id, value_lineage,
+    ColumnLineageAnalysis, InternalColumnSource, InternalModelColumnLineage, ModelOutputRef,
+    ModelPathHop, OutputSlotId, SlotLookup, UnresolvedContribution, UnresolvedReason, ValueLineage,
+    find_model_by_name, find_model_by_unique_id,
 };
 
-type ModelPath = Vec<(String, String, TransformationType)>;
-
-/// What the trace of one root output column has collected so far.
+/// What the trace of one root output slot has collected so far.
 #[derive(Default)]
 struct TraceAccumulator {
     sources: Vec<InternalColumnSource>,
     unresolved: Vec<UnresolvedContribution>,
 }
+
+/// The upstream outputs that the trace of one root slot has already entered.
+/// A slot is identified by its model and slot id, never by its name.
+type Visited = HashSet<(String, OutputSlotId)>;
 
 pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
     analysis: &'a mut ColumnLineageAnalysis<'m>,
@@ -29,7 +28,10 @@ pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
         in_memory_cache: HashMap::new(),
         computing: HashSet::new(),
     };
-    ctx.computing.insert(model_name.to_string());
+    let key = find_model_by_unique_id(ctx.analysis.manifest, model_name)
+        .or_else(|| find_model_by_name(ctx.analysis.manifest, model_name))
+        .map_or_else(|| model_name.to_string(), |node| node.unique_id.clone());
+    ctx.computing.insert(key);
     compute_cross_model_inner(model_name, &mut ctx)
 }
 
@@ -44,24 +46,41 @@ fn compute_cross_model_inner(
     ctx: &mut CrossModelContext<'_, '_>,
 ) -> InternalModelColumnLineage {
     let mut result = super::compute_column_lineage_internal(ctx.analysis, model_name);
+    let Some(root_uid) = find_model_by_unique_id(ctx.analysis.manifest, model_name)
+        .or_else(|| find_model_by_name(ctx.analysis.manifest, model_name))
+        .map(|node| node.unique_id.clone())
+    else {
+        return result;
+    };
     let upstream_models = build_upstream_model_relations(ctx.analysis.manifest, model_name);
 
-    for entry in &mut result.columns {
+    let model = result.model.clone();
+    let errors = &mut result.errors;
+    let Some(output) = result.output.as_mut() else {
+        return result;
+    };
+    for slot in &mut output.columns {
+        let root = ModelOutputRef {
+            unique_id: root_uid.clone(),
+            model: model.clone(),
+            slot: slot.id,
+            column: slot.name.to_string(),
+        };
         let mut acc = TraceAccumulator {
             sources: Vec::new(),
-            unresolved: entry.lineage.unresolved().to_vec(),
+            unresolved: slot.lineage.unresolved().to_vec(),
         };
-        let mut visited: HashSet<(String, String)> = HashSet::new();
-        visited.insert((model_name.to_string(), entry.column.clone()));
+        let mut visited = Visited::new();
+        visited.insert((root_uid.clone(), slot.id));
 
-        for source in entry.lineage.known() {
+        for source in slot.lineage.known() {
             resolve_source_recursive(
                 source,
-                &entry.column,
+                &root,
                 &upstream_models,
                 &mut visited,
                 &mut acc,
-                &mut result.errors,
+                errors,
                 ctx,
                 &[],
             );
@@ -75,9 +94,8 @@ fn compute_cross_model_inner(
         sources.dedup();
         unresolved.sort();
         unresolved.dedup();
-        entry.lineage = ValueLineage::new(sources, unresolved);
+        slot.lineage = ValueLineage::new(sources, unresolved);
     }
-    result.traced_columns = result.complete_column_count();
 
     result
 }
@@ -115,50 +133,32 @@ pub(super) fn build_upstream_model_relations(
 #[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
     source: &InternalColumnSource,
-    root_output_column: &str,
+    root: &ModelOutputRef,
     upstream_models: &[(RelationRef, String)],
-    visited: &mut HashSet<(String, String)>,
+    visited: &mut Visited,
     acc: &mut TraceAccumulator,
-    errors: &mut Vec<ColumnLineageError>,
+    errors: &mut Vec<super::ColumnLineageError>,
     ctx: &mut CrossModelContext<'_, '_>,
-    current_path: &[(String, String, TransformationType)],
+    current_path: &[ModelPathHop],
 ) {
+    let leaf = |acc: &mut TraceAccumulator| {
+        let mut leaf = source.clone();
+        leaf.model_path = current_path.to_vec();
+        acc.sources.push(leaf);
+    };
     let candidates = upstream_models
         .iter()
         .map(|(relation, _)| relation.clone())
         .collect::<Vec<_>>();
     let model_unique_id = match resolve_unique(&source.relation, &candidates, ctx.analysis.dialect)
     {
-        RelationResolution::Unique(index) => Some(upstream_models[index].1.clone()),
-        RelationResolution::Ambiguous | RelationResolution::NotFound => None,
-    };
-
-    let model_unique_id = match model_unique_id {
-        Some(unique_id) => {
-            let pair = (unique_id.clone(), source.column.clone());
-            if visited.contains(&pair) {
-                let mut leaf = source.clone();
-                leaf.model_path = current_path.to_vec();
-                acc.sources.push(leaf);
-                return;
-            }
-            visited.insert(pair);
-            unique_id
-        }
-        None => {
-            let mut leaf = source.clone();
-            leaf.model_path = current_path.to_vec();
-            acc.sources.push(leaf);
-            return;
-        }
+        RelationResolution::Unique(index) => upstream_models[index].1.clone(),
+        RelationResolution::Ambiguous | RelationResolution::NotFound => return leaf(acc),
     };
 
     if !ctx.in_memory_cache.contains_key(&model_unique_id) {
         if ctx.computing.contains(&model_unique_id) {
-            let mut leaf = source.clone();
-            leaf.model_path = current_path.to_vec();
-            acc.sources.push(leaf);
-            return;
+            return leaf(acc);
         }
         ctx.computing.insert(model_unique_id.clone());
         let upstream_result = compute_cross_model_inner(&model_unique_id, ctx);
@@ -166,105 +166,114 @@ fn resolve_source_recursive(
             .insert(model_unique_id.clone(), upstream_result);
     }
     let upstream_result = ctx.in_memory_cache.get(&model_unique_id).unwrap();
+    let lookup = upstream_result
+        .output
+        .as_ref()
+        .map_or(SlotLookup::Absent, |output| {
+            output.lookup(&source.column, ctx.analysis.dialect)
+        });
 
+    // Only a failure of the whole model and the diagnostics of the slot that
+    // is followed may cross this model boundary. A diagnostic for another
+    // slot belongs to a sibling branch (and can even refer to an EXCEPT-ed
+    // projection), and a difference between the YAML and the SQL output is
+    // about the upstream model alone.
+    let followed = match &lookup {
+        SlotLookup::Unique(id) => Some(*id),
+        SlotLookup::Ambiguous(_) | SlotLookup::Absent => None,
+    };
+    if let Some(id) = followed
+        && !visited.insert((model_unique_id.clone(), id))
+    {
+        return leaf(acc);
+    }
     for err in &upstream_result.errors {
-        // A diagnostic for a different output column belongs to a sibling
-        // branch (and can even refer to an EXCEPT-ed projection). Only global
-        // diagnostics and the column currently being followed may cross this
-        // model boundary.
-        if !err.is_column_scoped() || err.column_name() == Some(source.column.as_str()) {
-            let rebased = err.rebase_column(root_output_column);
+        if err.is_model_failure() || (followed.is_some() && err.slot() == followed) {
+            let rebased = err.rebase_to(root);
             if !errors.contains(&rebased) {
                 errors.push(rebased);
             }
         }
     }
 
-    if let Some(col_entry) = upstream_result
-        .columns
-        .iter()
-        .find(|c| c.column == source.column)
-    {
-        // Build extended_path with the transformation type now that we know it
-        let mut extended_path = current_path.to_vec();
-        extended_path.push((
-            upstream_result.model.clone(),
-            source.column.clone(),
-            col_entry.transformation.clone(),
-        ));
+    match lookup {
+        SlotLookup::Unique(id) => {
+            let slot = upstream_result
+                .output
+                .as_ref()
+                .and_then(|output| output.slot(id))
+                .expect("a looked-up slot exists");
+            let mut extended_path = current_path.to_vec();
+            extended_path.push(ModelPathHop {
+                output: output_ref_of(&model_unique_id, &upstream_result.model, slot),
+                transformation: slot.transformation.clone(),
+            });
 
-        let (known, unresolved) = (col_entry.lineage.known(), col_entry.lineage.unresolved());
-        if known.is_empty() {
-            // Leaf: the column exists at model_name but has no known sources.
-            // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
-            // This holds for a partial column as well: its nearest terminal is
-            // kept, and the unresolved contributions are carried next to it.
-            let mut leaf = source.clone();
-            leaf.model_path = current_path.to_vec();
-            acc.sources.push(leaf);
-        } else {
-            for s in known {
-                let mut merged = s.clone();
-                let mut full_path = extended_path.clone();
-                full_path.extend(s.model_path.iter().cloned());
-                merged.model_path = full_path;
-                acc.sources.push(merged);
+            let (known, unresolved) = (slot.lineage.known(), slot.lineage.unresolved());
+            if known.is_empty() {
+                // Leaf: the column exists at model_name but has no known sources.
+                // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
+                // This holds for a partial column as well: its nearest terminal is
+                // kept, and the unresolved contributions are carried next to it.
+                leaf(acc);
+            } else {
+                for s in known {
+                    let mut merged = s.clone();
+                    let mut full_path = extended_path.clone();
+                    full_path.extend(s.model_path.iter().cloned());
+                    merged.model_path = full_path;
+                    acc.sources.push(merged);
+                }
+            }
+            for contribution in unresolved {
+                acc.unresolved
+                    .push(extend_contribution(contribution, &extended_path));
             }
         }
-        for contribution in unresolved {
-            acc.unresolved
-                .push(extend_contribution(contribution, &extended_path));
+        SlotLookup::Ambiguous(ids) => {
+            // Several output columns of the upstream model have this name.
+            // None of them is chosen: the source stays a leaf, and the
+            // contribution that could not be attributed is recorded where the
+            // reference was written.
+            let output = upstream_result
+                .output
+                .as_ref()
+                .expect("an ambiguous lookup has an output");
+            let candidates = ids
+                .iter()
+                .filter_map(|id| output.slot(*id))
+                .map(|slot| output_ref_of(&model_unique_id, &upstream_result.model, slot))
+                .collect();
+            let origin = current_path
+                .last()
+                .map_or_else(|| root.clone(), |hop| hop.output.clone());
+            acc.unresolved.push(UnresolvedContribution {
+                reason: UnresolvedReason::AmbiguousOutput {
+                    relation: source.relation.clone(),
+                    column: source.column.clone(),
+                    candidates,
+                },
+                origin,
+                model_path: current_path.to_vec(),
+            });
+            leaf(acc);
         }
-    } else {
-        // A missing column can mean either that the all-column analysis did
-        // not discover it, or that it explicitly reported an uncertainty for
-        // that column (for example, a field selected from a BigQuery row
-        // value). In the latter case, retrying the same model for each
-        // missing field only repeats the full SQL analysis and turns a linear
-        // row-value expansion into quadratic work.
-        let on_demand = should_retry_missing_column(&upstream_result.errors, &source.column)
-            .then(|| compute_single_column_lineage(ctx.analysis, &model_unique_id, &source.column))
-            .flatten();
-        let transformation = on_demand
-            .as_ref()
-            .map_or(TransformationType::Unknown, |(_, t)| t.clone());
-        let model_display_name = ctx
-            .analysis
-            .manifest
-            .nodes
-            .get(&model_unique_id)
-            .map(|node| node.name.clone())
-            .unwrap_or_else(|| model_unique_id.clone());
-        let mut extended_path = current_path.to_vec();
-        extended_path.push((model_display_name, source.column.clone(), transformation));
-        let (on_demand_sources, on_demand_unresolved) = on_demand
-            .map(|(lineage, _)| lineage.into_parts())
-            .unwrap_or_default();
-        if on_demand_sources.is_empty() {
-            // Leaf: column at model_name has no traceable sources — don't self-include in path.
-            let mut leaf = source.clone();
-            leaf.model_path = current_path.to_vec();
-            acc.sources.push(leaf);
-        } else {
-            let further_upstream =
-                build_upstream_model_relations(ctx.analysis.manifest, &model_unique_id);
-            for s in &on_demand_sources {
-                resolve_source_recursive(
-                    s,
-                    root_output_column,
-                    &further_upstream,
-                    visited,
-                    acc,
-                    errors,
-                    ctx,
-                    &extended_path,
-                );
-            }
-        }
-        for contribution in &on_demand_unresolved {
-            acc.unresolved
-                .push(extend_contribution(contribution, &extended_path));
-        }
+        // The column is not among the listed outputs of the model (or the
+        // model has none): the source stays where it was found.
+        SlotLookup::Absent => leaf(acc),
+    }
+}
+
+fn output_ref_of(
+    unique_id: &str,
+    model: &str,
+    slot: &super::OutputSlot<InternalColumnSource>,
+) -> ModelOutputRef {
+    ModelOutputRef {
+        unique_id: unique_id.to_string(),
+        model: model.to_string(),
+        slot: slot.id,
+        column: slot.name.to_string(),
     }
 }
 
@@ -273,91 +282,13 @@ fn resolve_source_recursive(
 /// including the upstream hop itself. The origin is kept as it was found.
 fn extend_contribution(
     contribution: &UnresolvedContribution,
-    prefix: &ModelPath,
+    prefix: &[ModelPathHop],
 ) -> UnresolvedContribution {
-    let mut model_path = prefix.clone();
+    let mut model_path = prefix.to_vec();
     model_path.extend(contribution.model_path.iter().cloned());
     UnresolvedContribution {
         reason: contribution.reason.clone(),
         origin: contribution.origin.clone(),
         model_path,
-    }
-}
-
-/// Return whether a missing output column should be retried by the
-/// single-column recovery path.
-///
-/// A column-scoped diagnostic means that the regular all-column analysis did
-/// attempt this output and could not establish its lineage. Retrying it would
-/// repeat the same analysis without improving the result. Keep retrying when
-/// no matching diagnostic exists so that the existing recovery behavior for
-/// incomplete output discovery is preserved.
-fn should_retry_missing_column(errors: &[ColumnLineageError], column: &str) -> bool {
-    !errors
-        .iter()
-        .any(|error| error.is_column_scoped() && error.column_name() == Some(column))
-}
-
-/// Lineage of one output column computed on demand, when the all-column
-/// analysis of the model did not list it. A `Partial` result keeps its known
-/// sources and unresolved contributions.
-fn compute_single_column_lineage(
-    analysis: &mut ColumnLineageAnalysis<'_>,
-    model_name: &str,
-    column_name: &str,
-) -> Option<(ValueLineage<InternalColumnSource>, TransformationType)> {
-    let manifest = analysis.manifest;
-    let dialect = analysis.dialect;
-    let node = find_model_by_unique_id(manifest, model_name)
-        .or_else(|| find_model_by_name(manifest, model_name))?;
-    let compiled_code = node.compiled_code.as_ref()?;
-    let catalog = analysis.schema.catalog_for(node);
-    let parsed = parse_sql(compiled_code, dialect).ok()?;
-    let statement = analyze_parsed(&parsed, dialect, catalog.as_ref())
-        .into_single()
-        .ok()?;
-    if statement_error(&statement).is_some() {
-        return None;
-    }
-    let output = resolve_statement_output(&statement, column_name, false, dialect).ok()?;
-    let origin = ModelOutputRef {
-        unique_id: node.unique_id.clone(),
-        model: node.name.clone(),
-        column: column_name.to_string(),
-    };
-    Some((
-        value_lineage(&output.lineage, &origin, catalog.as_ref(), dialect),
-        super::backend::sqllineage::transformation(output.transform),
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_column_retry_skips_matching_scoped_diagnostic() {
-        let errors = vec![ColumnLineageError {
-            kind: super::super::ColumnLineageErrorKind::ColumnIndeterminate,
-            column: Some("event_field".to_string()),
-            what: "column 'event_field': row-value binding is indeterminate".to_string(),
-            why: None,
-            hint: None,
-        }];
-
-        assert!(!should_retry_missing_column(&errors, "event_field"));
-    }
-
-    #[test]
-    fn missing_column_retry_preserves_recovery_without_matching_diagnostic() {
-        let errors = vec![ColumnLineageError {
-            kind: super::super::ColumnLineageErrorKind::ColumnIndeterminate,
-            column: Some("other_field".to_string()),
-            what: "column 'other_field': row-value binding is indeterminate".to_string(),
-            why: None,
-            hint: None,
-        }];
-
-        assert!(should_retry_missing_column(&errors, "event_field"));
     }
 }

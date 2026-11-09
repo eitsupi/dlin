@@ -109,7 +109,7 @@ pub(crate) fn run_column_lineage_command(
         graph::column_lineage::ColumnLineageCache::load(&project_dir, cache_dir)
     };
 
-    let column_filter: HashSet<&str> = columns.iter().map(|s| s.as_str()).collect();
+    let column_filter: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
     let mut analysis =
         graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache);
 
@@ -118,52 +118,7 @@ pub(crate) fn run_column_lineage_command(
         .map(|model| {
             let mut report = analysis.compute_cross_model_column_lineage(model);
             if !column_filter.is_empty() {
-                report
-                    .columns
-                    .retain(|entry| column_filter.contains(entry.column.as_str()));
-                // Only recompute counts and filter errors when analysis was actually attempted.
-                // total_columns==0 indicates a load error (model not found, no
-                // compiled_code, etc.) — preserve the zero so callers can
-                // distinguish "nothing requested" from "nothing found".
-                if report.total_columns > 0 {
-                    // Remove per-column errors for columns outside the filter.
-                    // Global errors (e.g. SQL parse failures) are always preserved.
-                    report.errors.retain(|err| match err {
-                        err if err.is_column_scoped() => err
-                            .column_name()
-                            .is_none_or(|name| column_filter.contains(name)),
-                        _ => true,
-                    });
-                    report.traced_columns = report.complete_column_count();
-                    report.total_columns = column_filter.len();
-
-                    // When there are no global errors, explicitly flag requested columns
-                    // that are absent from both the output and per-column errors.
-                    let has_global_errors = report
-                        .errors
-                        .iter()
-                        .any(|err| !err.is_column_scoped());
-                    if !has_global_errors {
-                        let mut sorted_cols: Vec<&str> = column_filter.iter().copied().collect();
-                        sorted_cols.sort_unstable();
-                        for col in sorted_cols {
-                            let in_output = report.columns.iter().any(|c| c.column == col);
-                            let has_col_error = report
-                                .errors
-                                .iter()
-                                .any(|err| err.column_name() == Some(col));
-                            if !in_output && !has_col_error {
-                                report.errors.push(graph::column_lineage::ColumnLineageError {
-                                    kind: graph::column_lineage::ColumnLineageErrorKind::ColumnNotFound,
-                                    column: Some(col.to_string()),
-                                    what: format!("column '{}': not found in model output", col),
-                                    why: None,
-                                    hint: None,
-                                });
-                            }
-                        }
-                    }
-                }
+                report.select_columns(&column_filter, dialect);
             }
             report
         })

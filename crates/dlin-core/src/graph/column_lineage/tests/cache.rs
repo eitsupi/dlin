@@ -5,29 +5,34 @@ fn test_column_cache_hit() {
     let project_dir = tmp.path();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "test_model".to_string(),
         model: "test_model".to_string(),
-        traced_columns: 1,
-        total_columns: 1,
-        columns: vec![ColumnLineageEntry {
-            column: "id".to_string(),
-            transformation: TransformationType::Direct,
-            lineage: ValueLineage::complete(vec![ColumnSource {
-                table: "raw".to_string(),
-                column: "id".to_string(),
-                model_path: vec![],
-            }]),
-        }],
+        output: Some(OutputSlots {
+            columns: vec![OutputSlot {
+                id: OutputSlotId::new(0),
+                ordinal: Some(0),
+                name: OutputName::Explicit(Ident::unquoted("id")),
+                transformation: TransformationType::Direct,
+                lineage: ValueLineage::complete(vec![InternalColumnSource {
+                    relation: RelationRef::bare("raw"),
+                    column: Ident::unquoted("id"),
+                    model_path: vec![],
+                }]),
+            }],
+            shape: OutputShape::Closed,
+        }),
         errors: vec![],
     };
-    cache.insert("test_model", DlinDialect::Generic, 0, lineage.into());
+    cache.insert("test_model", DlinDialect::Generic, 0, lineage);
     cache.save();
 
     // Reload from disk
     let cache2 = ColumnLineageCache::load(project_dir, None);
     let hit = cache2.get("test_model", DlinDialect::Generic, 0).unwrap();
-    assert_eq!(hit.columns.len(), 1);
-    assert_eq!(hit.columns[0].column, "id");
+    let output = hit.output.as_ref().unwrap();
+    assert_eq!(output.columns.len(), 1);
+    assert_eq!(output.columns[0].name.to_string(), "id");
 }
 
 #[test]
@@ -44,7 +49,7 @@ fn test_column_cache_persists_structural_relation_and_public_output() {
         .join(COLUMN_LINEAGE_CACHE_FILENAME);
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(cache_path).unwrap()).unwrap();
-    let sources = json["entries"]["model.proj.stg_orders"]["lineage"]["columns"]
+    let sources = json["entries"]["model.proj.stg_orders"]["lineage"]["output"]["columns"]
         .as_array()
         .unwrap()
         .iter()
@@ -79,11 +84,10 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
     let node = super::super::find_model_by_name(&manifest, "stg_orders").unwrap();
     let unique_id = node.unique_id.clone();
     let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
-    let sentinel = ModelColumnLineage {
+    let sentinel = InternalModelColumnLineage {
+        unique_id: unique_id.clone(),
         model: "canonical-cache-sentinel".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
 
@@ -95,7 +99,7 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
         &unique_id,
         DlinDialect::Generic,
         semantic_digest,
-        sentinel.clone().into(),
+        sentinel.clone(),
     );
     seeded.save();
 
@@ -125,14 +129,13 @@ fn test_column_cache_miss_on_semantic_digest_change() {
     let project_dir = tmp.path();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
@@ -145,14 +148,13 @@ fn test_column_cache_miss_on_dialect_change() {
     let project_dir = tmp.path();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::BigQuery, 0, lineage.into());
+    cache.insert("m", DlinDialect::BigQuery, 0, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
@@ -165,14 +167,13 @@ fn test_column_cache_miss_on_manifest_columns_change() {
     let project_dir = tmp.path();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 42, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 42, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
@@ -188,14 +189,13 @@ fn test_column_cache_version_invalidation() {
     let project_dir = tmp.path();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
 
     // Tamper with version in saved file
@@ -215,14 +215,13 @@ fn test_column_cache_version_invalidation() {
 #[test]
 fn test_column_cache_disabled() {
     let mut cache = ColumnLineageCache::disabled();
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 0, lineage);
     // Disabled cache still works in-memory (only disk persistence is disabled)
     assert!(cache.get("m", DlinDialect::Generic, 0).is_some());
     // But save is a no-op (no cache_path)
@@ -236,14 +235,13 @@ fn test_column_cache_fresh() {
 
     // Populate cache
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 0, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
 
     // Fresh cache ignores existing entries
@@ -252,14 +250,13 @@ fn test_column_cache_fresh() {
 
     // But can save new entries
     let mut fresh = ColumnLineageCache::fresh(project_dir, None);
-    let lineage2 = ModelColumnLineage {
+    let lineage2 = InternalModelColumnLineage {
+        unique_id: "m2".to_string(),
         model: "m2".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    fresh.insert("m2", DlinDialect::Generic, 0, lineage2.into());
+    fresh.insert("m2", DlinDialect::Generic, 0, lineage2);
     fresh.save();
 
     let reloaded = ColumnLineageCache::load(project_dir, None);
@@ -274,14 +271,13 @@ fn test_column_cache_ignores_manifest_stat_change_when_semantics_match() {
     std::fs::write(&manifest_path, r#"{"nodes":{}}"#).unwrap();
 
     let mut cache = ColumnLineageCache::load(project_dir, None);
-    let lineage = ModelColumnLineage {
+    let lineage = InternalModelColumnLineage {
+        unique_id: "m".to_string(),
         model: "m".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
-    cache.insert("m", DlinDialect::Generic, 42, lineage.into());
+    cache.insert("m", DlinDialect::Generic, 42, lineage);
     cache.save();
 
     let cache2 = ColumnLineageCache::load(project_dir, None);
@@ -306,21 +302,15 @@ fn test_compute_column_lineage_reuses_result_when_manifest_stat_changes() {
     let unique_id = node.unique_id.clone();
     let semantic_digest = super::super::schema::compute_semantic_digest(&manifest, node);
 
-    let sentinel = ModelColumnLineage {
+    let sentinel = InternalModelColumnLineage {
+        unique_id: "manifest-stat-cache-sentinel".to_string(),
         model: "manifest-stat-cache-sentinel".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
 
     let mut seeded = ColumnLineageCache::load(project_dir, None);
-    seeded.insert(
-        &unique_id,
-        DlinDialect::Generic,
-        semantic_digest,
-        sentinel.into(),
-    );
+    seeded.insert(&unique_id, DlinDialect::Generic, semantic_digest, sentinel);
     seeded.save();
 
     let mut before_change = ColumnLineageCache::load(project_dir, None);
@@ -347,20 +337,14 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
     let unique_id = downstream.unique_id.clone();
     let initial_hash = super::super::schema::compute_semantic_digest(&manifest, downstream);
 
-    let sentinel = ModelColumnLineage {
+    let sentinel = InternalModelColumnLineage {
+        unique_id: "upstream-alias-cache-sentinel".to_string(),
         model: "upstream-alias-cache-sentinel".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
     let mut cache = ColumnLineageCache::disabled();
-    cache.insert(
-        &unique_id,
-        DlinDialect::Generic,
-        initial_hash,
-        sentinel.into(),
-    );
+    cache.insert(&unique_id, DlinDialect::Generic, initial_hash, sentinel);
 
     let cached = compute_column_lineage(&manifest, "orders", DlinDialect::Generic, &mut cache);
     assert_eq!(cached.model, "upstream-alias-cache-sentinel");
@@ -383,7 +367,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         &mut cache,
     );
     assert!(
-        result.total_columns > 0,
+        result.listed_columns > 0,
         "alias change should invalidate the cache"
     );
 }
@@ -442,21 +426,15 @@ fn test_unrelated_manifest_change_reuses_cached_lineage() {
     let node = super::super::find_model_by_name(&manifest, "orders").unwrap();
     let unique_id = node.unique_id.clone();
     let digest = super::super::schema::compute_semantic_digest(&manifest, node);
-    let sentinel = ModelColumnLineage {
+    let sentinel = InternalModelColumnLineage {
+        unique_id: "unrelated-change-sentinel".to_string(),
         model: "unrelated-change-sentinel".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
 
     let mut seeded = ColumnLineageCache::load(tmp.path(), None);
-    seeded.insert(
-        &unique_id,
-        DlinDialect::Generic,
-        digest,
-        sentinel.clone().into(),
-    );
+    seeded.insert(&unique_id, DlinDialect::Generic, digest, sentinel.clone());
     seeded.save();
 
     let mut changed = manifest;
@@ -537,11 +515,10 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         .digest_for_node(&cyclic_manifest, orders);
     assert!(!digest.persistent_cache_safe);
 
-    let sentinel = ModelColumnLineage {
+    let sentinel = InternalModelColumnLineage {
+        unique_id: "cycle-cache-sentinel".to_string(),
         model: "cycle-cache-sentinel".to_string(),
-        traced_columns: 0,
-        total_columns: 0,
-        columns: vec![],
+        output: None,
         errors: vec![],
     };
     let mut seeded = ColumnLineageCache::load(tmp.path(), None);
@@ -549,7 +526,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         &orders_id,
         DlinDialect::Generic,
         digest.value,
-        sentinel.clone().into(),
+        sentinel.clone(),
     );
     seeded.save();
 
@@ -770,14 +747,12 @@ fn seeded_cache_file(project_dir: &std::path::Path) -> ColumnLineageCacheFile {
         "m",
         DlinDialect::Generic,
         0,
-        ModelColumnLineage {
+        InternalModelColumnLineage {
+            unique_id: "m".to_string(),
             model: "m".to_string(),
-            traced_columns: 0,
-            total_columns: 0,
-            columns: vec![],
+            output: None,
             errors: vec![],
-        }
-        .into(),
+        },
     );
     cache.save();
     serde_json::from_str(&std::fs::read_to_string(cache_file_path(project_dir)).unwrap()).unwrap()
@@ -833,17 +808,17 @@ fn e1_manifest(source_columns: &[&str]) -> Manifest {
 
 fn pairs_by_column(result: &ModelColumnLineage) -> Vec<(String, Vec<(String, String)>)> {
     let mut pairs: Vec<_> = result
-        .columns
+        .slots()
         .iter()
         .map(|entry| {
             let mut sources: Vec<_> = entry
                 .lineage
                 .known()
                 .iter()
-                .map(|source| (source.table.clone(), source.column.clone()))
+                .map(|source| (source.table.clone(), source.column.to_string()))
                 .collect();
             sources.sort();
-            (entry.column.clone(), sources)
+            (entry.column(), sources)
         })
         .collect();
     pairs.sort();

@@ -226,12 +226,12 @@ fn test_row_value_alias_partial_lineage_is_non_fatal_and_structured() {
     );
     let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let report = &reports[0];
-    let lineage = &report["columns"][0]["lineage"];
+    let lineage = &report["output"]["columns"][0]["lineage"];
     assert_eq!(lineage["status"], "partial");
     assert_eq!(lineage["unresolved"][0]["reason"]["kind"], "row_value");
     let source = &lineage["known"][0];
     assert_eq!(source["table"], "p.d.upstream_model");
-    assert_eq!(source["column"], "col_a");
+    assert_eq!(source["column"]["value"], "col_a");
     assert!(source["model_path"].is_null() || source["model_path"].as_array().unwrap().is_empty());
     assert_eq!(report["errors"][0]["kind"], "column_indeterminate");
     assert_eq!(report["errors"][0]["column"], "col_a");

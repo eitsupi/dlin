@@ -67,28 +67,26 @@ fn partial_chain_manifest() -> Manifest {
     ])
 }
 
-fn output_ref(model: &str, column: &str) -> ModelOutputRef {
+/// The output `column` at SQL position `slot` of `model`.
+fn output_ref(model: &str, slot: usize, column: &str) -> ModelOutputRef {
     ModelOutputRef {
         unique_id: model_id(model),
         model: model.to_string(),
+        slot: OutputSlotId::new(slot),
         column: column.to_string(),
     }
 }
 
-fn entry<'a>(result: &'a ModelColumnLineage, column: &str) -> &'a ColumnLineageEntry {
-    result
-        .columns
-        .iter()
-        .find(|entry| entry.column == column)
-        .unwrap_or_else(|| panic!("no entry for '{column}': {result:?}"))
+fn entry<'a>(result: &'a ModelColumnLineage, column: &str) -> &'a OutputSlot<ColumnSource> {
+    result.slot_named(column)
 }
 
-fn known_pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
+fn known_pairs(entry: &OutputSlot<ColumnSource>) -> Vec<(String, String)> {
     entry
         .lineage
         .known()
         .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .map(|source| (source.table.clone(), source.column.to_string()))
         .collect()
 }
 
@@ -153,7 +151,10 @@ fn single_model_partial_keeps_known_sources_and_unresolved_reason() {
 
     let total = entry(&result, "total");
     assert!(total.lineage.is_partial(), "{total:?}");
-    assert_eq!(known_pairs(total), [("source_model", "x")]);
+    assert_eq!(
+        known_pairs(total),
+        [("source_model".to_string(), "x".to_string())]
+    );
     let [contribution] = total.lineage.unresolved() else {
         panic!("expected one unresolved contribution: {total:?}");
     };
@@ -161,7 +162,7 @@ fn single_model_partial_keeps_known_sources_and_unresolved_reason() {
         behind_star_of(&contribution.reason, "raw.fees"),
         "{contribution:?}"
     );
-    assert_eq!(contribution.origin, output_ref("partial_model", "total"));
+    assert_eq!(contribution.origin, output_ref("partial_model", 0, "total"));
     assert!(contribution.model_path.is_empty());
 
     // The existing column-scoped diagnostic is still reported.
@@ -173,10 +174,10 @@ fn single_model_partial_keeps_known_sources_and_unresolved_reason() {
         "{:?}",
         result.errors
     );
-    // Only complete columns are counted as traced.
-    assert_eq!(result.traced_columns, 0);
-    assert_eq!(result.total_columns, 1);
-    assert_eq!(result.columns.len(), 1);
+    // Only complete columns are counted as value-complete.
+    assert_eq!(result.value_complete_columns, 0);
+    assert_eq!(result.listed_columns, 1);
+    assert_eq!(result.slots().len(), 1);
 }
 
 #[test]
@@ -196,7 +197,7 @@ fn partial_with_no_known_source_is_still_listed() {
     let fee = entry(&result, "fee");
     assert!(fee.lineage.known().is_empty());
     assert!(fee.lineage.is_partial());
-    assert_eq!(result.traced_columns, 0);
+    assert_eq!(result.value_complete_columns, 0);
 }
 
 #[test]
@@ -209,16 +210,19 @@ fn cross_model_partial_keeps_terminal_and_unresolved_origin() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_eq!(result.traced_columns, 0);
-    assert_eq!(result.total_columns, 1);
+    assert_eq!(result.value_complete_columns, 0);
+    assert_eq!(result.listed_columns, 1);
     let total = entry(&result, "total");
     assert!(total.lineage.is_partial(), "{total:?}");
-    assert_eq!(known_pairs(total), [("raw.source_table", "x")]);
+    assert_eq!(
+        known_pairs(total),
+        [("raw.source_table".to_string(), "x".to_string())]
+    );
     let source = &total.lineage.known()[0];
     let hops: Vec<_> = source
         .model_path
         .iter()
-        .map(|(model, column, _)| (model.as_str(), column.as_str()))
+        .map(|hop| (hop.output.model.as_str(), hop.output.column.as_str()))
         .collect();
     assert_eq!(hops, [("partial_model", "total"), ("source_model", "x")]);
 
@@ -226,11 +230,11 @@ fn cross_model_partial_keeps_terminal_and_unresolved_origin() {
         panic!("expected one unresolved contribution: {total:?}");
     };
     assert!(behind_star_of(&contribution.reason, "raw.fees"));
-    assert_eq!(contribution.origin, output_ref("partial_model", "total"));
+    assert_eq!(contribution.origin, output_ref("partial_model", 0, "total"));
     let path: Vec<_> = contribution
         .model_path
         .iter()
-        .map(|(model, column, _)| (model.as_str(), column.as_str()))
+        .map(|hop| (hop.output.model.as_str(), hop.output.column.as_str()))
         .collect();
     assert_eq!(path, [("partial_model", "total")]);
 }
@@ -272,7 +276,7 @@ fn unresolved_contributions_are_sorted_and_deduplicated() {
         assert!(
             unresolved
                 .iter()
-                .all(|c| c.origin == output_ref("partial_model", "total"))
+                .all(|c| c.origin == output_ref("partial_model", 0, "total"))
         );
     }
 }
@@ -303,11 +307,7 @@ fn impact_confirms_through_partial_entries_and_reports_the_gap() {
     );
     assert_eq!(
         downstream.path[0].from,
-        DependencyRef::Column {
-            unique_id: model_id("source_model"),
-            model: "source_model".to_string(),
-            column: "x".to_string(),
-        }
+        DependencyRef::Column(output_ref("source_model", 0, "x"))
     );
 
     // The unresolved part of partial_model.total is not proven unrelated.
@@ -315,7 +315,7 @@ fn impact_confirms_through_partial_entries_and_reports_the_gap() {
     let [TraceGap::UnresolvedLineage { at, reasons }] = gaps else {
         panic!("expected one unresolved-lineage gap: {gaps:?}");
     };
-    assert_eq!(*at, output_ref("partial_model", "total"));
+    assert_eq!(*at, output_ref("partial_model", 0, "total"));
     assert!(
         reasons
             .iter()
@@ -362,7 +362,7 @@ fn partial_without_known_edge_is_a_gap_and_not_a_confirmation() {
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     assert!(matches!(
         &gaps[0],
-        TraceGap::UnresolvedLineage { at, .. } if *at == output_ref("partial_model", "only_fee")
+        TraceGap::UnresolvedLineage { at, .. } if *at == output_ref("partial_model", 0, "only_fee")
     ));
     assert!(!report.proves_no_impact());
 }
@@ -475,7 +475,7 @@ fn dependent_model_failure_is_an_analysis_gap() {
 }
 
 #[test]
-fn unlisted_column_with_a_diagnostic_is_an_unresolved_column_gap() {
+fn yaml_only_column_of_a_dependent_is_neither_a_target_nor_a_gap() {
     // `ghost` is declared in YAML but the SQL does not produce it.
     let manifest = manifest(&[
         (
@@ -493,13 +493,11 @@ fn unlisted_column_with_a_diagnostic_is_an_unresolved_column_gap() {
     ]);
     let report = impact(&manifest, "source_model", "x", ImpactScope::ValueOnly);
 
+    // A column that only the YAML declares is not an output of the dependent
+    // model, so it is neither a target nor a gap of the search.
     assert_eq!(confirmed_targets(&report), [("dependent", "x")]);
-    assert_eq!(
-        value_gaps(&report),
-        [TraceGap::UnresolvedColumn {
-            at: output_ref("dependent", "ghost")
-        }]
-    );
+    assert_eq!(value_exploration(&report), &ExplorationStatus::Complete);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
 }
 
 #[test]
@@ -556,12 +554,11 @@ fn partial_value_lineage_does_not_change_output_listing() {
         DIALECT,
         &mut ColumnLineageCache::disabled(),
     );
-    let names: Vec<_> = partial.columns.iter().map(|c| c.column.as_str()).collect();
-    assert_eq!(names, ["a", "b"]);
-    assert_eq!(partial.total_columns, 2);
+    assert_eq!(partial.names(), ["a", "b"]);
+    assert_eq!(partial.listed_columns, 2);
     assert!(entry(&partial, "a").lineage.is_partial());
     assert!(entry(&partial, "b").lineage.is_complete());
-    assert_eq!(partial.traced_columns, 1);
+    assert_eq!(partial.value_complete_columns, 1);
 
     let reader = compute_column_lineage(
         &manifest,
@@ -569,9 +566,8 @@ fn partial_value_lineage_does_not_change_output_listing() {
         DIALECT,
         &mut ColumnLineageCache::disabled(),
     );
-    let names: Vec<_> = reader.columns.iter().map(|c| c.column.as_str()).collect();
-    assert_eq!(names, ["a", "b"]);
-    assert_eq!(reader.total_columns, 2);
+    assert_eq!(reader.names(), ["a", "b"]);
+    assert_eq!(reader.listed_columns, 2);
 }
 
 #[test]
@@ -600,7 +596,7 @@ fn partial_entry_round_trips_through_the_cache() {
         panic!("{cached_total:?}");
     };
     assert!(behind_star_of(&contribution.reason, "raw.fees"));
-    assert_eq!(contribution.origin, output_ref("partial_model", "total"));
+    assert_eq!(contribution.origin, output_ref("partial_model", 0, "total"));
     assert_eq!(contribution.model_path.len(), 1);
 
     // The stored single-model entry is the typed internal value, not a copy.
@@ -610,9 +606,12 @@ fn partial_entry_round_trips_through_the_cache() {
         .get(&model_id("partial_model"), DIALECT, digest.value)
         .expect("partial_model is cached");
     let stored_total = stored
+        .output
+        .as_ref()
+        .unwrap()
         .columns
         .iter()
-        .find(|entry| entry.column == "total")
+        .find(|entry| entry.name.to_string() == "total")
         .unwrap();
     assert!(stored_total.lineage.is_partial());
     assert_eq!(stored_total.lineage.known().len(), 1);
@@ -633,7 +632,7 @@ fn every_unresolved_reason_round_trips_with_its_tag() {
                 },
                 possible_sources: vec![UnresolvedSource {
                     relation: relation.clone(),
-                    column: "a".to_string(),
+                    column: Ident::unquoted("a"),
                 }],
                 unknown_operands: vec![SetOperand::Right],
             },
@@ -655,13 +654,13 @@ fn every_unresolved_reason_round_trips_with_its_tag() {
             "named_behind_star",
             UnresolvedReason::NamedBehindStar {
                 relation: relation.clone(),
-                column: "fee".to_string(),
+                column: Ident::unquoted("fee"),
             },
         ),
         (
             "ambiguous",
             UnresolvedReason::Ambiguous {
-                column: "id".to_string(),
+                column: Ident::unquoted("id"),
                 candidates: vec![
                     UnresolvedCandidate::Relation {
                         relation: relation.clone(),
@@ -676,7 +675,7 @@ fn every_unresolved_reason_round_trips_with_its_tag() {
         (
             "unbound",
             UnresolvedReason::Unbound {
-                column: "id".to_string(),
+                column: Ident::unquoted("id"),
             },
         ),
         ("recursive", UnresolvedReason::Recursive),
@@ -711,15 +710,21 @@ fn public_json_shapes_complete_and_partial_lineage() {
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_value(&partial).unwrap();
-    let lineage = &json["columns"][0]["lineage"];
+    let slot = &json["output"]["columns"][0];
+    let lineage = &slot["lineage"];
     assert_eq!(lineage["status"], "partial");
-    assert_eq!(lineage["known"][0]["column"], "x");
+    assert_eq!(lineage["known"][0]["column"]["value"], "x");
+    assert_eq!(slot["id"], 0);
+    assert_eq!(slot["name"]["kind"], "explicit");
     assert_eq!(
         lineage["unresolved"][0]["reason"]["kind"],
         "named_behind_star"
     );
     assert_eq!(lineage["unresolved"][0]["origin"]["model"], "partial_model");
-    assert!(json["columns"][0].get("sources").is_none());
+    assert!(slot.get("sources").is_none());
+    assert_eq!(json["listed_columns"], 1);
+    assert_eq!(json["value_complete_columns"], 0);
+    assert_eq!(json["value_partial_columns"], 1);
 
     let complete = compute_column_lineage(
         &manifest,
@@ -728,7 +733,7 @@ fn public_json_shapes_complete_and_partial_lineage() {
         &mut ColumnLineageCache::disabled(),
     );
     let json = serde_json::to_value(&complete).unwrap();
-    let lineage = &json["columns"][0]["lineage"];
+    let lineage = &json["output"]["columns"][0]["lineage"];
     assert_eq!(lineage["status"], "complete");
     assert!(lineage.get("unresolved").is_none());
 

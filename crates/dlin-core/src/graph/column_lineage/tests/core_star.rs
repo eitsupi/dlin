@@ -15,8 +15,8 @@ fn test_top_level_set_operation_infers_output_names() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 1);
-    assert_eq!(result.columns[0].column, "id");
+    assert_eq!(result.slots().len(), 1);
+    assert_eq!(result.slots()[0].column(), "id");
 }
 
 #[test]
@@ -34,11 +34,13 @@ fn test_bare_select_star_without_catalog_does_not_infer_output_names() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(result.columns.is_empty());
-    assert_eq!(
-        result.errors[0].kind,
-        ColumnLineageErrorKind::ColumnInferenceFailed
-    );
+    // The star cannot be expanded: nothing is listed and the shape is open.
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(result.slots().is_empty());
+    assert!(matches!(
+        result.output.as_ref().map(|output| &output.shape),
+        Some(OutputShape::Open { unexpanded }) if unexpanded.len() == 1
+    ));
 }
 
 #[test]
@@ -57,12 +59,12 @@ fn test_catalog_expands_bare_select_star_output_names() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.total_columns, 4);
-    assert_eq!(result.columns.len(), 4);
+    assert_eq!(result.listed_columns, 4);
+    assert_eq!(result.slots().len(), 4);
 }
 
 #[test]
-fn test_dependency_catalog_unions_yaml_and_compiled_sql_columns() {
+fn test_dependency_provides_its_sql_output_and_not_its_yaml_columns() {
     let mut manifest = make_test_manifest();
     let dependency = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     dependency.columns = ["yaml_only"]
@@ -92,14 +94,15 @@ fn test_dependency_catalog_unions_yaml_and_compiled_sql_columns() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(
-        result
-            .columns
-            .iter()
-            .map(|column| column.column.as_str())
-            .collect::<Vec<_>>(),
-        vec!["sql_only", "yaml_only"]
-    );
+    // Outputs follow the SQL projection order of the reader.
+    assert_eq!(result.names(), ["yaml_only", "sql_only"]);
+
+    // The catalog that the reader is analysed against holds the SQL output of
+    // the dependency only; its YAML declaration is a separate record.
+    let catalog = schema::SchemaContext::new(&manifest, DlinDialect::Generic)
+        .catalog_for(manifest.nodes.get("model.proj.orders").unwrap())
+        .unwrap();
+    assert_eq!(catalog.table_columns("stg_orders"), Some(vec!["sql_only"]));
 }
 
 #[test]
@@ -128,20 +131,20 @@ fn test_cte_select_star_in_manifest_model() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 4);
+    assert_eq!(result.slots().len(), 4);
 
     let order_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_id")
+        .find(|c| c.column() == "order_id")
         .unwrap();
     assert_eq!(order_id.lineage.known()[0].column, "id");
 }
 
 #[test]
-fn test_column_not_found_hint_when_select_star_unresolved() {
+fn test_select_star_hint_when_select_star_unresolved() {
     // When SELECT * cannot be expanded (external table not in manifest),
-    // ColumnNotFound errors for YAML-defined columns should include the SELECT * hint.
+    // Diagnostics for columns that an unexpanded star may provide carry the SELECT * hint.
     let mut manifest = make_test_manifest();
     // Replace stg_orders SQL with SELECT * from an external table (no schema info)
     manifest
@@ -163,15 +166,15 @@ fn test_column_not_found_hint_when_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors should include SELECT * hint when stars remain unresolved; got: {:?}",
+        "diagnostics should include SELECT * hint when stars remain unresolved; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_cte_select_star_unresolved() {
+fn test_select_star_hint_when_cte_select_star_unresolved() {
     // When a CTE body has SELECT * from an external table, the hint should still
-    // fire for the outer query's ColumnNotFound errors even though the outermost
+    // fire for the outer query's indeterminate-column diagnostics even though the outermost
     // SELECT list has no star.
     let mut manifest = make_test_manifest();
     manifest
@@ -193,13 +196,13 @@ fn test_column_not_found_hint_when_cte_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for CTE-nested stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for CTE-nested stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
+fn test_select_star_hint_when_derived_table_select_star_unresolved() {
     // Derived-table pattern: SELECT id FROM (SELECT * FROM ext) src
     // The outermost SELECT has no star; the star is inside a FROM subquery.
     let mut manifest = make_test_manifest();
@@ -221,13 +224,13 @@ fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for derived-table stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for derived-table stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_join_select_star_unresolved() {
+fn test_select_star_hint_when_join_select_star_unresolved() {
     // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
     // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
     let mut manifest = make_test_manifest();
@@ -236,7 +239,8 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
         .get_mut("model.proj.stg_orders")
         .unwrap()
         .compiled_code = Some(
-        "SELECT id FROM some_table JOIN (SELECT * FROM some_external_table) src ON 1=1".to_string(),
+        "SELECT src.id FROM some_table JOIN (SELECT * FROM some_external_table) src ON 1=1"
+            .to_string(),
     );
 
     let result = compute_column_lineage(
@@ -251,13 +255,13 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
+fn test_select_star_hint_reaches_public_result_for_indeterminate_star() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns = ["c1"]
@@ -281,13 +285,19 @@ fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
         &mut ColumnLineageCache::disabled(),
     );
 
+    // The declared column is not an output; the open shape is why it cannot be
+    // confirmed, and the hint says so.
+    assert!(result.slots().is_empty());
     let c1_error = result
         .errors
         .iter()
-        .find(|error| error.what.starts_with("column 'c1':"))
-        .expect("c1 should have a column-lineage error");
-    assert_eq!(c1_error.kind, ColumnLineageErrorKind::ColumnIndeterminate);
-    assert_eq!(c1_error.column_name(), Some("c1"));
+        .find(|error| error.what.contains("column c1 "))
+        .expect("c1 should have a declaration diagnostic");
+    assert_eq!(
+        c1_error.kind,
+        ColumnLineageErrorKind::DeclaredColumnNotEnumerated
+    );
+    assert!(!c1_error.is_fatal());
     assert!(
         c1_error.hint.as_deref().unwrap_or("").contains("SELECT *"),
         "the public result should retain the SELECT * hint: {c1_error:?}"

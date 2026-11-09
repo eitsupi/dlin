@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn test_cte_select_star_passthrough_is_traced() {
     // When a CTE body has SELECT * from an external table, the hint should still
-    // fire for the outer query's ColumnNotFound errors even though the outermost
+    // fire for the outer query's indeterminate-column diagnostics even though the outermost
     // SELECT list has no star.
     let mut manifest = make_test_manifest();
     manifest
@@ -87,7 +87,8 @@ fn test_join_select_star_passthrough_is_ambiguous() {
         &[],
         &["customer_id", "id", "order_date", "order_id", "status"],
     );
-    assert_select_star_hint(&result);
+    // The ambiguity is a finding about `id` itself, not a hidden column, so it
+    // carries no star hint.
     assert!(
         result
             .errors
@@ -149,7 +150,7 @@ fn assert_star_passthrough_shapes_are_traceable(cases: &[&str]) {
             "SQL: {sql}\nerrors: {:?}",
             result.errors
         );
-        assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+        assert_eq!(result.value_complete_columns, 1, "SQL: {sql}");
     }
 }
 
@@ -264,7 +265,7 @@ fn test_set_operation_outputs_follow_leading_names_and_ordinals() {
                 "SQL: {sql}\nerrors: {:?}",
                 result.errors
             );
-            assert_eq!(result.traced_columns, 1, "SQL: {sql}");
+            assert_eq!(result.value_complete_columns, 1, "SQL: {sql}");
         }
     }
 }
@@ -313,7 +314,7 @@ fn test_set_operation_duplicate_leading_output_name_is_not_detected() {
         &mut ColumnLineageCache::disabled(),
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
 }
 
 fn assert_exact_column_outcomes(
@@ -323,48 +324,59 @@ fn assert_exact_column_outcomes(
 ) {
     // Columns with a partial value lineage are listed but not traced; each of
     // them must be explained by a column-scoped diagnostic.
-    for partial in result.columns.iter().filter(|c| c.lineage.is_partial()) {
+    for partial in result.slots().iter().filter(|c| c.lineage.is_partial()) {
         assert!(
             result
                 .errors
                 .iter()
-                .any(|error| error.column_name() == Some(partial.column.as_str())),
+                .any(|error| error.slot() == Some(partial.id)),
             "partial column '{}' has no diagnostic: {:?}",
-            partial.column,
+            partial.column(),
             result.errors
         );
     }
     let mut actual_columns: Vec<_> = result
-        .columns
+        .slots()
         .iter()
         .filter(|column| column.lineage.is_complete())
-        .map(|column| column.column.as_str())
+        .map(|column| column.column())
         .collect();
     actual_columns.sort_unstable();
-    let mut expected_columns = expected_columns.to_vec();
+    let mut expected_columns: Vec<String> = expected_columns
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
     expected_columns.sort_unstable();
     assert_eq!(actual_columns, expected_columns);
 
-    let mut actual_errors: Vec<_> = result
+    // Every diagnostic names one column: either the output slot it is scoped
+    // to, or a column the YAML declares that the SQL output does not list.
+    let mut actual_errors: Vec<&str> = result
         .errors
         .iter()
-        .map(|error| {
-            assert!(
-                matches!(
-                    error.kind,
-                    ColumnLineageErrorKind::ColumnNotFound
-                        | ColumnLineageErrorKind::ColumnAmbiguous
-                        | ColumnLineageErrorKind::ColumnIndeterminate
-                ),
-                "expected a column-scoped diagnostic, got: {:?}",
+        .map(|error| match error.kind {
+            ColumnLineageErrorKind::DeclaredColumnNotInOutput
+            | ColumnLineageErrorKind::DeclaredColumnNotEnumerated => {
+                assert!(!error.is_fatal() && error.slot().is_none());
                 error
-            );
-            error
-                .what
-                .strip_prefix("column '")
-                .and_then(|rest| rest.split_once("':"))
-                .map(|(name, _)| name)
-                .expect("column errors should identify their column")
+                    .what
+                    .strip_prefix("column ")
+                    .and_then(|rest| rest.split_once(" is declared in YAML"))
+                    .map(|(name, _)| name)
+                    .expect("declaration diagnostics should name their column")
+            }
+            ColumnLineageErrorKind::ColumnNotFound
+            | ColumnLineageErrorKind::ColumnAmbiguous
+            | ColumnLineageErrorKind::ColumnIndeterminate => {
+                assert!(error.slot().is_some(), "{error:?}");
+                error
+                    .what
+                    .strip_prefix("column '")
+                    .and_then(|rest| rest.split_once("':"))
+                    .map(|(name, _)| name)
+                    .expect("column errors should identify their column")
+            }
+            _ => panic!("expected a column diagnostic, got: {error:?}"),
         })
         .collect();
     actual_errors.sort_unstable();
@@ -387,12 +399,10 @@ fn assert_select_star_hint(result: &ModelColumnLineage) {
 #[test]
 fn test_column_resolution_reasons_map_to_dlin_outcomes() {
     let not_found = compute_star_shape("SELECT id FROM raw.orders", &["missing"]);
-    assert!(
-        not_found
-            .errors
-            .iter()
-            .any(|error| error.what.starts_with("column 'missing':"))
-    );
+    assert!(not_found.errors.iter().any(|error| {
+        error.kind == ColumnLineageErrorKind::DeclaredColumnNotInOutput
+            && error.what.starts_with("column missing ")
+    }));
     assert!(not_found.errors.iter().all(|error| error.hint.is_none()));
 
     let indeterminate = compute_star_shape("SELECT * FROM unknown_source", &["missing"]);
@@ -738,14 +748,16 @@ fn test_explicit_output_case_normalization_with_unresolved_star() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert!(
-        result
-            .columns
-            .iter()
-            .any(|column| column.column == "order_id"),
+    // The explicit `ORDER_ID` is the column `order_id` under Snowflake's
+    // folding rules; the output keeps the spelling it was written with.
+    let output = result.output.as_ref().expect("the SQL was analysed");
+    assert_eq!(
+        output.lookup(&Ident::unquoted("order_id"), DlinDialect::Snowflake),
+        SlotLookup::Unique(OutputSlotId::new(0)),
         "case-folded explicit output should resolve order_id: {:?}",
         result.errors
     );
+    assert_eq!(result.names(), ["ORDER_ID"]);
     assert!(
         result
             .errors
@@ -789,15 +801,15 @@ fn compute_star_shape(sql: &str, columns: &[&str]) -> ModelColumnLineage {
 
 fn assert_sources_for(result: &ModelColumnLineage, column: &str, expected: &[(&str, &str)]) {
     let entry = result
-        .columns
+        .slots()
         .iter()
-        .find(|entry| entry.column == column)
+        .find(|entry| entry.column() == column)
         .unwrap_or_else(|| panic!("missing traced column {column}: {:?}", result.errors));
     let mut actual: Vec<_> = entry
         .lineage
         .known()
         .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .map(|source| (source.table.as_str(), source.column.value.as_str()))
         .collect();
     actual.sort_unstable();
     let mut expected = expected.to_vec();
@@ -862,7 +874,7 @@ fn test_set_operands_do_not_match_explicit_projections_by_name_at_other_ordinal(
         &["total"],
     );
     assert_exact_column_outcomes(&result, &[], &["total"]);
-    assert!(result.columns.is_empty());
+    assert!(result.slots().is_empty());
 }
 
 #[test]
@@ -883,7 +895,7 @@ fn test_set_star_with_derived_source_and_no_explicit_name_stays_unresolved() {
         &["total"],
     );
     assert_exact_column_outcomes(&result, &[], &["total"]);
-    assert!(result.columns.iter().all(|entry| {
+    assert!(result.slots().iter().all(|entry| {
         entry.lineage.known().iter().all(|source| {
             source.table != "real_x"
                 && source.table != "known_table"
@@ -902,7 +914,7 @@ fn test_star_replace_introduced_name_is_explicit() {
         &["wanted"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
 }
 
@@ -915,7 +927,7 @@ fn test_star_rename_introduced_name_traces_original_column() {
         &["wanted"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "wanted", &[("raw.orders", "id")]);
 }
 
@@ -942,7 +954,7 @@ fn test_cte_scope_propagates_to_all_set_operation_operands() {
         &["x"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "x", &[("raw.orders", "id")]);
 }
 
@@ -957,7 +969,7 @@ fn test_star_rename_in_join_keeps_source_table_qualifier() {
         &["wanted"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "wanted", &[("raw.customers", "id")]);
 }
 
@@ -988,7 +1000,7 @@ fn test_star_except_removed_name_remains_unresolved() {
         "SELECT * EXCEPT (wanted) FROM some_unknown_source",
         &["wanted"],
     );
-    assert_eq!(result.traced_columns, 0);
+    assert_eq!(result.value_complete_columns, 0);
     assert_eq!(result.errors.len(), 1);
     assert!(
         result.errors[0]
@@ -1003,7 +1015,7 @@ fn test_star_except_removed_name_remains_unresolved() {
 fn test_real_underscore_one_column_is_not_synthetic_ordinal() {
     let result = compute_star_shape("SELECT id AS _1 FROM raw.orders", &["_1"]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "_1", &[("orders", "id")]);
 }
 
@@ -1017,10 +1029,15 @@ fn test_cte_star_expansion_preserves_marker_and_sources() {
         &["marker", "a", "b"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 3);
-    assert!(result.columns.iter().any(|entry| entry.column == "marker"));
-    assert!(result.columns.iter().any(|entry| entry.column == "a"));
-    assert!(result.columns.iter().any(|entry| entry.column == "b"));
+    assert_eq!(result.value_complete_columns, 3);
+    assert!(
+        result
+            .slots()
+            .iter()
+            .any(|entry| entry.column() == "marker")
+    );
+    assert!(result.slots().iter().any(|entry| entry.column() == "a"));
+    assert!(result.slots().iter().any(|entry| entry.column() == "b"));
     assert_sources_for(&result, "a", &[("known", "a")]);
     assert_sources_for(&result, "b", &[("known", "b")]);
 }
@@ -1035,6 +1052,6 @@ fn test_duplicate_left_output_name_preserves_sources() {
         &["a"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.traced_columns, 1);
+    assert_eq!(result.value_complete_columns, 1);
     assert_sources_for(&result, "a", &[("dup", "a")]);
 }

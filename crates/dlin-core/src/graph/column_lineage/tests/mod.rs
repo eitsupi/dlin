@@ -978,8 +978,139 @@ mod core_star;
 mod core_star_chain;
 mod core_util;
 mod impact;
+mod output_slots;
 mod partial_lineage;
 mod production_output;
 mod regression_fixtures;
 mod schema_knowledge;
 mod yaml_schema;
+
+/// Test access to the slots of a public result.
+pub(super) trait ModelLineageTestExt {
+    fn slots(&self) -> &[OutputSlot<ColumnSource>];
+    /// The one slot with this display name.
+    fn slot_named(&self, name: &str) -> &OutputSlot<ColumnSource>;
+    /// Display names of the slots, in order.
+    fn names(&self) -> Vec<String>;
+}
+
+impl ModelLineageTestExt for ModelColumnLineage {
+    fn slots(&self) -> &[OutputSlot<ColumnSource>] {
+        self.output
+            .as_ref()
+            .map_or(&[], |output| output.columns.as_slice())
+    }
+
+    fn slot_named(&self, name: &str) -> &OutputSlot<ColumnSource> {
+        let mut matching = self.slots().iter().filter(|slot| slot.column() == name);
+        let slot = matching.next().unwrap_or_else(|| {
+            panic!(
+                "column '{name}' is not listed; columns: {:?}, errors: {:?}",
+                self.names(),
+                self.errors
+            )
+        });
+        assert!(matching.next().is_none(), "column '{name}' is listed twice");
+        slot
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.slots().iter().map(OutputSlot::column).collect()
+    }
+}
+
+/// Test access to the display name of a slot.
+pub(super) trait SlotTestExt {
+    fn column(&self) -> String;
+}
+
+impl<S> SlotTestExt for OutputSlot<S> {
+    fn column(&self) -> String {
+        self.name.to_string()
+    }
+}
+
+/// A model path hop through output `slot` of the model `unique_id`.
+pub(super) fn hop(
+    unique_id: &str,
+    model: &str,
+    slot: usize,
+    column: &str,
+    transformation: TransformationType,
+) -> ModelPathHop {
+    ModelPathHop {
+        output: ModelOutputRef {
+            unique_id: unique_id.to_string(),
+            model: model.to_string(),
+            slot: OutputSlotId::new(slot),
+            column: column.to_string(),
+        },
+        transformation,
+    }
+}
+
+/// `(table, column)` pairs of the known sources of a slot, comparable with
+/// arrays of string pairs.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Pairs(pub(super) Vec<(String, String)>);
+
+impl<const N: usize> PartialEq<[(&str, &str); N]> for Pairs {
+    fn eq(&self, other: &[(&str, &str); N]) -> bool {
+        self.0.len() == N
+            && self
+                .0
+                .iter()
+                .zip(other)
+                .all(|((table, column), (t, c))| table == t && column == c)
+    }
+}
+
+pub(super) fn known_pairs_of(entry: &OutputSlot<ColumnSource>) -> Pairs {
+    Pairs(
+        entry
+            .lineage
+            .known()
+            .iter()
+            .map(|source| (source.table.clone(), source.column.to_string()))
+            .collect(),
+    )
+}
+
+/// Assert the one non-fatal declaration diagnostic about `column`: a column the
+/// YAML declares and the SQL output does not list.
+pub(super) fn assert_declared_difference(
+    result: &ModelColumnLineage,
+    kind: ColumnLineageErrorKind,
+    column: &str,
+    message: &str,
+) {
+    let error = result
+        .errors
+        .iter()
+        .find(|error| error.kind == kind && error.what.contains(&format!("column {column} ")))
+        .unwrap_or_else(|| panic!("no {kind:?} for '{column}': {:?}", result.errors));
+    assert!(error.what.contains(message), "message: {}", error.what);
+    assert!(!error.is_fatal());
+    assert_eq!(error.slot(), None, "the column has no output slot");
+    assert!(
+        !result.names().contains(&column.to_string()),
+        "a declared-only column is not an output"
+    );
+}
+
+/// Assert listed, value-complete and value-partial counts.
+pub(super) fn assert_counts(
+    result: &ModelColumnLineage,
+    listed: usize,
+    complete: usize,
+    partial: usize,
+) {
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (listed, complete, partial)
+    );
+}

@@ -1,6 +1,6 @@
 ---
-source: crates/dlin-core/src/render/column_graph.rs
+source: crates/dlin-core/src/render/column_graph_tests.rs
 expression: "graph_plain(&[report])"
 ---
-mart (1/1 columns traced)
+mart (1 column listed: 1 complete, 0 partial)
   area  →  raw.postcode → stg_app.area [expression] (direct)

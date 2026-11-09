@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use super::super::schema;
 use super::super::{
-    ColumnLineageCache, ColumnSource, DlinDialect, TransformationType, compute_column_impact,
+    ColumnLineageCache, ColumnSource, DlinDialect, Ident, TransformationType, compute_column_impact,
 };
+use super::{ModelLineageTestExt, SlotTestExt, hop};
 use crate::parser::manifest::{DependsOn, Manifest, ManifestColumn, ManifestConfig, ManifestNode};
 
 #[allow(clippy::too_many_arguments)]
@@ -234,19 +235,21 @@ fn cross_model_lineage_resolves_an_aliased_upstream_relation() {
         &mut ColumnLineageCache::disabled(),
     );
     let id = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "id")
+        .find(|column| column.column() == "id")
         .unwrap();
 
     assert_eq!(
         id.lineage.known(),
         vec![ColumnSource {
             table: "raw_upstream".to_string(),
-            column: "id".to_string(),
-            model_path: vec![(
-                "upstream_model".to_string(),
-                "id".to_string(),
+            column: Ident::unquoted("id"),
+            model_path: vec![hop(
+                "model.proj.upstream_model",
+                "upstream_model",
+                0,
+                "id",
                 TransformationType::Direct,
             )],
         }]
@@ -375,13 +378,16 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
         &mut ColumnLineageCache::disabled(),
     );
     let id = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "id")
+        .find(|column| column.column() == "id")
         .unwrap();
 
     assert_eq!(id.lineage.known()[0].table, "raw_b");
-    assert_eq!(id.lineage.known()[0].model_path[0].0, "shared_model");
+    assert_eq!(
+        id.lineage.known()[0].model_path[0].output.model,
+        "shared_model"
+    );
 }
 
 fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSource {

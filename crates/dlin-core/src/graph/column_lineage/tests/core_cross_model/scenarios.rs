@@ -11,35 +11,35 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     );
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.total_columns, 2);
-    assert_eq!(result.traced_columns, 2);
-    assert_eq!(result.columns.len(), 2);
+    assert_eq!(result.listed_columns, 2);
+    assert_eq!(result.value_complete_columns, 2);
+    assert_eq!(result.slots().len(), 2);
 
     let real_col = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "real_col")
+        .find(|column| column.column() == "real_col")
         .unwrap();
     assert_eq!(
         real_col
             .lineage
             .known()
             .iter()
-            .map(|source| (source.table.as_str(), source.column.as_str()))
+            .map(|source| (source.table.as_str(), source.column.value.as_str()))
             .collect::<Vec<_>>(),
         vec![("external_table_a", "real_col")]
     );
 
     let id = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "id")
+        .find(|column| column.column() == "id")
         .unwrap();
     let mut id_sources = id
         .lineage
         .known()
         .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
+        .map(|source| (source.table.as_str(), source.column.value.as_str()))
         .collect::<Vec<_>>();
     id_sources.sort_unstable();
     assert_eq!(
@@ -59,9 +59,9 @@ fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column
     );
 
     let first_item = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "first_item")
+        .find(|column| column.column() == "first_item")
         .expect("first_item should be present");
     assert_eq!(
         first_item.lineage.known().len(),
@@ -76,7 +76,7 @@ fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column
         source
             .model_path
             .iter()
-            .any(|(model, column, _)| model == "upstream_model" && column == "items_array"),
+            .any(|hop| hop.output.model == "upstream_model" && hop.output.column == "items_array"),
         "expected upstream model path, got: {:?}",
         source.model_path
     );
@@ -93,24 +93,26 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
     );
 
     let user_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "user_id")
+        .find(|column| column.column() == "user_id")
         .expect("user_id should be present");
     let plain_column = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "plain_column")
+        .find(|column| column.column() == "plain_column")
         .expect("plain_column should be present");
     for entry in [user_id, plain_column] {
         assert_eq!(
             entry.lineage.known(),
             vec![ColumnSource {
                 table: "p.d.external_table_a".to_string(),
-                column: "user_id".to_string(),
-                model_path: vec![(
-                    "upstream_model".to_string(),
-                    "user_id".to_string(),
+                column: Ident::unquoted("user_id"),
+                model_path: vec![hop(
+                    "model.proj.upstream_model",
+                    "upstream_model",
+                    0,
+                    "user_id",
                     TransformationType::Direct,
                 )],
             }]
@@ -118,13 +120,13 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
     }
 
     let qualified = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "qualified_field");
+        .find(|column| column.column() == "qualified_field");
     let bare = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "bare_field");
+        .find(|column| column.column() == "bare_field");
     let qualified = qualified.expect("qualified_field should be present");
     let bare = bare.expect("bare_field should be present");
     assert_eq!(qualified.lineage.known(), bare.lineage.known());
@@ -133,7 +135,7 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
             entry.lineage.known(),
             vec![ColumnSource {
                 table: "p.d.upstream_model".to_string(),
-                column: "event".to_string(),
+                column: Ident::unquoted("event"),
                 model_path: Vec::new(),
             }]
         );
@@ -219,9 +221,9 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
         &mut ColumnLineageCache::disabled(),
     );
     let col_a = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "col_a")
+        .find(|column| column.column() == "col_a")
         .expect("col_a should remain published");
     assert_eq!(
         col_a.lineage.known().len(),
@@ -262,9 +264,9 @@ fn test_cross_model_rebases_deep_diagnostic_to_root_output() {
     );
 
     let x = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "x")
+        .find(|column| column.column() == "x")
         .expect("x should be present");
     assert_eq!(x.lineage.known().len(), 1);
     assert_eq!(x.lineage.known()[0].table, "p.d.middle_model");
@@ -335,15 +337,15 @@ fn test_cross_model_bigquery_unnest_reaches_external_array_column() {
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let item = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "item")
+        .find(|column| column.column() == "item")
         .expect("item should be present");
     assert_eq!(
         item.lineage
             .known()
             .iter()
-            .map(|source| (source.table.as_str(), source.column.as_str()))
+            .map(|source| (source.table.as_str(), source.column.value.as_str()))
             .collect::<Vec<_>>(),
         vec![("external_table_a", "items_array")]
     );
@@ -367,25 +369,28 @@ fn test_cross_model_rebases_distinct_same_column_errors_to_target_outputs() {
         &mut ColumnLineageCache::disabled(),
     );
 
+    // Each upstream diagnostic is rebased to the target output that reads it,
+    // identified by its slot, and the two are not merged.
     let left_error = result
         .errors
         .iter()
         .find(|error| error.column_name() == Some("dup_col"))
         .expect("left diagnostic should remain scoped to dup_col");
+    assert_eq!(left_error.slot(), Some(OutputSlotId::new(0)));
     assert_eq!(left_error.kind, ColumnLineageErrorKind::ColumnIndeterminate);
     assert!(left_error.what.starts_with("column 'dup_col':"));
-    assert!(left_error.hint.is_some());
-    assert!(left_error.what.contains("unexpanded SELECT *"));
+    assert!(left_error.what.contains("unexpanded wildcard"));
 
     let right_error = result
         .errors
         .iter()
         .find(|error| error.column_name() == Some("other_col"))
         .expect("right diagnostic should be rebased to other_col");
-    assert_eq!(right_error.kind, ColumnLineageErrorKind::ColumnNotFound);
+    assert_eq!(right_error.slot(), Some(OutputSlotId::new(1)));
+    assert_eq!(right_error.kind, ColumnLineageErrorKind::ColumnAmbiguous);
     assert!(right_error.what.starts_with("column 'other_col':"));
-    assert!(right_error.hint.is_none());
-    assert!(right_error.what.contains("no sqllineage mapping"));
+    assert!(right_error.what.contains("is ambiguous between"));
+    assert_eq!(result.errors.len(), 2, "errors: {:?}", result.errors);
 }
 
 #[test]
@@ -402,9 +407,9 @@ fn test_cross_model_bigquery_nested_star_keeps_known_user_id_lineage() {
     );
 
     let user_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "user_id")
+        .find(|column| column.column() == "user_id")
         .expect("user_id should remain in the known lineage columns");
     assert!(
         user_id
@@ -418,17 +423,24 @@ fn test_cross_model_bigquery_nested_star_keeps_known_user_id_lineage() {
     );
     assert!(
         !result
-            .columns
+            .slots()
             .iter()
-            .any(|column| column.column == "updated_at"),
+            .any(|column| column.column() == "updated_at"),
         "nested field star should remain unresolved"
     );
+    // The nested field star leaves the output open, and the YAML column it
+    // might provide is reported as not enumerated rather than as an output.
+    assert!(matches!(
+        result.output.as_ref().map(|output| &output.shape),
+        Some(OutputShape::Open { .. })
+    ));
     assert!(
         result.errors.iter().any(|error| {
-            error.kind == ColumnLineageErrorKind::ColumnIndeterminate
-                && error.what.starts_with("column 'updated_at':")
+            error.kind == ColumnLineageErrorKind::DeclaredColumnNotEnumerated
+                && error.what.contains("column updated_at ")
+                && !error.is_fatal()
         }),
-        "expected an uncertainty/error for nested field star, got: {:?}",
+        "expected a non-fatal declaration diagnostic for updated_at, got: {:?}",
         result.errors
     );
     assert!(
@@ -456,9 +468,9 @@ fn test_cross_model_single_hop() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let order_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_id")
+        .find(|c| c.column() == "order_id")
         .unwrap();
     // Should trace through stg_orders to raw source (orders table)
     assert!(
@@ -478,7 +490,9 @@ fn test_cross_model_single_hop() {
         .find(|s| s.column == "id")
         .unwrap();
     assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
+        src.model_path
+            .iter()
+            .any(|hop| hop.output.model == "stg_orders"),
         "model_path should include stg_orders, got: {:?}",
         src.model_path
     );
@@ -498,9 +512,9 @@ fn test_cross_model_two_hops() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let customer_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "customer_id")
+        .find(|c| c.column() == "customer_id")
         .unwrap();
     assert!(
         customer_id
@@ -519,8 +533,13 @@ fn test_cross_model_two_hops() {
         .find(|s| s.column == "user_id")
         .unwrap();
     assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "orders")
-            && src.model_path.iter().any(|(m, _, _)| m == "stg_orders"),
+        src.model_path
+            .iter()
+            .any(|hop| hop.output.model == "orders")
+            && src
+                .model_path
+                .iter()
+                .any(|hop| hop.output.model == "stg_orders"),
         "model_path should include orders and stg_orders, got: {:?}",
         src.model_path
     );
@@ -528,12 +547,12 @@ fn test_cross_model_two_hops() {
     let orders_pos = src
         .model_path
         .iter()
-        .position(|(m, _, _)| m == "orders")
+        .position(|hop| hop.output.model == "orders")
         .unwrap();
     let stg_pos = src
         .model_path
         .iter()
-        .position(|(m, _, _)| m == "stg_orders")
+        .position(|hop| hop.output.model == "stg_orders")
         .unwrap();
     assert!(
         orders_pos < stg_pos,
@@ -553,9 +572,9 @@ fn test_cross_model_join_sources() {
     );
 
     let total_amount = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "total_amount")
+        .find(|c| c.column() == "total_amount")
         .unwrap();
     assert!(
         total_amount
@@ -574,7 +593,9 @@ fn test_cross_model_join_sources() {
         .find(|s| s.column == "amount")
         .unwrap();
     assert!(
-        src.model_path.iter().any(|(m, _, _)| m == "stg_payments"),
+        src.model_path
+            .iter()
+            .any(|hop| hop.output.model == "stg_payments"),
         "model_path should include stg_payments, got: {:?}",
         src.model_path
     );
@@ -597,9 +618,9 @@ fn test_cross_model_source_table_is_leaf() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    assert_eq!(single.columns.len(), cross.columns.len());
-    for (s, c) in single.columns.iter().zip(cross.columns.iter()) {
-        assert_eq!(s.column, c.column);
+    assert_eq!(single.slots().len(), cross.slots().len());
+    for (s, c) in single.slots().iter().zip(cross.slots().iter()) {
+        assert_eq!(s.name, c.name);
         assert_eq!(s.lineage.known(), c.lineage.known());
     }
 }
@@ -632,7 +653,7 @@ fn test_cross_model_diamond_different_columns_through_shared_model() {
         &mut ColumnLineageCache::disabled(),
     );
     assert!(left.errors.is_empty(), "left errors: {:?}", left.errors);
-    let left_x = left.columns.iter().find(|c| c.column == "x").unwrap();
+    let left_x = left.slots().iter().find(|c| c.column() == "x").unwrap();
     assert!(
         left_x.lineage.known().iter().any(|s| s.column == "x"),
         "left_model.x should trace through shared, got: {:?}",
@@ -647,7 +668,7 @@ fn test_cross_model_diamond_different_columns_through_shared_model() {
         &mut ColumnLineageCache::disabled(),
     );
     assert!(right.errors.is_empty(), "right errors: {:?}", right.errors);
-    let right_y = right.columns.iter().find(|c| c.column == "y").unwrap();
+    let right_y = right.slots().iter().find(|c| c.column() == "y").unwrap();
     assert!(
         right_y.lineage.known().iter().any(|s| s.column == "y"),
         "right_model.y should trace through shared, got: {:?}",
@@ -681,9 +702,9 @@ fn test_join_alias_resolves_to_model_name() {
 
     // p.amount → table must be "stg_payments", not the alias "p"
     let total_amount = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "total_amount")
+        .find(|c| c.column() == "total_amount")
         .unwrap();
     assert_eq!(
         total_amount.lineage.known()[0].table,
@@ -694,9 +715,9 @@ fn test_join_alias_resolves_to_model_name() {
 
     // o.order_id → table must be "stg_orders", not the alias "o"
     let order_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_id")
+        .find(|c| c.column() == "order_id")
         .unwrap();
     assert_eq!(
         order_id.lineage.known()[0].table,
@@ -720,9 +741,9 @@ fn test_cross_model_join_alias_traces_to_raw_source() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let total_amount = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "total_amount")
+        .find(|c| c.column() == "total_amount")
         .unwrap();
     assert!(!total_amount.lineage.known().is_empty());
     let src = &total_amount.lineage.known()[0];
@@ -781,9 +802,9 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let chosen = result
-        .columns
+        .slots()
         .iter()
-        .find(|column| column.column == "chosen")
+        .find(|column| column.column() == "chosen")
         .expect("chosen should be present");
     assert_eq!(
         chosen.lineage.known().len(),
@@ -799,7 +820,7 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
         source
             .model_path
             .iter()
-            .any(|(model, column, _)| model == "stg_orders" && column == "ID"),
+            .any(|hop| hop.output.model == "stg_orders" && hop.output.column == "ID"),
         "model_path should retain the upstream output name ID: {:?}",
         source.model_path
     );

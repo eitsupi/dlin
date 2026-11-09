@@ -430,7 +430,7 @@ fn duplicate_column_error_manifest() -> Manifest {
             "left_model",
             &[],
             &["dup_col"],
-            "SELECT * FROM unknown_left_table",
+            "SELECT s.dup_col AS dup_col FROM (SELECT * FROM unknown_left_table) AS s",
         ),
     );
     manifest.nodes.insert(
@@ -440,7 +440,7 @@ fn duplicate_column_error_manifest() -> Manifest {
             "right_model",
             &[],
             &["dup_col"],
-            "SELECT missing_col FROM known_right_table",
+            "SELECT dup_col FROM known_right_table JOIN other_right_table ON 1 = 1",
         ),
     );
     manifest.nodes.insert(

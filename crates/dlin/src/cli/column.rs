@@ -29,9 +29,14 @@ There is no --source flag; manifest.json is the only data source (unlike
 Requires manifest.json with compiled SQL (run `dbt compile` first).
 Use `dlin check-manifest` to verify freshness before querying.
 
-Column resolution order:
-  1. YAML column definitions (schema.yml / models.yml)
-  2. SQL inference from compiled_code (fallback when YAML is absent)
+Output columns:
+  The output columns of a model are the columns of its compiled SQL, in SQL
+  order. Columns with the same name stay separate, and a name written with
+  quotes keeps them. Columns declared in YAML but not in the SQL output are
+  reported as non-fatal diagnostics, not added to the output.
+  --column NAME selects by the dialect's identifier rules (write \"Name\" or
+  `Name` to select a quoted name). A name shared by several columns is reported
+  as ambiguous and selects none of them.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line).
@@ -41,32 +46,48 @@ Stdin/pipe support:
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:
     model             model name
-    traced_columns    number of columns whose lineage is complete (partial columns are not counted)
-    total_columns     total number of columns attempted
-    columns[]
-      column          output column name
-      transformation  how the column was derived:
+    unique_id         dbt unique id of the model
+    listed_columns    number of output columns listed (0 when the SQL could not
+                      be analysed). A column after an unexpanded star counts
+                      once if it is listed; the star itself is not counted
+    value_complete_columns  listed columns whose lineage is complete
+    value_partial_columns   listed columns whose lineage is partial
+    output            null when the SQL could not be analysed (see errors[]),
+                      otherwise:
+      shape           {\"kind\": \"closed\"}, or {\"kind\": \"open\", \"unexpanded\": [..]}
+                      when a star could not be expanded and more columns may
+                      exist than are listed
+      columns[]       output columns in SQL order
+        id            position of this entry in columns[] (tells columns with
+                      the same name apart)
+        ordinal       zero-based SQL position when proven (null after a star)
+        name          {\"kind\": \"explicit\"|\"inferred\", \"ident\": {\"value\", \"quote\"}},
+                      or {\"kind\": \"anonymous\"} for an unnamed expression
+        transformation  how the column was derived:
                         direct       passed through unchanged (including renames)
                         aggregation  aggregate function (SUM, COUNT, etc.)
                         expression   arithmetic or other expression
                         cast         type cast (CAST(x AS INT))
                         conditional  CASE WHEN expression
                         unknown      could not classify
-      lineage
-        status        \"complete\" when every contributing source is known, or
+        lineage
+          status      \"complete\" when every contributing source is known, or
                       \"partial\" when some contributions could not be resolved
-        known[]       sources proven to contribute to the value
-          table       source model or raw table name; empty string (\"\") when the
+          known[]     sources proven to contribute to the value
+            table     source model or raw table name; empty string (\"\") when the
                       value originates from a literal (NULL, constant, UNNEST, etc.)
                       — rendered as \"(literal)\" in plain/mermaid/dot outputs
-          column      source column name
-          model_path[]  intermediate [model, column, transformation] triples traversed (omitted if empty)
-        unresolved[]  (partial only) contributions that could not be resolved:
-          reason      structured reason, tagged by \"kind\"
-          origin      model output where the unresolved part arose
-          model_path[]  hops from this column to the origin
+            column    source column identifier ({\"value\", \"quote\"})
+            model_path[]  intermediate hops traversed, each with the model output
+                      (unique_id, model, slot, column) and its transformation
+                      (omitted if empty)
+          unresolved[]  (partial only) contributions that could not be resolved:
+            reason    structured reason, tagged by \"kind\"
+            origin    model output where the unresolved part arose
+            model_path[]  hops from this column to the origin
     errors[]    parse or resolution diagnostics. An indeterminate per-column
-                diagnostic is non-fatal and does not change the exit code;
+                diagnostic and a difference between the YAML columns and the
+                SQL output are non-fatal and do not change the exit code;
                 model-level, missing-column, ambiguous, and parse diagnostics
                 are fatal (exit code 1).
   plain           human-readable text, one model per block
@@ -128,11 +149,18 @@ Use `dlin check-manifest` to verify freshness before querying.
 Output format (-o/--output):
   json (default)  JSON array per column:
     model, column     the analysed input
+    input             the model output that the column names, or absent when it
+                      names none or several (the exploration then has an
+                      \"unidentified_input\" gap; dependents that name the
+                      column are still searched by that name, and their paths
+                      start at an \"unidentified_column\" that does not stand
+                      for one particular output of the model)
     scope             \"value_only\"
     confirmed[]       downstream columns that depend on the input through known
                       edges (target, kind, transformation, path of edges)
     exploration[]     per dependency kind, \"complete\" or \"incomplete\" with the
-                      gaps (unresolved lineage, failed analysis, ...) that may hide
+                      gaps (unresolved lineage, failed analysis, a dependent
+                      model with unlisted columns, ...) that may hide
                       further impacts. An empty confirmed list means \"no impact\"
                       only when the exploration is complete.
   plain           human-readable text, one source column per block

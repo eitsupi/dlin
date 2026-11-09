@@ -32,13 +32,8 @@ fn trace(manifest: &Manifest, dialect: DlinDialect) -> ModelColumnLineage {
     compute_column_lineage(manifest, "m", dialect, &mut ColumnLineageCache::disabled())
 }
 
-fn pairs(entry: &ColumnLineageEntry) -> Vec<(&str, &str)> {
-    entry
-        .lineage
-        .known()
-        .iter()
-        .map(|source| (source.table.as_str(), source.column.as_str()))
-        .collect()
+fn pairs(entry: &OutputSlot<ColumnSource>) -> Pairs {
+    known_pairs_of(entry)
 }
 
 /// A star over a source that only has YAML columns expands to the declared
@@ -52,19 +47,15 @@ fn star_over_yaml_only_source_expands_declared_columns() {
     let result = trace(&manifest, DlinDialect::PostgreSQL);
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let mut names: Vec<_> = result
-        .columns
-        .iter()
-        .map(|entry| entry.column.as_str())
-        .collect();
+    let mut names = result.names();
     names.sort_unstable();
     assert_eq!(names, ["a", "z"]);
-    for entry in &result.columns {
+    for entry in result.slots() {
         assert_eq!(
             pairs(entry),
-            [("src", entry.column.as_str())],
+            [("src", entry.column().as_str())],
             "column {}",
-            entry.column
+            entry.column()
         );
     }
 }
@@ -80,9 +71,13 @@ fn quoted_yaml_column_matches_a_quoted_reference_in_snowflake() {
     let result = trace(&manifest, DlinDialect::Snowflake);
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_eq!(result.columns.len(), 1);
-    assert_eq!(result.columns[0].column, "id");
-    assert_eq!(pairs(&result.columns[0]), [("src", "id")]);
+    assert_eq!(result.slots().len(), 1);
+    // The output name keeps the quote of the reference it was inferred from.
+    assert_eq!(
+        result.slots()[0].name,
+        OutputName::Explicit(Ident::quoted("id", Quote::Double))
+    );
+    assert_eq!(pairs(&result.slots()[0]), [("src", "\"id\"")]);
 }
 
 /// Two models-of-record for one physical table: two source definitions with
@@ -140,19 +135,15 @@ fn star_over_a_table_shared_by_consistent_source_definitions_expands() {
         let result = trace(&manifest, DlinDialect::PostgreSQL);
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let mut names: Vec<_> = result
-            .columns
-            .iter()
-            .map(|entry| entry.column.as_str())
-            .collect();
+        let mut names = result.names();
         names.sort_unstable();
         assert_eq!(names, ["id", "ts"]);
-        for entry in &result.columns {
+        for entry in result.slots() {
             assert_eq!(
                 pairs(entry),
-                [("db.raw.events", entry.column.as_str())],
+                [("db.raw.events", entry.column().as_str())],
                 "column {}",
-                entry.column
+                entry.column()
             );
         }
     }
@@ -169,9 +160,9 @@ fn star_over_a_table_shared_by_contradicting_source_definitions_is_not_expanded(
     let result = trace(&manifest, DlinDialect::PostgreSQL);
 
     assert!(
-        result.columns.iter().all(|entry| entry.column != "id"),
+        result.slots().iter().all(|entry| entry.column() != "id"),
         "columns: {:?}",
-        result.columns
+        result.slots()
     );
 }
 
@@ -246,16 +237,23 @@ fn star_over_a_relation_shared_by_a_model_and_a_source_follows_the_sql_order() {
         );
 
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-        let mut columns: Vec<_> = result.columns.iter().map(|e| e.column.as_str()).collect();
+        let mut columns = result.names();
         columns.sort_unstable();
         assert_eq!(columns, ["a", "b"], "dependencies: {dependency_order:?}");
         for (column, upstream) in [("b", "p"), ("a", "q")] {
-            let entry = result.columns.iter().find(|e| e.column == column).unwrap();
-            let mut sources: Vec<_> = pairs(entry);
+            let entry = result
+                .slots()
+                .iter()
+                .find(|e| e.column() == column)
+                .unwrap();
+            let mut sources: Vec<_> = pairs(entry).0;
             sources.sort_unstable();
+            let expected = [
+                ("db.raw.events".to_string(), column.to_string()),
+                ("other".to_string(), upstream.to_string()),
+            ];
             assert_eq!(
-                sources,
-                [("db.raw.events", column), ("other", upstream)],
+                sources, expected,
                 "column {column}, dependencies: {dependency_order:?}"
             );
         }

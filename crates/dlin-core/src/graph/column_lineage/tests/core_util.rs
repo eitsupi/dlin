@@ -1,7 +1,7 @@
 use super::*;
 #[test]
-fn test_partial_failure_summary() {
-    // Model with some columns that can be traced and some that fail
+fn test_yaml_only_column_is_reported_without_affecting_listed_outputs() {
+    // A column that only the YAML declares does not affect the listed outputs
     let mut manifest = make_test_manifest();
     // Add a column to stg_orders that doesn't exist in the SQL
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
@@ -19,24 +19,23 @@ fn test_partial_failure_summary() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    // Should have 4 successful columns and 1 failed
-    assert_eq!(result.columns.len(), 4);
-    assert_eq!(result.traced_columns, 4);
-    assert_eq!(result.total_columns, 5);
+    // The four SQL outputs are listed; the YAML-only column is reported, not added.
+    assert_eq!(result.slots().len(), 4);
+    assert_eq!(result.value_complete_columns, 4);
     assert!(
         result
             .errors
             .iter()
             .any(|e| e.what.contains("nonexistent_col")),
-        "should include per-column error, got: {:?}",
+        "should include the declaration diagnostic, got: {:?}",
         result.errors
     );
     assert!(
-        result
-            .errors
-            .iter()
-            .all(|e| matches!(e.kind, ColumnLineageErrorKind::ColumnNotFound)),
-        "all errors should be column_not_found, got: {:?}",
+        result.errors.iter().all(|e| matches!(
+            e.kind,
+            ColumnLineageErrorKind::DeclaredColumnNotInOutput
+        ) && !e.is_fatal()),
+        "all errors should be non-fatal declaration differences, got: {:?}",
         result.errors
     );
 }
@@ -55,9 +54,9 @@ fn test_transformation_classification() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let customer_id = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "customer_id")
+        .find(|c| c.column() == "customer_id")
         .unwrap();
     assert_eq!(
         customer_id.transformation,
@@ -66,9 +65,9 @@ fn test_transformation_classification() {
     );
 
     let order_count = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "order_count")
+        .find(|c| c.column() == "order_count")
         .unwrap();
     assert_eq!(
         order_count.transformation,
@@ -104,9 +103,9 @@ fn test_count_star_has_no_sources() {
 
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let order_count = result
-        .columns
+        .slots()
         .iter()
-        .find(|entry| entry.column == "order_count")
+        .find(|entry| entry.column() == "order_count")
         .expect("COUNT(*) output should be traced");
     assert!(
         order_count.lineage.known().is_empty(),
@@ -166,18 +165,18 @@ fn test_unattributable_leaves_never_publish_empty_tables() {
             result.errors
         );
         assert!(
-            result.columns.iter().any(|entry| entry.column == column),
+            result.slots().iter().any(|entry| entry.column() == column),
             "missing output column {column} for {sql}: {:?}",
-            result.columns
+            result.slots()
         );
         assert!(
             result
-                .columns
+                .slots()
                 .iter()
                 .flat_map(|entry| entry.lineage.known())
                 .all(|source| !source.table.is_empty()),
             "unattributable leaf published an empty-table source for {sql}: {:?}",
-            result.columns
+            result.slots()
         );
     }
 }
@@ -193,7 +192,7 @@ fn test_source_table_has_empty_model_path() {
         &mut ColumnLineageCache::disabled(),
     );
 
-    for entry in &result.columns {
+    for entry in result.slots() {
         for source in entry.lineage.known() {
             assert!(
                 source.model_path.is_empty(),
@@ -207,7 +206,7 @@ fn test_source_table_has_empty_model_path() {
 }
 
 #[test]
-fn test_traced_total_columns_success() {
+fn test_column_counts_success() {
     let manifest = make_test_manifest();
     let result = compute_column_lineage(
         &manifest,
@@ -215,8 +214,14 @@ fn test_traced_total_columns_success() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert_eq!(result.total_columns, 4);
-    assert_eq!(result.traced_columns, 4);
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (4, 4, 0)
+    );
 }
 
 #[test]
@@ -236,9 +241,9 @@ fn test_scalar_function_transformation() {
 
     let find = |name: &str| {
         result
-            .columns
+            .slots()
             .iter()
-            .find(|c| c.column == name)
+            .find(|c| c.column() == name)
             .unwrap_or_else(|| panic!("{name} not found"))
             .transformation
             .clone()
@@ -280,9 +285,9 @@ fn test_cte_passthrough_inherits_transformation() {
         result_upper.errors
     );
     let status_upper = result_upper
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "status_upper")
+        .find(|c| c.column() == "status_upper")
         .expect("status_upper not found");
     assert_eq!(
         status_upper.transformation,
@@ -303,9 +308,9 @@ fn test_cte_passthrough_inherits_transformation() {
         result_coalesce.errors
     );
     let status_coalesced = result_coalesce
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "status_coalesced")
+        .find(|c| c.column() == "status_coalesced")
         .expect("status_coalesced not found");
     assert_eq!(
         status_coalesced.transformation,
@@ -315,7 +320,7 @@ fn test_cte_passthrough_inherits_transformation() {
 }
 
 #[test]
-fn test_traced_total_columns_partial_failure() {
+fn test_column_counts_ignore_yaml_only_columns() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns.insert(
@@ -331,12 +336,18 @@ fn test_traced_total_columns_partial_failure() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert_eq!(result.total_columns, 5);
-    assert_eq!(result.traced_columns, 4);
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (4, 4, 0)
+    );
 }
 
 #[test]
-fn test_traced_total_columns_model_not_found() {
+fn test_column_counts_model_not_found() {
     let manifest = make_test_manifest();
     let result = compute_column_lineage(
         &manifest,
@@ -344,12 +355,19 @@ fn test_traced_total_columns_model_not_found() {
         DlinDialect::Generic,
         &mut ColumnLineageCache::disabled(),
     );
-    assert_eq!(result.total_columns, 0);
-    assert_eq!(result.traced_columns, 0);
+    assert_eq!(result.output, None);
+    assert_eq!(
+        (
+            result.listed_columns,
+            result.value_complete_columns,
+            result.value_partial_columns
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[test]
-fn test_traced_total_columns_in_json() {
+fn test_column_counts_in_json() {
     let manifest = make_test_manifest();
     let result = compute_column_lineage(
         &manifest,
@@ -359,8 +377,11 @@ fn test_traced_total_columns_in_json() {
     );
     let json = serde_json::to_string(&result).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed["traced_columns"], 4);
-    assert_eq!(parsed["total_columns"], 4);
+    assert_eq!(parsed["listed_columns"], 4);
+    assert_eq!(parsed["value_complete_columns"], 4);
+    assert_eq!(parsed["value_partial_columns"], 0);
+    assert!(parsed.get("traced_columns").is_none());
+    assert!(parsed.get("total_columns").is_none());
 }
 
 // --- Regression tests for known issues ---
@@ -414,9 +435,9 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // The output is present and source-free by contract.
     let week_start = result
-        .columns
+        .slots()
         .iter()
-        .find(|c| c.column == "week_start")
+        .find(|c| c.column() == "week_start")
         .expect("week_start should be present");
     assert!(
         week_start.lineage.known().is_empty(),
