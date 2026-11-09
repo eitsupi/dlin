@@ -161,8 +161,9 @@ Tracing a column through models follows the typed lineage of each model's
   set. A source column `(relation, column)` is resolved to a dbt node, and the
   column is looked up in that model's slots by the dialect's column key. A
   unique match is followed by slot id. Several matches are never resolved by
-  taking the first: the source stays where it is and an `AmbiguousOutput`
-  reason makes the output partial. Duplicate names and unknown positions stay
+  taking the first: the reference and its candidates stay in an
+  `AmbiguousOutput` reason that makes the output partial, rather than becoming
+  a known terminal source. Duplicate names and unknown positions stay
   distinguishable, and a positional reference does not turn into a name match.
 - A model that is referenced by name and cannot be identified (more than one
   candidate) is a boundary, not a guess.
@@ -178,9 +179,15 @@ Cases: D1, I3.
 
 Tracing stops in places, and the reason matters more than the fact that it
 stopped. A stop point is a `TraceBoundary` with a position (`at`, a model output)
-and a reason. Each boundary also records the identity and kind of the resource
+and a reason. `at` is the existing output slot where the reference was written,
+not an invented slot of the resource where tracing stopped. Each boundary also
+records the identity and kind of the resource
 it stands for (model, source, seed, snapshot, or a physical relation) and the
 scope or policy that applies to it.
+
+Boundaries are listed on the model result. Each has a `root` output identifying
+the column being traced, separate from `at`, so selecting columns also selects
+their boundaries while preserving the location of an upstream reference.
 
 | Reason | Meaning |
 | --- | --- |

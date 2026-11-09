@@ -51,6 +51,7 @@ fn lineage_of(
     shape: OutputShape,
 ) -> ModelColumnLineage {
     let mut report = ModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: format!("model.{model}"),
         model: model.to_string(),
         output: Some(OutputSlots { columns, shape }),

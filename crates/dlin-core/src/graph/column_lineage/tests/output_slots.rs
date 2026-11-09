@@ -226,7 +226,7 @@ fn naming_a_duplicated_output_is_ambiguous_and_not_the_first_slot() {
 }
 
 #[test]
-fn star_over_duplicated_outputs_keeps_the_source_and_records_the_ambiguity() {
+fn star_over_duplicated_outputs_records_candidates_without_a_fake_source() {
     let manifest = project(&[
         ("up", &[], "SELECT a AS x, b AS x, c FROM raw.t"),
         ("down", &["up"], "SELECT * FROM up"),
@@ -235,10 +235,10 @@ fn star_over_duplicated_outputs_keeps_the_source_and_records_the_ambiguity() {
 
     assert_eq!(result.names(), ["x", "x", "c"]);
     for x in &result.slots()[..2] {
-        // Neither output of `up` is chosen. The source stays at `up`, and the
-        // output is partial with a reason that lists both candidates.
+        // Neither output of `up` is a proven source. The partial output
+        // lists both candidates in its unresolved contribution.
         assert!(x.lineage.is_partial());
-        assert_eq!(terminals(x), [pair("up", "x")]);
+        assert!(terminals(x).is_empty());
         let [contribution] = x.lineage.unresolved() else {
             panic!("expected one unresolved contribution: {x:?}");
         };
@@ -861,6 +861,7 @@ fn rich_result() -> InternalModelColumnLineage {
         ],
     );
     InternalModelColumnLineage {
+        boundaries: Vec::new(),
         unique_id: "model.proj.m".to_string(),
         model: "m".to_string(),
         output: Some(OutputSlots {

@@ -417,7 +417,7 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                 // Table names from SQL may be fully qualified (e.g. "db.schema.model"); take
                 // the last dot-separated segment and strip quotes to get the model short name.
                 let selected = report.output.iter().flat_map(|output| &output.columns);
-                let upstream_models: HashSet<String> = selected
+                let mut upstream_models: HashSet<String> = selected
                     .clone()
                     .flat_map(|slot| {
                         slot.lineage.known().iter().flat_map(|src| {
@@ -426,6 +426,18 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                         })
                     })
                     .collect();
+                // Failed resources are boundaries rather than known sources.
+                // Column selection has already kept only the boundaries of
+                // the requested root outputs.
+                for boundary in &report.boundaries {
+                    upstream_models.insert(boundary.resource.name.clone());
+                    upstream_models.extend(
+                        boundary
+                            .model_path
+                            .iter()
+                            .map(|hop| hop.output.model.clone()),
+                    );
+                }
                 let selected_slots: HashSet<_> = selected.map(|slot| slot.id).collect();
                 // Partition cross-model errors:
                 // - Global errors (ParseFailure, NoCompiledCode, etc.) are kept only when

@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn selecting_a_column_keeps_only_its_trace_boundaries() {
+    let mut manifest = make_cross_model_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_payments")
+        .unwrap()
+        .compiled_code = None;
+    let mut result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(
+        result
+            .boundaries
+            .iter()
+            .any(|boundary| { boundary.reason == TraceBoundaryReason::MissingDefinition })
+    );
+    result.select_columns(&["order_id"], DlinDialect::Generic);
+    assert!(!result.boundaries.is_empty());
+    assert!(result.boundaries.iter().all(|boundary| {
+        boundary.root.slot == result.slots()[0].id
+            && boundary.reason == TraceBoundaryReason::ExternalRelation
+    }));
+}
+
+#[test]
+fn snowflake_resource_resolution_distinguishes_quoted_and_folded_names() {
+    use crate::graph::column_lineage::cross_model::resolve_resource;
+
+    let mut manifest = make_test_manifest();
+    let source = manifest.sources.get_mut("source.proj.raw.orders").unwrap();
+    source.identifier = Some("ORDERS".to_string());
+    source.schema = Some("RAW".to_string());
+    let resolve = |query| {
+        resolve_resource(
+            &manifest,
+            "model.proj.stg_orders",
+            &RelationRef::parse(query).unwrap(),
+            &Ident::unquoted("id"),
+            DlinDialect::Snowflake,
+        )
+    };
+    for query in ["raw.orders", "\"RAW\".\"ORDERS\""] {
+        assert_eq!(resolve(query).resource.kind, TraceResourceKind::Source);
+    }
+    // A lowercase quoted spelling denotes a different physical relation.
+    assert_eq!(
+        resolve("\"raw\".\"orders\"").resource.kind,
+        TraceResourceKind::PhysicalRelation
+    );
+}
+
+#[test]
 fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     let manifest = source_free_union_manifest();
     let result = compute_cross_model_column_lineage(
@@ -131,14 +186,8 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
     let bare = bare.expect("bare_field should be present");
     assert_eq!(qualified.lineage.known(), bare.lineage.known());
     for entry in [qualified, bare] {
-        assert_eq!(
-            entry.lineage.known(),
-            vec![ColumnSource {
-                table: "p.d.upstream_model".to_string(),
-                column: Ident::unquoted("event"),
-                model_path: Vec::new(),
-            }]
-        );
+        assert!(entry.lineage.known().is_empty());
+        assert!(entry.lineage.is_partial());
     }
     for output_column in ["qualified_field", "bare_field"] {
         let diagnostic = result
@@ -178,7 +227,7 @@ fn test_cross_model_bigquery_struct_field_access_has_one_honest_contract() {
 }
 
 #[test]
-fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fatal_error() {
+fn test_cross_model_bigquery_row_value_child_keeps_partial_without_a_fake_source() {
     let mut manifest = bigquery_struct_field_cross_model_manifest();
     let upstream = manifest.nodes.get_mut("model.proj.upstream_model").unwrap();
     upstream.columns = ["col_a"]
@@ -197,7 +246,7 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
         "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.col_a AS col_a FROM latest".to_string(),
     );
 
-    let downstream = manifest.nodes.get_mut("model.proj.quoting_model").unwrap();
+    let mut downstream = manifest.nodes.remove("model.proj.quoting_model").unwrap();
     downstream.name = "repro_model".to_string();
     downstream.unique_id = "model.proj.repro_model".to_string();
     downstream.columns = ["col_a"]
@@ -213,6 +262,9 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
         })
         .collect();
     downstream.compiled_code = Some("SELECT col_a FROM `p`.`d`.`upstream_model`".to_string());
+    manifest
+        .nodes
+        .insert(downstream.unique_id.clone(), downstream);
 
     let result = compute_cross_model_column_lineage(
         &manifest,
@@ -225,15 +277,7 @@ fn test_cross_model_bigquery_row_value_child_keeps_nearest_terminal_without_fata
         .iter()
         .find(|column| column.column() == "col_a")
         .expect("col_a should remain published");
-    assert_eq!(
-        col_a.lineage.known().len(),
-        1,
-        "sources: {:?}",
-        col_a.lineage.known()
-    );
-    assert_eq!(col_a.lineage.known()[0].table, "p.d.upstream_model");
-    assert_eq!(col_a.lineage.known()[0].column, "col_a");
-    assert!(col_a.lineage.known()[0].model_path.is_empty());
+    assert!(col_a.lineage.known().is_empty());
     // The row-value part of upstream_model.col_a stays visible as unresolved.
     assert!(col_a.lineage.is_partial());
     assert!(matches!(
@@ -268,8 +312,8 @@ fn test_cross_model_rebases_deep_diagnostic_to_root_output() {
         .iter()
         .find(|column| column.column() == "x")
         .expect("x should be present");
-    assert_eq!(x.lineage.known().len(), 1);
-    assert_eq!(x.lineage.known()[0].table, "p.d.middle_model");
+    assert!(x.lineage.known().is_empty());
+    assert!(x.lineage.is_complete());
     assert!(
         result
             .errors
@@ -619,10 +663,512 @@ fn test_cross_model_source_table_is_leaf() {
     );
 
     assert_eq!(single.slots().len(), cross.slots().len());
+    assert!(cross.boundaries.iter().any(|boundary| {
+        boundary.reason == TraceBoundaryReason::ExternalRelation
+            && boundary.resource.kind == TraceResourceKind::Source
+    }));
     for (s, c) in single.slots().iter().zip(cross.slots().iter()) {
         assert_eq!(s.name, c.name);
         assert_eq!(s.lineage.known(), c.lineage.known());
     }
+}
+
+#[test]
+fn seed_is_an_external_relation_under_the_fixed_policy() {
+    let seed_id = "seed.proj.seed_orders";
+    let model_id = "model.proj.seed_reader";
+    let seed = ManifestNode {
+        unique_id: seed_id.to_string(),
+        name: "seed_orders".to_string(),
+        alias: None,
+        resource_type: "seed".to_string(),
+        depends_on: crate::parser::manifest::DependsOn { nodes: vec![] },
+        config: crate::parser::manifest::ManifestConfig::default(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: indexmap::IndexMap::new(),
+        compiled_code: None,
+        database: None,
+        schema: None,
+    };
+    let reader = ManifestNode {
+        unique_id: model_id.to_string(),
+        name: "seed_reader".to_string(),
+        alias: None,
+        resource_type: "model".to_string(),
+        depends_on: crate::parser::manifest::DependsOn {
+            nodes: vec![seed_id.to_string()],
+        },
+        config: crate::parser::manifest::ManifestConfig::default(),
+        description: None,
+        path: None,
+        original_file_path: None,
+        columns: indexmap::IndexMap::new(),
+        compiled_code: Some("select id from seed_orders".to_string()),
+        database: None,
+        schema: None,
+    };
+    let manifest = Manifest {
+        nodes: HashMap::from([(seed_id.to_string(), seed), (model_id.to_string(), reader)]),
+        ..Default::default()
+    };
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "seed_reader",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.slot_named("id").lineage.is_complete());
+    assert!(result.boundaries.iter().any(|boundary| {
+        boundary.reason == TraceBoundaryReason::ExternalRelation
+            && boundary.resource.kind == TraceResourceKind::Seed
+            && boundary.resource.policy == TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal
+    }));
+}
+
+#[test]
+fn source_free_output_has_a_source_free_boundary_without_a_fake_source() {
+    let mut manifest = make_cross_model_manifest();
+    let unique_id = "model.proj.constant_model";
+    manifest.nodes.insert(
+        unique_id.to_string(),
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: "constant_model".to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn { nodes: vec![] },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some("select 1 as value".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+    let downstream_id = "model.proj.constant_downstream";
+    manifest.nodes.insert(
+        downstream_id.to_string(),
+        ManifestNode {
+            unique_id: downstream_id.to_string(),
+            name: "constant_downstream".to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: vec![unique_id.to_string()],
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some("select value from constant_model".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "constant_downstream",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.slot_named("value").lineage.known().is_empty());
+    assert!(result.slot_named("value").lineage.is_complete());
+    assert!(result.boundaries.iter().any(|boundary| boundary.reason
+        == TraceBoundaryReason::SourceFree
+        && boundary.resource.unique_id.as_deref() == Some(unique_id)));
+}
+
+#[test]
+fn failed_upstream_is_a_boundary_and_makes_the_output_partial() {
+    let mut manifest = make_cross_model_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = None;
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let order_id = result.slot_named("order_id");
+    assert!(order_id.lineage.is_partial());
+    let boundary = result
+        .boundaries
+        .iter()
+        .find(|boundary| boundary.reason == TraceBoundaryReason::MissingDefinition)
+        .expect("missing SQL is reported as a boundary");
+    assert_eq!(
+        boundary.root,
+        ModelOutputRef {
+            unique_id: "model.proj.orders".to_string(),
+            model: "orders".to_string(),
+            slot: order_id.id,
+            column: "order_id".to_string(),
+        }
+    );
+    assert_eq!(boundary.at.unique_id, "model.proj.orders");
+    assert_eq!(
+        boundary.resource.unique_id.as_deref(),
+        Some("model.proj.stg_orders")
+    );
+}
+
+#[test]
+fn analysis_failure_two_hops_away_is_partial_without_a_fake_source() {
+    let mut manifest = make_cross_model_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_orders")
+        .unwrap()
+        .compiled_code = Some("select from".to_string());
+    let downstream_id = "model.proj.orders_downstream";
+    manifest.nodes.insert(
+        downstream_id.to_string(),
+        ManifestNode {
+            unique_id: downstream_id.to_string(),
+            name: "orders_downstream".to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: vec!["model.proj.orders".to_string()],
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some("select order_id from orders".to_string()),
+            database: None,
+            schema: None,
+        },
+    );
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders_downstream",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let slot = result.slot_named("order_id");
+    assert!(slot.lineage.is_partial());
+    assert!(slot.lineage.known().is_empty());
+    assert!(result.boundaries.iter().any(|boundary| boundary.reason
+        == TraceBoundaryReason::AnalysisFailed
+        && boundary.resource.unique_id.as_deref() == Some("model.proj.stg_orders")));
+}
+
+#[test]
+fn snapshot_is_an_unsupported_materialization_boundary() {
+    let mut manifest = make_cross_model_manifest();
+    manifest
+        .nodes
+        .get_mut("model.proj.stg_payments")
+        .unwrap()
+        .resource_type = "snapshot".to_string();
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let boundary = result
+        .boundaries
+        .iter()
+        .find(|boundary| boundary.reason == TraceBoundaryReason::UnsupportedMaterialization)
+        .expect("snapshot semantics are outside the trace model");
+    assert_eq!(boundary.resource.kind, TraceResourceKind::Snapshot);
+    assert_eq!(
+        boundary.resource.policy,
+        TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal
+    );
+    assert!(result.slot_named("total_amount").lineage.is_partial());
+}
+
+#[test]
+fn snapshot_without_definition_is_a_missing_definition_boundary() {
+    let mut manifest = make_cross_model_manifest();
+    let snapshot = manifest.nodes.get_mut("model.proj.stg_payments").unwrap();
+    snapshot.resource_type = "snapshot".to_string();
+    snapshot.compiled_code = None;
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.boundaries.iter().any(|boundary| {
+        boundary.reason == TraceBoundaryReason::MissingDefinition
+            && boundary.resource.kind == TraceResourceKind::Snapshot
+    }));
+}
+
+#[test]
+fn missing_manifest_dependency_is_not_reported_as_an_external_relation() {
+    let mut manifest = make_cross_model_manifest();
+    let node = manifest.nodes.get_mut("model.proj.orders").unwrap();
+    node.depends_on
+        .nodes
+        .push("model.proj.disappeared".to_string());
+    node.compiled_code = Some("select id from disappeared".to_string());
+    node.columns = indexmap::IndexMap::from([(
+        "id".to_string(),
+        crate::parser::manifest::ManifestColumn {
+            name: "id".to_string(),
+            quote: None,
+        },
+    )]);
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "orders",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let boundary = result
+        .boundaries
+        .iter()
+        .find(|boundary| boundary.reason == TraceBoundaryReason::MissingDefinition)
+        .expect("a dangling expected dependency is incomplete");
+    assert!(
+        boundary
+            .resource
+            .candidates
+            .iter()
+            .any(|candidate| { candidate.unique_id == "model.proj.disappeared" })
+    );
+    assert!(result.slot_named("id").lineage.is_partial());
+}
+
+#[test]
+fn ambiguous_short_model_name_is_not_resolved_to_the_first_match() {
+    let manifest = make_duplicate_name_manifest();
+    let result = compute_column_lineage(
+        &manifest,
+        "customers",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert_eq!(
+        result.errors[0].kind,
+        ColumnLineageErrorKind::ModelAmbiguous
+    );
+    assert!(result.errors[0].what.contains("model.pkg_a.customers"));
+    assert!(result.errors[0].what.contains("model.pkg_b.customers"));
+}
+
+#[test]
+fn model_cycle_is_kept_as_an_incomplete_boundary() {
+    fn node(unique_id: &str, name: &str, dependency: &str, sql: &str) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: vec![dependency.to_string()],
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+    let left = "model.proj.cycle_left";
+    let right = "model.proj.cycle_right";
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                left.to_string(),
+                node(left, "cycle_left", right, "select id from cycle_right"),
+            ),
+            (
+                right.to_string(),
+                node(right, "cycle_right", left, "select id from cycle_left"),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "cycle_left",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.slot_named("id").lineage.is_partial());
+    assert!(
+        result
+            .boundaries
+            .iter()
+            .any(|boundary| boundary.reason == TraceBoundaryReason::Cycle)
+    );
+}
+
+#[test]
+fn model_level_cycle_does_not_cut_an_acyclic_slot_path() {
+    fn node(unique_id: &str, name: &str, dependencies: &[&str], sql: &str) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: dependencies.iter().map(|id| id.to_string()).collect(),
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+    let left = "model.proj.slot_cycle_left";
+    let right = "model.proj.slot_cycle_right";
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                left.to_string(),
+                node(
+                    left,
+                    "slot_cycle_left",
+                    &[right],
+                    "select 1 as x, slot_cycle_right.y as z from slot_cycle_right",
+                ),
+            ),
+            (
+                right.to_string(),
+                node(
+                    right,
+                    "slot_cycle_right",
+                    &[left],
+                    "select slot_cycle_left.x as y from slot_cycle_left",
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "slot_cycle_left",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let z = result.slot_named("z");
+    assert!(z.lineage.is_complete(), "z lineage: {:?}", z.lineage);
+    assert!(z.lineage.known().is_empty());
+    assert!(result.boundaries.iter().any(|boundary| {
+        boundary.root.slot == z.id && boundary.reason == TraceBoundaryReason::SourceFree
+    }));
+    assert!(!result.boundaries.iter().any(|boundary| {
+        boundary.root.slot == z.id && boundary.reason == TraceBoundaryReason::Cycle
+    }));
+}
+
+#[test]
+fn diamond_can_visit_the_same_slot_in_separate_branches() {
+    fn node(unique_id: &str, name: &str, dependencies: &[&str], sql: &str) -> ManifestNode {
+        ManifestNode {
+            unique_id: unique_id.to_string(),
+            name: name.to_string(),
+            alias: None,
+            resource_type: "model".to_string(),
+            depends_on: crate::parser::manifest::DependsOn {
+                nodes: dependencies.iter().map(|id| id.to_string()).collect(),
+            },
+            config: crate::parser::manifest::ManifestConfig::default(),
+            description: None,
+            path: None,
+            original_file_path: None,
+            columns: indexmap::IndexMap::new(),
+            compiled_code: Some(sql.to_string()),
+            database: None,
+            schema: None,
+        }
+    }
+    let shared = "model.proj.diamond_shared";
+    let left = "model.proj.diamond_left";
+    let right = "model.proj.diamond_right";
+    let root = "model.proj.diamond_root";
+    let manifest = Manifest {
+        nodes: HashMap::from([
+            (
+                shared.to_string(),
+                node(shared, "diamond_shared", &[], "select 1 as id"),
+            ),
+            (
+                left.to_string(),
+                node(
+                    left,
+                    "diamond_left",
+                    &[shared],
+                    "select id from diamond_shared",
+                ),
+            ),
+            (
+                right.to_string(),
+                node(
+                    right,
+                    "diamond_right",
+                    &[shared],
+                    "select id from diamond_shared",
+                ),
+            ),
+            (
+                root.to_string(),
+                node(
+                    root,
+                    "diamond_root",
+                    &[left, right],
+                    "select coalesce(l.id, r.id) as id from diamond_left l join diamond_right r on 1 = 1",
+                ),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let result = compute_cross_model_column_lineage(
+        &manifest,
+        "diamond_root",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let id = result.slot_named("id");
+    assert!(id.lineage.is_complete(), "id lineage: {:?}", id.lineage);
+    assert!(id.lineage.known().is_empty());
+    assert!(!result.boundaries.iter().any(|boundary| {
+        boundary.root.slot == id.id && boundary.reason == TraceBoundaryReason::Cycle
+    }));
+    let source_free_paths = result
+        .boundaries
+        .iter()
+        .filter(|boundary| {
+            boundary.root.slot == id.id && boundary.reason == TraceBoundaryReason::SourceFree
+        })
+        .map(|boundary| boundary.model_path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        source_free_paths.len(),
+        2,
+        "boundaries: {:?}",
+        result.boundaries
+    );
 }
 
 #[test]

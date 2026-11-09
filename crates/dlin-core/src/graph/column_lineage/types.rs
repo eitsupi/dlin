@@ -19,6 +19,10 @@ pub(crate) const OPEN_SHAPE_HINT: &str = "column may be introduced via SELECT * 
 pub enum ColumnLineageErrorKind {
     /// The specified model was not found in the dbt manifest.
     ModelNotFound,
+    /// A short model name identifies more than one manifest model.
+    ModelAmbiguous,
+    /// The resource's materialization semantics are not modelled.
+    UnsupportedMaterialization,
     /// The model has no compiled SQL (run `dbt compile` first).
     NoCompiledCode,
     /// The compiled SQL could not be parsed or analysed as one query.
@@ -184,6 +188,8 @@ pub struct ModelColumnLineage {
     pub value_complete_columns: usize,
     /// Listed slots whose value lineage is `Partial`.
     pub value_partial_columns: usize,
+    /// Resource boundaries encountered while tracing output values.
+    pub boundaries: Vec<TraceBoundary>,
     pub errors: Vec<ColumnLineageError>,
 }
 
@@ -220,6 +226,9 @@ impl ModelColumnLineage {
             diagnostics.extend(output.lookup_error(name, &lookup));
         }
         output.columns.retain(|slot| keep.contains(&slot.id));
+        self.boundaries.retain(|boundary| {
+            boundary.root.unique_id != self.unique_id || keep.contains(&boundary.root.slot)
+        });
         // Keep the model-level diagnostics and those of the selected slots.
         // A declared-only column has no slot, and a requested name that
         // matched nothing is reported by the lookup instead.
@@ -485,6 +494,7 @@ pub(crate) struct InternalModelColumnLineage {
     pub unique_id: String,
     pub model: String,
     pub output: Option<OutputSlots<InternalColumnSource>>,
+    pub boundaries: Vec<TraceBoundary>,
     pub errors: Vec<ColumnLineageError>,
 }
 
@@ -495,6 +505,7 @@ impl InternalModelColumnLineage {
             unique_id: unique_id.to_string(),
             model: model.to_string(),
             output: None,
+            boundaries: Vec::new(),
             errors: vec![error],
         }
     }
@@ -521,6 +532,7 @@ impl InternalModelColumnLineage {
                     .collect(),
                 shape: output.shape,
             }),
+            boundaries: self.boundaries,
             listed_columns: 0,
             value_complete_columns: 0,
             value_partial_columns: 0,
@@ -529,6 +541,68 @@ impl InternalModelColumnLineage {
         public.recount();
         public
     }
+}
+
+/// A stop point reached while tracing an output through manifest resources.
+/// `at` is always the real output slot that contains the relation reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraceBoundary {
+    /// Root result slot whose trace reached this boundary.
+    pub root: ModelOutputRef,
+    /// Output slot that contains the relation reference (the root for direct
+    /// boundaries such as a constant output).
+    pub at: ModelOutputRef,
+    pub reason: TraceBoundaryReason,
+    pub resource: TraceResource,
+    pub model_path: Vec<ModelPathHop>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBoundaryReason {
+    ExternalRelation,
+    SourceFree,
+    AnalysisFailed,
+    Cycle,
+    MissingDefinition,
+    AmbiguousModel,
+    UnsupportedMaterialization,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceResourceKind {
+    Model,
+    Source,
+    Seed,
+    Snapshot,
+    PhysicalRelation,
+}
+
+/// Fixed tracing policy. Results record the policy used for classification.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceBoundaryPolicy {
+    SnapshotUnsupportedSeedExternal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraceResourceCandidate {
+    pub unique_id: String,
+    pub name: String,
+    pub kind: TraceResourceKind,
+    pub relation: RelationRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraceResource {
+    pub unique_id: Option<String>,
+    pub name: String,
+    pub kind: TraceResourceKind,
+    pub relation: RelationRef,
+    pub column: Option<Ident>,
+    pub candidates: Vec<TraceResourceCandidate>,
+    pub policy: TraceBoundaryPolicy,
 }
 
 /// Collapse parseable per-column diagnostics at a public output boundary.
@@ -770,6 +844,11 @@ pub enum UnresolvedReason {
         column: Ident,
         candidates: Vec<ModelOutputRef>,
     },
+    /// A closed model output does not contain the referenced column.
+    AbsentOutput {
+        relation: RelationRef,
+        column: Ident,
+    },
     /// A column could not be bound to a relation in scope.
     Unbound { column: Ident },
     /// Recursive lineage is represented by its known base sources only.
@@ -778,6 +857,11 @@ pub enum UnresolvedReason {
     RowValue { alias: String },
     /// The syntax is not modelled by the engine.
     Unsupported { what: String },
+    /// Tracing stopped at a manifest resource boundary that is incomplete.
+    TraceBoundary {
+        reason: TraceBoundaryReason,
+        resource: TraceResource,
+    },
 }
 
 /// Human-readable form for display only. The structured variant, not this
@@ -846,10 +930,16 @@ impl std::fmt::Display for UnresolvedReason {
                 "{column} matches {} output columns of {relation}",
                 candidates.len()
             ),
+            Self::AbsentOutput { relation, column } => {
+                write!(f, "'{column}' is not an output of {relation}")
+            }
             Self::Unbound { column } => write!(f, "'{column}' is not bound to a relation"),
             Self::Recursive => write!(f, "recursive lineage is limited to its base sources"),
             Self::RowValue { alias } => write!(f, "whole-row value '{alias}'"),
             Self::Unsupported { what } => write!(f, "unsupported syntax: {what}"),
+            Self::TraceBoundary { reason, resource } => {
+                write!(f, "{reason:?} at {}", resource.name)
+            }
         }
     }
 }

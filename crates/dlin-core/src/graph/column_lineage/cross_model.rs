@@ -1,11 +1,13 @@
 use crate::parser::manifest::Manifest;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use super::relation::{RelationRef, RelationResolution, resolve_unique};
+use super::relation::{RelationRef, RelationResolution, matching_indices, resolve_unique};
 use super::{
     ColumnLineageAnalysis, InternalColumnSource, InternalModelColumnLineage, ModelOutputRef,
-    ModelPathHop, OutputSlotId, SlotLookup, UnresolvedContribution, UnresolvedReason, ValueLineage,
-    find_model_by_name, find_model_by_unique_id,
+    ModelPathHop, OutputSlotId, SlotLookup, TraceBoundary, TraceBoundaryPolicy,
+    TraceBoundaryReason, TraceResource, TraceResourceCandidate, TraceResourceKind,
+    UnresolvedContribution, UnresolvedReason, ValueLineage, find_model_by_name,
+    find_model_by_unique_id,
 };
 
 /// What the trace of one root output slot has collected so far.
@@ -13,6 +15,14 @@ use super::{
 struct TraceAccumulator {
     sources: Vec<InternalColumnSource>,
     unresolved: Vec<UnresolvedContribution>,
+    boundaries: Vec<TraceBoundary>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedResource {
+    pub(super) resource: TraceResource,
+    pub(super) reason: TraceBoundaryReason,
+    pub(super) model_unique_id: Option<String>,
 }
 
 /// The upstream outputs that the trace of one root slot has already entered.
@@ -23,22 +33,12 @@ pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
     analysis: &'a mut ColumnLineageAnalysis<'m>,
     model_name: &str,
 ) -> InternalModelColumnLineage {
-    let mut ctx = CrossModelContext {
-        analysis,
-        in_memory_cache: HashMap::new(),
-        computing: HashSet::new(),
-    };
-    let key = find_model_by_unique_id(ctx.analysis.manifest, model_name)
-        .or_else(|| find_model_by_name(ctx.analysis.manifest, model_name))
-        .map_or_else(|| model_name.to_string(), |node| node.unique_id.clone());
-    ctx.computing.insert(key);
+    let mut ctx = CrossModelContext { analysis };
     compute_cross_model_inner(model_name, &mut ctx)
 }
 
 struct CrossModelContext<'a, 'm> {
     analysis: &'a mut ColumnLineageAnalysis<'m>,
-    in_memory_cache: HashMap<String, InternalModelColumnLineage>,
-    computing: HashSet<String>,
 }
 
 fn compute_cross_model_inner(
@@ -46,20 +46,20 @@ fn compute_cross_model_inner(
     ctx: &mut CrossModelContext<'_, '_>,
 ) -> InternalModelColumnLineage {
     let mut result = super::compute_column_lineage_internal(ctx.analysis, model_name);
-    let Some(root_uid) = find_model_by_unique_id(ctx.analysis.manifest, model_name)
+    let Some(root_node) = find_model_by_unique_id(ctx.analysis.manifest, model_name)
         .or_else(|| find_model_by_name(ctx.analysis.manifest, model_name))
-        .map(|node| node.unique_id.clone())
     else {
         return result;
     };
-    let upstream_models = build_upstream_model_relations(ctx.analysis.manifest, model_name);
+    let root_uid = root_node.unique_id.clone();
 
     let model = result.model.clone();
     let errors = &mut result.errors;
     let Some(output) = result.output.as_mut() else {
         return result;
     };
-    for slot in &mut output.columns {
+    for slot_index in 0..output.columns.len() {
+        let slot = &output.columns[slot_index];
         let root = ModelOutputRef {
             unique_id: root_uid.clone(),
             model: model.clone(),
@@ -69,73 +69,255 @@ fn compute_cross_model_inner(
         let mut acc = TraceAccumulator {
             sources: Vec::new(),
             unresolved: slot.lineage.unresolved().to_vec(),
+            boundaries: Vec::new(),
         };
         let mut visited = Visited::new();
         visited.insert((root_uid.clone(), slot.id));
 
+        if slot.lineage.is_complete() && slot.lineage.known().is_empty() {
+            acc.boundaries.push(TraceBoundary {
+                root: root.clone(),
+                at: root.clone(),
+                reason: TraceBoundaryReason::SourceFree,
+                resource: TraceResource {
+                    unique_id: Some(root_uid.clone()),
+                    name: root_node.name.clone(),
+                    kind: TraceResourceKind::Model,
+                    relation: RelationRef::from_manifest(
+                        root_node.database.as_deref(),
+                        root_node.schema.as_deref(),
+                        root_node.relation_name(),
+                    ),
+                    column: slot.name.ident().cloned(),
+                    candidates: Vec::new(),
+                    policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+                },
+                model_path: Vec::new(),
+            });
+        }
+
         for source in slot.lineage.known() {
-            resolve_source_recursive(
-                source,
-                &root,
-                &upstream_models,
-                &mut visited,
-                &mut acc,
-                errors,
-                ctx,
-                &[],
-            );
+            let branch_visited = visited.clone();
+            resolve_source_recursive(source, &root, branch_visited, &mut acc, errors, ctx, &[]);
         }
 
         let TraceAccumulator {
             mut sources,
             mut unresolved,
+            mut boundaries,
         } = acc;
         sources.sort_by(|a, b| (&a.relation, &a.column).cmp(&(&b.relation, &b.column)));
         sources.dedup();
         unresolved.sort();
         unresolved.dedup();
-        slot.lineage = ValueLineage::new(sources, unresolved);
+        boundaries.sort();
+        boundaries.dedup();
+        result.boundaries.extend(boundaries);
+        output.columns[slot_index].lineage = ValueLineage::new(sources, unresolved);
     }
+
+    result.boundaries.sort();
+    result.boundaries.dedup();
 
     result
 }
 
-pub(super) fn build_upstream_model_relations(
+/// Resolve one SQL relation using only the manifest resources that the owner
+/// declares as dependencies. This is shared by lineage and impact analysis.
+pub(super) fn resolve_resource(
     manifest: &Manifest,
-    model_name: &str,
-) -> Vec<(RelationRef, String)> {
-    let mut relations = Vec::new();
-
-    let node = find_model_by_unique_id(manifest, model_name)
-        .or_else(|| find_model_by_name(manifest, model_name));
-    let node = match node {
-        Some(n) => n,
-        None => return relations,
+    owner_unique_id: &str,
+    relation: &RelationRef,
+    column: &super::Ident,
+    dialect: super::DlinDialect,
+) -> ResolvedResource {
+    let candidates = upstream_resource_candidates(manifest, owner_unique_id);
+    let mut missing_dependency_ids = missing_dependency_ids(manifest, owner_unique_id);
+    let relations = candidates
+        .iter()
+        .map(|(candidate, _)| candidate.relation.clone())
+        .collect::<Vec<_>>();
+    let matching = matching_indices(relation, &relations, dialect);
+    let resolution = resolve_unique(relation, &relations, dialect);
+    let (resource, reason, model_unique_id) = match resolution {
+        RelationResolution::Unique(index) => {
+            let candidate = candidates[index].0.clone();
+            (
+                TraceResource {
+                    unique_id: Some(candidate.unique_id.clone()),
+                    name: candidate.name.clone(),
+                    kind: candidate.kind.clone(),
+                    relation: candidate.relation.clone(),
+                    column: Some(column.clone()),
+                    candidates: Vec::new(),
+                    policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+                },
+                candidates[index]
+                    .1
+                    .clone()
+                    .unwrap_or(TraceBoundaryReason::MissingDefinition),
+                (candidate.kind == TraceResourceKind::Model).then_some(candidate.unique_id),
+            )
+        }
+        RelationResolution::NotFound if !missing_dependency_ids.is_empty() => {
+            missing_dependency_ids.sort();
+            let missing = missing_dependency_ids
+                .iter()
+                .map(|unique_id| TraceResourceCandidate {
+                    unique_id: unique_id.clone(),
+                    name: unique_id
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(unique_id)
+                        .to_string(),
+                    kind: if unique_id.starts_with("snapshot.") {
+                        TraceResourceKind::Snapshot
+                    } else {
+                        TraceResourceKind::Model
+                    },
+                    relation: relation.clone(),
+                })
+                .collect();
+            (
+                TraceResource {
+                    unique_id: None,
+                    name: relation.to_string(),
+                    kind: TraceResourceKind::PhysicalRelation,
+                    relation: relation.clone(),
+                    column: Some(column.clone()),
+                    candidates: missing,
+                    policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+                },
+                TraceBoundaryReason::MissingDefinition,
+                None,
+            )
+        }
+        RelationResolution::NotFound => (
+            TraceResource {
+                unique_id: None,
+                name: relation.to_string(),
+                kind: TraceResourceKind::PhysicalRelation,
+                relation: relation.clone(),
+                column: Some(column.clone()),
+                candidates: Vec::new(),
+                policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+            },
+            TraceBoundaryReason::ExternalRelation,
+            None,
+        ),
+        RelationResolution::Ambiguous => {
+            let mut matches = matching
+                .iter()
+                .map(|index| candidates[*index].0.clone())
+                .collect::<Vec<_>>();
+            matches.sort();
+            (
+                TraceResource {
+                    unique_id: None,
+                    name: relation.to_string(),
+                    kind: TraceResourceKind::PhysicalRelation,
+                    relation: relation.clone(),
+                    column: Some(column.clone()),
+                    candidates: matches,
+                    policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+                },
+                TraceBoundaryReason::AmbiguousModel,
+                None,
+            )
+        }
     };
+    ResolvedResource {
+        resource,
+        reason,
+        model_unique_id,
+    }
+}
 
-    for dep_id in &node.depends_on.nodes {
-        if let Some(dep_node) = manifest.nodes.get(dep_id) {
-            if dep_node.resource_type != "model" {
-                continue;
-            }
-            let relation = RelationRef::from_manifest(
-                dep_node.database.as_deref(),
-                dep_node.schema.as_deref(),
-                dep_node.relation_name(),
-            );
-            relations.push((relation, dep_node.unique_id.clone()));
+pub(super) fn upstream_resource_candidates(
+    manifest: &Manifest,
+    owner_unique_id: &str,
+) -> Vec<(TraceResourceCandidate, Option<TraceBoundaryReason>)> {
+    let dependencies = manifest
+        .nodes
+        .get(owner_unique_id)
+        .map(|node| {
+            node.depends_on
+                .nodes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut candidates = Vec::new();
+    for unique_id in dependencies {
+        if let Some(node) = manifest.nodes.get(unique_id) {
+            let (kind, reason) = match node.resource_type.as_str() {
+                "model" => (TraceResourceKind::Model, None),
+                "seed" => (
+                    TraceResourceKind::Seed,
+                    Some(TraceBoundaryReason::ExternalRelation),
+                ),
+                "snapshot" => (
+                    TraceResourceKind::Snapshot,
+                    Some(if node.compiled_code.is_some() {
+                        TraceBoundaryReason::UnsupportedMaterialization
+                    } else {
+                        TraceBoundaryReason::MissingDefinition
+                    }),
+                ),
+                _ => continue,
+            };
+            candidates.push((
+                TraceResourceCandidate {
+                    unique_id: node.unique_id.clone(),
+                    name: node.name.clone(),
+                    kind,
+                    relation: RelationRef::from_manifest(
+                        node.database.as_deref(),
+                        node.schema.as_deref(),
+                        node.relation_name(),
+                    ),
+                },
+                reason,
+            ));
+        } else if let Some(source) = manifest.sources.get(unique_id) {
+            candidates.push((
+                TraceResourceCandidate {
+                    unique_id: source.unique_id.clone(),
+                    name: format!("{}.{}", source.source_name, source.name),
+                    kind: TraceResourceKind::Source,
+                    relation: RelationRef::from_manifest(
+                        source.database.as_deref(),
+                        source.schema.as_deref(),
+                        source.identifier.as_deref().unwrap_or(&source.name),
+                    ),
+                },
+                Some(TraceBoundaryReason::ExternalRelation),
+            ));
         }
     }
+    candidates
+}
 
-    relations
+fn missing_dependency_ids(manifest: &Manifest, owner_unique_id: &str) -> Vec<String> {
+    manifest
+        .nodes
+        .get(owner_unique_id)
+        .into_iter()
+        .flat_map(|node| &node.depends_on.nodes)
+        .filter(|unique_id| {
+            (unique_id.starts_with("model.") || unique_id.starts_with("snapshot."))
+                && !manifest.nodes.contains_key(*unique_id)
+        })
+        .cloned()
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_source_recursive(
     source: &InternalColumnSource,
     root: &ModelOutputRef,
-    upstream_models: &[(RelationRef, String)],
-    visited: &mut Visited,
+    mut visited: Visited,
     acc: &mut TraceAccumulator,
     errors: &mut Vec<super::ColumnLineageError>,
     ctx: &mut CrossModelContext<'_, '_>,
@@ -146,26 +328,52 @@ fn resolve_source_recursive(
         leaf.model_path = current_path.to_vec();
         acc.sources.push(leaf);
     };
-    let candidates = upstream_models
-        .iter()
-        .map(|(relation, _)| relation.clone())
-        .collect::<Vec<_>>();
-    let model_unique_id = match resolve_unique(&source.relation, &candidates, ctx.analysis.dialect)
-    {
-        RelationResolution::Unique(index) => upstream_models[index].1.clone(),
-        RelationResolution::Ambiguous | RelationResolution::NotFound => return leaf(acc),
+    let owner_uid = current_path
+        .last()
+        .map_or(root.unique_id.as_str(), |hop| hop.output.unique_id.as_str());
+    let resolved = resolve_resource(
+        ctx.analysis.manifest,
+        owner_uid,
+        &source.relation,
+        &source.column,
+        ctx.analysis.dialect,
+    );
+    let at = current_path
+        .last()
+        .map_or_else(|| root.clone(), |hop| hop.output.clone());
+    let push_boundary =
+        |acc: &mut TraceAccumulator, reason: TraceBoundaryReason, resource: TraceResource| {
+            if !matches!(
+                reason,
+                TraceBoundaryReason::ExternalRelation | TraceBoundaryReason::SourceFree
+            ) {
+                acc.unresolved.push(UnresolvedContribution {
+                    reason: UnresolvedReason::TraceBoundary {
+                        reason: reason.clone(),
+                        resource: resource.clone(),
+                    },
+                    origin: at.clone(),
+                    model_path: current_path.to_vec(),
+                });
+            }
+            acc.boundaries.push(TraceBoundary {
+                root: root.clone(),
+                at: at.clone(),
+                reason,
+                resource,
+                model_path: current_path.to_vec(),
+            });
+        };
+    let Some(model_unique_id) = resolved.model_unique_id.clone() else {
+        let is_external = matches!(resolved.reason, TraceBoundaryReason::ExternalRelation);
+        push_boundary(acc, resolved.reason, resolved.resource);
+        if is_external {
+            leaf(acc);
+        }
+        return;
     };
 
-    if !ctx.in_memory_cache.contains_key(&model_unique_id) {
-        if ctx.computing.contains(&model_unique_id) {
-            return leaf(acc);
-        }
-        ctx.computing.insert(model_unique_id.clone());
-        let upstream_result = compute_cross_model_inner(&model_unique_id, ctx);
-        ctx.in_memory_cache
-            .insert(model_unique_id.clone(), upstream_result);
-    }
-    let upstream_result = ctx.in_memory_cache.get(&model_unique_id).unwrap();
+    let upstream_result = super::compute_column_lineage_internal(ctx.analysis, &model_unique_id);
     let lookup = upstream_result
         .output
         .as_ref()
@@ -178,22 +386,24 @@ fn resolve_source_recursive(
     // slot belongs to a sibling branch (and can even refer to an EXCEPT-ed
     // projection), and a difference between the YAML and the SQL output is
     // about the upstream model alone.
-    let followed = match &lookup {
-        SlotLookup::Unique(id) => Some(*id),
-        SlotLookup::Ambiguous(_) | SlotLookup::Absent => None,
-    };
-    if let Some(id) = followed
-        && !visited.insert((model_unique_id.clone(), id))
-    {
-        return leaf(acc);
-    }
-    for err in &upstream_result.errors {
-        if err.is_model_failure() || (followed.is_some() && err.slot() == followed) {
+    if upstream_result.output.is_none() {
+        let reason = if upstream_result
+            .errors
+            .iter()
+            .any(|error| error.kind == super::ColumnLineageErrorKind::NoCompiledCode)
+        {
+            TraceBoundaryReason::MissingDefinition
+        } else {
+            TraceBoundaryReason::AnalysisFailed
+        };
+        push_boundary(acc, reason, resolved.resource.clone());
+        for err in &upstream_result.errors {
             let rebased = err.rebase_to(root);
             if !errors.contains(&rebased) {
                 errors.push(rebased);
             }
         }
+        return;
     }
 
     match lookup {
@@ -203,32 +413,61 @@ fn resolve_source_recursive(
                 .as_ref()
                 .and_then(|output| output.slot(id))
                 .expect("a looked-up slot exists");
+            for err in &upstream_result.errors {
+                if err.is_model_failure() || err.slot() == Some(id) {
+                    let rebased = err.rebase_to(root);
+                    if !errors.contains(&rebased) {
+                        errors.push(rebased);
+                    }
+                }
+            }
+            let visited_key = (model_unique_id.clone(), id);
+            if !visited.insert(visited_key.clone()) {
+                push_boundary(acc, TraceBoundaryReason::Cycle, resolved.resource.clone());
+                return;
+            }
             let mut extended_path = current_path.to_vec();
+            let output_ref = output_ref_of(&model_unique_id, &upstream_result.model, slot);
             extended_path.push(ModelPathHop {
-                output: output_ref_of(&model_unique_id, &upstream_result.model, slot),
+                output: output_ref.clone(),
                 transformation: slot.transformation.clone(),
             });
 
             let (known, unresolved) = (slot.lineage.known(), slot.lineage.unresolved());
-            if known.is_empty() {
-                // Leaf: the column exists at model_name but has no known sources.
-                // Don't include model_name in model_path since it IS the leaf (avoids self-loop).
-                // This holds for a partial column as well: its nearest terminal is
-                // kept, and the unresolved contributions are carried next to it.
-                leaf(acc);
-            } else {
-                for s in known {
-                    let mut merged = s.clone();
-                    let mut full_path = extended_path.clone();
-                    full_path.extend(s.model_path.iter().cloned());
-                    merged.model_path = full_path;
-                    acc.sources.push(merged);
-                }
+            if known.is_empty() && unresolved.is_empty() {
+                acc.boundaries.push(TraceBoundary {
+                    root: root.clone(),
+                    at: output_ref,
+                    reason: TraceBoundaryReason::SourceFree,
+                    resource: TraceResource {
+                        unique_id: Some(model_unique_id.clone()),
+                        name: upstream_result.model.clone(),
+                        kind: TraceResourceKind::Model,
+                        relation: resolved.resource.relation.clone(),
+                        column: slot.name.ident().cloned(),
+                        candidates: Vec::new(),
+                        policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
+                    },
+                    model_path: extended_path.clone(),
+                });
             }
             for contribution in unresolved {
                 acc.unresolved
                     .push(extend_contribution(contribution, &extended_path));
             }
+            for nested_source in known {
+                let branch_visited = visited.clone();
+                resolve_source_recursive(
+                    nested_source,
+                    root,
+                    branch_visited,
+                    acc,
+                    errors,
+                    ctx,
+                    &extended_path,
+                );
+            }
+            visited.remove(&visited_key);
         }
         SlotLookup::Ambiguous(ids) => {
             // Several output columns of the upstream model have this name.
@@ -244,23 +483,35 @@ fn resolve_source_recursive(
                 .filter_map(|id| output.slot(*id))
                 .map(|slot| output_ref_of(&model_unique_id, &upstream_result.model, slot))
                 .collect();
-            let origin = current_path
-                .last()
-                .map_or_else(|| root.clone(), |hop| hop.output.clone());
             acc.unresolved.push(UnresolvedContribution {
                 reason: UnresolvedReason::AmbiguousOutput {
                     relation: source.relation.clone(),
                     column: source.column.clone(),
                     candidates,
                 },
-                origin,
+                origin: at,
                 model_path: current_path.to_vec(),
             });
-            leaf(acc);
         }
         // The column is not among the listed outputs of the model (or the
         // model has none): the source stays where it was found.
-        SlotLookup::Absent => leaf(acc),
+        SlotLookup::Absent => {
+            let reason = match upstream_result.output.as_ref().map(|output| &output.shape) {
+                Some(super::OutputShape::Open { .. }) => UnresolvedReason::NamedBehindStar {
+                    relation: resolved.resource.relation.clone(),
+                    column: source.column.clone(),
+                },
+                _ => UnresolvedReason::AbsentOutput {
+                    relation: resolved.resource.relation.clone(),
+                    column: source.column.clone(),
+                },
+            };
+            acc.unresolved.push(UnresolvedContribution {
+                reason,
+                origin: at,
+                model_path: current_path.to_vec(),
+            });
+        }
     }
 }
 

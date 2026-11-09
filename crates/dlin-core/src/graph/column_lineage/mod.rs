@@ -32,8 +32,9 @@ pub use types::{
     ColumnLineageError, ColumnLineageErrorKind, ColumnSource, ModelColumnLineage, ModelOutputRef,
     ModelPathHop, OutputName, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
     SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind, SetOperator,
-    SetQuantifier, SlotLookup, TransformationType, UnexpandedStar, UnresolvedCandidate,
-    UnresolvedContribution, UnresolvedReason, UnresolvedSource, ValueLineage,
+    SetQuantifier, SlotLookup, TraceBoundary, TraceBoundaryPolicy, TraceBoundaryReason,
+    TraceResource, TraceResourceCandidate, TraceResourceKind, TransformationType, UnexpandedStar,
+    UnresolvedCandidate, UnresolvedContribution, UnresolvedReason, UnresolvedSource, ValueLineage,
 };
 use types::{
     InternalColumnSource, InternalModelColumnLineage, OPEN_SHAPE_HINT,
@@ -182,6 +183,73 @@ pub(super) fn compute_column_lineage_internal(
     let node = match node {
         Some(n) => n,
         None => {
+            let candidates = model_candidates_by_name(manifest, model_name);
+            if candidates.len() > 1 {
+                let candidates = candidates
+                    .iter()
+                    .map(|node| node.unique_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return InternalModelColumnLineage::failed(
+                    model_name,
+                    model_name,
+                    ColumnLineageError::model(
+                        ColumnLineageErrorKind::ModelAmbiguous,
+                        format!(
+                            "model name '{model_name}' is ambiguous; use a unique_id: {candidates}"
+                        ),
+                    ),
+                );
+            }
+            let mut snapshots = manifest
+                .nodes
+                .values()
+                .filter(|node| {
+                    node.resource_type == "snapshot"
+                        && (node.unique_id == model_name
+                            || node.unique_id.ends_with(&format!(".{model_name}")))
+                })
+                .collect::<Vec<_>>();
+            snapshots.sort_unstable_by(|a, b| a.unique_id.cmp(&b.unique_id));
+            if snapshots.len() == 1 {
+                let node = snapshots[0];
+                let (kind, message) = if node.compiled_code.is_some() {
+                    (
+                        ColumnLineageErrorKind::UnsupportedMaterialization,
+                        format!(
+                            "snapshot '{}' has unsupported materialization and history semantics",
+                            node.name
+                        ),
+                    )
+                } else {
+                    (
+                        ColumnLineageErrorKind::NoCompiledCode,
+                        format!("snapshot '{}' has no compiled SQL definition", node.name),
+                    )
+                };
+                return InternalModelColumnLineage::failed(
+                    &node.unique_id,
+                    &node.name,
+                    ColumnLineageError::model(kind, message),
+                );
+            }
+            if snapshots.len() > 1 {
+                let candidates = snapshots
+                    .iter()
+                    .map(|node| node.unique_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return InternalModelColumnLineage::failed(
+                    model_name,
+                    model_name,
+                    ColumnLineageError::model(
+                        ColumnLineageErrorKind::ModelAmbiguous,
+                        format!(
+                            "snapshot name '{model_name}' is ambiguous; use a unique_id: {candidates}"
+                        ),
+                    ),
+                );
+            }
             return InternalModelColumnLineage::failed(
                 model_name,
                 model_name,
@@ -265,6 +333,7 @@ pub(super) fn compute_column_lineage_internal(
         unique_id: cache_key.to_string(),
         model: display_name.to_string(),
         output: Some(output),
+        boundaries: Vec::new(),
         errors,
     };
 
@@ -481,27 +550,26 @@ pub(super) fn find_model_by_name<'a>(
     {
         return Some(node);
     }
-    let suffix = format!(".{}", name);
-    let mut matches: Vec<&crate::parser::manifest::ManifestNode> = manifest
-        .nodes
-        .values()
-        .filter(|n| n.resource_type == "model" && n.unique_id.ends_with(&suffix))
-        .collect();
+    let matches = model_candidates_by_name(manifest, name);
     match matches.len() {
         0 => None,
         1 => Some(matches[0]),
-        _ => {
-            matches.sort_unstable_by(|a, b| a.unique_id.cmp(&b.unique_id));
-            let ids: Vec<&str> = matches.iter().map(|n| n.unique_id.as_str()).collect();
-            crate::warn!(
-                "model name '{}' is ambiguous (matched: {}); using '{}'",
-                name,
-                ids.join(", "),
-                matches[0].unique_id,
-            );
-            Some(matches[0])
-        }
+        _ => None,
     }
+}
+
+pub(super) fn model_candidates_by_name<'a>(
+    manifest: &'a Manifest,
+    name: &str,
+) -> Vec<&'a crate::parser::manifest::ManifestNode> {
+    let suffix = format!(".{name}");
+    let mut matches = manifest
+        .nodes
+        .values()
+        .filter(|node| node.resource_type == "model" && node.unique_id.ends_with(&suffix))
+        .collect::<Vec<_>>();
+    matches.sort_unstable_by(|left, right| left.unique_id.cmp(&right.unique_id));
+    matches
 }
 
 pub(super) fn find_model_by_unique_id<'a>(
