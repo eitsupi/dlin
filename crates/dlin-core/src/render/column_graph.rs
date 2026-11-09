@@ -533,6 +533,13 @@ fn dependency_kind_label(kind: DependencyKind) -> &'static str {
 
 fn describe_gap(gap: &TraceGap) -> String {
     match gap {
+        TraceGap::Cycle { at } => format!("cycle reached at {}.{}", at.model, at.column),
+        TraceGap::AmbiguousModel { at, candidates } => format!(
+            "{}.{} matches multiple models: {}",
+            at.model,
+            at.column,
+            candidates.join(", ")
+        ),
         TraceGap::UnresolvedLineage { at, reasons } => {
             let reasons: Vec<String> = reasons.iter().map(ToString::to_string).collect();
             format!(
@@ -601,9 +608,10 @@ fn gap_outputs(report: &ColumnImpactReport) -> Vec<&ModelOutputRef> {
         .gaps()
         .into_iter()
         .filter_map(|(_, gap)| match gap {
-            TraceGap::UnresolvedLineage { at, .. } | TraceGap::AmbiguousInput { at, .. } => {
-                Some(at)
-            }
+            TraceGap::UnresolvedLineage { at, .. }
+            | TraceGap::AmbiguousInput { at, .. }
+            | TraceGap::Cycle { at }
+            | TraceGap::AmbiguousModel { at, .. } => Some(at),
             TraceGap::AnalysisFailed { .. }
             | TraceGap::OpenOutput { .. }
             | TraceGap::UnidentifiedInput { .. }
@@ -622,6 +630,17 @@ fn gap_notes(reports: &[ColumnImpactReport]) -> BTreeSet<String> {
     for report in reports {
         for (_, gap) in report.gaps() {
             match gap {
+                TraceGap::Cycle { at } => {
+                    notes.insert(format!("{}.{}: cycle reached", at.model, at.column));
+                }
+                TraceGap::AmbiguousModel { at, candidates } => {
+                    notes.insert(format!(
+                        "{}.{} matches models {}",
+                        at.model,
+                        at.column,
+                        candidates.join(", ")
+                    ));
+                }
                 TraceGap::AnalysisFailed { model, .. } => {
                     notes.insert(format!("{model}: analysis failed"));
                 }

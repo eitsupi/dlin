@@ -5,12 +5,12 @@ use serde::Serialize;
 
 use crate::parser::manifest::Manifest;
 
-use super::relation::{RelationResolution, resolve_unique};
+use super::relation::{RelationRef, matching_indices};
 use super::{
     ColumnLineageAnalysis, ColumnLineageError, ColumnLineageErrorKind, Ident,
     InternalModelColumnLineage, ModelOutputRef, OutputShape, OutputSlot, OutputSlotId, SlotLookup,
-    TransformationType, UnexpandedStar, UnresolvedReason, find_model_by_name,
-    normalize_column_lineage_errors,
+    TransformationType, UnexpandedStar, UnresolvedCandidate, UnresolvedReason, find_model_by_name,
+    model_candidates_by_name, normalize_column_lineage_errors,
 };
 
 /// How a target depends on an input.
@@ -81,6 +81,16 @@ pub struct ConfirmedImpact {
     pub path: Vec<ImpactEdge>,
 }
 
+/// A target that may depend on the input through a finite ambiguous path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PossibleImpact {
+    pub target: ModelOutputRef,
+    pub kind: DependencyKind,
+    pub transformation: TransformationType,
+    /// Candidate edges from the input to the target, in order.
+    pub path: Vec<ImpactEdge>,
+}
+
 /// Why the search for one dependency kind may have missed targets.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -98,8 +108,8 @@ pub enum TraceGap {
         error: ColumnLineageErrorKind,
     },
     /// A dependent model has unexpanded stars, so columns that are not
-    /// listed may depend on the input. Searched conservatively: the model is
-    /// a gap whether or not the stars read the input.
+    /// listed may depend on the input when the relation cannot be proven
+    /// unrelated to it.
     OpenOutput {
         unique_id: String,
         model: String,
@@ -112,6 +122,14 @@ pub enum TraceGap {
         at: ModelOutputRef,
         candidates: Vec<ModelOutputRef>,
     },
+    /// A relation can name several manifest models, including the current
+    /// impact frontier.
+    AmbiguousModel {
+        at: ModelOutputRef,
+        candidates: Vec<String>,
+    },
+    /// An impact path revisited the same output slot.
+    Cycle { at: ModelOutputRef },
     /// The requested input column does not identify one output of its model:
     /// no listed output has that name (or the model could not be analysed),
     /// or several do (`candidates`). The dependents are still searched by the
@@ -150,6 +168,7 @@ pub struct ColumnImpactReport {
     pub input: Option<ModelOutputRef>,
     pub scope: ImpactScope,
     pub confirmed: Vec<ConfirmedImpact>,
+    pub possible: Vec<PossibleImpact>,
     /// One entry per requested dependency kind.
     pub exploration: Vec<KindExploration>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -157,10 +176,11 @@ pub struct ColumnImpactReport {
 }
 
 impl ColumnImpactReport {
-    /// Whether the report supports "no impact": nothing is confirmed and every
-    /// requested exploration is complete.
+    /// Whether the report supports "no impact": no target is confirmed or
+    /// possible, and every requested exploration is complete.
     pub fn proves_no_impact(&self) -> bool {
         self.confirmed.is_empty()
+            && self.possible.is_empty()
             && self
                 .exploration
                 .iter()
@@ -206,6 +226,7 @@ type ImpactQueueItem = (
     ImpactInput,
     Option<Rc<PathNode>>,
     Option<Rc<VisitedNode>>,
+    bool,
 );
 
 fn visited_contains(mut cursor: Option<&Rc<VisitedNode>>, key: &NodeKey) -> bool {
@@ -228,14 +249,21 @@ fn materialize_path(mut cursor: Option<&Rc<PathNode>>) -> Vec<ImpactEdge> {
     path
 }
 
-fn exploration_for(scope: ImpactScope, value_gaps: BTreeSet<TraceGap>) -> Vec<KindExploration> {
+fn exploration_for(
+    scope: ImpactScope,
+    value_gaps: BTreeSet<TraceGap>,
+    row_uncollected: bool,
+) -> Vec<KindExploration> {
     scope
         .kinds()
         .iter()
         .map(|&kind| {
             let gaps: Vec<TraceGap> = match kind {
                 DependencyKind::Value => value_gaps.iter().cloned().collect(),
-                DependencyKind::Row => vec![TraceGap::NotCollected { kind }],
+                DependencyKind::Row if row_uncollected => {
+                    vec![TraceGap::NotCollected { kind }]
+                }
+                DependencyKind::Row => Vec::new(),
             };
             KindExploration {
                 kind,
@@ -262,10 +290,36 @@ pub(super) fn compute_column_impact(
     {
         Some(n) => n,
         None => {
-            let gap = TraceGap::AnalysisFailed {
-                unique_id: model_name.to_string(),
-                model: model_name.to_string(),
-                error: ColumnLineageErrorKind::ModelNotFound,
+            let ambiguous = model_candidates_by_name(manifest, model_name);
+            let (error_kind, message) = if ambiguous.is_empty() {
+                (
+                    ColumnLineageErrorKind::ModelNotFound,
+                    format!("model '{}' not found in manifest", model_name),
+                )
+            } else {
+                let ids = ambiguous
+                    .iter()
+                    .map(|node| node.unique_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    ColumnLineageErrorKind::ModelAmbiguous,
+                    format!("model name '{model_name}' is ambiguous; use a unique_id: {ids}"),
+                )
+            };
+            let gap = if ambiguous.is_empty() {
+                TraceGap::AnalysisFailed {
+                    unique_id: model_name.to_string(),
+                    model: model_name.to_string(),
+                    error: error_kind,
+                }
+            } else {
+                TraceGap::UnidentifiedInput {
+                    unique_id: model_name.to_string(),
+                    model: model_name.to_string(),
+                    column: column_name.to_string(),
+                    candidates: Vec::new(),
+                }
             };
             return ColumnImpactReport {
                 model: model_name.to_string(),
@@ -273,12 +327,13 @@ pub(super) fn compute_column_impact(
                 input: None,
                 scope,
                 confirmed: vec![],
-                exploration: exploration_for(scope, BTreeSet::from([gap])),
+                possible: vec![],
+                exploration: exploration_for(scope, BTreeSet::from([gap]), true),
                 errors: vec![ColumnLineageError {
                     hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
                     ..ColumnLineageError::model(
-                        ColumnLineageErrorKind::ModelNotFound,
-                        format!("model '{}' not found in manifest", model_name),
+                        error_kind,
+                        message,
                     )
                 }],
             };
@@ -286,11 +341,16 @@ pub(super) fn compute_column_impact(
     };
 
     let downstream_map = build_downstream_model_map(manifest);
+    let row_uncollected = downstream_map
+        .get(&initial_node.unique_id)
+        .is_some_and(|dependents| !dependents.is_empty());
 
     let mut confirmed = Vec::new();
+    let mut possible = Vec::new();
     let mut gaps = BTreeSet::new();
     let mut errors = Vec::new();
     let initial_uid = initial_node.unique_id.clone();
+    let input_reachable = downstream_model_ids(manifest, &initial_uid);
     let mut lineage_cache: HashMap<String, InternalModelColumnLineage> = HashMap::new();
     ensure_lineage(analysis, &mut lineage_cache, &initial_uid);
 
@@ -347,15 +407,33 @@ pub(super) fn compute_column_impact(
             (None, ImpactInput::Name(reference.clone()), None)
         }
     };
-    let mut queue: Vec<ImpactQueueItem> = vec![(initial_uid, start, None, initial_visited)];
+    let mut queue: Vec<ImpactQueueItem> = vec![(initial_uid, start, None, initial_visited, false)];
 
-    while let Some((source_uid, source_input, current_path, visited_nodes)) = queue.pop() {
+    while let Some((source_uid, source_input, current_path, visited_nodes, already_possible)) =
+        queue.pop()
+    {
         let dependents = match downstream_map.get(&source_uid) {
             Some(deps) => deps,
             None => continue,
         };
         for dep_uid in dependents {
-            if !manifest.nodes.contains_key(dep_uid) {
+            let Some(dep_node) = manifest.nodes.get(dep_uid) else {
+                continue;
+            };
+            if dep_node.resource_type == "snapshot" {
+                let error = if dep_node.compiled_code.is_some() {
+                    ColumnLineageErrorKind::UnsupportedMaterialization
+                } else {
+                    ColumnLineageErrorKind::NoCompiledCode
+                };
+                gaps.insert(TraceGap::AnalysisFailed {
+                    unique_id: dep_uid.clone(),
+                    model: dep_node.name.clone(),
+                    error,
+                });
+                continue;
+            }
+            if dep_node.resource_type != "model" {
                 continue;
             }
             ensure_lineage(analysis, &mut lineage_cache, dep_uid);
@@ -379,10 +457,10 @@ pub(super) fn compute_column_impact(
                 },
             };
             let dep_name = &lineage.model;
-            let candidates = super::cross_model::build_upstream_model_relations(manifest, dep_uid);
+            let candidates = super::cross_model::upstream_resource_candidates(manifest, dep_uid);
             let candidate_relations = candidates
                 .iter()
-                .map(|(relation, _)| relation.clone())
+                .map(|(candidate, _)| candidate.relation.clone())
                 .collect::<Vec<_>>();
 
             let mut found_on_path = false;
@@ -390,11 +468,28 @@ pub(super) fn compute_column_impact(
 
             if let Some(dep_output) = &lineage.output {
                 if let OutputShape::Open { unexpanded } = &dep_output.shape {
-                    gaps.insert(TraceGap::OpenOutput {
-                        unique_id: dep_uid.clone(),
-                        model: dep_name.clone(),
-                        unexpanded: unexpanded.clone(),
-                    });
+                    let relevant: Vec<_> = unexpanded
+                        .iter()
+                        .filter(|star| {
+                            star.relation.as_ref().is_none_or(|relation| {
+                                relation_relevance(
+                                    relation,
+                                    dep_uid,
+                                    &input_reachable,
+                                    manifest,
+                                    dialect,
+                                ) != RelationRelevance::Unrelated
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                    if !relevant.is_empty() {
+                        gaps.insert(TraceGap::OpenOutput {
+                            unique_id: dep_uid.clone(),
+                            model: dep_name.clone(),
+                            unexpanded: relevant,
+                        });
+                    }
                 }
                 let source_columns = source_lineage.output.as_ref();
                 for entry in &dep_output.columns {
@@ -402,38 +497,59 @@ pub(super) fn compute_column_impact(
                     let target_key = (dep_uid.clone(), entry.id);
 
                     let mut references_source = false;
+                    let mut possible_source = false;
                     for s in entry.lineage.known() {
-                        let reads_source = matches!(
-                            resolve_unique(&s.relation, &candidate_relations, dialect),
-                            RelationResolution::Unique(index) if candidates[index].1 == source_uid
-                        );
+                        let relation_matches =
+                            matching_indices(&s.relation, &candidate_relations, dialect);
+                        let reads_source = relation_matches.iter().any(|index| {
+                            candidates[*index].0.kind == super::TraceResourceKind::Model
+                                && candidates[*index].0.unique_id == source_uid
+                        });
+                        let relation_is_ambiguous = relation_matches.len() > 1;
                         if !reads_source {
                             continue;
+                        }
+                        if relation_is_ambiguous {
+                            let model_candidates = relation_matches
+                                .iter()
+                                .map(|index| candidates[*index].0.unique_id.clone())
+                                .collect();
+                            gaps.insert(TraceGap::AmbiguousModel {
+                                at: output.clone(),
+                                candidates: model_candidates,
+                            });
                         }
                         let source_slot_id = match &source_input {
                             ImpactInput::Slot(id) => *id,
                             ImpactInput::Name(name) => {
                                 let key = s.column.column_key(dialect);
-                                references_source |=
-                                    key.is_some() && key == name.column_key(dialect);
+                                let matches_name = key.is_some() && key == name.column_key(dialect);
+                                references_source |= matches_name && !relation_is_ambiguous;
+                                possible_source |= matches_name && relation_is_ambiguous;
                                 continue;
                             }
                         };
                         match source_columns.map(|columns| columns.lookup(&s.column, dialect)) {
                             Some(SlotLookup::Unique(id)) => {
-                                references_source |= id == source_slot_id
+                                references_source |= id == source_slot_id && !relation_is_ambiguous;
+                                possible_source |= id == source_slot_id && relation_is_ambiguous;
                             }
                             Some(SlotLookup::Ambiguous(ids)) if ids.contains(&source_slot_id) => {
-                                gaps.insert(TraceGap::AmbiguousInput {
-                                    at: output.clone(),
-                                    candidates: ids
-                                        .iter()
-                                        .filter_map(|id| source_columns?.slot(*id))
-                                        .map(|slot| {
-                                            slot_ref(&source_uid, &source_lineage.model, slot)
-                                        })
-                                        .collect(),
-                                });
+                                if relation_is_ambiguous {
+                                    possible_source = true;
+                                } else {
+                                    gaps.insert(TraceGap::AmbiguousInput {
+                                        at: output.clone(),
+                                        candidates: ids
+                                            .iter()
+                                            .filter_map(|id| source_columns?.slot(*id))
+                                            .map(|slot| {
+                                                slot_ref(&source_uid, &source_lineage.model, slot)
+                                            })
+                                            .collect(),
+                                    });
+                                    possible_source = true;
+                                }
                             }
                             Some(SlotLookup::Ambiguous(_) | SlotLookup::Absent) | None => {}
                         }
@@ -443,24 +559,59 @@ pub(super) fn compute_column_impact(
                     // it is confirmed: its unresolved part is not proven unrelated
                     // to the input, so it may hide paths that are not listed.
                     if entry.lineage.is_partial() {
-                        let mut reasons: Vec<UnresolvedReason> = entry
+                        let input_column = match &source_input {
+                            ImpactInput::Name(name) => Some(name.clone()),
+                            ImpactInput::Slot(id) => source_lineage
+                                .output
+                                .as_ref()
+                                .and_then(|output| output.slot(*id))
+                                .map(|slot| Ident::parse_reference(&slot.name.to_string())),
+                        };
+                        let unresolved = entry
                             .lineage
                             .unresolved()
+                            .iter()
+                            .filter(|contribution| {
+                                unresolved_relevance(
+                                    &contribution.reason,
+                                    dep_uid,
+                                    &input_reachable,
+                                    manifest,
+                                    dialect,
+                                ) != RelationRelevance::Unrelated
+                            })
+                            .collect::<Vec<_>>();
+                        let mut reasons: Vec<UnresolvedReason> = unresolved
                             .iter()
                             .map(|contribution| contribution.reason.clone())
                             .collect();
                         reasons.sort();
                         reasons.dedup();
-                        gaps.insert(TraceGap::UnresolvedLineage {
-                            at: output.clone(),
-                            reasons,
-                        });
+                        if !reasons.is_empty() {
+                            gaps.insert(TraceGap::UnresolvedLineage {
+                                at: output.clone(),
+                                reasons,
+                            });
+                            possible_source |= unresolved.iter().any(|contribution| {
+                                unresolved_may_include_input(
+                                    &contribution.reason,
+                                    &source_uid,
+                                    &source_input,
+                                    input_column.as_ref(),
+                                    &candidates,
+                                    dialect,
+                                )
+                            });
+                        }
                     }
-                    if !references_source || visited_contains(visited_nodes.as_ref(), &target_key) {
+                    if !references_source && !possible_source {
+                        continue;
+                    }
+                    if visited_contains(visited_nodes.as_ref(), &target_key) {
+                        gaps.insert(TraceGap::Cycle { at: output });
                         continue;
                     }
 
-                    found_on_path = true;
                     path_slots.insert(entry.id);
                     let edge = ImpactEdge {
                         from: source_ref.clone(),
@@ -472,24 +623,46 @@ pub(super) fn compute_column_impact(
                         edge: edge.clone(),
                         parent: current_path.clone(),
                     });
-
-                    confirmed.push(ConfirmedImpact {
-                        target: output,
-                        kind: DependencyKind::Value,
-                        transformation: entry.transformation.clone(),
-                        path: materialize_path(Some(&next_path)),
-                    });
+                    if possible_source || already_possible {
+                        possible.push(PossibleImpact {
+                            target: output.clone(),
+                            kind: DependencyKind::Value,
+                            transformation: entry.transformation.clone(),
+                            path: materialize_path(Some(&next_path)),
+                        });
+                    }
+                    if references_source && !already_possible {
+                        found_on_path = true;
+                        confirmed.push(ConfirmedImpact {
+                            target: output.clone(),
+                            kind: DependencyKind::Value,
+                            transformation: entry.transformation.clone(),
+                            path: materialize_path(Some(&next_path)),
+                        });
+                    }
 
                     let next_visited = Some(Rc::new(VisitedNode {
                         key: target_key,
                         parent: visited_nodes.clone(),
                     }));
-                    queue.push((
-                        dep_uid.clone(),
-                        ImpactInput::Slot(entry.id),
-                        Some(next_path),
-                        next_visited,
-                    ));
+                    if references_source {
+                        queue.push((
+                            dep_uid.clone(),
+                            ImpactInput::Slot(entry.id),
+                            Some(next_path.clone()),
+                            next_visited.clone(),
+                            already_possible,
+                        ));
+                    }
+                    if possible_source {
+                        queue.push((
+                            dep_uid.clone(),
+                            ImpactInput::Slot(entry.id),
+                            Some(next_path),
+                            next_visited,
+                            true,
+                        ));
+                    }
                 }
             }
 
@@ -522,6 +695,8 @@ pub(super) fn compute_column_impact(
 
     confirmed.sort();
     confirmed.dedup();
+    possible.sort();
+    possible.dedup();
 
     ColumnImpactReport {
         model: model_name.to_string(),
@@ -529,9 +704,225 @@ pub(super) fn compute_column_impact(
         input,
         scope,
         confirmed,
-        exploration: exploration_for(scope, gaps),
+        possible,
+        exploration: exploration_for(scope, gaps, row_uncollected),
         errors: normalize_column_lineage_errors(errors),
     }
+}
+
+fn unresolved_may_include_input(
+    reason: &UnresolvedReason,
+    source_uid: &str,
+    source_input: &ImpactInput,
+    input_column: Option<&Ident>,
+    candidates: &[(
+        super::TraceResourceCandidate,
+        Option<super::TraceBoundaryReason>,
+    )],
+    dialect: super::DlinDialect,
+) -> bool {
+    let relation_matches_source = |relation: &RelationRef| {
+        candidates.iter().any(|(candidate, _)| {
+            candidate.kind == super::TraceResourceKind::Model
+                && candidate.unique_id == source_uid
+                && relation.matches(&candidate.relation, dialect)
+        })
+    };
+    let name_matches = |column: &Ident| {
+        input_column.is_some_and(|input| column.column_key(dialect) == input.column_key(dialect))
+    };
+    match reason {
+        UnresolvedReason::NamedBehindStar { relation, column } => {
+            name_matches(column) && relation_matches_source(relation)
+        }
+        UnresolvedReason::Ambiguous {
+            column,
+            candidates: unresolved,
+        } => {
+            if !name_matches(column) {
+                return false;
+            }
+            unresolved.iter().any(|candidate| match candidate {
+                UnresolvedCandidate::Relation { relation } => relation_matches_source(relation),
+                UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => false,
+            })
+        }
+        UnresolvedReason::AmbiguousOutput {
+            relation,
+            column,
+            candidates: slots,
+        } => {
+            if !relation_matches_source(relation) {
+                return false;
+            }
+            match source_input {
+                ImpactInput::Slot(id) => slots
+                    .iter()
+                    .any(|slot| slot.unique_id == source_uid && slot.slot == *id),
+                ImpactInput::Name(_) => name_matches(column),
+            }
+        }
+        UnresolvedReason::AlignmentUnknown {
+            possible_sources, ..
+        } => possible_sources.iter().any(|source| {
+            name_matches(&source.column) && relation_matches_source(&source.relation)
+        }),
+        UnresolvedReason::TraceBoundary { reason, resource } => {
+            *reason == super::TraceBoundaryReason::AmbiguousModel
+                && resource.column.as_ref().is_none_or(name_matches)
+                && resource
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.unique_id == source_uid)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelationRelevance {
+    Relevant,
+    Unrelated,
+    Unknown,
+}
+
+fn combine_relevance(results: impl IntoIterator<Item = RelationRelevance>) -> RelationRelevance {
+    let mut any = false;
+    let mut unknown = false;
+    for result in results {
+        any = true;
+        match result {
+            RelationRelevance::Relevant => return RelationRelevance::Relevant,
+            RelationRelevance::Unrelated => {}
+            RelationRelevance::Unknown => unknown = true,
+        }
+    }
+    if !any || unknown {
+        RelationRelevance::Unknown
+    } else {
+        RelationRelevance::Unrelated
+    }
+}
+
+fn unresolved_relevance(
+    reason: &UnresolvedReason,
+    owner_uid: &str,
+    input_reachable: &BTreeSet<String>,
+    manifest: &Manifest,
+    dialect: super::DlinDialect,
+) -> RelationRelevance {
+    let related = |relation: &RelationRef| {
+        relation_relevance(relation, owner_uid, input_reachable, manifest, dialect)
+    };
+    match reason {
+        UnresolvedReason::BehindStar { relation }
+        | UnresolvedReason::NamedBehindStar { relation, .. } => related(relation),
+        UnresolvedReason::AbsentOutput { relation, .. } => related(relation),
+        UnresolvedReason::AmbiguousOutput {
+            relation,
+            candidates,
+            ..
+        } => {
+            let relation_result = related(relation);
+            if candidates.is_empty() {
+                relation_result
+            } else if relation_result == RelationRelevance::Unrelated {
+                RelationRelevance::Unrelated
+            } else {
+                RelationRelevance::Unknown
+            }
+        }
+        UnresolvedReason::SchemaDependent { relations, .. } => {
+            combine_relevance(relations.iter().map(related))
+        }
+        UnresolvedReason::AlignmentUnknown {
+            possible_sources,
+            unknown_operands,
+            ..
+        } => {
+            let possible = combine_relevance(
+                possible_sources
+                    .iter()
+                    .map(|source| related(&source.relation)),
+            );
+            if possible == RelationRelevance::Relevant {
+                RelationRelevance::Relevant
+            } else if !unknown_operands.is_empty() || possible == RelationRelevance::Unknown {
+                RelationRelevance::Unknown
+            } else {
+                RelationRelevance::Unrelated
+            }
+        }
+        UnresolvedReason::Ambiguous {
+            candidates: unresolved,
+            ..
+        } => combine_relevance(unresolved.iter().map(|candidate| match candidate {
+            UnresolvedCandidate::Relation { relation } => related(relation),
+            UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => {
+                RelationRelevance::Unknown
+            }
+        })),
+        UnresolvedReason::Unbound { .. }
+        | UnresolvedReason::Recursive
+        | UnresolvedReason::RowValue { .. }
+        | UnresolvedReason::Unsupported { .. }
+        | UnresolvedReason::TraceBoundary { .. } => RelationRelevance::Unknown,
+    }
+}
+
+/// Resolve whether a relation is on an input-reachable model, is a known
+/// external relation, or cannot be classified from the manifest.
+fn relation_relevance(
+    relation: &RelationRef,
+    owner_uid: &str,
+    input_reachable: &BTreeSet<String>,
+    manifest: &Manifest,
+    dialect: super::DlinDialect,
+) -> RelationRelevance {
+    let resolved = super::cross_model::resolve_resource(
+        manifest,
+        owner_uid,
+        relation,
+        &Ident::parse_reference("*"),
+        dialect,
+    );
+    if resolved.reason == super::TraceBoundaryReason::AmbiguousModel {
+        return combine_relevance(resolved.resource.candidates.iter().map(|candidate| {
+            if input_reachable.contains(&candidate.unique_id) {
+                RelationRelevance::Relevant
+            } else {
+                RelationRelevance::Unrelated
+            }
+        }));
+    }
+    if let Some(unique_id) = resolved.resource.unique_id {
+        return if input_reachable.contains(&unique_id) {
+            RelationRelevance::Relevant
+        } else {
+            RelationRelevance::Unrelated
+        };
+    }
+    if resolved.reason == super::TraceBoundaryReason::MissingDefinition {
+        return RelationRelevance::Unknown;
+    }
+    // A physical relation without a declared identity can be external, but
+    // its non-match against in-scope dependencies does not prove that it is
+    // unrelated to the input.
+    RelationRelevance::Unknown
+}
+
+fn downstream_model_ids(manifest: &Manifest, start: &str) -> BTreeSet<String> {
+    let downstream = build_downstream_model_map(manifest);
+    let mut found = BTreeSet::from([start.to_owned()]);
+    let mut queue = vec![start.to_owned()];
+    while let Some(current) = queue.pop() {
+        for next in downstream.get(&current).into_iter().flatten() {
+            if found.insert(next.clone()) {
+                queue.push(next.clone());
+            }
+        }
+    }
+    found
 }
 
 fn ensure_lineage(
@@ -558,12 +949,12 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
     for node in manifest.nodes.values() {
-        if node.resource_type != "model" {
+        if !matches!(node.resource_type.as_str(), "model" | "snapshot") {
             continue;
         }
         for dep_id in &node.depends_on.nodes {
             if let Some(dep_node) = manifest.nodes.get(dep_id)
-                && dep_node.resource_type == "model"
+                && matches!(dep_node.resource_type.as_str(), "model" | "snapshot")
             {
                 map.entry(dep_node.unique_id.clone())
                     .or_default()

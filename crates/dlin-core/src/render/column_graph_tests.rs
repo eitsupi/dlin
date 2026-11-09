@@ -71,6 +71,7 @@ fn impact_report(model: &str, column: &str, confirmed: Vec<ConfirmedImpact>) -> 
         input: Some(output_ref(model, 0, column)),
         scope: ImpactScope::ValueOnly,
         confirmed,
+        possible: vec![],
         exploration: vec![KindExploration {
             kind: DependencyKind::Value,
             status: ExplorationStatus::Complete,

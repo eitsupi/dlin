@@ -298,8 +298,10 @@ cannot affect the result rows.
   it does not establish a dependency on one particular slot of it.
 - Paths, visited sets and targets are keyed by model and slot id, so outputs
   with the same name are different targets.
-- A dependent model whose output is open is an `OpenOutput` gap, whether or not
-  its stars read the input: the columns that are not listed may depend on it.
+- A dependent model whose output is open is an `OpenOutput` gap unless its
+  unexpanded output can be proven unrelated to the input. A relation that could
+  not be resolved is not proof of independence: the columns that are not listed
+  may depend on the input.
 - A dependent output that reads a name shared by several outputs of the input
   model, one of which is the input, is an `AmbiguousInput` gap.
 - The existence of the rows of a relation (for example `COUNT(*)`) is not

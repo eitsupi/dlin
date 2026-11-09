@@ -24,7 +24,7 @@ pub use cache::ColumnLineageCache;
 pub use ident::{Ident, Quote};
 pub use impact::{
     ColumnImpactReport, ConfirmedImpact, DependencyKind, DependencyRef, ExplorationStatus,
-    ImpactEdge, ImpactScope, KindExploration, TraceGap,
+    ImpactEdge, ImpactScope, KindExploration, PossibleImpact, TraceGap,
 };
 pub use relation::RelationRef;
 use schema::{SchemaContext, SemanticDigestCache};
