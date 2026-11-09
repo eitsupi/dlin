@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn test_cte_select_star_passthrough_is_traced() {
     // When a CTE body has SELECT * from an external table, the hint should still
-    // fire for the outer query's ColumnNotFound errors even though the outermost
+    // fire for the outer query's indeterminate-column diagnostics even though the outermost
     // SELECT list has no star.
     let mut manifest = make_test_manifest();
     manifest

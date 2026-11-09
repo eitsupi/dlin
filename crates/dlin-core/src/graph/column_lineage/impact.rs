@@ -46,11 +46,15 @@ impl ImpactScope {
 pub enum DependencyRef {
     /// An output slot of a model.
     Column(ModelOutputRef),
-    /// A column that is only known by its name, because it is not an
-    /// identified output of its model (the model has no output, or the name
-    /// is not among its listed outputs). The search from such an input
-    /// matches the sources of dependents by name.
-    UnlistedColumn {
+    /// A column that is only known by its name, because it does not identify
+    /// one output of its model: the model has no output, the name is not
+    /// among its listed outputs, or several outputs share it. The search from
+    /// such an input matches the sources of dependents by name.
+    ///
+    /// A confirmed impact whose path starts here means that the dependent
+    /// references this column name of the start model. It does not establish
+    /// a dependency on one particular slot of that model.
+    UnidentifiedColumn {
         unique_id: String,
         model: String,
         column: String,
@@ -368,7 +372,7 @@ pub(super) fn compute_column_impact(
                     };
                     DependencyRef::Column(slot_ref(&source_uid, &source_lineage.model, source_slot))
                 }
-                ImpactInput::Name(name) => DependencyRef::UnlistedColumn {
+                ImpactInput::Name(name) => DependencyRef::UnidentifiedColumn {
                     unique_id: source_uid.clone(),
                     model: source_lineage.model.clone(),
                     column: name.to_string(),

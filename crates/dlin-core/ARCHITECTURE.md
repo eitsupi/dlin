@@ -286,6 +286,9 @@ cannot affect the result rows.
   diagnostic. The search still continues: the known sources of the dependents
   are matched by relation and by the column key of the name, which their SQL
   states explicitly, and the search goes on by slot from each match.
+  The path of such an impact starts at a `DependencyRef::UnidentifiedColumn`.
+  It means that the dependent references that column name of the start model;
+  it does not establish a dependency on one particular slot of it.
 - Paths, visited sets and targets are keyed by model and slot id, so outputs
   with the same name are different targets.
 - A dependent model whose output is open is an `OpenOutput` gap, whether or not

@@ -152,7 +152,9 @@ Output format (-o/--output):
     input             the model output that the column names, or absent when it
                       names none or several (the exploration then has an
                       \"unidentified_input\" gap; dependents that name the
-                      column are still searched by that name)
+                      column are still searched by that name, and their paths
+                      start at an \"unidentified_column\" that does not stand
+                      for one particular output of the model)
     scope             \"value_only\"
     confirmed[]       downstream columns that depend on the input through known
                       edges (target, kind, transformation, path of edges)

@@ -1,7 +1,7 @@
 use super::*;
 #[test]
-fn test_partial_failure_summary() {
-    // Model with some columns that can be traced and some that fail
+fn test_yaml_only_column_is_reported_without_affecting_listed_outputs() {
+    // A column that only the YAML declares does not affect the listed outputs
     let mut manifest = make_test_manifest();
     // Add a column to stg_orders that doesn't exist in the SQL
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();

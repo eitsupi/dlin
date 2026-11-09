@@ -949,7 +949,7 @@ fn test_impact_diagrams_draw_an_unlisted_input_as_a_named_node() {
         ("mid", "hidden"),
         vec![("top", "seen", TransformationType::Direct)],
     );
-    found.path[0].from = DependencyRef::UnlistedColumn {
+    found.path[0].from = DependencyRef::UnidentifiedColumn {
         unique_id: "model.mid".to_string(),
         model: "mid".to_string(),
         column: "hidden".to_string(),

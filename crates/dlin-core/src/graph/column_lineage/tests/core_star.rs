@@ -142,9 +142,9 @@ fn test_cte_select_star_in_manifest_model() {
 }
 
 #[test]
-fn test_column_not_found_hint_when_select_star_unresolved() {
+fn test_select_star_hint_when_select_star_unresolved() {
     // When SELECT * cannot be expanded (external table not in manifest),
-    // ColumnNotFound errors for YAML-defined columns should include the SELECT * hint.
+    // Diagnostics for columns that an unexpanded star may provide carry the SELECT * hint.
     let mut manifest = make_test_manifest();
     // Replace stg_orders SQL with SELECT * from an external table (no schema info)
     manifest
@@ -166,15 +166,15 @@ fn test_column_not_found_hint_when_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors should include SELECT * hint when stars remain unresolved; got: {:?}",
+        "diagnostics should include SELECT * hint when stars remain unresolved; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_cte_select_star_unresolved() {
+fn test_select_star_hint_when_cte_select_star_unresolved() {
     // When a CTE body has SELECT * from an external table, the hint should still
-    // fire for the outer query's ColumnNotFound errors even though the outermost
+    // fire for the outer query's indeterminate-column diagnostics even though the outermost
     // SELECT list has no star.
     let mut manifest = make_test_manifest();
     manifest
@@ -196,13 +196,13 @@ fn test_column_not_found_hint_when_cte_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for CTE-nested stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for CTE-nested stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
+fn test_select_star_hint_when_derived_table_select_star_unresolved() {
     // Derived-table pattern: SELECT id FROM (SELECT * FROM ext) src
     // The outermost SELECT has no star; the star is inside a FROM subquery.
     let mut manifest = make_test_manifest();
@@ -224,13 +224,13 @@ fn test_column_not_found_hint_when_derived_table_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for derived-table stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for derived-table stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_when_join_select_star_unresolved() {
+fn test_select_star_hint_when_join_select_star_unresolved() {
     // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
     // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
     let mut manifest = make_test_manifest();
@@ -255,13 +255,13 @@ fn test_column_not_found_hint_when_join_select_star_unresolved() {
             .errors
             .iter()
             .any(|e| { e.hint.as_deref().unwrap_or("").contains("SELECT *") }),
-        "ColumnNotFound errors for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
+        "indeterminate-column diagnostics for JOIN-derived-table stars should include SELECT * hint; got: {:?}",
         result.errors
     );
 }
 
 #[test]
-fn test_column_not_found_hint_reaches_public_result_for_indeterminate_star() {
+fn test_select_star_hint_reaches_public_result_for_indeterminate_star() {
     let mut manifest = make_test_manifest();
     let node = manifest.nodes.get_mut("model.proj.stg_orders").unwrap();
     node.columns = ["c1"]

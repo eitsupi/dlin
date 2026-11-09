@@ -174,7 +174,7 @@ fn single_model_partial_keeps_known_sources_and_unresolved_reason() {
         "{:?}",
         result.errors
     );
-    // Only complete columns are counted as traced.
+    // Only complete columns are counted as value-complete.
     assert_eq!(result.value_complete_columns, 0);
     assert_eq!(result.listed_columns, 1);
     assert_eq!(result.slots().len(), 1);
@@ -475,7 +475,7 @@ fn dependent_model_failure_is_an_analysis_gap() {
 }
 
 #[test]
-fn unlisted_column_with_a_diagnostic_is_an_unresolved_column_gap() {
+fn yaml_only_column_of_a_dependent_is_neither_a_target_nor_a_gap() {
     // `ghost` is declared in YAML but the SQL does not produce it.
     let manifest = manifest(&[
         (

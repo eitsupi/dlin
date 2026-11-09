@@ -544,7 +544,7 @@ fn impact_from_an_ambiguous_name_reports_the_candidates_and_still_searches_by_na
         assert_eq!(impact.target.model, "top");
         assert!(matches!(
             &impact.path[0].from,
-            DependencyRef::UnlistedColumn { column, .. } if column == "x"
+            DependencyRef::UnidentifiedColumn { column, .. } if column == "x"
         ));
     }
 }
@@ -585,7 +585,7 @@ fn impact_from_an_unlisted_name_is_not_a_no_impact_conclusion() {
     assert_eq!(targets, [("leaf", "renamed"), ("top", "renamed")]);
     assert!(matches!(
         &report.confirmed[1].path[0].from,
-        DependencyRef::UnlistedColumn { model, .. } if model == "mid"
+        DependencyRef::UnidentifiedColumn { model, .. } if model == "mid"
     ));
     assert!(matches!(
         &report.confirmed[0].path[1].from,

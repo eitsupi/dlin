@@ -675,7 +675,7 @@ fn build_impact_graph(reports: &[ColumnImpactReport]) -> ColumnGraph {
             for edge in &ic.path {
                 let from = match &edge.from {
                     DependencyRef::Column(from) => graph.output_node(from, None),
-                    DependencyRef::UnlistedColumn {
+                    DependencyRef::UnidentifiedColumn {
                         unique_id,
                         model,
                         column,
