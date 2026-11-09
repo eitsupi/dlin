@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
 use crate::graph::column_lineage::{
-    ColumnImpactReport, DependencyKind, DependencyRef, ExplorationStatus, Ident,
-    ModelColumnLineage, ModelOutputRef, ModelPathHop, OutputShape, OutputSlotId, TraceGap,
-    TransformationType, UnexpandedStar, UnresolvedContribution,
+    ColumnImpactReport, DependencyKind, DependencyRef, ExplorationStatus, Ident, ImpactScope,
+    ModelColumnLineage, ModelOutputRef, ModelPathHop, OutputShape, OutputSlotId, TraceBoundary,
+    TraceBoundaryReason, TraceGap, TransformationType, UnexpandedStar, UnresolvedContribution,
 };
 
 /// Suffix appended to a node label that has an unresolved part.
@@ -13,6 +13,20 @@ const PARTIAL_MARK: &str = "(partial)";
 const GAP_NOTE_COLOR: &str = "#F5B7B1";
 /// Fill of the DOT nodes that stand for columns that are not listed.
 const UNLISTED_COLOR: &str = "#FFFFFF";
+const BOUNDARY_COLOR: &str = "#D5F5E3";
+const POSSIBLE_EDGE_COLOR: &str = "#C0392B";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoteStyle {
+    Gap,
+    Boundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EdgeStyle {
+    Confirmed,
+    Possible,
+}
 
 // ── Graph model shared by the Mermaid and DOT renderers ──────────────────────
 
@@ -73,9 +87,9 @@ struct NodeInfo {
 struct ColumnGraph {
     owners: BTreeSet<Owner>,
     nodes: BTreeMap<NodeKey, NodeInfo>,
-    edges: Vec<(NodeKey, NodeKey, String)>,
+    edges: Vec<(NodeKey, NodeKey, String, EdgeStyle)>,
     marks: BTreeMap<NodeKey, &'static str>,
-    notes: BTreeSet<String>,
+    notes: BTreeMap<String, NoteStyle>,
 }
 
 impl ColumnGraph {
@@ -150,7 +164,24 @@ impl ColumnGraph {
     }
 
     fn edge(&mut self, from: NodeKey, to: NodeKey, label: &str) {
-        self.edges.push((from, to, label.to_string()));
+        self.edges
+            .push((from, to, label.to_string(), EdgeStyle::Confirmed));
+    }
+
+    fn possible_edge(&mut self, from: NodeKey, to: NodeKey, label: &str) {
+        self.edges
+            .push((from, to, label.to_string(), EdgeStyle::Possible));
+    }
+
+    fn note(&mut self, text: String, style: NoteStyle) {
+        self.notes
+            .entry(text)
+            .and_modify(|current| {
+                if style == NoteStyle::Gap {
+                    *current = NoteStyle::Gap;
+                }
+            })
+            .or_insert(style);
     }
 
     fn label(&self, key: &NodeKey) -> String {
@@ -223,6 +254,9 @@ fn build_upstream_graph(reports: &[ModelColumnLineage]) -> ColumnGraph {
         let owner = Owner::model(&report.unique_id, &report.model);
         graph.owners.insert(owner.clone());
         let Some(output) = &report.output else {
+            for boundary in &report.boundaries {
+                graph.note(describe_boundary(boundary), boundary_note_style(boundary));
+            }
             continue;
         };
         for slot in &output.columns {
@@ -252,6 +286,9 @@ fn build_upstream_graph(reports: &[ModelColumnLineage]) -> ColumnGraph {
             }
         }
         graph.note_unlisted(&owner, &output.shape);
+        for boundary in &report.boundaries {
+            graph.note(describe_boundary(boundary), boundary_note_style(boundary));
+        }
     }
     graph
 }
@@ -284,6 +321,9 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
         )?;
 
         let Some(output) = &report.output else {
+            for boundary in &report.boundaries {
+                writeln!(w, "  boundary: {}", describe_boundary(boundary))?;
+            }
             continue;
         };
 
@@ -311,6 +351,11 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 };
                 writeln!(w, "  {:width$}  {}", name, note, width = col_width)?;
                 write_unresolved_lines(w, &indent, slot.lineage.unresolved())?;
+                for boundary in report.boundaries.iter().filter(|boundary| {
+                    boundary.root.unique_id == report.unique_id && boundary.root.slot == slot.id
+                }) {
+                    writeln!(w, "{}  boundary: {}", indent, describe_boundary(boundary))?;
+                }
                 continue;
             }
 
@@ -335,6 +380,11 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 )?;
             }
             write_unresolved_lines(w, &indent, slot.lineage.unresolved())?;
+            for boundary in report.boundaries.iter().filter(|boundary| {
+                boundary.root.unique_id == report.unique_id && boundary.root.slot == slot.id
+            }) {
+                writeln!(w, "{}  boundary: {}", indent, describe_boundary(boundary))?;
+            }
         }
         if let OutputShape::Open { unexpanded } = &output.shape {
             for star in unexpanded {
@@ -406,19 +456,30 @@ fn write_mermaid<W: Write>(w: &mut W, graph: &ColumnGraph) -> io::Result<()> {
         }
         writeln!(w, "  end")?;
     }
-    for (i, note) in graph.notes.iter().enumerate() {
+    for (i, (note, style)) in graph.notes.iter().enumerate() {
         writeln!(w, "  gap{i}[\"{}\"]", super::mermaid_escape(note))?;
+        let color = match style {
+            NoteStyle::Gap => GAP_NOTE_COLOR,
+            NoteStyle::Boundary => BOUNDARY_COLOR,
+        };
+        writeln!(w, "  style gap{i} fill:{color}")?;
     }
 
     writeln!(w)?;
 
     // Render edges (deduplicated)
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for (from, to, label) in &graph.edges {
+    for (from, to, label, style) in &graph.edges {
         let (from_owner, from_column) = ids.nodes[from];
         let (to_owner, to_column) = ids.nodes[to];
-        let edge_str =
-            format!("  n{from_owner}_{from_column} -->|\"{label}\"|n{to_owner}_{to_column}");
+        let edge_str = match style {
+            EdgeStyle::Confirmed => {
+                format!("  n{from_owner}_{from_column} -->|\"{label}\"|n{to_owner}_{to_column}")
+            }
+            EdgeStyle::Possible => format!(
+                "  n{from_owner}_{from_column} -.->|\"possible: {label}\"|n{to_owner}_{to_column}"
+            ),
+        };
         if seen.insert(edge_str.clone()) {
             writeln!(w, "{}", edge_str)?;
         }
@@ -444,19 +505,30 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
         if i > 0 {
             writeln!(w)?;
         }
-        let count = report.confirmed.len();
         let complete = report
             .exploration
             .iter()
             .all(|e| e.status == ExplorationStatus::Complete);
-        let plural = if count == 1 { "" } else { "s" };
-        let summary = match (count, complete) {
-            (0, true) => "no impact".to_string(),
-            (0, false) => "no confirmed impact; exploration incomplete".to_string(),
-            (n, true) => format!("{n} impacted column{plural}"),
-            (n, false) => format!("{n} impacted column{plural}; exploration incomplete"),
+        let summary = if report.proves_no_impact() {
+            "no impact".to_string()
+        } else {
+            let confirmed = report.confirmed.len();
+            let possible = report.possible.len();
+            let suffix = if complete {
+                ""
+            } else {
+                "; exploration incomplete"
+            };
+            format!("{confirmed} confirmed, {possible} possible{suffix}")
         };
-        writeln!(w, "{}.{} ({})", report.model, report.column, summary)?;
+        writeln!(
+            w,
+            "{}.{} ({}; scope: {})",
+            report.model,
+            report.column,
+            summary,
+            impact_scope_label(report.scope)
+        )?;
 
         let col_width = report
             .confirmed
@@ -490,13 +562,32 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             };
             writeln!(
                 w,
-                "  {:width$}  →  {} ({}{})",
+                "  {:width$}  →  {} ({}, {}{})",
                 ic.target.column,
                 ic.target.model,
                 transformation_label(&ic.transformation),
+                dependency_kind_label(ic.kind),
                 via_str,
                 width = col_width
             )?;
+        }
+        if !report.possible.is_empty() {
+            writeln!(w, "  possible:")?;
+            for impact in &report.possible {
+                let via_str = format_impact_via(&impact.path);
+                writeln!(
+                    w,
+                    "  {:width$}  ⇢  {} ({}, {})",
+                    impact.target.column,
+                    impact.target.model,
+                    transformation_label(&impact.transformation),
+                    dependency_kind_label(impact.kind),
+                    width = col_width
+                )?;
+                if !via_str.is_empty() {
+                    writeln!(w, "{}{}", " ".repeat(4 + col_width), via_str)?;
+                }
+            }
         }
         write_exploration_gaps(w, report)?;
     }
@@ -531,15 +622,33 @@ fn dependency_kind_label(kind: DependencyKind) -> &'static str {
     }
 }
 
+fn impact_scope_label(scope: ImpactScope) -> &'static str {
+    match scope {
+        ImpactScope::ValueOnly => "value only",
+        ImpactScope::ValueAndRow => "value and row",
+    }
+}
+
+fn format_impact_via(path: &[crate::graph::column_lineage::ImpactEdge]) -> String {
+    if path.len() <= 1 {
+        return String::new();
+    }
+    let parts = path[..path.len() - 1]
+        .iter()
+        .map(|edge| {
+            format!(
+                "{}.{} [{}]",
+                edge.to.model,
+                edge.to.column,
+                dependency_kind_label(edge.kind)
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("via {}", parts.join(" → "))
+}
+
 fn describe_gap(gap: &TraceGap) -> String {
     match gap {
-        TraceGap::Cycle { at } => format!("cycle reached at {}.{}", at.model, at.column),
-        TraceGap::AmbiguousModel { at, candidates } => format!(
-            "{}.{} matches multiple models: {}",
-            at.model,
-            at.column,
-            candidates.join(", ")
-        ),
         TraceGap::UnresolvedLineage { at, reasons } => {
             let reasons: Vec<String> = reasons.iter().map(ToString::to_string).collect();
             format!(
@@ -549,6 +658,13 @@ fn describe_gap(gap: &TraceGap) -> String {
                 reasons.join("; ")
             )
         }
+        TraceGap::Cycle { at } => format!("cycle reached at {}.{}", at.model, at.column),
+        TraceGap::AmbiguousModel { at, candidates } => format!(
+            "{}.{} matches multiple models: {}",
+            at.model,
+            at.column,
+            candidates.join(", ")
+        ),
         TraceGap::AnalysisFailed { model, error, .. } => {
             format!("analysis of {model} failed ({error:?})")
         }
@@ -602,20 +718,76 @@ fn describe_gap(gap: &TraceGap) -> String {
     }
 }
 
+fn describe_boundary(boundary: &TraceBoundary) -> String {
+    let reason = match boundary.reason {
+        TraceBoundaryReason::ExternalRelation => "external relation",
+        TraceBoundaryReason::SourceFree => "source-free output",
+        TraceBoundaryReason::AnalysisFailed => "analysis failed",
+        TraceBoundaryReason::Cycle => "cycle",
+        TraceBoundaryReason::MissingDefinition => "missing definition",
+        TraceBoundaryReason::AmbiguousModel => "ambiguous model",
+        TraceBoundaryReason::UnsupportedMaterialization => "unsupported materialization",
+    };
+    let root = if boundary.root == boundary.at {
+        String::new()
+    } else {
+        format!(" for {}.{}", boundary.root.model, boundary.root.column)
+    };
+    format!(
+        "{} at {}.{}{}: {} ({}, policy: {})",
+        reason,
+        boundary.at.model,
+        boundary.at.column,
+        root,
+        boundary.resource.name,
+        resource_kind_label(&boundary.resource.kind),
+        match boundary.resource.policy {
+            crate::graph::column_lineage::TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal => {
+                "snapshot unsupported; seed external"
+            }
+        }
+    )
+}
+
+fn resource_kind_label(kind: &crate::graph::column_lineage::TraceResourceKind) -> &'static str {
+    use crate::graph::column_lineage::TraceResourceKind;
+    match kind {
+        TraceResourceKind::Model => "model",
+        TraceResourceKind::Source => "source",
+        TraceResourceKind::Seed => "seed",
+        TraceResourceKind::Snapshot => "snapshot",
+        TraceResourceKind::PhysicalRelation => "physical relation",
+    }
+}
+
+fn boundary_note_style(boundary: &TraceBoundary) -> NoteStyle {
+    match boundary.reason {
+        TraceBoundaryReason::ExternalRelation | TraceBoundaryReason::SourceFree => {
+            NoteStyle::Boundary
+        }
+        TraceBoundaryReason::AnalysisFailed
+        | TraceBoundaryReason::Cycle
+        | TraceBoundaryReason::MissingDefinition
+        | TraceBoundaryReason::AmbiguousModel
+        | TraceBoundaryReason::UnsupportedMaterialization => NoteStyle::Gap,
+    }
+}
+
 /// Markers for the nodes where an impact search found a gap.
 fn gap_outputs(report: &ColumnImpactReport) -> Vec<&ModelOutputRef> {
     report
         .gaps()
         .into_iter()
         .filter_map(|(_, gap)| match gap {
-            TraceGap::UnresolvedLineage { at, .. }
-            | TraceGap::AmbiguousInput { at, .. }
-            | TraceGap::Cycle { at }
-            | TraceGap::AmbiguousModel { at, .. } => Some(at),
+            TraceGap::UnresolvedLineage { at, .. } | TraceGap::AmbiguousInput { at, .. } => {
+                Some(at)
+            }
             TraceGap::AnalysisFailed { .. }
             | TraceGap::OpenOutput { .. }
             | TraceGap::UnidentifiedInput { .. }
             | TraceGap::NotCollected { .. } => None,
+            TraceGap::Cycle { at } => Some(at),
+            TraceGap::AmbiguousModel { at, .. } => Some(at),
         })
         .collect()
 }
@@ -625,36 +797,51 @@ fn gap_outputs(report: &ColumnImpactReport) -> Vec<&ModelOutputRef> {
 /// output, and dependency kinds that were not collected. They are drawn as
 /// standalone note nodes so that an impact search that could not look
 /// somewhere never reads as "no impact".
-fn gap_notes(reports: &[ColumnImpactReport]) -> BTreeSet<String> {
-    let mut notes = BTreeSet::new();
+fn gap_notes(reports: &[ColumnImpactReport]) -> BTreeMap<String, NoteStyle> {
+    let mut notes = BTreeMap::new();
     for report in reports {
         for (_, gap) in report.gaps() {
             match gap {
-                TraceGap::Cycle { at } => {
-                    notes.insert(format!("{}.{}: cycle reached", at.model, at.column));
-                }
-                TraceGap::AmbiguousModel { at, candidates } => {
-                    notes.insert(format!(
-                        "{}.{} matches models {}",
-                        at.model,
-                        at.column,
-                        candidates.join(", ")
-                    ));
-                }
                 TraceGap::AnalysisFailed { model, .. } => {
-                    notes.insert(format!("{model}: analysis failed"));
+                    notes.insert(format!("{model}: analysis failed"), NoteStyle::Gap);
                 }
                 TraceGap::OpenOutput { model, .. } => {
-                    notes.insert(format!("{model}: unlisted columns may depend on the input"));
+                    notes.insert(
+                        format!("{model}: unlisted columns may depend on the input"),
+                        NoteStyle::Gap,
+                    );
                 }
                 TraceGap::UnidentifiedInput { model, column, .. } => {
-                    notes.insert(format!("{model}.{column}: input not identified"));
+                    notes.insert(
+                        format!("{model}.{column}: input not identified"),
+                        NoteStyle::Gap,
+                    );
                 }
                 TraceGap::NotCollected { kind } => {
-                    notes.insert(format!(
-                        "{} dependencies not collected",
-                        dependency_kind_label(*kind)
-                    ));
+                    notes.insert(
+                        format!(
+                            "{} dependencies not collected",
+                            dependency_kind_label(*kind)
+                        ),
+                        NoteStyle::Gap,
+                    );
+                }
+                TraceGap::Cycle { at } => {
+                    notes.insert(
+                        format!("cycle reached at {}.{}", at.model, at.column),
+                        NoteStyle::Gap,
+                    );
+                }
+                TraceGap::AmbiguousModel { at, candidates } => {
+                    notes.insert(
+                        format!(
+                            "{}.{} matches models {}",
+                            at.model,
+                            at.column,
+                            candidates.join(", ")
+                        ),
+                        NoteStyle::Gap,
+                    );
                 }
                 TraceGap::UnresolvedLineage { .. } | TraceGap::AmbiguousInput { .. } => {}
             }
@@ -701,7 +888,37 @@ fn build_impact_graph(reports: &[ColumnImpactReport]) -> ColumnGraph {
                     } => graph.named_node(Owner::model(unique_id, model), column),
                 };
                 let to = graph.output_node(&edge.to, Some(&edge.transformation));
-                graph.edge(from, to, transformation_label(&edge.transformation));
+                graph.edge(
+                    from,
+                    to,
+                    &format!(
+                        "{} {}",
+                        dependency_kind_label(edge.kind),
+                        transformation_label(&edge.transformation)
+                    ),
+                );
+            }
+        }
+        for impact in &report.possible {
+            for edge in &impact.path {
+                let from = match &edge.from {
+                    DependencyRef::Column(from) => graph.output_node(from, None),
+                    DependencyRef::UnidentifiedColumn {
+                        unique_id,
+                        model,
+                        column,
+                    } => graph.named_node(Owner::model(unique_id, model), column),
+                };
+                let to = graph.output_node(&edge.to, Some(&edge.transformation));
+                graph.possible_edge(
+                    from,
+                    to,
+                    &format!(
+                        "{} {}",
+                        dependency_kind_label(edge.kind),
+                        transformation_label(&edge.transformation)
+                    ),
+                );
             }
         }
     }
@@ -792,10 +1009,14 @@ fn write_dot_column_graph<W: Write>(w: &mut W, graph: &ColumnGraph) -> io::Resul
         }
         writeln!(w, "  }}")?;
     }
-    for (i, note) in graph.notes.iter().enumerate() {
+    for (i, (note, style)) in graph.notes.iter().enumerate() {
+        let color = match style {
+            NoteStyle::Gap => GAP_NOTE_COLOR,
+            NoteStyle::Boundary => BOUNDARY_COLOR,
+        };
         writeln!(
             w,
-            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{GAP_NOTE_COLOR}"];"#,
+            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{color}"];"#,
             dot_escape(note)
         )?;
     }
@@ -803,17 +1024,31 @@ fn write_dot_column_graph<W: Write>(w: &mut W, graph: &ColumnGraph) -> io::Resul
     writeln!(w)?;
 
     // Deduplicate and sort edges via a structured key; format only when writing.
-    let mut unique_edges: BTreeSet<(usize, usize, usize, usize, String)> = BTreeSet::new();
-    for (from, to, label) in &graph.edges {
+    let mut unique_edges: BTreeSet<(usize, usize, usize, usize, String, EdgeStyle)> =
+        BTreeSet::new();
+    for (from, to, label, style) in &graph.edges {
         let (midx_from, cidx_from) = ids.nodes[from];
         let (midx_to, cidx_to) = ids.nodes[to];
-        unique_edges.insert((midx_from, cidx_from, midx_to, cidx_to, dot_escape(label)));
+        unique_edges.insert((
+            midx_from,
+            cidx_from,
+            midx_to,
+            cidx_to,
+            dot_escape(label),
+            *style,
+        ));
     }
-    for (midx_from, cidx_from, midx_to, cidx_to, label) in &unique_edges {
-        writeln!(
-            w,
-            r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{label}"];"#
-        )?;
+    for (midx_from, cidx_from, midx_to, cidx_to, label, style) in &unique_edges {
+        match style {
+            EdgeStyle::Confirmed => writeln!(
+                w,
+                r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="{label}"];"#
+            )?,
+            EdgeStyle::Possible => writeln!(
+                w,
+                r#"  "n{midx_from}_{cidx_from}" -> "n{midx_to}_{cidx_to}" [label="possible: {label}", style=dashed, color="{POSSIBLE_EDGE_COLOR}"];"#
+            )?,
+        }
     }
 
     writeln!(w, "}}")?;

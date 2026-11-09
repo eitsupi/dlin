@@ -52,6 +52,10 @@ Output format (-o/--output):
                       once if it is listed; the star itself is not counted
     value_complete_columns  listed columns whose lineage is complete
     value_partial_columns   listed columns whose lineage is partial
+    boundaries[]     where tracing stopped, with a reason and resource kind;
+                     external relations and source-free outputs are valid ends,
+                     while failed, missing, ambiguous, cyclic and unsupported
+                     resources make lineage partial
     output            null when the SQL could not be analysed (see errors[]),
                       otherwise:
       shape           {\"kind\": \"closed\"}, or {\"kind\": \"open\", \"unexpanded\": [..]}
@@ -74,9 +78,7 @@ Output format (-o/--output):
           status      \"complete\" when every contributing source is known, or
                       \"partial\" when some contributions could not be resolved
           known[]     sources proven to contribute to the value
-            table     source model or raw table name; empty string (\"\") when the
-                      value originates from a literal (NULL, constant, UNNEST, etc.)
-                      — rendered as \"(literal)\" in plain/mermaid/dot outputs
+            table     source model or raw table name
             column    source column identifier ({\"value\", \"quote\"})
             model_path[]  intermediate hops traversed, each with the model output
                       (unique_id, model, slot, column) and its transformation
@@ -91,8 +93,9 @@ Output format (-o/--output):
                 model-level, missing-column, ambiguous, and parse diagnostics
                 are fatal (exit code 1).
   plain           human-readable text, one model per block
-  mermaid         Mermaid flowchart (LR) with subgraphs per model
-  dot             Graphviz DOT format; models as clusters, columns as nodes
+  mermaid         Mermaid flowchart (LR) with subgraphs per model and boundary notes
+  dot             Graphviz DOT format; models as clusters, columns as nodes,
+                  with distinct notes for legitimate ends and incomplete boundaries
                   color-coded by transformation type (pipe to `dot -Tsvg`)
 
 Exit codes:
@@ -158,12 +161,16 @@ Output format (-o/--output):
     scope             \"value_only\"
     confirmed[]       downstream columns that depend on the input through known
                       edges (target, kind, transformation, path of edges)
+    possible[]        concrete downstream targets that may depend on the input
+                      through finite unresolved paths; paths remain separate
     exploration[]     per dependency kind, \"complete\" or \"incomplete\" with the
                       gaps (unresolved lineage, failed analysis, a dependent
                       model with unlisted columns, ...) that may hide
-                      further impacts. An empty confirmed list means \"no impact\"
-                      only when the exploration is complete.
-  plain           human-readable text, one source column per block
+                      further impacts. \"no impact\" is shown only when there
+                      are no confirmed or possible targets and every requested
+                      dependency kind is complete.
+  plain           human-readable text with confirmed and possible counts, scope,
+                  per-kind gaps and concrete paths
   mermaid         Mermaid flowchart (LR) showing impacted columns across models
   dot             Graphviz DOT format; models as clusters, columns as nodes
                   color-coded by transformation type (pipe to `dot -Tsvg`)
