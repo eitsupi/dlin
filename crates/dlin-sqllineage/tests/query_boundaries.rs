@@ -41,6 +41,15 @@ fn every_clause_reads_the_relations_of_its_subqueries() {
             Dialect::Generic,
             "SELECT a FROM t ORDER BY (SELECT max(b) FROM u)",
         ),
+        // Clauses of a function that only choose or order its rows.
+        (
+            Dialect::PostgreSql,
+            "SELECT COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM u)) AS n FROM t",
+        ),
+        (
+            Dialect::PostgreSql,
+            "SELECT string_agg(a, ',' ORDER BY (SELECT max(b) FROM u)) AS s FROM t",
+        ),
         // Filters the old table walk did not look into.
         (
             Dialect::Generic,

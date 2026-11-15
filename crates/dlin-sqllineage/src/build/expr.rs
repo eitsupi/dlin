@@ -268,6 +268,31 @@ impl LineageBuilder {
                 for order in &func.within_group {
                     ancestors.extend(self.collect_ancestors(&order.expr));
                 }
+                // Those clauses still read the relations of their subqueries.
+                if let Some(filter) = &func.filter {
+                    self.scan_expr_for_tables(filter);
+                }
+                if let FunctionArguments::List(list) = &func.args {
+                    for clause in &list.clauses {
+                        match clause {
+                            ast::FunctionArgumentClause::Where(expr)
+                            | ast::FunctionArgumentClause::Limit(expr)
+                            | ast::FunctionArgumentClause::Having(ast::HavingBound(_, expr)) => {
+                                self.scan_expr_for_tables(expr);
+                            }
+                            ast::FunctionArgumentClause::OrderBy(orders) => {
+                                for order in orders {
+                                    self.scan_expr_for_tables(&order.expr);
+                                }
+                            }
+                            ast::FunctionArgumentClause::IgnoreOrRespectNulls(_)
+                            | ast::FunctionArgumentClause::OnOverflow(_)
+                            | ast::FunctionArgumentClause::Separator(_)
+                            | ast::FunctionArgumentClause::JsonNullClause(_)
+                            | ast::FunctionArgumentClause::JsonReturningClause(_) => {}
+                        }
+                    }
+                }
                 if let FunctionArguments::Subquery(q) = &func.args {
                     self.visit_subquery(ScopeKind::Subquery, q);
                 }
