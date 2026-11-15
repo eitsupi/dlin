@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::binding::{
     find_unqualified_binding, find_virtual_sources_for_column, lookup_virtual_binding,
-    resolve_input_reference, resolve_node,
+    resolve_input_reference, resolve_node, virtual_column_indexes,
 };
 use super::context::{EvalContext, EvalKey};
 use super::mapping::{known_empty_dependency, merge_transform};
@@ -91,11 +91,10 @@ pub(super) fn collect_leaf_origins(
     if let Some(origin) = super::binding::ambiguous_qualified_origin(node_id, graph) {
         return (Sources::one(origin), false, TransformKind::Direct);
     }
-    if let Some(result) = resolve_virtual_reference(node_id, cx) {
+    if let Some(result) = resolve_input_reference(node_id, cx) {
         return result;
     }
-
-    if let Some(result) = resolve_input_reference(node_id, cx) {
+    if let Some(result) = resolve_virtual_reference(node_id, cx) {
         return result;
     }
 
@@ -116,15 +115,14 @@ fn resolve_virtual_reference(
     cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Sources, bool, TransformKind)> {
     let graph = cx.graph;
-    let (name, binding, env) = match &graph.nodes[node_id] {
+    let (name, binding, env, virtual_alias) = match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
             env,
             binding,
-        } => (
-            name,
-            binding
+        } => {
+            let binding = binding
                 .clone()
                 .or_else(|| {
                     qualifier.as_deref().and_then(|parts| match parts {
@@ -132,15 +130,20 @@ fn resolve_virtual_reference(
                         _ => None,
                     })
                 })
-                .or_else(|| lookup_virtual_binding(*env, name, graph)),
-            *env,
-        ),
+                .or_else(|| lookup_virtual_binding(*env, name, graph));
+            let virtual_alias = match (qualifier.as_deref(), binding.as_ref()) {
+                (Some([alias]), Some(Binding::VirtualSource(_))) => Some(alias),
+                _ => None,
+            };
+            (name, binding, *env, virtual_alias)
+        }
         RawNode::Unqualified { name, env, binding } => (
             name,
             binding
                 .clone()
                 .or_else(|| lookup_virtual_binding(*env, name, graph)),
             *env,
+            None,
         ),
         _ => return None,
     };
@@ -162,21 +165,39 @@ fn resolve_virtual_reference(
             }
         },
     };
-    resolve_virtual_column_sources(name, source, cx)
+    resolve_virtual_column_sources(name, source, virtual_alias, cx)
 }
 
 fn resolve_virtual_column_sources(
     name: &Ident,
     source: VirtualSourceId,
+    virtual_alias: Option<&Ident>,
     cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Sources, bool, TransformKind)> {
     let graph = cx.graph;
-    let column = graph
-        .scopes
-        .virtual_source(source)
-        .columns
-        .iter()
-        .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
+    let mut indexes = virtual_column_indexes(name, source, graph);
+    if indexes.is_empty()
+        && let Some(alias) = virtual_alias
+    {
+        let alias_columns = virtual_column_indexes(alias, source, graph);
+        if let [index] = alias_columns.as_slice() {
+            // `item.x` reads a field of the element produced by an implicit
+            // UNNEST alias `item`. Retain that array expression as the parent
+            // dependency while leaving explicit `u(x).missing` unresolved.
+            indexes.push(*index);
+        }
+    }
+    let [index] = indexes.as_slice() else {
+        return Some((
+            Sources::one(ColumnOrigin::Ambiguous {
+                column: name.clone(),
+                candidates: Vec::new(),
+            }),
+            false,
+            TransformKind::Direct,
+        ));
+    };
+    let column = graph.scopes.virtual_source(source).columns.get(*index)?;
     let mut origins = Sources::default();
     for &dependency in &column.dependencies {
         let (dependency_origins, _, _) = collect_leaf_origins(dependency, cx, &mut HashSet::new());
@@ -202,12 +223,17 @@ pub(super) fn virtual_column_origin(
     source: VirtualSourceId,
     graph: &RawGraph,
 ) -> Option<Origin> {
-    let column = graph
-        .scopes
-        .virtual_source(source)
-        .columns
-        .iter()
-        .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
+    let indexes = virtual_column_indexes(name, source, graph);
+    let [index] = indexes.as_slice() else {
+        return (!indexes.is_empty()).then(|| {
+            ColumnOrigin::Ambiguous {
+                column: name.clone(),
+                candidates: Vec::new(),
+            }
+            .into()
+        });
+    };
+    let column = graph.scopes.virtual_source(source).columns.get(*index)?;
     match column.state {
         VirtualColumnState::KnownEmpty => None,
         VirtualColumnState::Unknown => Some(

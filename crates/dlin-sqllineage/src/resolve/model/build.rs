@@ -318,6 +318,50 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
+        if let Some(aliases) = graph.scopes.output_aliases(scope)
+            && !aliases.is_empty()
+        {
+            let width_known = !graph.scopes.has_unknown_output_width(scope);
+            let count_matches = elements.len() == aliases.len();
+            let positions_known = elements.iter().enumerate().all(|(index, element)| {
+                matches!(element, OutputElement::Column(slot) if slot.ordinal == Some(index))
+            });
+            let can_apply = width_known && count_matches && positions_known;
+            if can_apply {
+                for (element, alias) in elements.iter_mut().zip(aliases) {
+                    let OutputElement::Column(slot) = element else {
+                        unreachable!("aliasable output has only listed columns")
+                    };
+                    slot.name = alias.clone();
+                    slot.output_name = OutputName::Explicit(alias.clone());
+                }
+            } else {
+                // A positional alias list cannot be attached to the actual
+                // outputs without knowing their complete width. Do not map by
+                // a name or a partial prefix; expose an unresolved shape.
+                let reason = if !width_known {
+                    "column alias output shape unknown"
+                } else if !count_matches {
+                    "column alias count mismatch"
+                } else {
+                    "column alias order unknown"
+                };
+                let mut unknown = UnknownSegment::opaque(OpaqueReason::Unsupported(reason));
+                unknown.domain.allowed = Some(aliases.to_vec());
+                unknown.schema_relations = schema
+                    .relations()
+                    .map(|table| crate::Relation {
+                        catalog: table.catalog.clone(),
+                        schema: table.schema.clone(),
+                        name: table.table.clone(),
+                    })
+                    .collect();
+                unknown.structure.extend(&schema);
+                elements = vec![OutputElement::Unknown(unknown)];
+                source = None;
+                set_operation_source = None;
+            }
+        }
         let forwarded = self.publish(scope, publication, &mut elements);
         let mut model = OutputModel::new(
             elements,
@@ -616,6 +660,7 @@ fn relation_unknown(
         ranges: ranges.clone(),
         domain: NameDomain {
             filters: Vec::new(),
+            allowed: None,
             removed: listed_names.to_vec(),
         },
         structure: Evidence::relation(table),

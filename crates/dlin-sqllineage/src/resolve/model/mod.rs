@@ -141,13 +141,20 @@ pub(super) struct StarFilter {
 #[derive(Debug, Clone, Default)]
 pub(super) struct NameDomain {
     filters: Vec<(Rc<StarFilter>, Rc<[RangeRef]>)>,
+    /// When an alias list cannot be matched to a complete width, only its
+    /// declared names can be attributed to the unresolved output.
+    allowed: Option<Vec<Ident>>,
     /// Names the segment no longer publishes: merged by USING or renamed away.
     removed: Vec<Ident>,
 }
 
 impl NameDomain {
     pub(super) fn admits(&self, name: &Ident, dialect: Dialect) -> bool {
-        !self
+        self.allowed.as_ref().is_none_or(|allowed| {
+            allowed
+                .iter()
+                .any(|candidate| same_column_name(candidate, name, dialect))
+        }) && !self
             .removed
             .iter()
             .any(|removed| same_column_name(removed, name, dialect))

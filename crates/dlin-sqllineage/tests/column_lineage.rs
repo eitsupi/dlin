@@ -1,7 +1,9 @@
 mod common;
 
-use common::{analyze_one, concrete_sources, find_mapping, table};
-use dlin_sqllineage::{Lineage, Transform, Unresolved};
+use common::{
+    KnownTables, analyze_one, analyze_with_catalog, concrete_sources, find_mapping, table,
+};
+use dlin_sqllineage::{Dialect, Lineage, Transform, Unresolved};
 
 #[test]
 fn select_columns() {
@@ -169,7 +171,11 @@ fn unnest_source_free_alias_has_no_physical_sources() {
 
 #[test]
 fn unnest_alias_depends_on_array_column() {
-    let result = analyze_one("SELECT item FROM base, UNNEST(base.items_array) AS item");
+    let result = analyze_with_catalog(
+        "SELECT item FROM base, UNNEST(base.items_array) AS item",
+        Dialect::Generic,
+        &KnownTables(&[("base", &["items_array"])]),
+    );
     let mapping = find_mapping(&result.output.columns, "item");
     assert_eq!(
         concrete_sources(mapping),
@@ -190,7 +196,11 @@ fn unnest_unresolved_array_is_ambiguous_not_alias_column() {
 
 #[test]
 fn unnest_unqualified_array_column_keeps_prior_table_binding() {
-    let result = analyze_one("SELECT item FROM base, UNNEST(items_array) AS item");
+    let result = analyze_with_catalog(
+        "SELECT item FROM base, UNNEST(items_array) AS item",
+        Dialect::Generic,
+        &KnownTables(&[("base", &["items_array"])]),
+    );
     assert_eq!(
         concrete_sources(find_mapping(&result.output.columns, "item")),
         vec![("base".into(), "items_array".into())]
@@ -219,13 +229,20 @@ fn unqualified_identifier_does_not_capture_relation_alias() {
 
 #[test]
 fn duplicate_virtual_slots_are_ambiguous_but_qualified_slots_resolve() {
-    let result =
-        analyze_one("SELECT x FROM base, UNNEST(base.first) AS u(x), UNNEST(base.second) AS v(x)");
-    assert!(matches!(
-        &find_mapping(&result.output.columns, "x").lineage,
-        Lineage::Partial { unresolved, .. }
-            if matches!(&unresolved[..], [Unresolved::Unbound { column }] if column.value == "x")
-    ));
+    let result = analyze_with_catalog(
+        "SELECT x FROM base, UNNEST(base.first) AS u(x), UNNEST(base.second) AS v(x)",
+        Dialect::Generic,
+        &KnownTables(&[("base", &["first", "second"])]),
+    );
+    assert!(
+        matches!(
+            &find_mapping(&result.output.columns, "x").lineage,
+            Lineage::Partial { unresolved, .. }
+                if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }] if column.value == "x" && candidates.is_empty())
+        ),
+        "unexpected lineage: {:?}",
+        find_mapping(&result.output.columns, "x").lineage
+    );
 
     let result = analyze_one(
         "SELECT u.x, v.x FROM base, UNNEST(base.first) AS u(x), UNNEST(base.second) AS v(x)",
@@ -242,7 +259,11 @@ fn duplicate_virtual_slots_are_ambiguous_but_qualified_slots_resolve() {
 
 #[test]
 fn unnest_alias_columns_keep_array_expression_ordinals() {
-    let result = analyze_one("SELECT x, y FROM base, UNNEST(base.first, base.second) AS u(x, y)");
+    let result = analyze_with_catalog(
+        "SELECT x, y FROM base, UNNEST(base.first, base.second) AS u(x, y)",
+        Dialect::Generic,
+        &KnownTables(&[("base", &["first", "second"])]),
+    );
     assert_eq!(
         concrete_sources(find_mapping(&result.output.columns, "x")),
         vec![("base".into(), "first".into())]

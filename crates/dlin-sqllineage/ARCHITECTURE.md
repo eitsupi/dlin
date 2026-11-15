@@ -453,6 +453,27 @@ unresolved are never turned into an empty set. An argument built only from
 constants, such as `UNNEST([1, 2])`, has no input dependency, and `C[]` is the
 correct result for it.
 
+Scalar subqueries, `ARRAY(SELECT ...)` and the right operand of `IN` share
+the same value-input path. This path requires one explicitly projected output;
+a multi-column projection or a star is unresolved, rather than source-free.
+`EXISTS` still contributes no projected value dependency.
+
+CTE and derived-table column alias lists rename outputs by position, before
+readers resolve names. An alias list whose correspondence cannot be established
+does not guess the original names or positions: affected values are unresolved.
+
+Reading a field of an unnested element retains the dependency on its parent
+argument, such as `t.items` for `item.x`. Nested fields are not separate physical
+sources. DuckDB's `UNNEST` in a FROM clause is a virtual source too, including
+when its argument contains only constants; the function is never a relation in
+`read` or the qualifier of an unexpanded physical star. Virtual-source names
+follow the same scope boundaries and shadowing rules as other input names.
+An unqualified virtual column competes with the other providers in its FROM
+clause. If a physical relation has no exhaustive schema, it may provide the
+same name too; selecting the virtual column by its qualifier avoids that
+ambiguity. An inner clause that proves it provides a name takes precedence over
+an outer virtual column.
+
 Cases: Z3, Z4, U1, U2, U3, U4, R1, R2, R3, R4, V1, V2.
 
 ## 9. Invariants and their preconditions

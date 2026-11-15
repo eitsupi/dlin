@@ -377,15 +377,16 @@ isolated_test!(
 
 #[test]
 fn appending_an_unrelated_from_item_keeps_an_unnest_argument_meaning() {
+    let catalog = KnownTables(&[("base", &["items"]), ("other", &["items"])]);
     for dialect in [Dialect::Generic, Dialect::PostgreSql, Dialect::BigQuery] {
-        let base = analyze(
+        let base = analyze_one_with(
             "SELECT item FROM base, UNNEST(items) AS item",
             dialect,
-            false,
+            Some(&catalog),
         );
         for appended in [", other", ", other AS o"] {
             let sql = format!("SELECT item FROM base, UNNEST(items) AS item{appended}");
-            let longer = analyze(&sql, dialect, false);
+            let longer = analyze_one_with(&sql, dialect, Some(&catalog));
             assert_eq!(
                 base.output.columns[0].lineage, longer.output.columns[0].lineage,
                 "{dialect:?}: {sql}"

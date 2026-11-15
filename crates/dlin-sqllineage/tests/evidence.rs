@@ -376,3 +376,67 @@ fn a_natural_join_left_open_by_a_partial_schema_relies_on_that_schema() {
         assert!(x.evidence.lineage.contains(&ev("b")), "{join}");
     }
 }
+
+#[test]
+fn expression_subquery_inputs_keep_each_sources_evidence() {
+    let catalog = Schemas::new()
+        .exhaustive("a", &["x"])
+        .exhaustive("b", &["y"]);
+    for sql in [
+        "SELECT a.x IN (SELECT b.y FROM b) AS p FROM a",
+        "SELECT ARRAY(SELECT a.x FROM a) AS p",
+    ] {
+        let result = Analyzer::new(Dialect::BigQuery)
+            .with_catalog(&catalog)
+            .analyze(sql)
+            .expect("SQL parses")
+            .into_single()
+            .expect("one statement");
+        let value = &result.output.columns[0];
+        let expected = if sql.contains(" IN ") {
+            vec![source("a", "x"), source("b", "y")]
+        } else {
+            vec![source("a", "x")]
+        };
+        assert_eq!(value.lineage, Lineage::Complete(expected.clone()), "{sql}");
+        for origin in expected {
+            assert_eq!(
+                known_evidence(&value.evidence, &origin),
+                evs(&[origin.relation.name.value.as_str()]),
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[test]
+fn positional_cte_aliases_preserve_catalog_evidence() {
+    let catalog = Schemas::new().exhaustive("a", &["x", "y"]);
+    let result = analyze(
+        "WITH c(y, x) AS (SELECT * FROM a) SELECT x FROM c",
+        &catalog,
+    );
+    let value = column(&result, "x");
+    assert_eq!(value.lineage, Lineage::Complete(vec![source("a", "y")]));
+    assert_eq!(
+        known_evidence(&value.evidence, &source("a", "y")),
+        evs(&["a"])
+    );
+}
+
+#[test]
+fn unnested_field_keeps_the_arguments_catalog_evidence() {
+    let catalog = Schemas::new().exhaustive("t", &["items"]);
+    let result = Analyzer::new(Dialect::BigQuery)
+        .with_catalog(&catalog)
+        .analyze("SELECT item.x FROM t CROSS JOIN UNNEST(t.items) AS item")
+        .expect("SQL parses")
+        .into_single()
+        .expect("one statement");
+    let value = &result.output.columns[0];
+    assert_eq!(value.lineage, Lineage::Complete(vec![source("t", "items")]));
+    assert_eq!(
+        known_evidence(&value.evidence, &source("t", "items")),
+        evs(&["t"])
+    );
+}

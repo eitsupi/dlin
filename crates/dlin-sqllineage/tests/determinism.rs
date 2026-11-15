@@ -4,7 +4,7 @@
 //! changed from run to run. Every hash map is built with its own random seed,
 //! so repeating the analysis inside one process exposes the problem.
 
-use common::{output_name, table};
+use common::{concrete_sources, output_name, table};
 use dlin_sqllineage::{
     Analyzer, Candidate, Dialect, Ident, Lineage, Relation, Shape, StatementAnalysis, Unresolved,
 };
@@ -167,8 +167,12 @@ fn unnest_join_output_is_stable() {
     );
     assert_eq!(result.output.columns.len(), 2);
     let result = stable("SELECT * FROM t, UNNEST(t.arr) AS u(x)", Dialect::DuckDb);
-    assert!(result.output.columns.is_empty());
-    assert_eq!(wildcard_tables(&result), tables(&["t", "UNNEST"]));
+    assert_eq!(result.output.columns.len(), 1);
+    assert_eq!(
+        concrete_sources(&result.output.columns[0]),
+        vec![("t".into(), "arr".into())]
+    );
+    assert_eq!(wildcard_tables(&result), tables(&["t"]));
 }
 
 #[test]

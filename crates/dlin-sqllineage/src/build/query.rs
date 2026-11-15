@@ -23,6 +23,15 @@ impl LineageBuilder {
         scope
     }
 
+    /// Register positional names declared by a CTE or derived table. The
+    /// resolver applies them after catalog expansion, tying aliases to output
+    /// positions rather than source names.
+    pub(crate) fn set_scope_output_aliases(&mut self, scope: ScopeId, aliases: Vec<crate::Ident>) {
+        if !aliases.is_empty() {
+            self.graph.scopes.set_output_aliases(scope, aliases);
+        }
+    }
+
     /// Target-specific VALUES/TABLE handling follows only the query body and
     /// its set-operation branches; nested queries use ordinary analysis.
     pub(crate) fn visit_query_with_target(&mut self, query: &Query, target_values: bool) {
@@ -59,6 +68,17 @@ impl LineageBuilder {
                 });
 
                 self.visit_query(&cte.query);
+
+                if !cte.alias.columns.is_empty() {
+                    self.set_scope_output_aliases(
+                        cte_scope,
+                        cte.alias
+                            .columns
+                            .iter()
+                            .map(|column| crate::Ident::from_ast(&column.name))
+                            .collect(),
+                    );
+                }
 
                 self.defining_ctes.pop();
                 self.pop_scope();

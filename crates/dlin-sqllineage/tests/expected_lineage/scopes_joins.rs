@@ -89,10 +89,18 @@ pub fn cases() -> Vec<Case> {
         Dialect::Generic,
         vec![col(0, u("flag"), vec![])],
     ));
-    cases.push(scope(
-        "in_subquery_keeps_only_left_value_source",
+    cases.push(Case::new(
+        "in_subquery_keeps_both_compared_values",
         "SELECT a.id IN (SELECT b.id FROM b WHERE b.amount > 0) AS flag FROM a",
-        &[("flag", "a", "id")],
+        Dialect::Generic,
+        vec![col(
+            0,
+            u("flag"),
+            vec![
+                source(relation("a"), u("id")),
+                source(relation("b"), u("id")),
+            ],
+        )],
     ));
 
     // A merged INNER/FULL key can take values from both sides; LEFT/RIGHT
