@@ -316,6 +316,7 @@ fn scalar_value_sources_and_transforms_follow_projection_paths() {
                 name: OutputName::Explicit(u("value")),
                 lineage: complete(case.sources),
                 transform: case.transform,
+                evidence: Default::default(),
             }],
             "{}",
             case.name

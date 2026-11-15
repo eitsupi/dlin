@@ -13,24 +13,24 @@ use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, VirtualColumnState, VirtualSourceId};
-use crate::types::{ColumnOrigin, TransformKind};
+use crate::types::{ColumnOrigin, Origin, Sources, TransformKind};
 
 pub(super) fn collect_output_sources(
     node_id: NodeId,
     cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
+) -> (Sources, Vec<EdgeKind>, bool, TransformKind) {
     // TODO: tell "already visited by this walk" apart from "currently being
     // evaluated" (checked below); a cycle must not become an empty source set.
     if !visited.insert(node_id) {
-        return (vec![], vec![], false, TransformKind::Direct);
+        return (Sources::default(), vec![], false, TransformKind::Direct);
     }
     // Reaching a node that is already being collected, from a walk that does
     // not share `visited`, means its sources depend on themselves.
     let key = EvalKey::Node(node_id);
     if !cx.enter(key) {
         return (
-            vec![indeterminate_origin(cx.graph, node_id)],
+            Sources::one(indeterminate_origin(cx.graph, node_id)),
             vec![],
             false,
             TransformKind::Direct,
@@ -39,7 +39,7 @@ pub(super) fn collect_output_sources(
     let graph = cx.graph;
     let incoming = cx.incoming;
 
-    let mut sources = Vec::new();
+    let mut sources = Sources::default();
     let mut kinds = Vec::new();
     let mut has_back = false;
     let mut inherited_transform = TransformKind::Direct;
@@ -51,7 +51,7 @@ pub(super) fn collect_output_sources(
             continue;
         }
         let (sub_sources, sub_back, sub_transform) = collect_leaf_origins(edge.from, cx, visited);
-        for _ in &sub_sources {
+        for _ in &sub_sources.origins {
             kinds.push(edge.kind.clone());
         }
         sources.extend(sub_sources);
@@ -84,10 +84,10 @@ pub(super) fn collect_leaf_origins(
     node_id: NodeId,
     cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
-) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+) -> (Sources, bool, TransformKind) {
     let graph = cx.graph;
     if let Some(origin) = super::binding::ambiguous_qualified_origin(node_id, graph) {
-        return (vec![origin], false, TransformKind::Direct);
+        return (Sources::one(origin), false, TransformKind::Direct);
     }
     if let Some(result) = resolve_virtual_reference(node_id, cx) {
         return result;
@@ -105,18 +105,14 @@ pub(super) fn collect_leaf_origins(
         let (sources, _, has_back, transform) = collect_output_sources(node_id, cx, visited);
         (sources, has_back, transform)
     } else {
-        let origin = resolve_node(node_id, cx);
-        match origin {
-            Some(o) => (vec![o], false, TransformKind::Direct),
-            None => (vec![], false, TransformKind::Direct),
-        }
+        (resolve_node(node_id, cx), false, TransformKind::Direct)
     }
 }
 
 fn resolve_virtual_reference(
     node_id: NodeId,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+) -> Option<(Sources, bool, TransformKind)> {
     let graph = cx.graph;
     let (name, binding, env) = match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -154,10 +150,10 @@ fn resolve_virtual_reference(
             [] => return None,
             _ => {
                 return Some((
-                    vec![ColumnOrigin::Ambiguous {
+                    Sources::one(ColumnOrigin::Ambiguous {
                         column: name.clone(),
                         candidates: Vec::new(),
-                    }],
+                    }),
                     false,
                     TransformKind::Direct,
                 ));
@@ -171,7 +167,7 @@ fn resolve_virtual_column_sources(
     name: &Ident,
     source: VirtualSourceId,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+) -> Option<(Sources, bool, TransformKind)> {
     let graph = cx.graph;
     let column = graph
         .scopes
@@ -179,7 +175,7 @@ fn resolve_virtual_column_sources(
         .columns
         .iter()
         .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
-    let mut origins = Vec::new();
+    let mut origins = Sources::default();
     for &dependency in &column.dependencies {
         let (dependency_origins, _, _) = collect_leaf_origins(dependency, cx, &mut HashSet::new());
         origins.extend(dependency_origins);
@@ -203,7 +199,7 @@ pub(super) fn virtual_column_origin(
     name: &Ident,
     source: VirtualSourceId,
     graph: &RawGraph,
-) -> Option<ColumnOrigin> {
+) -> Option<Origin> {
     let column = graph
         .scopes
         .virtual_source(source)
@@ -212,10 +208,13 @@ pub(super) fn virtual_column_origin(
         .find(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))?;
     match column.state {
         VirtualColumnState::KnownEmpty => None,
-        VirtualColumnState::Unknown => Some(ColumnOrigin::Ambiguous {
-            column: column.name.clone(),
-            candidates: Vec::new(),
-        }),
+        VirtualColumnState::Unknown => Some(
+            ColumnOrigin::Ambiguous {
+                column: column.name.clone(),
+                candidates: Vec::new(),
+            }
+            .into(),
+        ),
     }
 }
 
@@ -225,7 +224,7 @@ pub(super) fn virtual_column_origin(
 fn resolve_named_scope_reference(
     node_id: NodeId,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+) -> Option<(Sources, bool, TransformKind)> {
     let graph = cx.graph;
     let (name, qualifier, env) = match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -261,16 +260,26 @@ fn resolve_named_scope_reference(
     named_scope_sources(name, target_scope, cx)
 }
 
-pub(super) fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {
-    let mut flattened = Vec::new();
+/// Unwrap the recursive markers of a set operation's column. What a marker
+/// itself relied on stays with the value.
+pub(super) fn flatten_mapping_sources(sources: &Sources) -> (Sources, bool) {
+    let mut flattened = Sources {
+        origins: Vec::new(),
+        evidence: sources.evidence.clone(),
+    };
     let mut has_back = false;
-    for source in sources {
-        match source {
+    for source in &sources.origins {
+        match &source.kind {
             ColumnOrigin::Recursive { base_sources } => {
-                flattened.extend(base_sources.clone());
+                flattened.origins.extend(
+                    base_sources
+                        .iter()
+                        .map(|base| base.clone().with(&source.evidence)),
+                );
+                flattened.evidence.extend(&source.evidence);
                 has_back = true;
             }
-            source => flattened.push(source.clone()),
+            _ => flattened.origins.push(source.clone()),
         }
     }
     (flattened, has_back)

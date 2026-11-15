@@ -110,8 +110,11 @@ fn a_recursive_marker_is_in_the_mappings_but_not_in_what_a_reader_sees() {
         let mappings = projection_mappings(projection, &model, ev.cx);
         assert_eq!(mappings.len(), 1);
         assert!(matches!(
-            mappings[0].sources.as_slice(),
-            [ColumnOrigin::Recursive { .. }]
+            mappings[0].sources.origins.as_slice(),
+            [crate::types::Origin {
+                kind: ColumnOrigin::Recursive { .. },
+                ..
+            }]
         ));
         let model = ev.scope_model(projection);
         let OutputElement::Column(slot) = &model.elements[0] else {
@@ -122,8 +125,9 @@ fn a_recursive_marker_is_in_the_mappings_but_not_in_what_a_reader_sees() {
         assert!(!has_back);
         assert!(
             sources
+                .origins
                 .iter()
-                .all(|source| !matches!(source, ColumnOrigin::Recursive { .. }))
+                .all(|source| !matches!(source.kind, ColumnOrigin::Recursive { .. }))
         );
     });
 }

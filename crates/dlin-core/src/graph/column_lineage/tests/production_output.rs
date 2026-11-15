@@ -397,6 +397,7 @@ fn analysis_findings_that_are_not_errors_do_not_reject_the_model() {
         output: Output {
             columns: Vec::new(),
             shape: Shape::Closed,
+            evidence: Vec::new(),
         },
         has_unresolved_stars: false,
         diagnostics: vec![Diagnostic {

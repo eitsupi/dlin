@@ -16,7 +16,7 @@ use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
 use crate::catalog::ColumnPresence;
 use crate::graph::scope::{Binding, BindingEnv, MergedColumns, ScopeId};
 use crate::keys::table_key;
-use crate::types::TableRef;
+use crate::types::{Evidence, TableRef};
 use crate::{Candidate, Dialect, Ident, Relation};
 
 use super::super::target::{effective_bindings, same_column_name};
@@ -389,44 +389,64 @@ impl OutputModels<'_, '_, '_> {
     /// clauses around provide. When no clause provides the name at all, it is
     /// the innermost clause's: a clause with a single relation answers for any
     /// name.
+    ///
+    /// The answer relies on the schemas of every clause that was weighed,
+    /// including those found not to publish the name.
     pub(in crate::resolve) fn lookup_input(
         &mut self,
         env: BindingEnv,
         name: &Ident,
-    ) -> InputLookup {
+    ) -> (InputLookup, Evidence) {
         let clauses = self.graph.scopes.clause_envs(env);
         let Some((&first, rest)) = clauses.split_first() else {
-            return InputLookup::Absent;
+            return (InputLookup::Absent, Evidence::default());
         };
-        let (standing, fallback) = self.clause_standing(first, name);
-        let walk = self.settle(standing, rest, name);
-        walk.into_lookup().unwrap_or(fallback)
+        let mut evidence = Evidence::default();
+        let (standing, fallback) = self.clause_standing(first, name, &mut evidence);
+        let walk = self.settle(standing, rest, name, &mut evidence);
+        (walk.into_lookup().unwrap_or(fallback), evidence)
     }
 
-    fn settle(&mut self, standing: Standing, farther: &[BindingEnv], name: &Ident) -> Walk {
+    fn settle(
+        &mut self,
+        standing: Standing,
+        farther: &[BindingEnv],
+        name: &Ident,
+        evidence: &mut Evidence,
+    ) -> Walk {
         match standing {
             Standing::Present(lookup) => Walk::Present(lookup),
-            Standing::Absent => self.walk_outward(farther, name),
+            Standing::Absent => self.walk_outward(farther, name, evidence),
             Standing::Possible { answer, candidates } => {
-                let outer = self.walk_outward(farther, name);
+                let outer = self.walk_outward(farther, name, evidence);
                 Walk::behind(answer, candidates, outer)
             }
         }
     }
 
-    fn walk_outward(&mut self, clauses: &[BindingEnv], name: &Ident) -> Walk {
+    fn walk_outward(
+        &mut self,
+        clauses: &[BindingEnv],
+        name: &Ident,
+        evidence: &mut Evidence,
+    ) -> Walk {
         let Some((&next, rest)) = clauses.split_first() else {
             return Walk::Absent;
         };
-        let (standing, _) = self.clause_standing(next, name);
-        self.settle(standing, rest, name)
+        let (standing, _) = self.clause_standing(next, name, evidence);
+        self.settle(standing, rest, name, evidence)
     }
 
     /// What the FROM clause `env` says about `name`, with the answer the name
     /// gets from that clause when nothing provides it anywhere. A clause with
     /// a single relation needs no model of its own: the name is that
     /// relation's.
-    fn clause_standing(&mut self, env: BindingEnv, name: &Ident) -> (Standing, InputLookup) {
+    fn clause_standing(
+        &mut self,
+        env: BindingEnv,
+        name: &Ident,
+        evidence: &mut Evidence,
+    ) -> (Standing, InputLookup) {
         let bindings = effective_bindings(env, self.graph);
         match bindings.as_slice() {
             [] => (Standing::Absent, InputLookup::Absent),
@@ -437,6 +457,7 @@ impl OutputModels<'_, '_, '_> {
                     binding: binding.clone(),
                 };
                 let single = InputLookup::single(&range);
+                evidence.extend(&self.binding_schema(binding));
                 let standing = match binding {
                     Binding::Table(table) => {
                         match self
@@ -484,12 +505,16 @@ impl OutputModels<'_, '_, '_> {
                 };
                 (standing, single)
             }
-            _ => (
-                self.input(env).standing(name, |provider| {
-                    provider.has_by_name_reason(self.graph, &self.store.arena)
-                }),
-                InputLookup::Absent,
-            ),
+            _ => {
+                let input = self.input(env);
+                evidence.extend(&input.model.schema);
+                (
+                    input.standing(name, |provider| {
+                        provider.has_by_name_reason(self.graph, &self.store.arena)
+                    }),
+                    InputLookup::Absent,
+                )
+            }
         }
     }
 
@@ -536,13 +561,17 @@ impl OutputModels<'_, '_, '_> {
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
         let mut groups = Vec::new();
+        let mut schema = Evidence::default();
         for range in &ranges {
             if let Some(model) = self.binding_model(&range.binding) {
                 reads.push((range.index, model));
             }
+            let group_schema = self.binding_schema(&range.binding);
+            schema.extend(&group_schema);
             groups.push(Group {
                 members: vec![range.name.clone()],
                 elements: self.binding_part(range),
+                schema: group_schema,
             });
         }
         let merges = graph.scopes.join_merges(env);
@@ -573,11 +602,13 @@ impl OutputModels<'_, '_, '_> {
         let mut anonymous = Vec::new();
         for child in graph.scopes.anonymous_derived(env) {
             let model = self.scope(child);
+            schema.extend(&model.schema);
             anonymous.extend(forward_scope(child, &model, &Rc::from([]), None));
         }
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;
         model.reads = reads;
+        model.schema = schema;
         InputModel { model, anonymous }
     }
 

@@ -19,7 +19,7 @@ use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence};
-use crate::types::TableRef;
+use crate::types::{Evidence, TableRef};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheKey {
@@ -174,11 +174,14 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         // The scope and the model whose output this scope only re-expresses.
         let mut source = None;
         let mut set_operation_source = None;
+        let mut schema = Evidence::default();
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
                 let mut next_ordinal = Some(0usize);
                 let mut minimum_width = 0usize;
+                // The widths of the stars before a column decide its position.
+                let mut prefix = Evidence::default();
                 for column in graph.scopes.output_columns(scope) {
                     if matches!(graph.nodes[column.node_id], RawNode::Star { .. }) {
                         let star = self.star(column.node_id);
@@ -186,6 +189,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         let base_ordinal = next_ordinal;
                         for element in &star.elements {
                             let mut element = element.clone();
+                            element.rely_on(&prefix);
                             match &mut element {
                                 OutputElement::Column(slot) => {
                                     slot.ordinal = slot.ordinal.and_then(|ordinal| {
@@ -208,6 +212,8 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             .and_then(|ordinal| width.and_then(|width| ordinal.checked_add(width)));
                         invalid.extend(star.invalid.iter().cloned());
                         reads.extend(star.reads.iter().cloned());
+                        prefix.extend(&star.schema);
+                        schema.extend(&star.schema);
                     } else {
                         elements.push(OutputElement::Column(ColumnSlot {
                             id: None,
@@ -229,6 +235,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             candidate_ranges: Rc::from([]),
                             value: ValueId::Expr(column.node_id),
                             origin: SlotOrigin::Defined,
+                            structure: prefix.clone(),
                         }));
                         next_ordinal = next_ordinal.and_then(|ordinal| ordinal.checked_add(1));
                         minimum_width = minimum_width.saturating_add(1);
@@ -240,6 +247,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 let model = self.scope(*child);
                 invalid.push(Invalidity::Whole(model.clone()));
                 let elements = forward_scope(*child, &model, &Rc::from([]), None);
+                schema.extend(&model.schema);
                 source = Some((*child, model));
                 elements
             }
@@ -256,6 +264,12 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 invalid.push(Invalidity::Whole(model.clone()));
                 let elements = forward_scope(*left, &model, &Rc::from([]), Some(scope));
                 let right_model = (!recursive).then(|| self.scope(*right));
+                // The operands' widths decide whether the operation is valid
+                // and which outputs correspond.
+                schema.extend(&model.schema);
+                if let Some(right) = &right_model {
+                    schema.extend(&right.schema);
+                }
                 set_operation_source = Some((
                     crate::SetOperationKind {
                         operator: *operator,
@@ -312,6 +326,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         );
         model.invalid = invalid;
         model.reads = reads;
+        model.schema = schema;
         model.publication = Some(publication);
         model.set_operation = set_operation_source.map(|(kind, recursive, left, right)| {
             build_set_operation_model(kind, recursive, &left, right.as_deref())
@@ -350,6 +365,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         name: slot.name.clone(),
                         value: slot.value.clone(),
                         publication,
+                        structure: slot.structure.clone(),
                     }));
                 }
                 OutputElement::Unknown(segment) => {
@@ -358,6 +374,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         provider: segment.provider.clone(),
                         position: segment.position,
                         publication,
+                        structure: segment.structure.clone(),
                     }));
                 }
             }
@@ -379,11 +396,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let opaque = |reason| vec![OutputElement::Unknown(UnknownSegment::opaque(reason))];
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
+        let mut schema = Evidence::default();
         let elements = match resolve_star_target(base, env, graph) {
             StarTarget::All => {
                 let input = self.input(env);
                 invalid.extend(input.model.invalid.iter().cloned());
                 reads.extend(input.model.reads.iter().cloned());
+                schema.extend(&input.model.schema);
                 input.star_elements()
             }
             StarTarget::Binding { name, binding } => {
@@ -395,9 +414,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 if let Some(model) = self.binding_model(&range.binding) {
                     reads.push((range.index, model));
                 }
+                schema.extend(&self.binding_schema(&range.binding));
                 self.binding_part(&range)
             }
-            StarTarget::Unknown(table) => self.relation_part(&Rc::new(table), &Rc::from([])),
+            StarTarget::Unknown(table) => {
+                schema.add(&table);
+                self.relation_part(&Rc::new(table), &Rc::from([]))
+            }
             StarTarget::FieldPath { .. } => opaque(OpaqueReason::FieldPath(node_id)),
             StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
@@ -409,7 +432,18 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         );
         model.invalid = invalid;
         model.reads = reads;
+        model.schema = schema;
         model
+    }
+
+    /// The schemas that decide what a binding publishes: a physical
+    /// relation's own, or those of the CTE or derived table it reads.
+    pub(super) fn binding_schema(&mut self, binding: &Binding) -> Evidence {
+        match binding {
+            Binding::Table(table) => Evidence::relation(table),
+            Binding::Cte(child) | Binding::DerivedTable(child) => self.scope(*child).schema.clone(),
+            Binding::VirtualSource(_) => Evidence::default(),
+        }
     }
 
     pub(super) fn binding_part(&mut self, range: &RangeRef) -> Vec<OutputElement> {
@@ -441,6 +475,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                             index,
                         },
                         origin: SlotOrigin::Forwarded(column.name.clone()),
+                        structure: Evidence::default(),
                     })
                 })
                 .collect(),
@@ -457,6 +492,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 provider: UnknownProvider::Relation(table.clone()),
                 ranges: ranges.clone(),
                 domain: NameDomain::default(),
+                structure: Evidence::relation(table),
             })];
         };
 
@@ -497,6 +533,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     column: column.name.clone(),
                 },
                 origin: SlotOrigin::Forwarded(column.name.clone()),
+                structure: Evidence::relation(table),
             }));
             if entry.coverage == SchemaCoverage::Partial
                 && let Some(after) = column.ordinal
@@ -580,6 +617,7 @@ fn relation_unknown(
             filters: Vec::new(),
             removed: listed_names.to_vec(),
         },
+        structure: Evidence::relation(table),
     })
 }
 
@@ -746,6 +784,7 @@ pub(super) fn forward_scope(
                         None => ValueId::Forward(id),
                     },
                     origin: SlotOrigin::Forwarded(slot.name.clone()),
+                    structure: slot.structure.clone(),
                 })
             }
             OutputElement::Unknown(segment) => {
@@ -761,6 +800,7 @@ pub(super) fn forward_scope(
                     },
                     ranges: ranges.clone(),
                     domain: segment.domain.clone(),
+                    structure: segment.structure.clone(),
                 })
             }
         })

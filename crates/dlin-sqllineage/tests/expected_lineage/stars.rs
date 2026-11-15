@@ -18,6 +18,7 @@ fn open_star(table: &str, after_ordinal: Option<usize>) -> Shape {
                     relation: relation(table),
                 }],
             },
+            evidence: Default::default(),
         }],
     }
 }
@@ -102,6 +103,7 @@ pub fn cases() -> Vec<Case> {
                             relation: relation("a"),
                         }],
                     },
+                    evidence: Default::default(),
                 },
                 UnexpandedStar {
                     relation: Some(relation("b")),
@@ -112,6 +114,7 @@ pub fn cases() -> Vec<Case> {
                             relation: relation("b"),
                         }],
                     },
+                    evidence: Default::default(),
                 },
             ],
         })
@@ -561,6 +564,7 @@ pub fn cases() -> Vec<Case> {
                         relation: relation(table),
                     }],
                 },
+                evidence: Default::default(),
             })
             .collect(),
     };
@@ -795,7 +799,7 @@ pub fn cases() -> Vec<Case> {
                 Dialect::Generic, vec![],
             ).shape(Shape::Open { unexpanded: ["a", "b"].into_iter().map(|table| UnexpandedStar {
                 relation: Some(relation(table)), after_ordinal: None,
-                lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] },
+                lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] }, evidence: Default::default(),
             }).collect() }).unresolved_stars(true));
         }
     }
@@ -807,7 +811,7 @@ pub fn cases() -> Vec<Case> {
     ).catalog(vec![(relation("c"), vec![u("other")])])
      .shape(Shape::Open { unexpanded: ["a", "b", "d"].into_iter().map(|table| UnexpandedStar {
         relation: Some(relation(table)), after_ordinal: None,
-        lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] },
+        lineage: Lineage::Partial { known: vec![], unresolved: vec![Unresolved::BehindStar { relation: relation(table) }] }, evidence: Default::default(),
      }).collect() }).unresolved_stars(true));
     cases.push(Case::new("unknown_using_chain_named_read_skips_known_non_owner",
         "SELECT id FROM (SELECT * EXCLUDE (x.id) FROM a x JOIN b y USING (id) JOIN c z ON TRUE JOIN d w USING (id)) result",
@@ -1158,6 +1162,7 @@ fn set_operation_tail_cases() -> Vec<Case> {
                     },
                 ],
             },
+            evidence: Default::default(),
         }],
     };
     let named_from_left_star = |column: &str| {

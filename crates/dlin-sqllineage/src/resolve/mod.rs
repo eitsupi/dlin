@@ -37,6 +37,7 @@ pub(crate) fn resolve(
     if graph.nodes.is_empty() {
         return Ok(analysis::assemble(
             &[],
+            &analysis::Structure::default(),
             &graph.tables,
             if graph.scopes.has_unknown_output_width(ScopeTree::root()) {
                 &[]
@@ -58,6 +59,7 @@ pub(crate) fn resolve(
         });
         return Ok(analysis::assemble(
             &[],
+            &analysis::Structure::default(),
             &graph.tables,
             if graph.scopes.has_unknown_output_width(ScopeTree::root()) {
                 &[]
@@ -103,6 +105,7 @@ pub(crate) fn resolve(
         });
         return Ok(analysis::assemble(
             &[],
+            &analysis::Structure::default(),
             &graph.tables,
             if graph.scopes.has_unknown_output_width(root) {
                 &[]
@@ -120,9 +123,22 @@ pub(crate) fn resolve(
     for mapping in &mut mappings {
         mapping.target.table.clone_from(&output_table);
     }
+    let structure = analysis::Structure {
+        columns: mappings
+            .iter()
+            .map(|mapping| {
+                mapping
+                    .slot
+                    .map(|slot| cx.mapping_cache.models.arena.structure(slot).clone())
+                    .unwrap_or_default()
+            })
+            .collect(),
+        shape: mapping::models(&mut cx).scope(root).schema.clone(),
+    };
 
     Ok(analysis::assemble(
         &mappings,
+        &structure,
         &graph.tables,
         if output_width.is_none() {
             &[]

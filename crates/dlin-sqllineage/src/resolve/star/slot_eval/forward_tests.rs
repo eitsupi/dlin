@@ -299,7 +299,7 @@ fn set_operation_provider_evaluation_uses_the_merged_segment_on_both_paths() {
         assert!(show(&named).contains(&"t1.*:id".to_owned()));
         assert!(!show(&named).contains(&"t2.*:id".to_owned()));
         assert!(
-            named.iter().any(|origin| matches!(origin,
+            named.origins.iter().any(|origin| matches!(&origin.kind,
                 crate::types::ColumnOrigin::Unresolved(crate::Unresolved::AlignmentUnknown {
                     unknown_operands, ..
                 }) if unknown_operands.contains(&crate::SetOperand::Right)

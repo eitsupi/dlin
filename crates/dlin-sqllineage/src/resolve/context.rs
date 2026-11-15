@@ -33,7 +33,7 @@ use crate::catalog::CatalogContext;
 use crate::graph::RawGraph;
 use crate::graph::node::NodeId;
 use crate::graph::scope::ScopeId;
-use crate::types::{ColumnMapping, ColumnOrigin, TransformKind};
+use crate::types::{ColumnMapping, Sources, TransformKind};
 
 /// Something whose evaluation can be in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,7 +67,7 @@ impl Budget {
 /// What a published column evaluates to, as its own scope states it.
 #[derive(Debug, Clone)]
 pub(super) struct SlotValue {
-    pub sources: Vec<ColumnOrigin>,
+    pub sources: Sources,
     pub transform: TransformKind,
 }
 
@@ -77,7 +77,7 @@ pub(super) struct EvalContext<'a, 'c> {
     pub incoming: &'a [Vec<usize>],
     pub catalog: Option<&'a CatalogContext<'c>>,
     /// Already computed: the origin of each node.
-    pub resolved: Vec<Option<ColumnOrigin>>,
+    pub resolved: Vec<Option<Sources>>,
     /// Already computed: the mappings and models of each scope.
     pub mapping_cache: ScopeMappingCache,
     /// Already computed: the value of each published column.

@@ -10,6 +10,7 @@ use super::{
     unknown_publishers,
 };
 use crate::graph::scope::{JoinMerge, JoinMergeKind, MergedColumns};
+use crate::types::Evidence;
 use crate::{Dialect, Ident, OutputName, Relation};
 
 fn union_ranges(left: &[RangeRef], right: &[RangeRef]) -> Rc<[RangeRef]> {
@@ -20,6 +21,8 @@ struct NaturalUncertainty {
     known_on_left: bool,
     name: Ident,
     relations: Vec<Relation>,
+    /// The schemas of the segments that may publish the name.
+    evidence: Evidence,
 }
 
 fn natural_uncertainties(
@@ -44,22 +47,21 @@ fn natural_uncertainties(
             if publishers.is_empty() {
                 continue;
             }
-            let relations = possible
-                .iter()
-                .filter_map(|element| match element {
-                    OutputElement::Unknown(segment)
-                        if segment.domain.admits(&slot.name, dialect) =>
-                    {
-                        Some(segment.schema_relations.iter().cloned())
-                    }
-                    _ => None,
-                })
-                .flatten()
-                .collect::<Vec<_>>();
+            let mut relations = Vec::new();
+            let mut evidence = Evidence::default();
+            for element in possible {
+                if let OutputElement::Unknown(segment) = element
+                    && segment.domain.admits(&slot.name, dialect)
+                {
+                    relations.extend(segment.schema_relations.iter().cloned());
+                    evidence.extend(&segment.structure);
+                }
+            }
             uncertain.push(NaturalUncertainty {
                 known_on_left,
                 name: slot.name.clone(),
                 relations,
+                evidence,
             });
         }
     }
@@ -103,6 +105,7 @@ fn apply_natural_uncertainties(
                     slot.value = ValueId::SchemaDependent {
                         value: (!suppressed).then(|| Box::new(slot.value.clone())),
                         relations: uncertainty.relations.clone(),
+                        evidence: uncertainty.evidence.clone(),
                     };
                 }
             }
@@ -125,13 +128,17 @@ pub(super) fn fold_join_columns(
     fold_groups(groups, merges, dialect).map_or_else(|| concat_groups(original), concat_groups)
 }
 
+/// Lay the groups out one after another. A position relies on the schemas
+/// of the groups before it, whose widths it is shifted by.
 fn concat_groups(mut groups: Vec<Group>) -> Vec<OutputElement> {
     let mut prefix = Some(0usize);
     let mut minimum_prefix = 0usize;
+    let mut prefix_schema = Evidence::default();
     let mut output = Vec::new();
     for group in &mut groups {
         let minimum_width = super::minimum_width(&group.elements);
         for element in &mut group.elements {
+            element.rely_on(&prefix_schema);
             match element {
                 OutputElement::Column(slot) => {
                     slot.ordinal = slot
@@ -158,6 +165,7 @@ fn concat_groups(mut groups: Vec<Group>) -> Vec<OutputElement> {
             });
         minimum_prefix = minimum_prefix.saturating_add(minimum_width);
         prefix = prefix.and_then(|prefix| width.and_then(|width| prefix.checked_add(width)));
+        prefix_schema.extend(&group.schema);
         output.append(&mut group.elements);
     }
     output
@@ -331,6 +339,12 @@ fn fold_groups(
             .chain(&right)
             .flat_map(|&index| groups[index].members.clone())
             .collect();
+        // Which names the sides share, and so the merged columns and their
+        // order, is decided by the schemas of both sides.
+        let mut schema = Evidence::default();
+        for &index in left.iter().chain(&right) {
+            schema.extend(&groups[index].schema);
+        }
         let first = *left.iter().chain(&right).min()?;
         let mut left_elements = take_elements(&mut groups, &left);
         let mut right_elements = take_elements(&mut groups, &right);
@@ -430,6 +444,7 @@ fn fold_groups(
                 value,
                 // Both sides carry the key under its name, as USING requires.
                 origin: SlotOrigin::Forwarded(key.clone()),
+                structure: Evidence::default(),
             }));
         }
         apply_natural_uncertainties(
@@ -462,11 +477,15 @@ fn fold_groups(
                 }
             }
         }
+        for element in &mut output {
+            element.rely_on(&schema);
+        }
         groups.insert(
             first,
             Group {
                 members,
                 elements: output,
+                schema,
             },
         );
     }

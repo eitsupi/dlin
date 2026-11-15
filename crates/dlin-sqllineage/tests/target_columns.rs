@@ -258,7 +258,8 @@ fn uneven_values_rows_keep_legacy_output_without_target_diagnostics() {
             result.output,
             Output {
                 columns: vec![],
-                shape: Shape::Closed
+                shape: Shape::Closed,
+                evidence: Default::default(),
             },
             "{sql}"
         );

@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use super::Evaluator;
 use crate::graph::scope::{OutputPlan, ScopeId};
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
+use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, Sources, StarPosition, TransformKind};
 use crate::{Ident, Unresolved};
 
 use super::super::context::{EvalKey, SlotValue};
@@ -38,7 +38,7 @@ impl Evaluator<'_, '_, '_> {
     /// The origins and transform of a published column. A column whose
     /// evaluation is already in progress depends on itself and is reported as
     /// an ambiguous column.
-    pub(super) fn slot_value(&mut self, id: SlotId) -> (Vec<ColumnOrigin>, TransformKind) {
+    pub(super) fn slot_value(&mut self, id: SlotId) -> (Sources, TransformKind) {
         if let Some(value) = self.cx.slot_values.get(&id) {
             return (value.sources.clone(), value.transform.clone());
         }
@@ -70,7 +70,7 @@ impl Evaluator<'_, '_, '_> {
     /// The same as [`Self::slot_value`] for a reader that names the column:
     /// the recursive marker of a set operation's column is unwrapped, and
     /// whether it was there is reported.
-    pub(super) fn slot_read(&mut self, id: SlotId) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    pub(super) fn slot_read(&mut self, id: SlotId) -> (Sources, bool, TransformKind) {
         let owner = self.cx.mapping_cache.models.arena.slot(id).owner;
         let (sources, transform) = self.slot_value(id);
         if self.is_set_operation(owner) {
@@ -87,7 +87,7 @@ impl Evaluator<'_, '_, '_> {
         &mut self,
         op: ScopeId,
         left: SlotId,
-    ) -> (Vec<ColumnOrigin>, TransformKind) {
+    ) -> (Sources, TransformKind) {
         if let Some(OutputRef::Slot(merged)) = self.merged_counterpart(op, OutputRef::Slot(left)) {
             self.slot_value(merged)
         } else {
@@ -129,7 +129,7 @@ impl Evaluator<'_, '_, '_> {
         scope: ScopeId,
         id: SlotId,
         name: &Ident,
-    ) -> (Vec<ColumnOrigin>, TransformKind) {
+    ) -> (Sources, TransformKind) {
         let output = OutputRef::Slot(id);
         let Ok(mappings) = self.published_mappings(scope, output) else {
             return (cut_sources(name), TransformKind::Direct);
@@ -138,7 +138,10 @@ impl Evaluator<'_, '_, '_> {
             return (mapping.sources.clone(), mapping.transform.clone());
         }
         debug_assert!(false, "a set operation's column has no merged mapping");
-        (vec![output_correspondence_lost()], TransformKind::Direct)
+        (
+            Sources::one(output_correspondence_lost()),
+            TransformKind::Direct,
+        )
     }
 
     /// The mappings of `scope` for the publication of its model that
@@ -213,7 +216,7 @@ impl Evaluator<'_, '_, '_> {
     ///
     /// The answer is specific to the name, so it is derived from the
     /// segment's definition each time and never kept under the segment alone.
-    pub(super) fn segment_sources(&mut self, id: SegmentId, column: &Ident) -> Vec<ColumnOrigin> {
+    pub(super) fn segment_sources(&mut self, id: SegmentId, column: &Ident) -> Sources {
         let def = self.cx.mapping_cache.models.arena.segment(id);
         if !self.cx.enter(EvalKey::Segment(id)) {
             return cut_sources(column);
@@ -242,11 +245,11 @@ fn output_correspondence_lost() -> ColumnOrigin {
 
 /// The origin of a column whose value cannot be determined because its
 /// evaluation depends on itself.
-fn cut_sources(column: &Ident) -> Vec<ColumnOrigin> {
-    vec![ColumnOrigin::Ambiguous {
+fn cut_sources(column: &Ident) -> Sources {
+    Sources::one(ColumnOrigin::Ambiguous {
         column: column.clone(),
         candidates: Vec::new(),
-    }]
+    })
 }
 
 /// The mapping of a segment whose evaluation depends on itself: columns the
@@ -260,7 +263,7 @@ pub(super) fn cut_segment() -> ColumnMapping {
             table: None,
             column: Ident::unquoted("*"),
         },
-        sources: vec![ColumnOrigin::UnknownStar],
+        sources: Sources::one(ColumnOrigin::UnknownStar),
         transform: TransformKind::Direct,
         slot: None,
     }

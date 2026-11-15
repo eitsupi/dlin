@@ -9,7 +9,9 @@ use super::model::{
     OutputElement, OutputModel, OutputRef, SegmentId, SetOperationModel, SlotMatch, SlotMatchKind,
 };
 use crate::graph::scope::ScopeId;
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, StarPosition, TransformKind};
+use crate::types::{
+    ColumnMapping, ColumnOrigin, ColumnRef, Evidence, Origin, Sources, StarPosition, TransformKind,
+};
 use crate::{
     Ident, SetCorrespondence, SetOperand, SetOperationKind, SetOperator, SourceColumn, Unresolved,
 };
@@ -47,18 +49,31 @@ fn unknown_mapping() -> ColumnMapping {
             table: None,
             column: Ident::unquoted("*"),
         },
-        sources: vec![ColumnOrigin::UnknownStar],
+        sources: Sources::one(ColumnOrigin::UnknownStar),
         transform: TransformKind::Direct,
         slot: None,
     }
 }
 
+/// The schemas that decide which outputs of the operands correspond to the
+/// left output `left`: its own position and those of the right outputs it was
+/// compared with. They are relied on whether or not the right operand supplies
+/// values.
+fn correspondence(left: OutputRef, matches: &[SlotMatch], cx: &EvalContext<'_, '_>) -> Evidence {
+    let arena = &cx.mapping_cache.models.arena;
+    let mut evidence = arena.structure(left).clone();
+    for matched in matches {
+        evidence.extend(arena.structure(matched.output));
+    }
+    evidence
+}
+
 /// Concrete candidates remain candidates even when their own lineage was
 /// partial. The missing part is represented by the enclosing operand marker.
-fn candidates(origins: &[ColumnOrigin], result: &mut Vec<SourceColumn>) -> bool {
+fn candidates(origins: &[Origin], result: &mut Vec<SourceColumn>) -> bool {
     let mut complete = true;
     for origin in origins {
-        match origin {
+        match &origin.kind {
             ColumnOrigin::Concrete { table, column } => result.push(SourceColumn {
                 relation: super::analysis::plain_relation(table),
                 column: column.clone(),
@@ -87,16 +102,19 @@ fn alignment(
     matches: &[SlotMatch],
     left_unknown: bool,
     cx: &mut EvalContext<'_, '_>,
-) -> ColumnOrigin {
+) -> Origin {
     let mut possible_sources = Vec::new();
     let mut unknown_operands = Vec::new();
+    // The candidates rely on what decided each of them.
+    let mut evidence = Evidence::default();
     if left_unknown {
         unknown_operands.push(SetOperand::Left);
     }
     for matched in matches {
         match output_mapping(matched.output, cx) {
             Ok(Some(mapping)) => {
-                if !candidates(&mapping.sources, &mut possible_sources)
+                evidence.extend(&mapping.sources.all_evidence());
+                if !candidates(&mapping.sources.origins, &mut possible_sources)
                     || matches!(matched.output, OutputRef::Segment(_))
                 {
                     unknown_operands.push(matched.operand);
@@ -105,14 +123,17 @@ fn alignment(
             Ok(None) | Err(Cut) => unknown_operands.push(matched.operand),
         }
     }
-    ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown {
-        operation,
-        possible_sources,
-        unknown_operands,
-    })
+    Origin::new(
+        ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown {
+            operation,
+            possible_sources,
+            unknown_operands,
+        }),
+        evidence,
+    )
 }
 
-fn append_reasons(sources: &mut Vec<ColumnOrigin>, model: &OutputModel) {
+fn append_reasons(sources: &mut Sources, model: &OutputModel) {
     for &what in &model.unknown_reasons {
         sources.push(incomplete(what));
     }
@@ -120,7 +141,7 @@ fn append_reasons(sources: &mut Vec<ColumnOrigin>, model: &OutputModel) {
 
 fn merge_values(left: &mut ColumnMapping, right: &ColumnMapping) {
     let source_free = left.sources.is_empty() != right.sources.is_empty();
-    left.sources.extend(right.sources.iter().cloned());
+    left.sources.extend(right.sources.clone());
     if source_free {
         left.sources.push(ColumnOrigin::SourceFree {
             column: left.target.column.clone(),
@@ -134,12 +155,6 @@ fn merge_values(left: &mut ColumnMapping, right: &ColumnMapping) {
 /// dependencies, which are not part of value lineage.
 fn right_supplies_values(operation: &SetOperationModel) -> bool {
     operation.kind.operator != SetOperator::Except
-}
-
-fn recursive(sources: Vec<ColumnOrigin>) -> Vec<ColumnOrigin> {
-    vec![ColumnOrigin::Recursive {
-        base_sources: sources,
-    }]
 }
 
 /// The names and positions come from the operation's published model. Only
@@ -175,8 +190,9 @@ pub(super) fn evaluate_set_operation(
                     .ok_or(Cut)?;
                 let mut mapping = output_mapping(left, cx)?.ok_or(Cut)?;
                 if operation.kind.correspondence == SetCorrespondence::Positional {
+                    let evidence = correspondence(left, &aligned.matches, cx);
                     if operation.recursive {
-                        mapping.sources = recursive(mapping.sources);
+                        mapping.sources = mapping.sources.recursive();
                     } else if !right_supplies_values(operation) {
                         // The right operand only excludes rows.
                     } else if let Some(proven) = aligned
@@ -194,6 +210,7 @@ pub(super) fn evaluate_set_operation(
                             cx,
                         ));
                     }
+                    mapping.sources.rely_on(&evidence);
                 }
                 mapping.output_name = Some(slot.output_name.clone());
                 mapping.ordinal = slot.ordinal;
@@ -215,7 +232,7 @@ pub(super) fn evaluate_set_operation(
                 if left.is_none() && operation.kind.correspondence == SetCorrespondence::ByName {
                     // This is the deliberately unsupported remainder, not
                     // an additional failed star expansion.
-                    mapping.sources.clear();
+                    mapping.sources = Sources::default();
                 }
                 if let Some(OutputRef::Segment(left_id)) = left {
                     let aligned = operation
@@ -224,8 +241,10 @@ pub(super) fn evaluate_set_operation(
                         .find(|aligned| aligned.left == left_id)
                         .ok_or(Cut)?;
                     if operation.kind.correspondence == SetCorrespondence::Positional {
+                        let evidence =
+                            correspondence(OutputRef::Segment(left_id), &aligned.matches, cx);
                         if operation.recursive {
-                            mapping.sources = recursive(mapping.sources);
+                            mapping.sources = mapping.sources.recursive();
                         } else if right_supplies_values(operation) {
                             // Publish each right interval once, even if several
                             // left intervals have overlapping possible positions.
@@ -234,7 +253,7 @@ pub(super) fn evaluate_set_operation(
                                     && exposed_segments.insert(matched.output)
                                     && let Some(right) = output_mapping(matched.output, cx)?
                                 {
-                                    marker_sources(&right.sources, &mut mapping.sources);
+                                    marker_sources(&right.sources.origins, &mut mapping.sources);
                                 }
                             }
                             mapping.sources.push(alignment(
@@ -244,6 +263,7 @@ pub(super) fn evaluate_set_operation(
                                 cx,
                             ));
                         }
+                        mapping.sources.rely_on(&evidence);
                     }
                 }
                 mapping.slot = Some(OutputRef::Segment(segment.published()));
@@ -260,9 +280,9 @@ pub(super) fn evaluate_set_operation(
 
 /// Preserve the relation markers of an unenumerated interval without
 /// asserting that any right-hand column has the queried left-hand name.
-fn marker_sources(origins: &[ColumnOrigin], result: &mut Vec<ColumnOrigin>) {
+fn marker_sources(origins: &[Origin], result: &mut Sources) {
     for origin in origins {
-        match origin {
+        match &origin.kind {
             ColumnOrigin::Wildcard { .. } | ColumnOrigin::UnknownStar => {
                 result.push(origin.clone());
             }
@@ -279,7 +299,7 @@ pub(super) fn set_operation_segment_sources(
     left: SegmentId,
     column: &Ident,
     cx: &mut EvalContext<'_, '_>,
-) -> Vec<ColumnOrigin> {
+) -> Sources {
     let mut sources = super::star::named_segment_sources(left, column, cx);
     if sources.is_empty() {
         sources.push(ColumnOrigin::Unresolved(Unresolved::Unbound {
@@ -306,11 +326,13 @@ pub(super) fn set_operation_segment_sources(
         return sources;
     };
     if operation.kind.correspondence == SetCorrespondence::Positional {
+        let evidence = correspondence(OutputRef::Segment(left), &aligned.matches, cx);
         if operation.recursive {
-            sources = recursive(sources);
+            sources = sources.recursive();
         } else if right_supplies_values(operation) {
             sources.push(alignment(operation.kind, &aligned.matches, true, cx));
         }
+        sources.rely_on(&evidence);
     }
     append_reasons(&mut sources, &model);
     sources

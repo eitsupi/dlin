@@ -356,7 +356,9 @@ fn lookup(sql: &str, tables: &[(&'static str, Vec<&'static str>)], name: &str) -
     let context = CatalogContext::new(&catalog, Dialect::Generic);
     let mut store = ModelStore::default();
     let env = graph.scopes.env(query_scope(&graph));
-    OutputModels::new(&graph, Some(&context), &mut store).lookup_input(env, &Ident::unquoted(name))
+    OutputModels::new(&graph, Some(&context), &mut store)
+        .lookup_input(env, &Ident::unquoted(name))
+        .0
 }
 
 fn contributing(lookup: &InputLookup) -> Vec<String> {

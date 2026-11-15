@@ -23,7 +23,9 @@ use slot_eval::cut_segment;
 
 use crate::graph::node::{NodeId, RawNode, StarBase};
 use crate::graph::scope::{Binding, BindingEnv, ScopeId, VirtualColumnState};
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TransformKind};
+use crate::types::{
+    ColumnMapping, ColumnOrigin, ColumnRef, Evidence, Origin, Sources, TransformKind,
+};
 use crate::{Candidate, Ident, Unresolved};
 
 /// What a scope publishes under a name that none of its listed columns has.
@@ -33,14 +35,14 @@ pub(super) enum Unlisted {
     /// Unlisted columns exist, but the star modifiers rule the name out.
     Denied,
     /// Origins of the unlisted columns that may carry the name.
-    Sources(Vec<ColumnOrigin>),
+    Sources(Sources),
 }
 
 pub(super) fn named_segment_sources(
     id: SegmentId,
     column: &Ident,
     cx: &mut EvalContext<'_, '_>,
-) -> Vec<ColumnOrigin> {
+) -> Sources {
     Evaluator { cx }.segment_sources(id, column)
 }
 
@@ -89,16 +91,17 @@ pub(super) fn named_scope_sources(
     name: &Ident,
     target_scope: ScopeId,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+) -> Option<(Sources, bool, TransformKind)> {
     Evaluator { cx }.named(target_scope, name)
 }
 
-/// What an unqualified name in the FROM clause at `env` denotes.
+/// What an unqualified name in the FROM clause at `env` denotes, with the
+/// schemas the answer relies on.
 pub(super) fn lookup_input(
     env: BindingEnv,
     name: &Ident,
     cx: &mut EvalContext<'_, '_>,
-) -> InputLookup {
+) -> (InputLookup, Evidence) {
     Evaluator { cx }.models().lookup_input(env, name)
 }
 
@@ -110,9 +113,11 @@ pub(super) fn input_name_sources(
     env: BindingEnv,
     name: &Ident,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-    let lookup = lookup_input(env, name, cx);
-    Evaluator { cx }.input(lookup, name)
+) -> Option<(Sources, bool, TransformKind)> {
+    let (lookup, evidence) = lookup_input(env, name, cx);
+    Evaluator { cx }
+        .input(lookup, name)
+        .map(|(sources, has_back, transform)| (sources.relying_on(&evidence), has_back, transform))
 }
 
 /// The id of the column at `index` of a published model, which the model's
@@ -129,6 +134,30 @@ fn listed_slot(model: &OutputModel, index: usize) -> super::model::SlotId {
 /// lists it once. Distinct spellings stay apart.
 fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
     format!("{left:?}") == format!("{right:?}")
+}
+
+/// A value that more columns of `relations` could change, relying on the
+/// schemas that leave them open.
+fn schema_dependent(relations: &[crate::Relation], evidence: &Evidence) -> Origin {
+    Origin::new(
+        ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
+            what: crate::SchemaDependencyKind::NaturalJoinColumns,
+            relations: relations.to_vec(),
+        }),
+        evidence.clone(),
+    )
+}
+
+/// A column of a physical relation the catalog lists, which relies on that
+/// relation's schema.
+fn physical(table: &crate::types::TableRef, column: &Ident) -> Origin {
+    Origin::new(
+        ColumnOrigin::Concrete {
+            table: table.clone(),
+            column: column.clone(),
+        },
+        Evidence::relation(table),
+    )
 }
 
 /// Evaluation of models into lineage. It holds no state of its own: what is
@@ -149,30 +178,27 @@ impl Evaluator<'_, '_, '_> {
         self.models().scope(scope)
     }
 
-    fn value(&mut self, value: &ValueId) -> (Vec<ColumnOrigin>, TransformKind) {
+    fn value(&mut self, value: &ValueId) -> (Sources, TransformKind) {
         match value {
-            ValueId::Physical { table, column } => (
-                vec![ColumnOrigin::Concrete {
-                    table: (**table).clone(),
-                    column: column.clone(),
-                }],
-                TransformKind::Direct,
-            ),
+            ValueId::Physical { table, column } => {
+                (Sources::one(physical(table, column)), TransformKind::Direct)
+            }
             ValueId::Expr(node_id) => {
                 let (sources, _, transform) = self.expression(*node_id);
                 (sources, transform)
             }
             ValueId::Forward(id) => self.slot_value(*id),
             ValueId::SetMerged { op, left } => self.merged_slot_value(*op, *left),
-            ValueId::SchemaDependent { value, relations } => {
+            ValueId::SchemaDependent {
+                value,
+                relations,
+                evidence,
+            } => {
                 let (mut sources, transform) = value.as_deref().map_or_else(
-                    || (Vec::new(), TransformKind::Direct),
+                    || (Sources::default(), TransformKind::Direct),
                     |value| self.value(value),
                 );
-                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
-                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
-                    relations: relations.clone(),
-                }));
+                sources.push(schema_dependent(relations, evidence));
                 (sources, transform)
             }
             // The same lookup a direct reference to the name in that scope makes.
@@ -180,10 +206,10 @@ impl Evaluator<'_, '_, '_> {
                 .map_or_else(
                     || {
                         (
-                            vec![ColumnOrigin::Ambiguous {
+                            Sources::one(ColumnOrigin::Ambiguous {
                                 column: column.clone(),
                                 candidates: Vec::new(),
-                            }],
+                            }),
                             TransformKind::Direct,
                         )
                     },
@@ -192,13 +218,13 @@ impl Evaluator<'_, '_, '_> {
             ValueId::VirtualColumn { source, index } => {
                 (self.virtual_column(*source, *index), TransformKind::Direct)
             }
-            ValueId::Named { providers, column } => (
-                providers
-                    .iter()
-                    .flat_map(|provider| self.provider_sources(provider, column))
-                    .collect(),
-                TransformKind::Direct,
-            ),
+            ValueId::Named { providers, column } => {
+                let mut sources = Sources::default();
+                for provider in providers {
+                    sources.extend(self.provider_sources(provider, column));
+                }
+                (sources, TransformKind::Direct)
+            }
             ValueId::Merged(left, right) => {
                 let (mut sources, left_transform) = self.value(left);
                 let (right_sources, right_transform) = self.value(right);
@@ -206,10 +232,10 @@ impl Evaluator<'_, '_, '_> {
                 (sources, merge_transform(&left_transform, &right_transform))
             }
             ValueId::Uncertain { column, candidates } => (
-                vec![ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: column.clone(),
                     candidates: candidates.iter().filter_map(RangeRef::candidate).collect(),
-                })],
+                })),
                 TransformKind::Direct,
             ),
         }
@@ -217,7 +243,7 @@ impl Evaluator<'_, '_, '_> {
 
     /// The origins and transform of the expression of an output node, with
     /// whether it reads the recursive CTE it belongs to.
-    fn expression(&mut self, node_id: NodeId) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    fn expression(&mut self, node_id: NodeId) -> (Sources, bool, TransformKind) {
         let (sources, edge_kinds, has_back, inherited) =
             collect_output_sources(node_id, self.cx, &mut HashSet::new());
         let transform = merge_transform(
@@ -231,11 +257,7 @@ impl Evaluator<'_, '_, '_> {
     /// projection `scope` that published it. A column the projection lists
     /// itself that reads its own recursive CTE is marked as recursive in the
     /// mappings, while a reader that names the column does not see the mark.
-    fn projected_value(
-        &mut self,
-        scope: ScopeId,
-        slot: &ColumnSlot,
-    ) -> (Vec<ColumnOrigin>, TransformKind) {
+    fn projected_value(&mut self, scope: ScopeId, slot: &ColumnSlot) -> (Sources, TransformKind) {
         if let ValueId::Expr(node_id) = slot.value
             && self
                 .cx
@@ -247,9 +269,7 @@ impl Evaluator<'_, '_, '_> {
         {
             let (sources, has_back, transform) = self.expression(node_id);
             let sources = if has_back {
-                vec![ColumnOrigin::Recursive {
-                    base_sources: sources,
-                }]
+                sources.recursive()
             } else {
                 sources
             };
@@ -261,38 +281,38 @@ impl Evaluator<'_, '_, '_> {
     /// The origins and transform of a column that a reference to `name`
     /// reads, with whether they read the recursive CTE the column belongs to.
     /// A column read this way is spelled as the reference spells it.
-    fn read_value(
-        &mut self,
-        value: &ValueId,
-        name: &Ident,
-    ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    fn read_value(&mut self, value: &ValueId, name: &Ident) -> (Sources, bool, TransformKind) {
         match value {
             ValueId::Physical { table, .. } => (
-                vec![ColumnOrigin::Concrete {
-                    table: (**table).clone(),
-                    column: name.clone(),
-                }],
+                Sources::one(physical(table, name)),
                 false,
                 TransformKind::Direct,
             ),
             ValueId::Forward(id) => self.slot_read(*id),
-            ValueId::SchemaDependent { value, relations } => {
+            ValueId::SchemaDependent {
+                value,
+                relations,
+                evidence,
+            } => {
                 let (mut sources, has_back, transform) = value.as_deref().map_or_else(
-                    || (Vec::new(), false, TransformKind::Direct),
+                    || (Sources::default(), false, TransformKind::Direct),
                     |value| self.read_value(value, name),
                 );
-                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
-                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
-                    relations: relations.clone(),
-                }));
+                sources.push(schema_dependent(relations, evidence));
                 (sources, has_back, transform)
             }
             ValueId::Merged(left, right) => {
                 let (mut sources, left_back, left_transform) = self.read_value(left, name);
                 let (right_sources, right_back, right_transform) = self.read_value(right, name);
-                for source in right_sources {
-                    if !sources.iter().any(|seen| same_origin(seen, &source)) {
-                        sources.push(source);
+                sources.evidence.extend(&right_sources.evidence);
+                for source in right_sources.origins {
+                    match sources
+                        .origins
+                        .iter_mut()
+                        .find(|seen| same_origin(&seen.kind, &source.kind))
+                    {
+                        Some(seen) => seen.evidence.extend(&source.evidence),
+                        None => sources.origins.push(source),
                     }
                 }
                 (
@@ -313,19 +333,16 @@ impl Evaluator<'_, '_, '_> {
         &mut self,
         lookup: InputLookup,
         name: &Ident,
-    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    ) -> Option<(Sources, bool, TransformKind)> {
         let unbound = || ColumnOrigin::Ambiguous {
             column: name.clone(),
             candidates: Vec::new(),
         };
         match lookup {
             InputLookup::NoSource => None,
-            InputLookup::Absent => Some((vec![unbound()], false, TransformKind::Direct)),
+            InputLookup::Absent => Some((Sources::one(unbound()), false, TransformKind::Direct)),
             InputLookup::Physical(table) => Some((
-                vec![ColumnOrigin::Concrete {
-                    table: (*table).clone(),
-                    column: name.clone(),
-                }],
+                Sources::one(physical(&table, name)),
                 false,
                 TransformKind::Direct,
             )),
@@ -342,7 +359,7 @@ impl Evaluator<'_, '_, '_> {
                 let mut by_name = false;
                 for value in &values {
                     let (sources, _, listed) = self.read_value(value, name);
-                    by_name |= has_by_name_reason(&sources);
+                    by_name |= has_by_name_reason(&sources.origins);
                     transform = merge_transform(&transform, &listed);
                 }
                 let origin = if typed {
@@ -366,7 +383,7 @@ impl Evaluator<'_, '_, '_> {
                             .collect(),
                     }
                 };
-                let mut sources = vec![origin];
+                let mut sources = Sources::one(origin);
                 if by_name {
                     sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
                         what: "BY NAME set operation",
@@ -379,15 +396,25 @@ impl Evaluator<'_, '_, '_> {
 
     /// The origins of the column a CTE or derived table publishes under
     /// `name`: a listed column or whatever its unknown segments may publish.
-    fn named(
+    /// The answer relies on the schemas that decide what the scope
+    /// publishes, whichever column it settles on.
+    fn named(&mut self, scope: ScopeId, name: &Ident) -> Option<(Sources, bool, TransformKind)> {
+        let model = self.scope_model(scope);
+        self.named_in(scope, &model, name)
+            .map(|(sources, has_back, transform)| {
+                (sources.relying_on(&model.schema), has_back, transform)
+            })
+    }
+
+    fn named_in(
         &mut self,
         scope: ScopeId,
+        model: &Rc<OutputModel>,
         name: &Ident,
-    ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
-        let model = self.scope_model(scope);
+    ) -> Option<(Sources, bool, TransformKind)> {
         match model.choose(name) {
             Choice::Column(index, _) => {
-                return Some(self.slot_read(listed_slot(&model, index)));
+                return Some(self.slot_read(listed_slot(model, index)));
             }
             Choice::Ambiguous(ambiguity) => {
                 let mut candidates = ambiguity.candidates;
@@ -408,15 +435,15 @@ impl Evaluator<'_, '_, '_> {
                             if segment.provider.has_by_name_reason(self.cx.graph, &self.cx.mapping_cache.models.arena))
                     });
                 for &index in &ambiguity.listed {
-                    let (sources, _, listed) = self.slot_read(listed_slot(&model, index));
-                    by_name |= has_by_name_reason(&sources);
+                    let (sources, _, listed) = self.slot_read(listed_slot(model, index));
+                    by_name |= has_by_name_reason(&sources.origins);
                     transform = merge_transform(&transform, &listed);
                 }
                 let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: name.clone(),
                     candidates,
                 });
-                let mut sources = vec![ambiguous];
+                let mut sources = Sources::one(ambiguous);
                 if by_name {
                     sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
                         what: "BY NAME set operation",
@@ -434,10 +461,10 @@ impl Evaluator<'_, '_, '_> {
         }
         match self.unlisted(scope, name) {
             Unlisted::Denied => Some((
-                vec![ColumnOrigin::Ambiguous {
+                Sources::one(ColumnOrigin::Ambiguous {
                     column: name.clone(),
                     candidates: Vec::new(),
-                }],
+                }),
                 false,
                 TransformKind::Direct,
             )),
@@ -469,7 +496,8 @@ impl Evaluator<'_, '_, '_> {
             ) => Some(self.opaque_star(*star, *reason)),
             UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
                 let mut mapping = cut_segment();
-                mapping.sources = vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })];
+                mapping.sources =
+                    Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
                 Some(mapping)
             }
             UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
@@ -494,23 +522,25 @@ impl Evaluator<'_, '_, '_> {
         };
         let sources = match (reason, resolve_star_target(base, *env, self.cx.graph)) {
             (OpaqueReason::Ambiguous(_), StarTarget::Ambiguous(candidates)) => {
-                vec![ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
+                Sources::one(ColumnOrigin::Unresolved(crate::Unresolved::Ambiguous {
                     column: Ident::unquoted("*"),
                     candidates,
-                })]
+                }))
             }
             (OpaqueReason::FieldPath(_), StarTarget::FieldPath { binding, path }) => {
-                let mut sources = Vec::new();
-                if let Some(field) = path.first()
-                    && let Some(origin) = resolve_captured_binding(field, binding, self.cx)
-                {
-                    sources.push(origin);
+                let mut sources = Sources::default();
+                if let Some(field) = path.first() {
+                    let field = resolve_captured_binding(field, binding, self.cx);
+                    // A field path reads one column of the relation.
+                    let evidence = field.all_evidence();
+                    sources.origins.extend(field.origins.into_iter().take(1));
+                    sources.evidence.extend(&evidence);
                 }
                 sources.push(ColumnOrigin::UnknownStar);
                 sources
             }
             _ => {
-                let mut sources = Vec::new();
+                let mut sources = Sources::default();
                 if let StarBase::Expr(dependencies) = base {
                     for &dependency in dependencies {
                         let (origins, _, _) =
@@ -518,7 +548,11 @@ impl Evaluator<'_, '_, '_> {
                         sources.extend(origins);
                     }
                 }
-                if !sources.iter().any(ColumnOrigin::is_unknown_star) {
+                if !sources
+                    .origins
+                    .iter()
+                    .any(|origin| origin.kind.is_unknown_star())
+                {
                     sources.push(ColumnOrigin::UnknownStar);
                 }
                 sources
@@ -539,10 +573,10 @@ impl Evaluator<'_, '_, '_> {
         &mut self,
         source: crate::graph::scope::VirtualSourceId,
         index: usize,
-    ) -> Vec<ColumnOrigin> {
+    ) -> Sources {
         let graph = self.cx.graph;
         let column = &graph.scopes.virtual_source(source).columns[index];
-        let mut origins = Vec::new();
+        let mut origins = Sources::default();
         let mut visited = HashSet::new();
         for &dependency in &column.dependencies {
             let (dependency_origins, _, _) =
@@ -565,24 +599,23 @@ impl Evaluator<'_, '_, '_> {
     }
 
     /// The wildcard origins a segment contributes to `column`.
-    fn provider_sources(
-        &mut self,
-        provider: &UnknownProvider,
-        column: &Ident,
-    ) -> Vec<ColumnOrigin> {
+    fn provider_sources(&mut self, provider: &UnknownProvider, column: &Ident) -> Sources {
         match provider {
-            UnknownProvider::Relation(table) => vec![ColumnOrigin::NamedWildcard {
-                table: (**table).clone(),
-                column: column.clone(),
-            }],
+            UnknownProvider::Relation(table) => Sources::one(Origin::new(
+                ColumnOrigin::NamedWildcard {
+                    table: (**table).clone(),
+                    column: column.clone(),
+                },
+                Evidence::relation(table),
+            )),
             UnknownProvider::Segment { id, .. } => self.segment_sources(*id, column),
             UnknownProvider::SetOperation { op, left } => {
                 super::set_operation::set_operation_segment_sources(*op, *left, column, self.cx)
             }
             UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
-                vec![ColumnOrigin::Unresolved(Unresolved::Unsupported { what })]
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
             }
-            UnknownProvider::Opaque(_) => Vec::new(),
+            UnknownProvider::Opaque(_) => Sources::default(),
         }
     }
 
@@ -590,7 +623,7 @@ impl Evaluator<'_, '_, '_> {
         let model = self.scope_model(scope);
         let mut admitted = false;
         let mut unknown_seen = false;
-        let mut sources = Vec::new();
+        let mut sources = Sources::default();
         for element in &model.elements {
             let OutputElement::Unknown(segment) = element else {
                 continue;
@@ -617,8 +650,8 @@ impl Evaluator<'_, '_, '_> {
 
 /// Ambiguity discards possible value sources, but keeps the reason that a
 /// candidate's set-operation correspondence could not be evaluated.
-fn has_by_name_reason(sources: &[ColumnOrigin]) -> bool {
-    sources.iter().any(|source| match source {
+fn has_by_name_reason(sources: &[Origin]) -> bool {
+    sources.iter().any(|source| match &source.kind {
         ColumnOrigin::Unresolved(Unresolved::Unsupported {
             what: "BY NAME set operation",
         }) => true,

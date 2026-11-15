@@ -9,6 +9,7 @@ use super::{
     unknown_publishers,
 };
 use crate::graph::node::{StarBase, StarOptions};
+use crate::types::Evidence;
 use crate::{Dialect, Ident, OutputName};
 
 /// Apply EXCLUDE/ILIKE, then REPLACE, then RENAME in list order to the
@@ -38,6 +39,18 @@ pub(super) fn apply_options(
             ilike: options.ilike.clone(),
         })
     });
+    // The modifiers decide names and positions from every column the star
+    // expands, so each element relies on all of their schemas.
+    let mut star_schema = Evidence::default();
+    if !options.exclude.is_empty()
+        || options.ilike.is_some()
+        || !options.replace.is_empty()
+        || !options.rename.is_empty()
+    {
+        for element in &elements {
+            star_schema.extend(element.structure());
+        }
+    }
     let removed: Vec<_> = elements
         .iter()
         .filter_map(|element| match element {
@@ -138,6 +151,7 @@ pub(super) fn apply_options(
             candidate_ranges: ranges,
             value: ValueId::Expr(replacement.node_id),
             origin: SlotOrigin::Defined,
+            structure: Evidence::default(),
         }));
     }
 
@@ -176,6 +190,7 @@ pub(super) fn apply_options(
             value,
             // The segments know the column under its old name.
             origin: SlotOrigin::Forwarded(old.clone()),
+            structure: Evidence::default(),
         }));
     }
     // A name a RENAME introduces does not collide with a column the star
@@ -190,6 +205,9 @@ pub(super) fn apply_options(
         {
             remove_from_segments(&mut elements, new, dialect);
         }
+    }
+    for element in &mut elements {
+        element.rely_on(&star_schema);
     }
     elements
 }
