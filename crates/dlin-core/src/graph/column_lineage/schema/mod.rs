@@ -6,6 +6,10 @@ mod sql_output;
 
 pub(super) use context::SchemaContext;
 pub(super) use evidence::SchemaEvidence;
+pub use evidence::{
+    ContractEnforcementEvidence, CoverageBasis, EnforcementApplicability, EvidenceId,
+    SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin,
+};
 
 use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;

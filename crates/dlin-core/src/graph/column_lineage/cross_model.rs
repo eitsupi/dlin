@@ -2,11 +2,12 @@ use crate::parser::manifest::Manifest;
 use std::collections::HashSet;
 
 use super::relation::{RelationRef, RelationResolution, matching_indices, resolve_unique};
+use super::types::{cited_evidence, merge_evidence, normalize_boundaries, normalize_unresolved};
 use super::{
-    ColumnLineageAnalysis, InternalColumnSource, InternalModelColumnLineage, ModelOutputRef,
-    ModelPathHop, OutputSlotId, SlotLookup, TraceBoundary, TraceBoundaryPolicy,
-    TraceBoundaryReason, TraceResource, TraceResourceCandidate, TraceResourceKind,
-    UnresolvedContribution, UnresolvedReason, ValueLineage, find_model_by_name,
+    ColumnLineageAnalysis, EvidenceId, InternalColumnSource, InternalModelColumnLineage,
+    ModelOutputRef, ModelPathHop, OutputSlotId, SchemaEvidenceRecord, SlotLookup, TraceBoundary,
+    TraceBoundaryPolicy, TraceBoundaryReason, TraceResource, TraceResourceCandidate,
+    TraceResourceKind, UnresolvedContribution, UnresolvedReason, ValueLineage, find_model_by_name,
     find_model_by_unique_id,
 };
 
@@ -16,6 +17,11 @@ struct TraceAccumulator {
     sources: Vec<InternalColumnSource>,
     unresolved: Vec<UnresolvedContribution>,
     boundaries: Vec<TraceBoundary>,
+    /// Evidence the lineage relies on as a whole, including what decided the
+    /// upstream outputs that were entered.
+    evidence: Vec<EvidenceId>,
+    /// The evidence records of every model the trace entered.
+    ledger: Vec<SchemaEvidenceRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +64,7 @@ fn compute_cross_model_inner(
     let Some(output) = result.output.as_mut() else {
         return result;
     };
+    let mut ledger = std::mem::take(&mut result.evidence);
     for slot_index in 0..output.columns.len() {
         let slot = &output.columns[slot_index];
         let root = ModelOutputRef {
@@ -70,6 +77,8 @@ fn compute_cross_model_inner(
             sources: Vec::new(),
             unresolved: slot.lineage.unresolved().to_vec(),
             boundaries: Vec::new(),
+            evidence: slot.evidence.lineage.clone(),
+            ledger: Vec::new(),
         };
         let mut visited = Visited::new();
         visited.insert((root_uid.clone(), slot.id));
@@ -93,6 +102,7 @@ fn compute_cross_model_inner(
                     policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
                 },
                 model_path: Vec::new(),
+                evidence: slot.evidence.lineage.clone(),
             });
         }
 
@@ -102,24 +112,63 @@ fn compute_cross_model_inner(
         }
 
         let TraceAccumulator {
-            mut sources,
-            mut unresolved,
-            mut boundaries,
+            sources,
+            unresolved,
+            boundaries,
+            mut evidence,
+            ledger: entered,
         } = acc;
-        sources.sort_by(|a, b| (&a.relation, &a.column).cmp(&(&b.relation, &b.column)));
-        sources.dedup();
-        unresolved.sort();
-        unresolved.dedup();
-        boundaries.sort();
-        boundaries.dedup();
+        let sources = merge_sources(sources);
+        let unresolved = normalize_unresolved(unresolved);
+        for source in &sources {
+            merge_evidence(&mut evidence, &source.evidence);
+        }
+        for contribution in &unresolved {
+            merge_evidence(&mut evidence, &contribution.evidence);
+        }
         result.boundaries.extend(boundaries);
-        output.columns[slot_index].lineage = ValueLineage::new(sources, unresolved);
+        ledger.extend(entered);
+        let slot = &mut output.columns[slot_index];
+        slot.lineage = ValueLineage::new(sources, unresolved);
+        slot.evidence.lineage = evidence;
     }
 
-    result.boundaries.sort();
-    result.boundaries.dedup();
+    result.boundaries = normalize_boundaries(std::mem::take(&mut result.boundaries));
+    let cited: Vec<EvidenceId> = output
+        .cited()
+        .chain(
+            result
+                .boundaries
+                .iter()
+                .flat_map(|boundary| &boundary.evidence),
+        )
+        .cloned()
+        .collect();
+    result.evidence = cited_evidence(&cited, &ledger);
 
     result
+}
+
+/// Sort sources and merge those that reach the same column along the same
+/// path, keeping the evidence of each.
+fn merge_sources(mut sources: Vec<InternalColumnSource>) -> Vec<InternalColumnSource> {
+    sources.sort_by(|a, b| {
+        (&a.relation, &a.column, &a.model_path).cmp(&(&b.relation, &b.column, &b.model_path))
+    });
+    let mut merged: Vec<InternalColumnSource> = Vec::with_capacity(sources.len());
+    for source in sources {
+        match merged.last_mut() {
+            Some(last)
+                if last.relation == source.relation
+                    && last.column == source.column
+                    && last.model_path == source.model_path =>
+            {
+                merge_evidence(&mut last.evidence, &source.evidence);
+            }
+            _ => merged.push(source),
+        }
+    }
+    merged
 }
 
 /// Resolve one SQL relation using only the manifest resources that the owner
@@ -323,6 +372,8 @@ fn resolve_source_recursive(
     ctx: &mut CrossModelContext<'_, '_>,
     current_path: &[ModelPathHop],
 ) {
+    // What the trace relied on to reach this source.
+    let reach = &source.evidence;
     let leaf = |acc: &mut TraceAccumulator| {
         let mut leaf = source.clone();
         leaf.model_path = current_path.to_vec();
@@ -354,6 +405,7 @@ fn resolve_source_recursive(
                     },
                     origin: at.clone(),
                     model_path: current_path.to_vec(),
+                    evidence: reach.clone(),
                 });
             }
             acc.boundaries.push(TraceBoundary {
@@ -362,6 +414,7 @@ fn resolve_source_recursive(
                 reason,
                 resource,
                 model_path: current_path.to_vec(),
+                evidence: reach.clone(),
             });
         };
     let Some(model_unique_id) = resolved.model_unique_id.clone() else {
@@ -374,6 +427,7 @@ fn resolve_source_recursive(
     };
 
     let upstream_result = super::compute_column_lineage_internal(ctx.analysis, &model_unique_id);
+    acc.ledger.extend(upstream_result.evidence.iter().cloned());
     let lookup = upstream_result
         .output
         .as_ref()
@@ -434,6 +488,11 @@ fn resolve_source_recursive(
             });
 
             let (known, unresolved) = (slot.lineage.known(), slot.lineage.unresolved());
+            // What decided the upstream output's value, including a decision
+            // that left it without sources, is part of the root's lineage.
+            let mut entered = reach.clone();
+            merge_evidence(&mut entered, &slot.evidence.lineage);
+            merge_evidence(&mut acc.evidence, &entered);
             if known.is_empty() && unresolved.is_empty() {
                 acc.boundaries.push(TraceBoundary {
                     root: root.clone(),
@@ -449,16 +508,19 @@ fn resolve_source_recursive(
                         policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
                     },
                     model_path: extended_path.clone(),
+                    evidence: entered.clone(),
                 });
             }
             for contribution in unresolved {
                 acc.unresolved
-                    .push(extend_contribution(contribution, &extended_path));
+                    .push(extend_contribution(contribution, &extended_path, reach));
             }
             for nested_source in known {
                 let branch_visited = visited.clone();
+                let mut nested_source = nested_source.clone();
+                merge_evidence(&mut nested_source.evidence, reach);
                 resolve_source_recursive(
-                    nested_source,
+                    &nested_source,
                     root,
                     branch_visited,
                     acc,
@@ -491,6 +553,7 @@ fn resolve_source_recursive(
                 },
                 origin: at,
                 model_path: current_path.to_vec(),
+                evidence: reach.clone(),
             });
         }
         // The column is not among the listed outputs of the model (or the
@@ -510,6 +573,7 @@ fn resolve_source_recursive(
                 reason,
                 origin: at,
                 model_path: current_path.to_vec(),
+                evidence: reach.clone(),
             });
         }
     }
@@ -531,15 +595,21 @@ fn output_ref_of(
 /// Re-express a contribution found in an upstream model relative to the root
 /// output. `prefix` is the hop path from the root to the upstream model,
 /// including the upstream hop itself. The origin is kept as it was found.
+///
+/// The contribution also relies on `reach`, the evidence of the path to it.
 fn extend_contribution(
     contribution: &UnresolvedContribution,
     prefix: &[ModelPathHop],
+    reach: &[EvidenceId],
 ) -> UnresolvedContribution {
     let mut model_path = prefix.to_vec();
     model_path.extend(contribution.model_path.iter().cloned());
+    let mut evidence = contribution.evidence.clone();
+    merge_evidence(&mut evidence, reach);
     UnresolvedContribution {
         reason: contribution.reason.clone(),
         origin: contribution.origin.clone(),
         model_path,
+        evidence,
     }
 }

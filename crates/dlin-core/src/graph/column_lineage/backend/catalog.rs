@@ -13,6 +13,9 @@ pub struct CatalogSnapshot {
     tables: BTreeMap<RelationRef, CatalogTable>,
     aliases: BTreeMap<RelationRef, BTreeSet<RelationRef>>,
     conflicted: BTreeSet<RelationRef>,
+    /// Every registered schema record and the records it was derived from,
+    /// by evidence id, so that a result can describe the evidence it cites.
+    records: BTreeMap<String, SchemaEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +27,8 @@ pub struct CatalogTable {
     /// unknown segments and the evidence it rests on.
     pub(crate) schema: SchemaEvidence,
     /// Ids of every registration that makes the same claim as `schema`,
-    /// including its own.
+    /// including its own, and of the evidence those registrations were
+    /// derived from. A reader of the relation relies on all of them.
     pub(crate) evidence_ids: BTreeSet<String>,
 }
 
@@ -96,13 +100,17 @@ impl CatalogSnapshot {
         preferred_name: impl Into<String>,
         schema: SchemaEvidence,
     ) {
+        for record in schema.records() {
+            self.records.insert(record.id.0.clone(), record);
+        }
+        let reliance: Vec<String> = schema.reliance().map(|id| id.0.clone()).collect();
         if let Some(existing) = self.tables.get_mut(&relation) {
             if existing.schema.same_claim_as(&schema) {
-                existing.evidence_ids.insert(schema.id.0);
+                existing.evidence_ids.extend(reliance);
                 return;
             }
             if existing.schema.is_order_refinement_pair(&schema) {
-                existing.evidence_ids.insert(schema.id.0.clone());
+                existing.evidence_ids.extend(reliance);
                 if schema.order == sqllineage::SchemaOrder::Proven {
                     existing.schema = schema;
                 }
@@ -117,7 +125,7 @@ impl CatalogSnapshot {
             CatalogTable {
                 name: preferred_name.into(),
                 relation: relation.clone(),
-                evidence_ids: BTreeSet::from([schema.id.0.clone()]),
+                evidence_ids: reliance.into_iter().collect(),
                 schema,
             },
         );
@@ -131,6 +139,17 @@ impl CatalogSnapshot {
     pub(crate) fn add_alias(&mut self, alias: RelationRef, relation: RelationRef) {
         debug_assert!(self.tables.contains_key(&relation));
         self.aliases.entry(alias).or_default().insert(relation);
+    }
+
+    /// The public description of every record.
+    pub(crate) fn records(&self) -> Vec<crate::graph::column_lineage::SchemaEvidenceRecord> {
+        self.records.values().map(SchemaEvidence::record).collect()
+    }
+
+    /// The record of a registered piece of evidence, or of one a registered
+    /// schema was derived from.
+    pub(crate) fn record(&self, id: &str) -> Option<&SchemaEvidence> {
+        self.records.get(id)
     }
 
     pub(crate) fn contains_relation(&self, relation: &RelationRef) -> bool {

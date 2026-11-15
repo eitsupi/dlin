@@ -322,7 +322,41 @@ fn sql_output_evidence(
 ) -> Result<SchemaEvidence, String> {
     let analysis = analyze_sql(sql, dialect, catalog)?;
     let statement = single_lineage_statement(&analysis)?;
-    Ok(SqlOutputSchema::from_output(&statement.output).to_evidence(subject))
+    let mut evidence = SqlOutputSchema::from_output(&statement.output).to_evidence(subject);
+    // The schema claims which columns the output lists, under which names, at
+    // which positions and whether it has more. Those claims rest on the
+    // evidence of the output's shape and of each column's structure, which is
+    // already closed under derivation in the model's own catalog. What a
+    // column's value was found to depend on is not part of the claim.
+    let mut references: Vec<&str> = statement
+        .output
+        .evidence
+        .iter()
+        .chain(
+            statement
+                .output
+                .columns
+                .iter()
+                .flat_map(|column| &column.evidence.structure),
+        )
+        .chain(
+            match &statement.output.shape {
+                sqllineage::Shape::Closed => [].iter(),
+                sqllineage::Shape::Open { unexpanded } => unexpanded.iter(),
+            }
+            .flat_map(|star| &star.evidence.structure),
+        )
+        .map(|reference| reference.0.as_str())
+        .collect();
+    references.sort_unstable();
+    references.dedup();
+    for reference in references {
+        evidence.derived_from.push(EvidenceId(reference.to_owned()));
+        if let Some(record) = catalog.and_then(|catalog| catalog.record(reference)) {
+            evidence.derived_records.push(record.clone());
+        }
+    }
+    Ok(evidence)
 }
 
 fn register_model_relation(

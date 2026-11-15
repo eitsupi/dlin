@@ -2,17 +2,33 @@
 //! on what basis its coverage is assumed.
 
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::graph::column_lineage::backend::DlinDialect;
 use crate::parser::manifest::{ManifestColumn, ManifestContractConfig};
 
-/// Stable identifier of one piece of schema evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EvidenceId(pub(crate) String);
+/// Stable identifier of one piece of schema evidence, such as
+/// `yaml:source.p.raw.orders` or `sql:model.p.orders`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EvidenceId(pub(crate) String);
+
+impl EvidenceId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for EvidenceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// Where a column list came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SchemaOrigin {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaOrigin {
     /// Output columns inferred from the model's SQL.
     SqlOutput,
     /// A schema supplied by a catalog, such as a user-provided schema string.
@@ -25,8 +41,10 @@ pub(crate) enum SchemaOrigin {
 ///
 /// `Enumerated` only says the list came from an enumeration. It does not by
 /// itself imply that the coverage is exhaustive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CoverageBasis {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageBasis {
+    /// The source enumerated the columns.
     Enumerated,
     /// A YAML list is treated as exhaustive because the default policy says so.
     AssumedByYamlPolicy,
@@ -35,16 +53,64 @@ pub(crate) enum CoverageBasis {
 }
 
 /// Whether a declared contract is known to apply to the built relation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EnforcementApplicability {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementApplicability {
     /// A declaration is not validation, so applicability is not established.
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ContractEnforcementEvidence {
-    pub(crate) declared: bool,
-    pub(crate) applicability: EnforcementApplicability,
+/// What is known about the enforcement of a declared model contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ContractEnforcementEvidence {
+    pub declared: bool,
+    pub applicability: EnforcementApplicability,
+}
+
+/// Whether a schema lists every column of its relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaCoverage {
+    /// Unlisted names are absent.
+    Exhaustive,
+    /// Unlisted names may exist.
+    Partial,
+}
+
+/// Whether a schema proves the physical order of its columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaOrder {
+    Proven,
+    Unknown,
+}
+
+/// The description of one piece of schema evidence that a result cites:
+/// what the schema claims about its relation and on what basis.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SchemaEvidenceRecord {
+    pub id: EvidenceId,
+    /// The dbt unique id (or relation name) the schema describes.
+    pub subject: String,
+    pub origin: SchemaOrigin,
+    pub coverage: SchemaCoverage,
+    pub coverage_basis: CoverageBasis,
+    pub order: SchemaOrder,
+    pub enforcement: Option<ContractEnforcementEvidence>,
+    /// The evidence a schema inferred from SQL relied on for its columns,
+    /// their positions and whether it has more.
+    pub derived_from: Vec<EvidenceId>,
+}
+
+impl SchemaEvidenceRecord {
+    /// Whether exhaustive coverage is assumed rather than enumerated.
+    pub fn is_assumption(&self) -> bool {
+        self.coverage == SchemaCoverage::Exhaustive
+            && matches!(
+                self.coverage_basis,
+                CoverageBasis::AssumedByYamlPolicy | CoverageBasis::DeclaredEnforcedContract
+            )
+    }
 }
 
 /// One column of a schema, in the order the source listed it.
@@ -70,6 +136,14 @@ pub(crate) struct SchemaEvidence {
     pub(crate) columns: Vec<EvidencedColumn>,
     pub(crate) unknown_segments: Vec<sqllineage::CatalogUnknownSegment>,
     pub(crate) enforcement: Option<ContractEnforcementEvidence>,
+    /// The evidence a schema inferred from SQL relied on for which columns it
+    /// lists and whether it has more. It is closed under derivation: the
+    /// evidence of an upstream SQL schema's own derivation is included.
+    pub(crate) derived_from: Vec<EvidenceId>,
+    /// The records of `derived_from`, so that a reader of this schema can
+    /// describe them. Each has no records of its own; their `derived_from`
+    /// ids are all among `derived_from` here.
+    pub(crate) derived_records: Vec<SchemaEvidence>,
 }
 
 impl SchemaEvidence {
@@ -172,7 +246,45 @@ impl SchemaEvidence {
                 .collect(),
             unknown_segments: Vec::new(),
             enforcement: None,
+            derived_from: Vec::new(),
+            derived_records: Vec::new(),
         }
+    }
+
+    /// The public description of this schema.
+    pub(crate) fn record(&self) -> SchemaEvidenceRecord {
+        SchemaEvidenceRecord {
+            id: self.id.clone(),
+            subject: self.subject.clone(),
+            origin: self.origin,
+            coverage: match self.coverage {
+                sqllineage::SchemaCoverage::Exhaustive => SchemaCoverage::Exhaustive,
+                sqllineage::SchemaCoverage::Partial => SchemaCoverage::Partial,
+            },
+            coverage_basis: self.coverage_basis,
+            order: match self.order {
+                sqllineage::SchemaOrder::Proven => SchemaOrder::Proven,
+                sqllineage::SchemaOrder::Unknown => SchemaOrder::Unknown,
+            },
+            enforcement: self.enforcement,
+            derived_from: self.derived_from.clone(),
+        }
+    }
+
+    /// Every evidence id a reader of this schema relies on: its own and
+    /// those it was derived from.
+    pub(crate) fn reliance(&self) -> impl Iterator<Item = &EvidenceId> {
+        std::iter::once(&self.id).chain(&self.derived_from)
+    }
+
+    /// This record and the records it was derived from, each without
+    /// records of its own.
+    pub(crate) fn records(&self) -> impl Iterator<Item = SchemaEvidence> + '_ {
+        std::iter::once(Self {
+            derived_records: Vec::new(),
+            ..self.clone()
+        })
+        .chain(self.derived_records.iter().cloned())
     }
 
     /// A user-typed schema string is an explicit, ordered enumeration.
@@ -240,6 +352,8 @@ pub(crate) fn yaml_schema_evidence(
             declared: true,
             applicability: EnforcementApplicability::Unknown,
         }),
+        derived_from: Vec::new(),
+        derived_records: Vec::new(),
     })
 }
 

@@ -804,6 +804,7 @@ fn slot_of(
         name,
         transformation: TransformationType::Expression,
         lineage,
+        evidence: Default::default(),
     }
 }
 
@@ -818,6 +819,7 @@ fn source_of(relation: &str, column: Ident) -> InternalColumnSource {
             "inner",
             TransformationType::Cast,
         )],
+        evidence: Default::default(),
     }
 }
 
@@ -850,6 +852,7 @@ fn rich_result() -> InternalModelColumnLineage {
                     "x",
                     TransformationType::Direct,
                 )],
+                evidence: Default::default(),
             },
             UnresolvedContribution {
                 reason: UnresolvedReason::BehindStar {
@@ -857,6 +860,7 @@ fn rich_result() -> InternalModelColumnLineage {
                 },
                 origin,
                 model_path: vec![],
+                evidence: Default::default(),
             },
         ],
     );
@@ -912,6 +916,7 @@ fn rich_result() -> InternalModelColumnLineage {
                     },
                 ],
             },
+            evidence: Default::default(),
         }),
         errors: vec![ColumnLineageError {
             kind: ColumnLineageErrorKind::ColumnIndeterminate,
@@ -921,6 +926,7 @@ fn rich_result() -> InternalModelColumnLineage {
             why: None,
             hint: Some("a hint".to_string()),
         }],
+        evidence: Default::default(),
     }
 }
 

@@ -50,11 +50,15 @@ fn test_column_cache_hit() {
                     relation: RelationRef::bare("raw"),
                     column: Ident::unquoted("id"),
                     model_path: vec![],
+                    evidence: Default::default(),
                 }]),
+                evidence: Default::default(),
             }],
             shape: OutputShape::Closed,
+            evidence: Default::default(),
         }),
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("test_model", DlinDialect::Generic, 0, lineage);
     cache.save();
@@ -122,6 +126,7 @@ fn test_compute_column_lineage_reuses_canonical_cache_entry_for_short_name() {
         model: "canonical-cache-sentinel".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
 
     // Seed the persistent cache using the canonical key, then resolve the
@@ -168,6 +173,7 @@ fn test_column_cache_miss_on_semantic_digest_change() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
@@ -188,6 +194,7 @@ fn test_column_cache_miss_on_dialect_change() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::BigQuery, 0, lineage);
     cache.save();
@@ -208,6 +215,7 @@ fn test_column_cache_miss_on_manifest_columns_change() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 42, lineage);
     cache.save();
@@ -231,6 +239,7 @@ fn test_column_cache_version_invalidation() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
@@ -258,6 +267,7 @@ fn test_column_cache_disabled() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 0, lineage);
     // Disabled cache still works in-memory (only disk persistence is disabled)
@@ -279,6 +289,7 @@ fn test_column_cache_fresh() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 0, lineage);
     cache.save();
@@ -295,6 +306,7 @@ fn test_column_cache_fresh() {
         model: "m2".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     fresh.insert("m2", DlinDialect::Generic, 0, lineage2);
     fresh.save();
@@ -317,6 +329,7 @@ fn test_column_cache_ignores_manifest_stat_change_when_semantics_match() {
         model: "m".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     cache.insert("m", DlinDialect::Generic, 42, lineage);
     cache.save();
@@ -349,6 +362,7 @@ fn test_compute_column_lineage_reuses_result_when_manifest_stat_changes() {
         model: "manifest-stat-cache-sentinel".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
 
     let mut seeded = ColumnLineageCache::load(project_dir, None);
@@ -385,6 +399,7 @@ fn test_compute_column_lineage_recomputes_when_upstream_alias_changes() {
         model: "upstream-alias-cache-sentinel".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     let mut cache = ColumnLineageCache::disabled();
     cache.insert(&unique_id, DlinDialect::Generic, initial_hash, sentinel);
@@ -475,6 +490,7 @@ fn test_unrelated_manifest_change_reuses_cached_lineage() {
         model: "unrelated-change-sentinel".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
 
     let mut seeded = ColumnLineageCache::load(tmp.path(), None);
@@ -565,6 +581,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         model: "cycle-cache-sentinel".to_string(),
         output: None,
         errors: vec![],
+        evidence: Default::default(),
     };
     let mut seeded = ColumnLineageCache::load(tmp.path(), None);
     seeded.insert(
@@ -798,6 +815,7 @@ fn seeded_cache_file(project_dir: &std::path::Path) -> ColumnLineageCacheFile {
             model: "m".to_string(),
             output: None,
             errors: vec![],
+            evidence: Default::default(),
         },
     );
     cache.save();

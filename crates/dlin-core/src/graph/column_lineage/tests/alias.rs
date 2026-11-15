@@ -252,6 +252,10 @@ fn cross_model_lineage_resolves_an_aliased_upstream_relation() {
                 "id",
                 TransformationType::Direct,
             )],
+            // The column is read from the upstream model's SQL output.
+            evidence: vec![crate::graph::column_lineage::EvidenceId(
+                "sql:model.proj.upstream_model".to_string(),
+            )],
         }]
     );
 }

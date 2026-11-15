@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::backend::DlinDialect;
 use super::ident::Ident;
 use super::relation::RelationRef;
+use super::schema::{EvidenceId, SchemaEvidenceRecord};
 
 /// Hint attached to a diagnostic about a column that may sit behind an
 /// unexpanded star.
@@ -190,6 +191,8 @@ pub struct ModelColumnLineage {
     pub value_partial_columns: usize,
     /// Resource boundaries encountered while tracing output values.
     pub boundaries: Vec<TraceBoundary>,
+    /// The schema evidence the result cites, and what it was derived from.
+    pub evidence: Vec<SchemaEvidenceRecord>,
     pub errors: Vec<ColumnLineageError>,
 }
 
@@ -244,6 +247,15 @@ impl ModelColumnLineage {
                 .into_iter()
                 .filter(|error| !failed || error.kind == ColumnLineageErrorKind::ColumnAmbiguous),
         );
+        let cited = cited_evidence(
+            self.output.iter().flat_map(|output| output.cited()).chain(
+                self.boundaries
+                    .iter()
+                    .flat_map(|boundary| &boundary.evidence),
+            ),
+            &self.evidence,
+        );
+        self.evidence = cited;
         self.recount();
     }
 }
@@ -335,6 +347,29 @@ pub struct OutputSlot<S> {
     pub transformation: TransformationType,
     /// Known sources of the value, and what remains unresolved.
     pub lineage: ValueLineage<S>,
+    /// The schema evidence the slot relies on.
+    #[serde(default, skip_serializing_if = "SlotEvidence::is_empty")]
+    pub evidence: SlotEvidence,
+}
+
+/// The schema evidence an output slot relies on. Each list is sorted and
+/// deduplicated. The evidence of each known source and unresolved
+/// contribution is kept with it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlotEvidence {
+    /// Evidence that the slot exists under its name at its position.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structure: Vec<EvidenceId>,
+    /// Evidence for the value lineage as a whole, including the decisions
+    /// that left no source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<EvidenceId>,
+}
+
+impl SlotEvidence {
+    pub fn is_empty(&self) -> bool {
+        self.structure.is_empty() && self.lineage.is_empty()
+    }
 }
 
 /// A star projection that could not be expanded.
@@ -366,6 +401,10 @@ pub enum OutputShape {
 pub struct OutputSlots<S> {
     pub columns: Vec<OutputSlot<S>>,
     pub shape: OutputShape,
+    /// Schema evidence that decides which columns are listed and whether there
+    /// are more.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// Result of looking a column name up in the slots of a model.
@@ -450,6 +489,16 @@ impl<S> OutputSlots<S> {
         }
     }
 
+    /// Every evidence id the slots and the shape cite. The lineage evidence
+    /// of a slot includes that of its sources and unresolved contributions.
+    pub(crate) fn cited(&self) -> impl Iterator<Item = &EvidenceId> {
+        self.evidence.iter().chain(
+            self.columns
+                .iter()
+                .flat_map(|slot| slot.evidence.structure.iter().chain(&slot.evidence.lineage)),
+        )
+    }
+
     /// Listed, value-complete and value-partial slot counts.
     fn counts(&self) -> (usize, usize, usize) {
         let complete = self
@@ -472,6 +521,9 @@ pub struct ColumnSource {
     /// hops ordered from the target model outward toward the leaf source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_path: Vec<ModelPathHop>,
+    /// Schema evidence this source relies on along its path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// Internal source representation. The public `ColumnSource.table` is a
@@ -482,6 +534,7 @@ pub(crate) struct InternalColumnSource {
     pub relation: RelationRef,
     pub column: Ident,
     pub model_path: Vec<ModelPathHop>,
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// The internal form of a model result.
@@ -495,6 +548,7 @@ pub(crate) struct InternalModelColumnLineage {
     pub model: String,
     pub output: Option<OutputSlots<InternalColumnSource>>,
     pub boundaries: Vec<TraceBoundary>,
+    pub evidence: Vec<SchemaEvidenceRecord>,
     pub errors: Vec<ColumnLineageError>,
 }
 
@@ -506,6 +560,7 @@ impl InternalModelColumnLineage {
             model: model.to_string(),
             output: None,
             boundaries: Vec::new(),
+            evidence: Vec::new(),
             errors: vec![error],
         }
     }
@@ -527,12 +582,16 @@ impl InternalModelColumnLineage {
                             table: source.relation.render(),
                             column: source.column,
                             model_path: source.model_path,
+                            evidence: source.evidence,
                         }),
+                        evidence: slot.evidence,
                     })
                     .collect(),
                 shape: output.shape,
+                evidence: output.evidence,
             }),
             boundaries: self.boundaries,
+            evidence: self.evidence,
             listed_columns: 0,
             value_complete_columns: 0,
             value_partial_columns: 0,
@@ -555,6 +614,10 @@ pub struct TraceBoundary {
     pub reason: TraceBoundaryReason,
     pub resource: TraceResource,
     pub model_path: Vec<ModelPathHop>,
+    /// Schema evidence the trace relied on to reach this boundary. The
+    /// classification itself follows the manifest and the boundary policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -603,6 +666,80 @@ pub struct TraceResource {
     pub column: Option<Ident>,
     pub candidates: Vec<TraceResourceCandidate>,
     pub policy: TraceBoundaryPolicy,
+}
+
+/// Add `more` to the sorted, deduplicated list `ids`.
+pub(crate) fn merge_evidence<'a>(
+    ids: &mut Vec<EvidenceId>,
+    more: impl IntoIterator<Item = &'a EvidenceId>,
+) {
+    ids.extend(more.into_iter().cloned());
+    ids.sort();
+    ids.dedup();
+}
+
+/// The records of `ledger` that `cited` names, with the records they were
+/// derived from, in id order.
+pub(crate) fn cited_evidence<'a>(
+    cited: impl IntoIterator<Item = &'a EvidenceId>,
+    ledger: &[SchemaEvidenceRecord],
+) -> Vec<SchemaEvidenceRecord> {
+    let mut wanted: Vec<&EvidenceId> = cited.into_iter().collect();
+    let mut found: Vec<SchemaEvidenceRecord> = Vec::new();
+    while let Some(id) = wanted.pop() {
+        if found.iter().any(|record| &record.id == id) {
+            continue;
+        }
+        if let Some(record) = ledger.iter().find(|record| &record.id == id) {
+            wanted.extend(&record.derived_from);
+            found.push(record.clone());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Sort unresolved contributions and merge those that differ only in their
+/// evidence, keeping the evidence of each.
+pub(crate) fn normalize_unresolved(
+    mut unresolved: Vec<UnresolvedContribution>,
+) -> Vec<UnresolvedContribution> {
+    unresolved.sort();
+    let mut merged: Vec<UnresolvedContribution> = Vec::with_capacity(unresolved.len());
+    for contribution in unresolved {
+        match merged.last_mut() {
+            Some(last)
+                if last.reason == contribution.reason
+                    && last.origin == contribution.origin
+                    && last.model_path == contribution.model_path =>
+            {
+                merge_evidence(&mut last.evidence, &contribution.evidence);
+            }
+            _ => merged.push(contribution),
+        }
+    }
+    merged
+}
+
+/// Sort trace boundaries and merge those that differ only in their evidence.
+pub(crate) fn normalize_boundaries(mut boundaries: Vec<TraceBoundary>) -> Vec<TraceBoundary> {
+    boundaries.sort();
+    let mut merged: Vec<TraceBoundary> = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        match merged.last_mut() {
+            Some(last)
+                if last.root == boundary.root
+                    && last.at == boundary.at
+                    && last.reason == boundary.reason
+                    && last.resource == boundary.resource
+                    && last.model_path == boundary.model_path =>
+            {
+                merge_evidence(&mut last.evidence, &boundary.evidence);
+            }
+            _ => merged.push(boundary),
+        }
+    }
+    merged
 }
 
 /// Collapse parseable per-column diagnostics at a public output boundary.
@@ -807,6 +944,10 @@ pub struct UnresolvedContribution {
     /// in the order of [`ColumnSource::model_path`]. Empty when `origin` is
     /// the root output itself.
     pub model_path: Vec<ModelPathHop>,
+    /// Schema evidence that leaves this part unresolved as it is, such as the
+    /// schemas that left its candidates, and the evidence of the path to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// Why a contribution is unresolved. This mirrors the engine's reasons and
