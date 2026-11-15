@@ -395,31 +395,19 @@ fn wrapping_an_expression_in_a_fromless_scalar_subquery_keeps_its_lineage() {
 }
 
 // DuckDB lets a plain derived table read the FROM items before it (implicit
-// LATERAL). The engine does not model that yet, so the reference is left
-// unresolved rather than bound to a wrong relation. This documents a
-// limitation to be lifted once visibility is decided per dialect.
+// LATERAL), so the reference resolves as it does with the keyword.
 #[test]
-fn duckdb_implicit_lateral_reference_is_unresolved_for_now() {
-    let result = analyze(
+fn duckdb_implicit_lateral_reference_reads_the_item_before_it() {
+    for sql in [
         "SELECT d.y FROM t, (SELECT t.x AS y) AS d",
-        Dialect::DuckDb,
-        None,
-    );
-    let column = &result.output.columns[0];
-    assert!(
-        matches!(&column.lineage, Lineage::Partial { known, .. } if known.is_empty()),
-        "{:?}",
-        column.lineage
-    );
-    assert_eq!(read_names(&result), ["t"]);
-    // With the keyword it is resolved.
-    let result = analyze(
         "SELECT d.y FROM t, LATERAL (SELECT t.x AS y) AS d",
-        Dialect::DuckDb,
-        None,
-    );
-    assert_eq!(
-        concrete_sources(&result.output.columns[0]),
-        [pair("t", "x")]
-    );
+    ] {
+        let result = analyze(sql, Dialect::DuckDb, None);
+        assert_eq!(
+            concrete_sources(&result.output.columns[0]),
+            [pair("t", "x")],
+            "{sql}"
+        );
+        assert_eq!(read_names(&result), ["t"], "{sql}");
+    }
 }

@@ -410,6 +410,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     index: self.range_index(env, &name, &binding),
                     name,
                     binding,
+                    anonymous: false,
                 };
                 if let Some(model) = self.binding_model(&range.binding) {
                     reads.push((range.index, model));

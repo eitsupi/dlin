@@ -32,6 +32,9 @@ pub(in crate::resolve) struct RangeRef {
     pub index: usize,
     pub name: Ident,
     pub binding: Binding,
+    /// A derived table written without a range variable. It has no name to
+    /// qualify a reference with, and `name` is empty.
+    pub anonymous: bool,
 }
 
 impl RangeRef {
@@ -45,7 +48,9 @@ impl RangeRef {
                 name: table.table.clone(),
             })),
             Binding::Cte(_) => Some(Candidate::Cte(self.name.clone())),
-            Binding::DerivedTable(_) => Some(Candidate::Derived(Some(self.name.clone()))),
+            Binding::DerivedTable(_) => Some(Candidate::Derived(
+                (!self.anonymous).then(|| self.name.clone()),
+            )),
             Binding::VirtualSource(_) => None,
         }
     }
@@ -97,11 +102,9 @@ pub(in crate::resolve) enum Invalidity {
 /// so the join rules that decide which columns exist live in the fold alone.
 #[derive(Debug)]
 pub(in crate::resolve) struct InputModel {
-    /// The folded relations of the FROM clause.
+    /// The folded relations of the FROM clause, then the columns of the
+    /// derived tables without a range variable.
     pub(super) model: OutputModel,
-    /// Columns of derived tables without a range variable. A star publishes
-    /// them after the relations; a name is never looked up in them.
-    pub(super) anonymous: Vec<OutputElement>,
 }
 
 /// What an unqualified name denotes among the relations of a FROM clause.
@@ -168,12 +171,7 @@ fn candidates_of<'r>(ranges: impl IntoIterator<Item = &'r RangeRef>) -> Vec<Cand
 impl InputModel {
     /// The elements an unqualified star publishes.
     pub(super) fn star_elements(&self) -> Vec<OutputElement> {
-        self.model
-            .elements
-            .iter()
-            .chain(&self.anonymous)
-            .cloned()
-            .collect()
+        self.model.elements.clone()
     }
 
     /// Decide what the unqualified `name` denotes among several relations.
@@ -368,7 +366,6 @@ impl OutputModels<'_, '_, '_> {
         if self.enter(CacheKey::Input(env)) {
             return Rc::new(InputModel {
                 model: OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect),
-                anonymous: Vec::new(),
             });
         }
         let model = Rc::new(self.build_input(env));
@@ -448,13 +445,15 @@ impl OutputModels<'_, '_, '_> {
         evidence: &mut Evidence,
     ) -> (Standing, InputLookup) {
         let bindings = effective_bindings(env, self.graph);
+        let anonymous = !self.graph.scopes.anonymous_derived(env).is_empty();
         match bindings.as_slice() {
-            [] => (Standing::Absent, InputLookup::Absent),
-            [(range_name, binding)] => {
+            [] if !anonymous => (Standing::Absent, InputLookup::Absent),
+            [(range_name, binding)] if !anonymous => {
                 let range = RangeRef {
                     index: 0,
                     name: range_name.clone(),
                     binding: binding.clone(),
+                    anonymous: false,
                 };
                 let single = InputLookup::single(&range);
                 evidence.extend(&self.binding_schema(binding));
@@ -556,6 +555,7 @@ impl OutputModels<'_, '_, '_> {
                 index,
                 name,
                 binding,
+                anonymous: false,
             })
             .collect();
         let mut invalid = Vec::new();
@@ -598,18 +598,32 @@ impl OutputModels<'_, '_, '_> {
                 candidates: candidates_of(&ranges),
             })));
         }
-        let elements = fold_join_columns(groups, merges, dialect);
-        let mut anonymous = Vec::new();
-        for child in graph.scopes.anonymous_derived(env) {
+        let mut elements = fold_join_columns(groups, merges, dialect);
+        // A derived table without a range variable is a relation of the
+        // clause like any other: a star publishes its columns after the
+        // others, and an unqualified name may be one of them.
+        for (offset, child) in graph.scopes.anonymous_derived(env).into_iter().enumerate() {
             let model = self.scope(child);
             schema.extend(&model.schema);
-            anonymous.extend(forward_scope(child, &model, &Rc::from([]), None));
+            let range = RangeRef {
+                index: ranges.len() + offset,
+                name: Ident::unquoted(""),
+                binding: Binding::DerivedTable(child),
+                anonymous: true,
+            };
+            elements.extend(forward_scope(
+                child,
+                &model,
+                &Rc::from([range.clone()]),
+                None,
+            ));
+            reads.push((range.index, model));
         }
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;
         model.reads = reads;
         model.schema = schema;
-        InputModel { model, anonymous }
+        InputModel { model }
     }
 
     /// The model of the CTE or derived table a binding reads, if it is one.

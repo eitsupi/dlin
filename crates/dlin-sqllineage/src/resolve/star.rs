@@ -615,7 +615,17 @@ impl Evaluator<'_, '_, '_> {
             UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
                 Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
             }
-            UnknownProvider::Opaque(_) => Sources::default(),
+            // What an opaque segment provides is not known: a value read
+            // through it is unresolved, never source-free.
+            UnknownProvider::Opaque(OpaqueReason::Recursive) => {
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Recursive))
+            }
+            UnknownProvider::Opaque(
+                OpaqueReason::FieldPath(_)
+                | OpaqueReason::Expression(_)
+                | OpaqueReason::Ambiguous(_)
+                | OpaqueReason::UnknownWidth,
+            ) => Sources::one(ColumnOrigin::UnknownStar),
         }
     }
 

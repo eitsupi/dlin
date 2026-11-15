@@ -7,8 +7,8 @@ use super::catalog_provider::CatalogAdapter;
 use super::dialect::DlinDialect;
 use crate::graph::column_lineage::Ident;
 use crate::graph::column_lineage::types::{
-    SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind, SetOperator,
-    SetQuantifier, UnresolvedCandidate, UnresolvedReason, UnresolvedSource,
+    ColumnLineageErrorKind, SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind,
+    SetOperator, SetQuantifier, UnresolvedCandidate, UnresolvedReason, UnresolvedSource,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,50 +119,84 @@ pub fn debug_trace_column_json(
 /// name keep the placeholder that dlin has always reported for them.
 const ANONYMOUS_COLUMN: &str = "?column?";
 
-/// Message for a statement-level failure that rejects the whole model, or
-/// `None` when the statement may still be traced.
+/// Why a statement cannot be traced as a whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StatementFailure {
+    pub kind: ColumnLineageErrorKind,
+    pub detail: String,
+}
+
+impl StatementFailure {
+    fn new(kind: ColumnLineageErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The failure that rejects the whole model, or `None` when the statement may
+/// still be traced.
 ///
 /// An empty projection is checked first, ahead of any semantic error. Other
 /// findings (duplicate output names, lineage cycles) never reject a statement.
-pub(crate) fn statement_error(statement: &sqllineage::StatementAnalysis) -> Option<String> {
+pub(crate) fn statement_error(
+    statement: &sqllineage::StatementAnalysis,
+) -> Option<StatementFailure> {
     use sqllineage::DiagnosticKind;
     if statement
         .diagnostics
         .iter()
         .any(|diagnostic| matches!(diagnostic.kind, DiagnosticKind::EmptyProjection))
     {
-        return Some("dlin found a SELECT with an empty projection".to_string());
+        return Some(StatementFailure::new(
+            ColumnLineageErrorKind::ParseFailure,
+            "dlin found a SELECT with an empty projection",
+        ));
     }
     semantic_error(statement)
 }
 
-/// Message for an analysis error that is not an empty projection.
-fn semantic_error(statement: &sqllineage::StatementAnalysis) -> Option<String> {
+/// The analysis error that is not an empty projection. Syntax the engine
+/// does not model is not a parse failure: the SQL is valid, dlin cannot trace
+/// it.
+fn semantic_error(statement: &sqllineage::StatementAnalysis) -> Option<StatementFailure> {
     use sqllineage::DiagnosticKind;
     statement
         .diagnostics
         .iter()
         .find_map(|diagnostic| match &diagnostic.kind {
-            DiagnosticKind::SetOperationArityMismatch { left, right } => Some(format!(
-                "SQL parse error: set operation arity mismatch: left has {left} columns, \
-                 right has {right} columns"
+            DiagnosticKind::SetOperationArityMismatch { left, right } => {
+                Some(StatementFailure::new(
+                    ColumnLineageErrorKind::ParseFailure,
+                    format!(
+                        "SQL parse error: set operation arity mismatch: left has {left} columns, \
+                         right has {right} columns"
+                    ),
+                ))
+            }
+            DiagnosticKind::TargetColumnCountMismatch { target, source } => {
+                Some(StatementFailure::new(
+                    ColumnLineageErrorKind::ParseFailure,
+                    format!(
+                        "SQL parse error: target column count mismatch: target has {target} \
+                         columns, source has {source} columns"
+                    ),
+                ))
+            }
+            DiagnosticKind::UnsupportedSyntax { what } => Some(StatementFailure::new(
+                ColumnLineageErrorKind::UnsupportedSyntax,
+                format!("not supported: {what}"),
             )),
-            DiagnosticKind::TargetColumnCountMismatch { target, source } => Some(format!(
-                "SQL parse error: target column count mismatch: target has {target} columns, source has {source} columns"
-            )),
-            DiagnosticKind::UnsupportedSyntax { what } => Some(match *what {
-                "pipe operators" => "SQL parse error: pipe operators are not supported".to_string(),
-                other => format!("SQL parse error: {other} is not supported"),
-            }),
             DiagnosticKind::EmptyProjection
             | DiagnosticKind::UnexpectedCycle
             | DiagnosticKind::DuplicateOutputName { .. } => None,
         })
 }
 
-/// Message for the first failure that rejects the whole input: an empty
-/// projection in any statement, otherwise the first semantic error.
-pub(crate) fn analysis_error(analysis: &sqllineage::Analysis) -> Option<String> {
+/// The first failure that rejects the whole input: an empty projection in any
+/// statement, otherwise the first semantic error.
+pub(crate) fn analysis_error(analysis: &sqllineage::Analysis) -> Option<StatementFailure> {
     analysis
         .statements
         .iter()
@@ -180,18 +214,23 @@ pub(crate) fn analysis_error(analysis: &sqllineage::Analysis) -> Option<String> 
 /// not have exactly one. An empty projection or a semantic error is a failure.
 pub(crate) fn single_lineage_statement(
     analysis: &sqllineage::Analysis,
-) -> Result<&sqllineage::StatementAnalysis, String> {
-    if let Some(detail) = analysis_error(analysis) {
-        return Err(detail);
+) -> Result<&sqllineage::StatementAnalysis, StatementFailure> {
+    if let Some(failure) = analysis_error(analysis) {
+        return Err(failure);
     }
+    let unsupported = |detail: String| {
+        StatementFailure::new(ColumnLineageErrorKind::UnsupportedStatement, detail)
+    };
     match analysis.statements.as_slice() {
-        [] => Err("no statements in analysis result".to_string()),
+        [] => Err(unsupported("the SQL has no statement".to_string())),
         [statement] if statement.kind.carries_lineage() => Ok(statement),
-        [_] => Err("statement is not lineage-bearing".to_string()),
-        statements => Err(format!(
+        [_] => Err(unsupported(
+            "the statement is not a query whose output columns can be traced".to_string(),
+        )),
+        statements => Err(unsupported(format!(
             "expected exactly one statement, found {}",
             statements.len()
-        )),
+        ))),
     }
 }
 

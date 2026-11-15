@@ -353,13 +353,28 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::GroupingSets(_)
-            | Expr::Cube(_)
-            | Expr::Rollup(_)
-            | Expr::Dictionary(_)
-            | Expr::Interval(_)
-            | Expr::Lambda(_)
-            | Expr::MatchAgainst { .. } => vec![],
+            Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
+                let mut v = Vec::new();
+                for expr in sets.iter().flatten() {
+                    v.extend(self.collect_ancestors(expr));
+                }
+                v
+            }
+
+            Expr::Dictionary(fields) => {
+                let mut v = Vec::new();
+                for field in fields {
+                    v.extend(self.collect_ancestors(&field.value));
+                }
+                v
+            }
+
+            Expr::Interval(interval) => self.collect_ancestors(&interval.value),
+
+            // A lambda body may read columns of the enclosing query, and its
+            // parameters are not modelled as bindings.
+            Expr::Lambda(_) => vec![self.graph.add_unsupported("lambda")],
+            Expr::MatchAgainst { .. } => vec![self.graph.add_unsupported("MATCH ... AGAINST")],
         }
     }
 

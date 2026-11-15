@@ -1,4 +1,4 @@
-use sqlparser::ast::{Query, SetExpr, SetOperator as SqlSetOperator, SetQuantifier};
+use sqlparser::ast::{OrderByKind, Query, SetExpr, SetOperator as SqlSetOperator, SetQuantifier};
 
 use crate::build::{LineageBuilder, relation};
 use crate::graph::scope::{OutputPlan, ScopeId, ScopeKind};
@@ -72,6 +72,15 @@ impl LineageBuilder {
         }
 
         self.visit_set_expr(&query.body, target_values);
+        // ORDER BY only orders the rows, but a subquery in it still reads
+        // its relations. It sees the FROM clause of the body.
+        if let Some(order_by) = &query.order_by
+            && let OrderByKind::Expressions(exprs) = &order_by.kind
+        {
+            for order in exprs {
+                self.scan_expr_for_tables(&order.expr);
+            }
+        }
 
         if has_ctes {
             let body_outputs: Vec<_> = self

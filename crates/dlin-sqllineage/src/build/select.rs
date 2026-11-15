@@ -1,6 +1,7 @@
 use sqlparser::ast::{
-    Expr, Join, JoinConstraint, JoinOperator, ObjectName, Select, SelectFlavor, SelectItem,
-    SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins, WildcardAdditionalOptions,
+    Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, ObjectName, Select, SelectFlavor,
+    SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    WildcardAdditionalOptions,
 };
 
 use crate::build::LineageBuilder;
@@ -28,8 +29,21 @@ impl LineageBuilder {
             self.visit_projection(&select.projection);
         }
         self.graph.tables.inputs.extend(from_inputs);
+        // The clauses that only filter or group rows still read the
+        // relations of their subqueries.
         if let Some(selection) = &select.selection {
             self.scan_expr_for_tables(selection);
+        }
+        if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
+            for expr in exprs {
+                self.scan_expr_for_tables(expr);
+            }
+        }
+        if let Some(having) = &select.having {
+            self.scan_expr_for_tables(having);
+        }
+        if let Some(qualify) = &select.qualify {
+            self.scan_expr_for_tables(qualify);
         }
     }
 
@@ -227,6 +241,9 @@ impl LineageBuilder {
             );
             self.visit_table_factor_in(&join.relation, applied);
             let right = self.graph.scopes.bindings_added_since(scope, right_start);
+            if let Some(JoinConstraint::On(condition)) = join_constraint(&join.join_operator) {
+                self.scan_expr_for_tables(condition);
+            }
             self.note_join_constraint(join, left, right);
         }
     }
@@ -235,23 +252,26 @@ impl LineageBuilder {
     /// sides, so an unqualified reference to one of them is not reported as
     /// ambiguous between those relations.
     fn note_join_constraint(&mut self, join: &Join, left: Vec<Ident>, right: Vec<Ident>) {
-        let (constraint, kind) = match &join.join_operator {
-            JoinOperator::Join(constraint)
-            | JoinOperator::Inner(constraint)
-            | JoinOperator::CrossJoin(constraint)
-            | JoinOperator::StraightJoin(constraint) => (constraint, JoinMergeKind::Inner),
-            JoinOperator::FullOuter(constraint) => (constraint, JoinMergeKind::Full),
-            JoinOperator::Left(constraint)
-            | JoinOperator::LeftOuter(constraint)
-            | JoinOperator::Semi(constraint)
-            | JoinOperator::LeftSemi(constraint)
-            | JoinOperator::Anti(constraint)
-            | JoinOperator::LeftAnti(constraint)
-            | JoinOperator::AsOf { constraint, .. } => (constraint, JoinMergeKind::Left),
-            JoinOperator::Right(constraint)
-            | JoinOperator::RightOuter(constraint)
-            | JoinOperator::RightSemi(constraint)
-            | JoinOperator::RightAnti(constraint) => (constraint, JoinMergeKind::Right),
+        let Some(constraint) = join_constraint(&join.join_operator) else {
+            return;
+        };
+        let kind = match &join.join_operator {
+            JoinOperator::Join(_)
+            | JoinOperator::Inner(_)
+            | JoinOperator::CrossJoin(_)
+            | JoinOperator::StraightJoin(_) => JoinMergeKind::Inner,
+            JoinOperator::FullOuter(_) => JoinMergeKind::Full,
+            JoinOperator::Left(_)
+            | JoinOperator::LeftOuter(_)
+            | JoinOperator::Semi(_)
+            | JoinOperator::LeftSemi(_)
+            | JoinOperator::Anti(_)
+            | JoinOperator::LeftAnti(_)
+            | JoinOperator::AsOf { .. } => JoinMergeKind::Left,
+            JoinOperator::Right(_)
+            | JoinOperator::RightOuter(_)
+            | JoinOperator::RightSemi(_)
+            | JoinOperator::RightAnti(_) => JoinMergeKind::Right,
             JoinOperator::CrossApply
             | JoinOperator::OuterApply
             | JoinOperator::ArrayJoin
@@ -411,6 +431,33 @@ impl LineageBuilder {
             | TableFactor::XmlTable { .. }
             | TableFactor::SemanticView { .. } => {}
         }
+    }
+}
+
+/// The constraint of a join, if its operator has one.
+fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
+    match operator {
+        JoinOperator::Join(constraint)
+        | JoinOperator::Inner(constraint)
+        | JoinOperator::CrossJoin(constraint)
+        | JoinOperator::StraightJoin(constraint)
+        | JoinOperator::FullOuter(constraint)
+        | JoinOperator::Left(constraint)
+        | JoinOperator::LeftOuter(constraint)
+        | JoinOperator::Semi(constraint)
+        | JoinOperator::LeftSemi(constraint)
+        | JoinOperator::Anti(constraint)
+        | JoinOperator::LeftAnti(constraint)
+        | JoinOperator::AsOf { constraint, .. }
+        | JoinOperator::Right(constraint)
+        | JoinOperator::RightOuter(constraint)
+        | JoinOperator::RightSemi(constraint)
+        | JoinOperator::RightAnti(constraint) => Some(constraint),
+        JoinOperator::CrossApply
+        | JoinOperator::OuterApply
+        | JoinOperator::ArrayJoin
+        | JoinOperator::LeftArrayJoin
+        | JoinOperator::InnerArrayJoin => None,
     }
 }
 

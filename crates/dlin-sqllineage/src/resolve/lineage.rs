@@ -20,8 +20,9 @@ pub(super) fn collect_output_sources(
     cx: &mut EvalContext<'_, '_>,
     visited: &mut HashSet<NodeId>,
 ) -> (Sources, Vec<EdgeKind>, bool, TransformKind) {
-    // TODO: tell "already visited by this walk" apart from "currently being
-    // evaluated" (checked below); a cycle must not become an empty source set.
+    // A node this walk already collected has its sources in the result
+    // already. A node that is still being evaluated is a cycle, which
+    // `cx.enter` below reports as unresolved.
     if !visited.insert(node_id) {
         return (Sources::default(), vec![], false, TransformKind::Direct);
     }
@@ -73,6 +74,7 @@ fn indeterminate_origin(graph: &RawGraph, node_id: NodeId) -> ColumnOrigin {
         | RawNode::Unqualified { name, .. }
         | RawNode::RowValueCandidate { name, .. } => name.clone(),
         RawNode::Star { .. } => Ident::unquoted("*"),
+        RawNode::Unsupported { what } => Ident::unquoted(*what),
     };
     ColumnOrigin::Ambiguous {
         column,

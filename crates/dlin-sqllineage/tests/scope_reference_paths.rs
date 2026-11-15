@@ -103,12 +103,12 @@ fn a_recursive_scope_reports_the_recursion_and_unbound_names() {
 }
 
 /// Scopes that read each other have no evaluable output. The reference is
-/// unresolved, not source-free.
+/// unresolved because of the cycle, not source-free.
 #[test]
 fn scopes_that_read_each_other_are_unresolved() {
     expect(
         "WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT x FROM a",
-        &["x#0 P[ | Unbound(x)]", "Closed"],
+        &["x#0 P[ | Recursive]", "Closed"],
     );
 }
 

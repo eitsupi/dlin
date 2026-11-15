@@ -26,8 +26,15 @@ pub enum ColumnLineageErrorKind {
     UnsupportedMaterialization,
     /// The model has no compiled SQL (run `dbt compile` first).
     NoCompiledCode,
-    /// The compiled SQL could not be parsed or analysed as one query.
+    /// The compiled SQL could not be parsed, or is not a valid query (for
+    /// example, the branches of a set operation differ in width).
     ParseFailure,
+    /// The compiled SQL is valid but uses syntax that column lineage does not
+    /// model, such as pipe operators.
+    UnsupportedSyntax,
+    /// The compiled SQL is not a single query whose output columns can be
+    /// traced: it has no statement, several, or a statement of another kind.
+    UnsupportedStatement,
     /// Lineage for a specific column could not be traced.
     ColumnNotFound,
     /// A specific column has multiple possible bindings.

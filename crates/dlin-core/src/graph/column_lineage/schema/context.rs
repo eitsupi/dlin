@@ -321,7 +321,7 @@ fn sql_output_evidence(
     subject: &str,
 ) -> Result<SchemaEvidence, String> {
     let analysis = analyze_sql(sql, dialect, catalog)?;
-    let statement = single_lineage_statement(&analysis)?;
+    let statement = single_lineage_statement(&analysis).map_err(|failure| failure.detail)?;
     let mut evidence = SqlOutputSchema::from_output(&statement.output).to_evidence(subject);
     // The schema claims which columns the output lists, under which names, at
     // which positions and whether it has more. Those claims rest on the
