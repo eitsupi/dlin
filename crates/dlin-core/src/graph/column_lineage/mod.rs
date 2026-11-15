@@ -430,12 +430,12 @@ fn output_slots(
         },
     };
     // An unexpanded star decides what the output may have beyond its listed
-    // columns, so what it relies on is part of the shape's evidence.
+    // columns, so the evidence that establishes it is part of the shape's.
+    // What its values rely on is not, as for the SQL output schema.
     let mut evidence = evidence_ids(&output.evidence);
     if let sqllineage::Shape::Open { unexpanded } = &output.shape {
         for star in unexpanded {
             merge_evidence(&mut evidence, &evidence_ids(&star.evidence.structure));
-            merge_evidence(&mut evidence, &evidence_ids(&star.evidence.lineage));
         }
     }
     OutputSlots {

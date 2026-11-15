@@ -276,3 +276,125 @@ fn i4_cached_results_keep_their_evidence_and_are_not_reused_after_it_changes() {
     let constant = manifest(&["id"], Some("SELECT 1 AS id"), &["id"], None);
     assert!(record(&compute(&constant), SQL_M).derived_from.is_empty());
 }
+
+#[test]
+fn an_unexpanded_star_adds_only_its_structure_to_the_shape() {
+    // A star over a struct field reads the column `rec` of `raw_orders`,
+    // which relies on its schema, but no schema says which fields `rec` has.
+    let manifest = manifest(
+        &["rec"],
+        Some("SELECT raw_orders.rec.* FROM raw_orders"),
+        &[],
+        None,
+    );
+    let result = compute_column_lineage(
+        &manifest,
+        "m",
+        DlinDialect::BigQuery,
+        &mut ColumnLineageCache::disabled(),
+    );
+    let output = result.output.as_ref().expect("m is analysed");
+    assert!(
+        matches!(output.shape, OutputShape::Open { .. }),
+        "{output:?}"
+    );
+    assert!(output.evidence.is_empty(), "{:?}", output.evidence);
+}
+
+/// `manifest` with a second YAML source `other` listing `columns`, which `m`
+/// also depends on.
+fn with_other_source(mut manifest: Manifest, columns: &[&str]) -> Manifest {
+    let other = "source.proj.raw.other";
+    let columns: serde_json::Map<_, _> = columns
+        .iter()
+        .map(|name| ((*name).to_string(), serde_json::json!({"name": name})))
+        .collect();
+    let source = serde_json::from_value(serde_json::json!({
+        "unique_id": other,
+        "name": "other",
+        "source_name": "raw",
+        "resource_type": "source",
+        "columns": columns
+    }))
+    .unwrap();
+    manifest.sources.insert(other.to_string(), source);
+    manifest
+        .nodes
+        .get_mut("model.proj.m")
+        .unwrap()
+        .depends_on
+        .nodes
+        .push(other.to_string());
+    manifest
+}
+
+#[test]
+fn a_source_reached_along_several_references_keeps_the_evidence_of_each() {
+    let manifest = with_other_source(
+        manifest(
+            &["id"],
+            Some("SELECT o.id + id AS total FROM raw_orders o CROSS JOIN other"),
+            &[],
+            None,
+        ),
+        &["y"],
+    );
+    // The qualified reference relies on raw_orders alone; the unqualified one
+    // also on `other` having no `id`. The merged source keeps both.
+    let result = cross_model(
+        &{
+            let mut manifest = manifest;
+            manifest
+                .nodes
+                .get_mut("model.proj.d")
+                .unwrap()
+                .compiled_code = Some("SELECT total FROM m".to_string());
+            manifest
+        },
+        "d",
+    );
+    let total = slot(&result, "total");
+    assert_eq!(total.lineage.known().len(), 1);
+    assert_eq!(
+        total.lineage.known()[0].evidence,
+        ids(&[
+            "sql:model.proj.m",
+            "yaml:source.proj.raw.other",
+            YAML_SOURCE
+        ])
+    );
+}
+
+#[test]
+fn an_unresolved_part_found_upstream_keeps_its_evidence_and_the_path_to_it() {
+    // `elsewhere` has no schema, so `x` may come from it as well.
+    let mut manifest = manifest(
+        &["x"],
+        Some("SELECT x FROM raw_orders CROSS JOIN elsewhere"),
+        &[],
+        None,
+    );
+    manifest
+        .nodes
+        .get_mut("model.proj.d")
+        .unwrap()
+        .compiled_code = Some("SELECT x FROM m".to_string());
+    let m = lineage(&manifest, "m");
+    let upstream = &slot(&m, "x").lineage.unresolved()[0];
+    assert!(
+        matches!(upstream.reason, UnresolvedReason::Ambiguous { .. }),
+        "{upstream:?}"
+    );
+    assert_eq!(upstream.evidence, ids(&[YAML_SOURCE]));
+
+    let result = cross_model(&manifest, "d");
+    let x = slot(&result, "x");
+    let traced = x
+        .lineage
+        .unresolved()
+        .iter()
+        .find(|contribution| contribution.reason == upstream.reason)
+        .unwrap_or_else(|| panic!("the upstream ambiguity is kept: {x:?}"));
+    assert_eq!(traced.evidence, ids(&[SQL_M, YAML_SOURCE]));
+    assert!(x.evidence.lineage.contains(&id(YAML_SOURCE)));
+}
