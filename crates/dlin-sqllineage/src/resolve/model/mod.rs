@@ -84,6 +84,8 @@ pub(super) enum ValueId {
     SchemaDependent {
         value: Option<Box<ValueId>>,
         relations: Vec<crate::Relation>,
+        /// The schemas of the unknown segments that leave the dependency open.
+        evidence: Evidence,
     },
     /// A column that exactly one of several unknown relations supplies, with
     /// no way to tell which. Naming one of them would invent a source.

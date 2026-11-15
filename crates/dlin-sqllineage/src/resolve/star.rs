@@ -136,6 +136,18 @@ fn same_origin(left: &ColumnOrigin, right: &ColumnOrigin) -> bool {
     format!("{left:?}") == format!("{right:?}")
 }
 
+/// A value that more columns of `relations` could change, relying on the
+/// schemas that leave them open.
+fn schema_dependent(relations: &[crate::Relation], evidence: &Evidence) -> Origin {
+    Origin::new(
+        ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
+            what: crate::SchemaDependencyKind::NaturalJoinColumns,
+            relations: relations.to_vec(),
+        }),
+        evidence.clone(),
+    )
+}
+
 /// A column of a physical relation the catalog lists, which relies on that
 /// relation's schema.
 fn physical(table: &crate::types::TableRef, column: &Ident) -> Origin {
@@ -177,15 +189,16 @@ impl Evaluator<'_, '_, '_> {
             }
             ValueId::Forward(id) => self.slot_value(*id),
             ValueId::SetMerged { op, left } => self.merged_slot_value(*op, *left),
-            ValueId::SchemaDependent { value, relations } => {
+            ValueId::SchemaDependent {
+                value,
+                relations,
+                evidence,
+            } => {
                 let (mut sources, transform) = value.as_deref().map_or_else(
                     || (Sources::default(), TransformKind::Direct),
                     |value| self.value(value),
                 );
-                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
-                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
-                    relations: relations.clone(),
-                }));
+                sources.push(schema_dependent(relations, evidence));
                 (sources, transform)
             }
             // The same lookup a direct reference to the name in that scope makes.
@@ -276,15 +289,16 @@ impl Evaluator<'_, '_, '_> {
                 TransformKind::Direct,
             ),
             ValueId::Forward(id) => self.slot_read(*id),
-            ValueId::SchemaDependent { value, relations } => {
+            ValueId::SchemaDependent {
+                value,
+                relations,
+                evidence,
+            } => {
                 let (mut sources, has_back, transform) = value.as_deref().map_or_else(
                     || (Sources::default(), false, TransformKind::Direct),
                     |value| self.read_value(value, name),
                 );
-                sources.push(ColumnOrigin::Unresolved(Unresolved::SchemaDependent {
-                    what: crate::SchemaDependencyKind::NaturalJoinColumns,
-                    relations: relations.clone(),
-                }));
+                sources.push(schema_dependent(relations, evidence));
                 (sources, has_back, transform)
             }
             ValueId::Merged(left, right) => {

@@ -21,6 +21,8 @@ struct NaturalUncertainty {
     known_on_left: bool,
     name: Ident,
     relations: Vec<Relation>,
+    /// The schemas of the segments that may publish the name.
+    evidence: Evidence,
 }
 
 fn natural_uncertainties(
@@ -45,22 +47,21 @@ fn natural_uncertainties(
             if publishers.is_empty() {
                 continue;
             }
-            let relations = possible
-                .iter()
-                .filter_map(|element| match element {
-                    OutputElement::Unknown(segment)
-                        if segment.domain.admits(&slot.name, dialect) =>
-                    {
-                        Some(segment.schema_relations.iter().cloned())
-                    }
-                    _ => None,
-                })
-                .flatten()
-                .collect::<Vec<_>>();
+            let mut relations = Vec::new();
+            let mut evidence = Evidence::default();
+            for element in possible {
+                if let OutputElement::Unknown(segment) = element
+                    && segment.domain.admits(&slot.name, dialect)
+                {
+                    relations.extend(segment.schema_relations.iter().cloned());
+                    evidence.extend(&segment.structure);
+                }
+            }
             uncertain.push(NaturalUncertainty {
                 known_on_left,
                 name: slot.name.clone(),
                 relations,
+                evidence,
             });
         }
     }
@@ -104,6 +105,7 @@ fn apply_natural_uncertainties(
                     slot.value = ValueId::SchemaDependent {
                         value: (!suppressed).then(|| Box::new(slot.value.clone())),
                         relations: uncertainty.relations.clone(),
+                        evidence: uncertainty.evidence.clone(),
                     };
                 }
             }

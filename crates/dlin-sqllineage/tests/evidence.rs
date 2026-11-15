@@ -344,3 +344,35 @@ fn without_a_catalog_nothing_relies_on_evidence() {
         assert_eq!(column.evidence, ColumnEvidence::default());
     }
 }
+
+#[test]
+fn a_natural_join_left_open_by_a_partial_schema_relies_on_that_schema() {
+    let catalog = Schemas::new().exhaustive("a", &["x"]).partial("b", &["y"]);
+    for (join, known) in [
+        ("NATURAL JOIN", vec![source("a", "x")]),
+        ("NATURAL RIGHT JOIN", vec![]),
+    ] {
+        let result = analyze(&format!("SELECT * FROM a {join} b"), &catalog);
+        let x = column(&result, "x");
+        let Lineage::Partial {
+            known: actual,
+            unresolved,
+        } = &x.lineage
+        else {
+            panic!("b may also have x: {:?}", x.lineage);
+        };
+        assert_eq!(actual, &known, "{join}");
+        assert!(
+            matches!(unresolved.as_slice(), [Unresolved::SchemaDependent { .. }]),
+            "{join}: {unresolved:?}"
+        );
+        // b's partial schema is what leaves the merge open.
+        assert_eq!(x.evidence.unresolved.len(), 1, "{join}");
+        assert!(matches!(
+            x.evidence.unresolved[0].unresolved,
+            Unresolved::SchemaDependent { .. }
+        ));
+        assert_eq!(x.evidence.unresolved[0].evidence, evs(&["b"]), "{join}");
+        assert!(x.evidence.lineage.contains(&ev("b")), "{join}");
+    }
+}
