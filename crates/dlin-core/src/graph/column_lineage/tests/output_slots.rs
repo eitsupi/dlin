@@ -977,11 +977,9 @@ fn cache_file_in_the_previous_layout_is_discarded() {
     let tmp = tempfile::tempdir().unwrap();
     let path = cache_file_path(tmp.path());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    // The same package version and analysis semantics id as the current
-    // build, with an entry in the layout that had counts and a name list.
+    // An entry in the older layout that had counts and a name list.
     let old = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "semantics_id": ANALYSIS_SEMANTICS_ID,
         "entries": {
             "model.proj.m": {
                 "semantic_digest": 7,

@@ -132,7 +132,7 @@ is keyed by the inputs of that layer:
 
 | Cache | Identity includes |
 | --- | --- |
-| SQL analysis | The SQL, the dialect and normalization settings, the adopted evidence (by evidence fingerprint), the analysis policy (for example the YAML coverage policy), and an engine and contract compatibility identity |
+| SQL analysis | The SQL, the dialect and normalization settings, the adopted evidence (by evidence fingerprint), and the analysis policy (for example the YAML coverage policy) |
 | Node resolution and tracing | Everything above, plus the inputs that resolve relations to dbt nodes and the boundary policy |
 | A cache that combines layers | The union of the inputs of the layers it combines |
 
@@ -141,10 +141,10 @@ evidence (E4, E5), the cached entry is invalid and a hit is not allowed. A chang
 only in the relation-to-node inputs invalidates the node-resolution and tracing
 results without forcing the pure SQL analysis to run again.
 
-The existing package-version compatibility checks remain. They are not enough
-alone: a development build whose analysis semantics changed under the same
-package version must not reuse old results. The engine and contract
-compatibility identity covers this.
+The package version is the sole cache compatibility boundary; there is no
+separate analysis-semantics identifier. Inputs that can vary within a package
+version, such as adopted evidence and analysis policy, remain part of the
+relevant cache key.
 
 Stored results keep their evidence references, so loading an entry gives back
 the same information that was stored (I4).
