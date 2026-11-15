@@ -398,3 +398,227 @@ fn an_unresolved_part_found_upstream_keeps_its_evidence_and_the_path_to_it() {
     assert_eq!(traced.evidence, ids(&[SQL_M, YAML_SOURCE]));
     assert!(x.evidence.lineage.contains(&id(YAML_SOURCE)));
 }
+
+// ── Impact ──────────────────────────────────────────────────────────────────
+
+/// Models `(name, dependencies, sql)` over YAML sources `(name, columns)` of
+/// the source `raw`. A dependency names a model or a source.
+fn project(models: &[(&str, &[&str], &str)], sources: &[(&str, &[&str])]) -> Manifest {
+    let source_id = |name: &str| format!("source.proj.raw.{name}");
+    let is_source = |name: &str| sources.iter().any(|(source, _)| *source == name);
+    let nodes: serde_json::Map<_, _> = models
+        .iter()
+        .map(|(name, dependencies, sql)| {
+            let dependencies: Vec<String> = dependencies
+                .iter()
+                .map(|dependency| {
+                    if is_source(dependency) {
+                        source_id(dependency)
+                    } else {
+                        format!("model.proj.{dependency}")
+                    }
+                })
+                .collect();
+            (
+                format!("model.proj.{name}"),
+                serde_json::json!({
+                    "unique_id": format!("model.proj.{name}"),
+                    "name": name,
+                    "resource_type": "model",
+                    "depends_on": {"nodes": dependencies},
+                    "compiled_code": sql,
+                }),
+            )
+        })
+        .collect();
+    let sources: serde_json::Map<_, _> = sources
+        .iter()
+        .map(|(name, columns)| {
+            let columns: serde_json::Map<_, _> = columns
+                .iter()
+                .map(|column| ((*column).to_string(), serde_json::json!({"name": column})))
+                .collect();
+            (
+                source_id(name),
+                serde_json::json!({
+                    "unique_id": source_id(name),
+                    "name": name,
+                    "source_name": "raw",
+                    "resource_type": "source",
+                    "columns": columns,
+                }),
+            )
+        })
+        .collect();
+    serde_json::from_value(serde_json::json!({"nodes": nodes, "sources": sources})).unwrap()
+}
+
+fn impact(manifest: &Manifest, model: &str, column: &str) -> ColumnImpactReport {
+    compute_column_impact(
+        manifest,
+        model,
+        column,
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    )
+}
+
+fn value_exploration(report: &ColumnImpactReport) -> &KindExploration {
+    report
+        .exploration
+        .iter()
+        .find(|exploration| exploration.kind == DependencyKind::Value)
+        .expect("value is always explored")
+}
+
+fn described(report: &ColumnImpactReport) -> Vec<&str> {
+    report
+        .evidence
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect()
+}
+
+#[test]
+fn d2_impact_and_no_impact_cite_the_assumption() {
+    // `m` lists raw_orders' YAML columns through a star, and `d` reads `id`.
+    let manifest = project(
+        &[
+            ("m", &["raw_orders"], "SELECT * FROM raw_orders"),
+            ("d", &["m"], "SELECT id FROM m"),
+        ],
+        &[("raw_orders", &["id", "amount"])],
+    );
+
+    let report = impact(&manifest, "m", "id");
+    assert_eq!(report.confirmed.len(), 1, "{report:?}");
+    // `d.id` reads `m.id` because `m`'s output, derived from the YAML list,
+    // has one column named `id`.
+    assert_eq!(report.confirmed[0].evidence, ids(&[SQL_M, YAML_SOURCE]));
+    assert_eq!(
+        value_exploration(&report).status,
+        ExplorationStatus::Complete
+    );
+    assert_eq!(
+        value_exploration(&report).evidence,
+        ids(&[SQL_M, YAML_SOURCE])
+    );
+    assert_eq!(report.no_impact_evidence(), None);
+    assert_eq!(described(&report), [SQL_M, YAML_SOURCE]);
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|record| record.id.as_str() == YAML_SOURCE && record.is_assumption())
+    );
+
+    // No output of `d` reads `amount`. That rests on the YAML list being
+    // taken as exhaustive: `m` has no other column that `d.id` could be.
+    let report = impact(&manifest, "m", "amount");
+    assert!(report.proves_no_impact(), "{report:?}");
+    assert_eq!(
+        report.no_impact_evidence(),
+        Some(ids(&[SQL_M, YAML_SOURCE]))
+    );
+    assert_eq!(described(&report), [SQL_M, YAML_SOURCE]);
+}
+
+#[test]
+fn an_impact_path_does_not_cite_what_only_another_input_relied_on() {
+    let manifest = project(
+        &[
+            ("a", &["raw_orders"], "SELECT * FROM raw_orders"),
+            ("b", &["other"], "SELECT * FROM other"),
+            (
+                "d",
+                &["a", "b"],
+                "SELECT a.x + b.y AS s FROM a CROSS JOIN b",
+            ),
+        ],
+        &[("raw_orders", &["x"]), ("other", &["y"])],
+    );
+    let report = impact(&manifest, "a", "x");
+    assert_eq!(report.confirmed.len(), 1, "{report:?}");
+    // The qualified reference `a.x` relies on `a` alone.
+    assert_eq!(
+        report.confirmed[0].evidence,
+        ids(&["sql:model.proj.a", YAML_SOURCE])
+    );
+    // Concluding that `d.s` is all of `d` that reads the input relies on
+    // the lineage of `d.s` as a whole, `b.y` included.
+    assert_eq!(
+        value_exploration(&report).evidence,
+        ids(&[
+            "sql:model.proj.a",
+            "sql:model.proj.b",
+            "yaml:source.proj.raw.other",
+            YAML_SOURCE
+        ])
+    );
+}
+
+#[test]
+fn a_possible_impact_cites_what_left_its_edge_unresolved() {
+    // `elsewhere` has no schema, so `x` may come from it or from `a`.
+    let manifest = project(
+        &[
+            ("a", &["raw_orders"], "SELECT * FROM raw_orders"),
+            ("d", &["a"], "SELECT x FROM a CROSS JOIN elsewhere"),
+            ("e", &["d"], "SELECT x FROM d"),
+        ],
+        &[("raw_orders", &["x"])],
+    );
+    let report = impact(&manifest, "a", "x");
+    assert!(report.confirmed.is_empty(), "{report:?}");
+    let possible: Vec<(&str, &[EvidenceId])> = report
+        .possible
+        .iter()
+        .map(|impact| (impact.target.model.as_str(), impact.evidence.as_slice()))
+        .collect();
+    assert_eq!(
+        possible,
+        [
+            ("d", ids(&["sql:model.proj.a", YAML_SOURCE]).as_slice()),
+            // The known edge from `d` adds its own evidence to the path.
+            (
+                "e",
+                ids(&["sql:model.proj.a", "sql:model.proj.d", YAML_SOURCE]).as_slice()
+            ),
+        ]
+    );
+    assert!(matches!(
+        value_exploration(&report).status,
+        ExplorationStatus::Incomplete { .. }
+    ));
+    assert_eq!(report.no_impact_evidence(), None);
+}
+
+#[test]
+fn an_impact_path_cites_what_placed_its_target() {
+    // `d.target` is the second output only because `b.*` is one column wide,
+    // which rests on the YAML list of `raw_b`.
+    let manifest = project(
+        &[
+            ("a", &[], "SELECT 1 AS id"),
+            ("b", &["raw_b"], "SELECT * FROM raw_b"),
+            (
+                "d",
+                &["a", "b"],
+                "SELECT b.*, a.id AS target FROM b CROSS JOIN a",
+            ),
+        ],
+        &[("raw_b", &["y"])],
+    );
+    let report = impact(&manifest, "a", "id");
+    assert_eq!(report.confirmed.len(), 1, "{report:?}");
+    let confirmed = &report.confirmed[0];
+    assert_eq!(confirmed.target.column, "target");
+    assert_eq!(
+        confirmed.evidence,
+        ids(&[
+            "sql:model.proj.a",
+            "sql:model.proj.b",
+            "yaml:source.proj.raw.raw_b"
+        ])
+    );
+}

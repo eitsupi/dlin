@@ -387,11 +387,18 @@ fn complete_chain_is_complete_and_row_is_not_collected() {
 
     let value = impact(&manifest, "source_model", "x", ImpactScope::ValueOnly);
     assert_eq!(confirmed_targets(&value), [("leaf", "z"), ("mid", "x")]);
+    // The search relied on the SQL outputs of the models it read through.
+    // Row dependencies are not collected, so no evidence is used for them.
+    let chain_evidence = vec![
+        EvidenceId("sql:model.proj.mid".to_string()),
+        EvidenceId("sql:model.proj.source_model".to_string()),
+    ];
     assert_eq!(
         value.exploration,
         [KindExploration {
             kind: DependencyKind::Value,
             status: ExplorationStatus::Complete,
+            evidence: chain_evidence.clone(),
         }]
     );
     assert!(value.errors.is_empty());
@@ -405,6 +412,7 @@ fn complete_chain_is_complete_and_row_is_not_collected() {
             KindExploration {
                 kind: DependencyKind::Value,
                 status: ExplorationStatus::Complete,
+                evidence: chain_evidence.clone(),
             },
             KindExploration {
                 kind: DependencyKind::Row,
@@ -413,6 +421,7 @@ fn complete_chain_is_complete_and_row_is_not_collected() {
                         kind: DependencyKind::Row
                     }],
                 },
+                evidence: vec![],
             },
         ]
     );

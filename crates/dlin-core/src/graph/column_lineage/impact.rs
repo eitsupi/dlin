@@ -6,11 +6,13 @@ use serde::Serialize;
 use crate::parser::manifest::Manifest;
 
 use super::relation::{RelationRef, matching_indices};
+use super::types::{cited_evidence, merge_evidence};
 use super::{
-    ColumnLineageAnalysis, ColumnLineageError, ColumnLineageErrorKind, Ident,
-    InternalModelColumnLineage, ModelOutputRef, OutputShape, OutputSlot, OutputSlotId, SlotLookup,
-    TransformationType, UnexpandedStar, UnresolvedCandidate, UnresolvedReason, find_model_by_name,
-    model_candidates_by_name, normalize_column_lineage_errors,
+    ColumnLineageAnalysis, ColumnLineageError, ColumnLineageErrorKind, EvidenceId, Ident,
+    InternalModelColumnLineage, ModelOutputRef, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
+    SchemaEvidenceRecord, SlotLookup, TransformationType, UnexpandedStar, UnresolvedCandidate,
+    UnresolvedReason, find_model_by_name, model_candidates_by_name,
+    normalize_column_lineage_errors,
 };
 
 /// How a target depends on an input.
@@ -79,6 +81,10 @@ pub struct ConfirmedImpact {
     pub transformation: TransformationType,
     /// Edges from the input column to `target`, in order.
     pub path: Vec<ImpactEdge>,
+    /// Schema evidence the path relies on: what bound each dependent's
+    /// reference to the column it reads.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// A target that may depend on the input through a finite ambiguous path.
@@ -89,6 +95,10 @@ pub struct PossibleImpact {
     pub transformation: TransformationType,
     /// Candidate edges from the input to the target, in order.
     pub path: Vec<ImpactEdge>,
+    /// Schema evidence the path relies on, including what left each
+    /// candidate edge unresolved.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 /// Why the search for one dependency kind may have missed targets.
@@ -157,6 +167,10 @@ pub struct KindExploration {
     pub kind: DependencyKind,
     #[serde(flatten)]
     pub status: ExplorationStatus,
+    /// Schema evidence the search relied on to identify the input and to
+    /// conclude what each examined dependent does or does not read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<EvidenceId>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -171,6 +185,9 @@ pub struct ColumnImpactReport {
     pub possible: Vec<PossibleImpact>,
     /// One entry per requested dependency kind.
     pub exploration: Vec<KindExploration>,
+    /// The schema evidence the report cites, and what it was derived from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<SchemaEvidenceRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ColumnLineageError>,
 }
@@ -185,6 +202,33 @@ impl ColumnImpactReport {
                 .exploration
                 .iter()
                 .all(|exploration| exploration.status == ExplorationStatus::Complete)
+    }
+
+    /// The evidence a "no impact" conclusion relies on: that of every
+    /// requested exploration. `None` when the report does not support "no
+    /// impact".
+    pub fn no_impact_evidence(&self) -> Option<Vec<EvidenceId>> {
+        if !self.proves_no_impact() {
+            return None;
+        }
+        let mut evidence = Vec::new();
+        for exploration in &self.exploration {
+            merge_evidence(&mut evidence, &exploration.evidence);
+        }
+        Some(evidence)
+    }
+
+    /// Every evidence id the impacts and explorations cite.
+    fn cited(&self) -> impl Iterator<Item = &EvidenceId> {
+        self.confirmed
+            .iter()
+            .flat_map(|impact| &impact.evidence)
+            .chain(self.possible.iter().flat_map(|impact| &impact.evidence))
+            .chain(
+                self.exploration
+                    .iter()
+                    .flat_map(|exploration| &exploration.evidence),
+            )
     }
 
     /// Gaps of every incomplete exploration, in report order.
@@ -204,6 +248,8 @@ type NodeKey = (String, OutputSlotId);
 #[derive(Debug, Clone)]
 struct PathNode {
     edge: ImpactEdge,
+    /// The evidence the edge relies on.
+    evidence: Vec<EvidenceId>,
     parent: Option<Rc<PathNode>>,
 }
 
@@ -239,19 +285,53 @@ fn visited_contains(mut cursor: Option<&Rc<VisitedNode>>, key: &NodeKey) -> bool
     false
 }
 
-fn materialize_path(mut cursor: Option<&Rc<PathNode>>) -> Vec<ImpactEdge> {
+/// The edges of a path in order, and the evidence of all of them.
+fn materialize_path(mut cursor: Option<&Rc<PathNode>>) -> (Vec<ImpactEdge>, Vec<EvidenceId>) {
     let mut path = Vec::new();
+    let mut evidence = Vec::new();
     while let Some(node) = cursor {
         path.push(node.edge.clone());
+        merge_evidence(&mut evidence, &node.evidence);
         cursor = node.parent.as_ref();
     }
     path.reverse();
-    path
+    (path, evidence)
+}
+
+/// Sort impacts and merge those that differ only in their evidence.
+fn normalize_impacts<T: Ord>(
+    mut impacts: Vec<T>,
+    same: impl Fn(&T, &T) -> bool,
+    evidence: impl Fn(&mut T) -> &mut Vec<EvidenceId>,
+) -> Vec<T> {
+    impacts.sort();
+    let mut merged: Vec<T> = Vec::with_capacity(impacts.len());
+    for mut impact in impacts {
+        match merged.last_mut() {
+            Some(last) if same(last, &impact) => {
+                let more = std::mem::take(evidence(&mut impact));
+                merge_evidence(evidence(last), &more);
+            }
+            _ => merged.push(impact),
+        }
+    }
+    merged
+}
+
+/// The evidence the identification of the input relies on: what decides
+/// which columns the model lists and under which names.
+fn identification_evidence<S>(output: &OutputSlots<S>) -> Vec<EvidenceId> {
+    let mut evidence = output.evidence.clone();
+    for slot in &output.columns {
+        merge_evidence(&mut evidence, &slot.evidence.structure);
+    }
+    evidence
 }
 
 fn exploration_for(
     scope: ImpactScope,
     value_gaps: BTreeSet<TraceGap>,
+    value_evidence: &[EvidenceId],
     row_uncollected: bool,
 ) -> Vec<KindExploration> {
     scope
@@ -265,6 +345,12 @@ fn exploration_for(
                 }
                 DependencyKind::Row => Vec::new(),
             };
+            // Row dependencies are not collected, so no evidence was used
+            // for them.
+            let evidence = match kind {
+                DependencyKind::Value => value_evidence.to_vec(),
+                DependencyKind::Row => Vec::new(),
+            };
             KindExploration {
                 kind,
                 status: if gaps.is_empty() {
@@ -272,6 +358,7 @@ fn exploration_for(
                 } else {
                     ExplorationStatus::Incomplete { gaps }
                 },
+                evidence,
             }
         })
         .collect()
@@ -328,7 +415,8 @@ pub(super) fn compute_column_impact(
                 scope,
                 confirmed: vec![],
                 possible: vec![],
-                exploration: exploration_for(scope, BTreeSet::from([gap]), true),
+                exploration: exploration_for(scope, BTreeSet::from([gap]), &[], true),
+                evidence: Vec::new(),
                 errors: vec![ColumnLineageError {
                     hint: Some("Run `dlin check-manifest` to verify the manifest is up to date, then `dlin list --source manifest` to see available models (pass the same --project-dir/--manifest-path if you specified them)".to_string()),
                     ..ColumnLineageError::model(
@@ -348,6 +436,10 @@ pub(super) fn compute_column_impact(
     let mut confirmed = Vec::new();
     let mut possible = Vec::new();
     let mut gaps = BTreeSet::new();
+    // What the value exploration relied on: the identification of the input,
+    // and for each examined dependent, its shape and the lineage of each of
+    // its outputs as a whole.
+    let mut explored = Vec::new();
     let mut errors = Vec::new();
     let initial_uid = initial_node.unique_id.clone();
     let original_input_uid = initial_uid.clone();
@@ -370,6 +462,9 @@ pub(super) fn compute_column_impact(
         SlotLookup::Unique(id) => initial.output.as_ref().and_then(|output| output.slot(*id)),
         SlotLookup::Ambiguous(_) | SlotLookup::Absent => None,
     };
+    if let Some(output) = &initial.output {
+        merge_evidence(&mut explored, &identification_evidence(output));
+    }
     // Each queue entry carries its own path-local set of visited (uid, slot)
     // pairs. This allows a node to be processed once per unique path leading to it, while
     // still preventing cycles within any single path.
@@ -468,6 +563,9 @@ pub(super) fn compute_column_impact(
             let mut path_slots = BTreeSet::new();
 
             if let Some(dep_output) = &lineage.output {
+                // The shape decides which outputs the dependent lists and
+                // whether it has more.
+                merge_evidence(&mut explored, &dep_output.evidence);
                 if let OutputShape::Open { unexpanded } = &dep_output.shape {
                     let relevant: Vec<_> = unexpanded
                         .iter()
@@ -493,82 +591,124 @@ pub(super) fn compute_column_impact(
                     }
                 }
                 let source_columns = source_lineage.output.as_ref();
+                // Matching a source by name to a slot of the source model
+                // relies on what decides which slots it lists, and their names.
+                let lookup_evidence = source_columns
+                    .map(identification_evidence)
+                    .unwrap_or_default();
                 for entry in &dep_output.columns {
                     let output = slot_ref(dep_uid, dep_name, entry);
                     let target_key = (dep_uid.clone(), entry.id);
+                    // Whether the output reads the input is concluded from its
+                    // lineage as a whole.
+                    merge_evidence(&mut explored, &entry.evidence.lineage);
 
                     let mut references_source = false;
                     let mut possible_source = false;
+                    // The evidence of the known sources and unresolved parts
+                    // that make the edge confirmed, and possible.
+                    let mut confirmed_evidence = Vec::new();
+                    let mut possible_evidence = Vec::new();
                     for s in entry.lineage.known() {
-                        let relation_matches =
-                            matching_indices(&s.relation, &candidate_relations, dialect);
-                        let reads_source = relation_matches.iter().any(|index| {
-                            candidates[*index].0.kind == super::TraceResourceKind::Model
-                                && candidates[*index].0.unique_id == source_uid
-                        });
-                        let relation_is_ambiguous = relation_matches.len() > 1;
-                        if !reads_source {
-                            continue;
-                        }
-                        let model_candidates = relation_is_ambiguous.then(|| {
-                            relation_matches
-                                .iter()
-                                .map(|index| candidates[*index].0.unique_id.clone())
-                                .collect::<Vec<_>>()
-                        });
-                        let source_slot_id = match &source_input {
-                            ImpactInput::Slot(id) => *id,
-                            ImpactInput::Name(name) => {
-                                let key = s.column.column_key(dialect);
-                                let matches_name = key.is_some() && key == name.column_key(dialect);
-                                references_source |= matches_name && !relation_is_ambiguous;
-                                possible_source |= matches_name && relation_is_ambiguous;
-                                if matches_name && let Some(candidates) = &model_candidates {
-                                    gaps.insert(TraceGap::AmbiguousModel {
-                                        at: output.clone(),
-                                        candidates: candidates.clone(),
-                                    });
-                                }
-                                continue;
+                        // Whether this source makes the edge confirmed, and
+                        // possible, and whether it was matched by slot.
+                        let (reads, may_read, by_slot) = 'source: {
+                            let relation_matches =
+                                matching_indices(&s.relation, &candidate_relations, dialect);
+                            let reads_source = relation_matches.iter().any(|index| {
+                                candidates[*index].0.kind == super::TraceResourceKind::Model
+                                    && candidates[*index].0.unique_id == source_uid
+                            });
+                            let relation_is_ambiguous = relation_matches.len() > 1;
+                            if !reads_source {
+                                break 'source (false, false, false);
                             }
-                        };
-                        match source_columns.map(|columns| columns.lookup(&s.column, dialect)) {
-                            Some(SlotLookup::Unique(id)) => {
-                                references_source |= id == source_slot_id && !relation_is_ambiguous;
-                                possible_source |= id == source_slot_id && relation_is_ambiguous;
-                                if id == source_slot_id
-                                    && let Some(candidates) = &model_candidates
-                                {
-                                    gaps.insert(TraceGap::AmbiguousModel {
-                                        at: output.clone(),
-                                        candidates: candidates.clone(),
-                                    });
-                                }
-                            }
-                            Some(SlotLookup::Ambiguous(ids)) if ids.contains(&source_slot_id) => {
-                                if relation_is_ambiguous {
-                                    possible_source = true;
-                                    if let Some(candidates) = &model_candidates {
+                            let model_candidates = relation_is_ambiguous.then(|| {
+                                relation_matches
+                                    .iter()
+                                    .map(|index| candidates[*index].0.unique_id.clone())
+                                    .collect::<Vec<_>>()
+                            });
+                            let source_slot_id = match &source_input {
+                                ImpactInput::Slot(id) => *id,
+                                ImpactInput::Name(name) => {
+                                    let key = s.column.column_key(dialect);
+                                    let matches_name =
+                                        key.is_some() && key == name.column_key(dialect);
+                                    if matches_name && let Some(candidates) = &model_candidates {
                                         gaps.insert(TraceGap::AmbiguousModel {
                                             at: output.clone(),
                                             candidates: candidates.clone(),
                                         });
                                     }
-                                } else {
-                                    gaps.insert(TraceGap::AmbiguousInput {
-                                        at: output.clone(),
-                                        candidates: ids
-                                            .iter()
-                                            .filter_map(|id| source_columns?.slot(*id))
-                                            .map(|slot| {
-                                                slot_ref(&source_uid, &source_lineage.model, slot)
-                                            })
-                                            .collect(),
-                                    });
-                                    possible_source = true;
+                                    break 'source (
+                                        matches_name && !relation_is_ambiguous,
+                                        matches_name && relation_is_ambiguous,
+                                        false,
+                                    );
+                                }
+                            };
+                            match source_columns.map(|columns| columns.lookup(&s.column, dialect)) {
+                                Some(SlotLookup::Unique(id)) => {
+                                    if id == source_slot_id
+                                        && let Some(candidates) = &model_candidates
+                                    {
+                                        gaps.insert(TraceGap::AmbiguousModel {
+                                            at: output.clone(),
+                                            candidates: candidates.clone(),
+                                        });
+                                    }
+                                    (
+                                        id == source_slot_id && !relation_is_ambiguous,
+                                        id == source_slot_id && relation_is_ambiguous,
+                                        true,
+                                    )
+                                }
+                                Some(SlotLookup::Ambiguous(ids))
+                                    if ids.contains(&source_slot_id) =>
+                                {
+                                    if relation_is_ambiguous {
+                                        if let Some(candidates) = &model_candidates {
+                                            gaps.insert(TraceGap::AmbiguousModel {
+                                                at: output.clone(),
+                                                candidates: candidates.clone(),
+                                            });
+                                        }
+                                    } else {
+                                        gaps.insert(TraceGap::AmbiguousInput {
+                                            at: output.clone(),
+                                            candidates: ids
+                                                .iter()
+                                                .filter_map(|id| source_columns?.slot(*id))
+                                                .map(|slot| {
+                                                    slot_ref(
+                                                        &source_uid,
+                                                        &source_lineage.model,
+                                                        slot,
+                                                    )
+                                                })
+                                                .collect(),
+                                        });
+                                    }
+                                    (false, true, true)
+                                }
+                                Some(SlotLookup::Ambiguous(_) | SlotLookup::Absent) | None => {
+                                    (false, false, true)
                                 }
                             }
-                            Some(SlotLookup::Ambiguous(_) | SlotLookup::Absent) | None => {}
+                        };
+                        references_source |= reads;
+                        possible_source |= may_read;
+                        for (matched, evidence) in [
+                            (reads, &mut confirmed_evidence),
+                            (may_read, &mut possible_evidence),
+                        ] {
+                            if matched {
+                                merge_evidence(evidence, &s.evidence);
+                                if by_slot {
+                                    merge_evidence(evidence, &lookup_evidence);
+                                }
+                            }
                         }
                     }
 
@@ -610,16 +750,19 @@ pub(super) fn compute_column_impact(
                                 at: output.clone(),
                                 reasons,
                             });
-                            possible_source |= unresolved.iter().any(|contribution| {
-                                unresolved_may_include_input(
+                            for contribution in &unresolved {
+                                if unresolved_may_include_input(
                                     &contribution.reason,
                                     &source_uid,
                                     &source_input,
                                     input_column.as_ref(),
                                     &candidates,
                                     dialect,
-                                )
-                            });
+                                ) {
+                                    possible_source = true;
+                                    merge_evidence(&mut possible_evidence, &contribution.evidence);
+                                }
+                            }
                         }
                     }
                     if !references_source && !possible_source {
@@ -631,31 +774,54 @@ pub(super) fn compute_column_impact(
                     }
 
                     path_slots.insert(entry.id);
+                    // The edge names the output by its slot, so it also relies
+                    // on what decided that the output exists at that position,
+                    // such as the width of a star before it.
+                    merge_evidence(&mut confirmed_evidence, &entry.evidence.structure);
+                    merge_evidence(&mut possible_evidence, &entry.evidence.structure);
                     let edge = ImpactEdge {
                         from: source_ref.clone(),
                         to: output.clone(),
                         kind: DependencyKind::Value,
                         transformation: entry.transformation.clone(),
                     };
-                    let next_path = Rc::new(PathNode {
+                    // A confirmed and a possible edge to the same output each
+                    // rely on their own evidence.
+                    let confirmed_path = Rc::new(PathNode {
                         edge: edge.clone(),
+                        evidence: confirmed_evidence,
                         parent: current_path.clone(),
                     });
-                    if possible_source || already_possible {
+                    let possible_path = Rc::new(PathNode {
+                        edge,
+                        evidence: possible_evidence,
+                        parent: current_path.clone(),
+                    });
+                    let mut push_possible = |node: &Rc<PathNode>| {
+                        let (path, evidence) = materialize_path(Some(node));
                         possible.push(PossibleImpact {
                             target: output.clone(),
                             kind: DependencyKind::Value,
                             transformation: entry.transformation.clone(),
-                            path: materialize_path(Some(&next_path)),
+                            path,
+                            evidence,
                         });
+                    };
+                    if possible_source {
+                        push_possible(&possible_path);
+                    }
+                    if references_source && already_possible {
+                        push_possible(&confirmed_path);
                     }
                     if references_source && !already_possible {
                         found_on_path = true;
+                        let (path, evidence) = materialize_path(Some(&confirmed_path));
                         confirmed.push(ConfirmedImpact {
                             target: output.clone(),
                             kind: DependencyKind::Value,
                             transformation: entry.transformation.clone(),
-                            path: materialize_path(Some(&next_path)),
+                            path,
+                            evidence,
                         });
                     }
 
@@ -667,7 +833,7 @@ pub(super) fn compute_column_impact(
                         queue.push((
                             dep_uid.clone(),
                             ImpactInput::Slot(entry.id),
-                            Some(next_path.clone()),
+                            Some(confirmed_path),
                             next_visited.clone(),
                             already_possible,
                         ));
@@ -676,7 +842,7 @@ pub(super) fn compute_column_impact(
                         queue.push((
                             dep_uid.clone(),
                             ImpactInput::Slot(entry.id),
-                            Some(next_path),
+                            Some(possible_path),
                             next_visited,
                             true,
                         ));
@@ -711,21 +877,42 @@ pub(super) fn compute_column_impact(
         }
     }
 
-    confirmed.sort();
-    confirmed.dedup();
-    possible.sort();
-    possible.dedup();
+    let confirmed = normalize_impacts(
+        confirmed,
+        |a, b| {
+            (&a.target, a.kind, &a.transformation, &a.path)
+                == (&b.target, b.kind, &b.transformation, &b.path)
+        },
+        |impact| &mut impact.evidence,
+    );
+    let possible = normalize_impacts(
+        possible,
+        |a, b| {
+            (&a.target, a.kind, &a.transformation, &a.path)
+                == (&b.target, b.kind, &b.transformation, &b.path)
+        },
+        |impact| &mut impact.evidence,
+    );
 
-    ColumnImpactReport {
+    let mut report = ColumnImpactReport {
         model: model_name.to_string(),
         column: column_name.to_string(),
         input,
         scope,
         confirmed,
         possible,
-        exploration: exploration_for(scope, gaps, row_uncollected),
+        exploration: exploration_for(scope, gaps, &explored, row_uncollected),
+        evidence: Vec::new(),
         errors: normalize_column_lineage_errors(errors),
-    }
+    };
+    // Each analysed model describes the evidence its result cites, which
+    // includes everything the report cites.
+    let ledger: Vec<SchemaEvidenceRecord> = lineage_cache
+        .values()
+        .flat_map(|lineage| lineage.evidence.iter().cloned())
+        .collect();
+    report.evidence = cited_evidence(report.cited(), &ledger);
+    report
 }
 
 fn unresolved_may_include_input(

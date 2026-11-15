@@ -171,8 +171,25 @@ output, `user:` and the relation for a user-typed schema.
   coverage basis, order, contract enforcement and what it was derived from.
   Only cited records and the records they were derived from are kept, also
   after selecting columns.
-- Impact reports do not cite evidence yet. Confirmed and possible paths,
-  exploration and no-impact conclusions will carry the evidence they used.
+- An impact report cites evidence per conclusion. A confirmed or possible
+  impact cites what each edge of its path relied on: the evidence of the
+  sources or unresolved parts of the dependent that make the edge, what
+  identified the slot of the model they read, and what decided that the
+  dependent's output exists at its position, such as the width of a star
+  before it. A confirmed edge and a possible
+  edge to the same output each keep their own evidence. What only another
+  input of the dependent relied on is not part of a path. The exploration of
+  a kind cites what the search relied on: what identified the input, the shape
+  of each examined dependent, and the lineage of each of its outputs as a
+  whole. "No impact" relies on the evidence of every requested exploration.
+  Row dependencies are not collected, so a row exploration cites nothing. The
+  report describes what it cites in `evidence`, as a model result does.
+- The plain, Mermaid and DOT outputs name each assumption a result relies on,
+  that is a column list taken as exhaustive by the YAML policy or by an
+  enforced contract, with the conclusions that rely on it: columns and the
+  column list of a model result, and the impacts, explorations or "no impact"
+  of an impact report. Outputs with the same name are told apart by their
+  slot.
 
 ### Cross-model tracing
 
@@ -269,6 +286,7 @@ ImpactReport {
     confirmed: [ConfirmedImpact],
     possible: [PossibleImpact],
     exploration: [KindExploration],      // one per requested kind
+    evidence: [SchemaEvidenceRecord],    // what the report cites
 }
 ConfirmedImpact { target: ModelOutputRef, kind: DependencyKind, path: [ImpactEdge], evidence: [EvidenceId] }
 PossibleImpact  { target: ModelOutputRef, kind: DependencyKind, path: [ImpactEdge], evidence: [EvidenceId] }
