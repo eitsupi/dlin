@@ -90,6 +90,8 @@ impl SqlOutputSchema {
             columns,
             unknown_segments,
             enforcement: None,
+            derived_from: Vec::new(),
+            derived_records: Vec::new(),
         }
     }
 }

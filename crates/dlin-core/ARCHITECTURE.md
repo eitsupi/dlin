@@ -149,6 +149,31 @@ compatibility identity covers this.
 Stored results keep their evidence references, so loading an entry gives back
 the same information that was stored (I4).
 
+**Evidence in results.** Each piece of schema evidence has an id: `yaml:` and
+the unique id for a YAML declaration, `sql:` and the unique id for a model's SQL
+output, `user:` and the relation for a user-typed schema.
+
+- A model result cites evidence ids where the engine reported them: each known
+  source and unresolved contribution, each slot's structure and lineage as a
+  whole, and the output's shape. Cross-model tracing composes them along the
+  path: a source reached through an upstream model also relies on what the
+  reference to that model relied on, and what decided the upstream output's
+  value is part of the root's lineage. A trace boundary cites what the trace
+  relied on to reach it. Its classification follows the manifest and the
+  boundary policy, not schema evidence.
+- A model's SQL output schema records the evidence it was derived from: what
+  decided which columns the output lists, their names and positions, and
+  whether it has more. What only a column's value relied on is not part of it.
+  A reader of the model relies on the `sql:` evidence and everything it was
+  derived from, so an assumption such as a YAML list taken as exhaustive stays
+  visible behind any number of `SELECT *` models (D2).
+- The result describes the evidence it cites in `evidence`: origin, coverage,
+  coverage basis, order, contract enforcement and what it was derived from.
+  Only cited records and the records they were derived from are kept, also
+  after selecting columns.
+- Impact reports do not cite evidence yet. Confirmed and possible paths,
+  exploration and no-impact conclusions will carry the evidence they used.
+
 ### Cross-model tracing
 
 Tracing a column through models follows the typed lineage of each model's

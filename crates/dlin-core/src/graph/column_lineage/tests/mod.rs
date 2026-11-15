@@ -977,6 +977,7 @@ mod core_cross_model;
 mod core_star;
 mod core_star_chain;
 mod core_util;
+mod evidence;
 mod impact;
 mod output_slots;
 mod partial_lineage;

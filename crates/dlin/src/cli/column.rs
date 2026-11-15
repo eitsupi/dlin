@@ -55,12 +55,27 @@ Output format (-o/--output):
     boundaries[]     where tracing stopped, with a reason and resource kind;
                      external relations and source-free outputs are valid ends,
                      while failed, missing, ambiguous, cyclic and unsupported
-                     resources make lineage partial
+                     resources make lineage partial. evidence[] (omitted if
+                     empty) lists the schema evidence ids the trace relied on
+                     to reach it
+    evidence[]        the schema evidence the result cites, and what it was
+                      derived from:
+      id              evidence id, such as yaml:<unique_id> or sql:<unique_id>
+      subject         the dbt node or relation the schema describes
+      origin          sql_output, catalog_artifact or yaml_declaration
+      coverage        exhaustive or partial
+      coverage_basis  enumerated, assumed_by_yaml_policy (a YAML list assumed
+                      to be complete) or declared_enforced_contract
+      order           proven or unknown
+      enforcement     what is known about an enforced contract, or null
+      derived_from[]  evidence an SQL output schema relied on for its columns
     output            null when the SQL could not be analysed (see errors[]),
                       otherwise:
       shape           {\"kind\": \"closed\"}, or {\"kind\": \"open\", \"unexpanded\": [..]}
                       when a star could not be expanded and more columns may
                       exist than are listed
+      evidence[]      evidence ids that decide which columns are listed and
+                      whether there are more (omitted if empty)
       columns[]       output columns in SQL order
         id            position of this entry in columns[] (tells columns with
                       the same name apart)
@@ -74,6 +89,9 @@ Output format (-o/--output):
                         cast         type cast (CAST(x AS INT))
                         conditional  CASE WHEN expression
                         unknown      could not classify
+        evidence      evidence ids the column relies on (omitted if empty):
+                      structure[] for its name and position, lineage[] for its
+                      lineage as a whole
         lineage
           status      \"complete\" when every contributing source is known, or
                       \"partial\" when some contributions could not be resolved
@@ -83,10 +101,14 @@ Output format (-o/--output):
             model_path[]  intermediate hops traversed, each with the model output
                       (unique_id, model, slot, column) and its transformation
                       (omitted if empty)
+            evidence[]  evidence ids this source relies on along its path
+                      (omitted if empty)
           unresolved[]  (partial only) contributions that could not be resolved:
             reason    structured reason, tagged by \"kind\"
             origin    model output where the unresolved part arose
             model_path[]  hops from this column to the origin
+            evidence[]  evidence ids that leave this part unresolved, and
+                      those of the path to it (omitted if empty)
     errors[]    parse or resolution diagnostics. An indeterminate per-column
                 diagnostic and a difference between the YAML columns and the
                 SQL output are non-fatal and do not change the exit code;

@@ -36,6 +36,7 @@ fn slot(
         name: OutputName::Explicit(Ident::unquoted(name)),
         transformation,
         lineage,
+        evidence: Default::default(),
     }
 }
 
@@ -44,6 +45,7 @@ fn source(table: &str, column: &str) -> ColumnSource {
         table: table.to_string(),
         column: Ident::unquoted(column),
         model_path: vec![],
+        evidence: Default::default(),
     }
 }
 
@@ -56,11 +58,16 @@ fn lineage_of(
         boundaries: Vec::new(),
         unique_id: format!("model.{model}"),
         model: model.to_string(),
-        output: Some(OutputSlots { columns, shape }),
+        output: Some(OutputSlots {
+            columns,
+            shape,
+            evidence: Default::default(),
+        }),
         listed_columns: 0,
         value_complete_columns: 0,
         value_partial_columns: 0,
         errors: vec![],
+        evidence: Default::default(),
     };
     report.recount();
     report
@@ -152,6 +159,7 @@ fn trace_boundary(root: &ModelOutputRef, reason: TraceBoundaryReason) -> TraceBo
             policy: TraceBoundaryPolicy::SnapshotUnsupportedSeedExternal,
         },
         model_path: vec![],
+        evidence: Default::default(),
     }
 }
 
@@ -585,6 +593,7 @@ fn partial_report() -> ModelColumnLineage {
                     reason: behind_star_reason(),
                     origin: output_ref("partial_model", 0, "total"),
                     model_path: vec![],
+                    evidence: Default::default(),
                 }],
             ),
         )],

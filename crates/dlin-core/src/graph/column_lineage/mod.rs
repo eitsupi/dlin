@@ -27,17 +27,22 @@ pub use impact::{
     ImpactEdge, ImpactScope, KindExploration, PossibleImpact, TraceGap,
 };
 pub use relation::RelationRef;
+pub use schema::{
+    ContractEnforcementEvidence, CoverageBasis, EnforcementApplicability, EvidenceId,
+    SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin,
+};
 use schema::{SchemaContext, SemanticDigestCache};
 pub use types::{
     ColumnLineageError, ColumnLineageErrorKind, ColumnSource, ModelColumnLineage, ModelOutputRef,
     ModelPathHop, OutputName, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
     SchemaDependencyKind, SetCorrespondence, SetOperand, SetOperationKind, SetOperator,
-    SetQuantifier, SlotLookup, TraceBoundary, TraceBoundaryPolicy, TraceBoundaryReason,
-    TraceResource, TraceResourceCandidate, TraceResourceKind, TransformationType, UnexpandedStar,
-    UnresolvedCandidate, UnresolvedContribution, UnresolvedReason, UnresolvedSource, ValueLineage,
+    SetQuantifier, SlotEvidence, SlotLookup, TraceBoundary, TraceBoundaryPolicy,
+    TraceBoundaryReason, TraceResource, TraceResourceCandidate, TraceResourceKind,
+    TransformationType, UnexpandedStar, UnresolvedCandidate, UnresolvedContribution,
+    UnresolvedReason, UnresolvedSource, ValueLineage,
 };
 use types::{
-    InternalColumnSource, InternalModelColumnLineage, OPEN_SHAPE_HINT,
+    InternalColumnSource, InternalModelColumnLineage, OPEN_SHAPE_HINT, merge_evidence,
     normalize_column_lineage_errors,
 };
 
@@ -329,11 +334,19 @@ pub(super) fn compute_column_lineage_internal(
     );
     errors.extend(declared_column_differences(node, &output, dialect));
 
+    // The ledger describes the evidence the output cites and what that
+    // evidence was derived from.
+    let ledger: Vec<SchemaEvidenceRecord> = catalog
+        .as_ref()
+        .map(CatalogSnapshot::records)
+        .unwrap_or_default();
+    let evidence = types::cited_evidence(output.cited(), &ledger);
     let result = InternalModelColumnLineage {
         unique_id: cache_key.to_string(),
         model: display_name.to_string(),
         output: Some(output),
         boundaries: Vec::new(),
+        evidence,
         errors,
     };
 
@@ -385,9 +398,19 @@ fn output_slots(
             OutputSlot {
                 id,
                 ordinal: column.ordinal,
-                lineage: value_lineage(&column.lineage, &origin, catalog, dialect),
+                lineage: value_lineage(
+                    &column.lineage,
+                    &column.evidence,
+                    &origin,
+                    catalog,
+                    dialect,
+                ),
                 transformation: backend::sqllineage::transformation(column.transform),
                 name,
+                evidence: SlotEvidence {
+                    structure: evidence_ids(&column.evidence.structure),
+                    lineage: evidence_ids(&column.evidence.lineage),
+                },
             }
         })
         .collect();
@@ -406,7 +429,31 @@ fn output_slots(
                 .collect(),
         },
     };
-    OutputSlots { columns, shape }
+    // An unexpanded star decides what the output may have beyond its listed
+    // columns, so the evidence that establishes it is part of the shape's.
+    // What its values rely on is not, as for the SQL output schema.
+    let mut evidence = evidence_ids(&output.evidence);
+    if let sqllineage::Shape::Open { unexpanded } = &output.shape {
+        for star in unexpanded {
+            merge_evidence(&mut evidence, &evidence_ids(&star.evidence.structure));
+        }
+    }
+    OutputSlots {
+        columns,
+        shape,
+        evidence,
+    }
+}
+
+/// The ids of engine evidence references, sorted and deduplicated.
+fn evidence_ids(references: &[sqllineage::EvidenceRef]) -> Vec<EvidenceId> {
+    let mut ids: Vec<EvidenceId> = references
+        .iter()
+        .map(|reference| EvidenceId(reference.0.clone()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// Diagnostics for the slots whose lineage the engine could not fully
@@ -504,8 +551,12 @@ fn declared_column_differences(
 
 /// Convert an engine lineage into the typed value lineage of an output at
 /// `origin`. Unresolved contributions are ordered and deduplicated.
+///
+/// Each known source and unresolved contribution keeps the evidence the
+/// engine reported for it.
 pub(super) fn value_lineage(
     lineage: &sqllineage::Lineage,
+    evidence: &sqllineage::ColumnEvidence,
     origin: &ModelOutputRef,
     catalog: Option<&CatalogSnapshot>,
     dialect: DlinDialect,
@@ -517,6 +568,12 @@ pub(super) fn value_lineage(
                 relation: backend::source_relation(&source.relation, catalog, dialect),
                 column: Ident::from_engine(&source.column),
                 model_path: vec![],
+                evidence: evidence
+                    .known
+                    .iter()
+                    .find(|known| known.source == *source)
+                    .map(|known| evidence_ids(&known.evidence))
+                    .unwrap_or_default(),
             })
             .collect()
     };
@@ -526,17 +583,21 @@ pub(super) fn value_lineage(
             known: sources,
             unresolved,
         } => {
-            let mut unresolved: Vec<UnresolvedContribution> = unresolved
+            let unresolved: Vec<UnresolvedContribution> = unresolved
                 .iter()
                 .map(|item| UnresolvedContribution {
                     reason: unresolved_reason(item, catalog, dialect),
                     origin: origin.clone(),
                     model_path: vec![],
+                    evidence: evidence
+                        .unresolved
+                        .iter()
+                        .find(|entry| entry.unresolved == *item)
+                        .map(|entry| evidence_ids(&entry.evidence))
+                        .unwrap_or_default(),
                 })
                 .collect();
-            unresolved.sort();
-            unresolved.dedup();
-            ValueLineage::new(known(sources), unresolved)
+            ValueLineage::new(known(sources), types::normalize_unresolved(unresolved))
         }
     }
 }
