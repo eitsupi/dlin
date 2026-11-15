@@ -1,11 +1,12 @@
 use super::*;
 use crate::graph::column_lineage::{
-    ColumnLineageErrorKind, ColumnSource, ConfirmedImpact, DependencyKind, DependencyRef,
-    ExplorationStatus, Ident, ImpactEdge, ImpactScope, KindExploration, ModelColumnLineage,
-    ModelOutputRef, ModelPathHop, OutputName, OutputShape, OutputSlot, OutputSlotId, OutputSlots,
-    PossibleImpact, Quote, RelationRef, TraceBoundary, TraceBoundaryPolicy, TraceBoundaryReason,
-    TraceGap, TraceResource, TraceResourceKind, UnexpandedStar, UnresolvedContribution,
-    UnresolvedReason, ValueLineage,
+    ColumnLineageErrorKind, ColumnSource, ConfirmedImpact, CoverageBasis, DependencyKind,
+    DependencyRef, EvidenceId, ExplorationStatus, Ident, ImpactEdge, ImpactScope, KindExploration,
+    ModelColumnLineage, ModelOutputRef, ModelPathHop, OutputName, OutputShape, OutputSlot,
+    OutputSlotId, OutputSlots, PossibleImpact, Quote, RelationRef, SchemaCoverage,
+    SchemaEvidenceRecord, SchemaOrder, SchemaOrigin, TraceBoundary, TraceBoundaryPolicy,
+    TraceBoundaryReason, TraceGap, TraceResource, TraceResourceKind, UnexpandedStar,
+    UnresolvedContribution, UnresolvedReason, ValueLineage,
 };
 
 fn output_ref(model: &str, slot: usize, column: &str) -> ModelOutputRef {
@@ -84,8 +85,10 @@ fn impact_report(model: &str, column: &str, confirmed: Vec<ConfirmedImpact>) -> 
         exploration: vec![KindExploration {
             kind: DependencyKind::Value,
             status: ExplorationStatus::Complete,
+            evidence: vec![],
         }],
         errors: vec![],
+        evidence: vec![],
     }
 }
 
@@ -117,6 +120,7 @@ fn impacted(
         kind: DependencyKind::Value,
         transformation,
         path,
+        evidence: vec![],
     }
 }
 
@@ -126,6 +130,7 @@ fn possible_from(confirmed: ConfirmedImpact) -> PossibleImpact {
         kind: confirmed.kind,
         transformation: confirmed.transformation,
         path: confirmed.path,
+        evidence: vec![],
     }
 }
 
@@ -645,6 +650,7 @@ fn incomplete_report(confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
                     reasons: vec![behind_star_reason()],
                 }],
             },
+            evidence: vec![],
         },
         KindExploration {
             kind: DependencyKind::Row,
@@ -653,6 +659,7 @@ fn incomplete_report(confirmed: Vec<ConfirmedImpact>) -> ColumnImpactReport {
                     kind: DependencyKind::Row,
                 }],
             },
+            evidence: vec![],
         },
     ];
     report
@@ -817,6 +824,7 @@ fn failed_exploration() -> KindExploration {
                 error: ColumnLineageErrorKind::ParseFailure,
             }],
         },
+        evidence: vec![],
     }
 }
 
@@ -825,6 +833,7 @@ fn row_not_collected_exploration() -> Vec<KindExploration> {
         KindExploration {
             kind: DependencyKind::Value,
             status: ExplorationStatus::Complete,
+            evidence: vec![],
         },
         KindExploration {
             kind: DependencyKind::Row,
@@ -833,6 +842,7 @@ fn row_not_collected_exploration() -> Vec<KindExploration> {
                     kind: DependencyKind::Row,
                 }],
             },
+            evidence: vec![],
         },
     ]
 }
@@ -1077,6 +1087,7 @@ fn test_impact_gap_for_a_dependent_with_unlisted_columns() {
                 }],
             }],
         },
+        evidence: vec![],
     }];
     let plain = impact_plain(std::slice::from_ref(&report));
     assert!(
@@ -1116,6 +1127,7 @@ fn test_impact_diagrams_draw_an_unlisted_input_as_a_named_node() {
                 candidates: vec![],
             }],
         },
+        evidence: vec![],
     }];
     let mermaid = impact_mermaid(std::slice::from_ref(&report));
     assert!(mermaid.contains("[\"hidden\"]"), "{mermaid}");
@@ -1131,4 +1143,155 @@ fn test_impact_diagrams_draw_an_unlisted_input_as_a_named_node() {
         plain.contains("is not an enumerated output of mid"),
         "{plain}"
     );
+}
+
+// ── Assumptions ──────────────────────────────────────────────────────────────
+
+const YAML_ORDERS: &str = "yaml:source.proj.raw.orders";
+const SQL_STG: &str = "sql:model.stg";
+
+fn evidence_id(id: &str) -> EvidenceId {
+    EvidenceId(id.to_string())
+}
+
+/// The YAML list of `orders`, taken as exhaustive with `basis`, and the SQL
+/// output of `stg` derived from it.
+fn ledger(basis: CoverageBasis) -> Vec<SchemaEvidenceRecord> {
+    vec![
+        SchemaEvidenceRecord {
+            id: evidence_id(SQL_STG),
+            subject: "model.stg".to_string(),
+            origin: SchemaOrigin::SqlOutput,
+            coverage: SchemaCoverage::Exhaustive,
+            coverage_basis: CoverageBasis::Enumerated,
+            order: SchemaOrder::Proven,
+            enforcement: None,
+            derived_from: vec![evidence_id(YAML_ORDERS)],
+        },
+        SchemaEvidenceRecord {
+            id: evidence_id(YAML_ORDERS),
+            subject: "source.proj.raw.orders".to_string(),
+            origin: SchemaOrigin::YamlDeclaration,
+            coverage: SchemaCoverage::Exhaustive,
+            coverage_basis: basis,
+            order: SchemaOrder::Unknown,
+            enforcement: None,
+            derived_from: vec![],
+        },
+    ]
+}
+
+/// `stg.id` is read by `mart.id`, which relies on `stg`'s SQL output.
+fn assumed_impact(basis: CoverageBasis) -> ColumnImpactReport {
+    let mut found = impacted(
+        "model.mart",
+        ("stg", "id"),
+        vec![("mart", "id", TransformationType::Direct)],
+    );
+    found.evidence = vec![evidence_id(SQL_STG)];
+    let mut report = impact_report("stg", "id", vec![found]);
+    report.exploration[0].evidence = vec![evidence_id(SQL_STG)];
+    report.evidence = ledger(basis);
+    report
+}
+
+#[test]
+fn test_impact_plain_names_the_assumption_each_conclusion_relies_on() {
+    let output = impact_plain(&[assumed_impact(CoverageBasis::AssumedByYamlPolicy)]);
+    assert!(
+        output.contains(
+            "  assumes yaml:source.proj.raw.orders (YAML columns taken as exhaustive): \
+             confirmed mart.id; value exploration\n"
+        ),
+        "{output}"
+    );
+    // The SQL output is enumerated, so it is not an assumption itself.
+    assert!(!output.contains("assumes sql:"), "{output}");
+}
+
+#[test]
+fn test_impact_plain_no_impact_names_its_assumption() {
+    let mut report = assumed_impact(CoverageBasis::AssumedByYamlPolicy);
+    report.confirmed.clear();
+    assert!(report.proves_no_impact());
+    let output = impact_plain(&[report]);
+    assert!(
+        output.contains(
+            "assumes yaml:source.proj.raw.orders (YAML columns taken as exhaustive): no impact\n"
+        ),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_impact_plain_without_assumptions_prints_none() {
+    let output = impact_plain(&[assumed_impact(CoverageBasis::Enumerated)]);
+    assert!(!output.contains("assumes"), "{output}");
+}
+
+#[test]
+fn test_impact_plain_enforced_contract_is_not_called_verified() {
+    let output = impact_plain(&[assumed_impact(CoverageBasis::DeclaredEnforcedContract)]);
+    assert!(
+        output.contains("(enforced contract columns taken as exhaustive, not verified)"),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_impact_diagrams_note_the_assumption_with_its_report() {
+    let report = assumed_impact(CoverageBasis::AssumedByYamlPolicy);
+    let note = "stg.id: assumes yaml:source.proj.raw.orders (YAML columns taken as exhaustive): \
+                confirmed mart.id; value exploration";
+
+    let mermaid = impact_mermaid(std::slice::from_ref(&report));
+    assert!(mermaid.contains(&format!("[\"{note}\"]")), "{mermaid}");
+    assert!(mermaid.contains("fill:#FCF3CF"), "{mermaid}");
+
+    let dot = impact_dot(&[report]);
+    assert!(
+        dot.contains(&format!(
+            r##"[label="{note}", shape=note, fillcolor="#FCF3CF"]"##
+        )),
+        "{dot}"
+    );
+}
+
+#[test]
+fn test_lineage_outputs_name_the_assumption_of_each_column() {
+    let mut id = slot(
+        0,
+        "id",
+        TransformationType::Direct,
+        ValueLineage::complete(vec![source("orders", "id")]),
+    );
+    id.evidence.lineage = vec![evidence_id(SQL_STG)];
+    let one = slot(
+        1,
+        "one",
+        TransformationType::Direct,
+        ValueLineage::complete(vec![]),
+    );
+    let mut report = lineage_of("mart", vec![id, one], OutputShape::Closed);
+    report.output.as_mut().unwrap().evidence = vec![evidence_id(SQL_STG)];
+    report.evidence = ledger(CoverageBasis::AssumedByYamlPolicy);
+
+    let plain = graph_plain(std::slice::from_ref(&report));
+    assert!(
+        plain.contains(
+            "  assumes yaml:source.proj.raw.orders (YAML columns taken as exhaustive): \
+             id; column list\n"
+        ),
+        "{plain}"
+    );
+    let mermaid = graph_mermaid(std::slice::from_ref(&report));
+    assert!(
+        mermaid.contains(
+            "mart: assumes yaml:source.proj.raw.orders (YAML columns taken as exhaustive): \
+             id; column list"
+        ),
+        "{mermaid}"
+    );
+    let dot = graph_dot(&[report]);
+    assert!(dot.contains(r##"fillcolor="#FCF3CF""##), "{dot}");
 }

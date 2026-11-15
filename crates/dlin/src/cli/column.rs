@@ -114,11 +114,16 @@ Output format (-o/--output):
                 SQL output are non-fatal and do not change the exit code;
                 model-level, missing-column, ambiguous, and parse diagnostics
                 are fatal (exit code 1).
-  plain           human-readable text, one model per block
-  mermaid         Mermaid flowchart (LR) with subgraphs per model and boundary notes
-  dot             Graphviz DOT format; models as clusters, columns as nodes,
-                  with distinct notes for legitimate ends and incomplete boundaries
-                  color-coded by transformation type (pipe to `dot -Tsvg`)
+  plain           human-readable text, one model per block. An \"assumes\" line
+                  names each assumed column list (a YAML list taken as
+                  exhaustive, or an enforced contract) and the columns that
+                  rely on it
+  mermaid         Mermaid flowchart (LR) with subgraphs per model, boundary
+                  notes and assumption notes
+  dot             Graphviz DOT format; models as clusters, columns as nodes
+                  color-coded by transformation type, with distinct notes for
+                  legitimate ends, incomplete boundaries and assumptions
+                  (pipe to `dot -Tsvg`)
 
 Exit codes:
   0   Success
@@ -182,18 +187,26 @@ Output format (-o/--output):
                       for one particular output of the model)
     scope             \"value_only\"
     confirmed[]       downstream columns that depend on the input through known
-                      edges (target, kind, transformation, path of edges)
+                      edges (target, kind, transformation, path of edges).
+                      evidence[] (omitted if empty) lists the schema evidence
+                      ids the path relies on
     possible[]        concrete downstream targets that may depend on the input
-                      through finite unresolved paths; paths remain separate
+                      through finite unresolved paths; paths remain separate.
+                      evidence[] as for confirmed[]
     exploration[]     per dependency kind, \"complete\" or \"incomplete\" with the
                       gaps (unresolved lineage, failed analysis, a dependent
                       model with unlisted columns, ...) that may hide
                       further impacts. \"no impact\" is shown only when there
                       are no confirmed or possible targets and every requested
-                      dependency kind is complete.
+                      dependency kind is complete; it relies on the
+                      evidence[] of every exploration.
+    evidence[]        the schema evidence the report cites, described as for
+                      `dlin column upstream`
   plain           human-readable text with confirmed and possible counts, scope,
-                  per-kind gaps and concrete paths
-  mermaid         Mermaid flowchart (LR) showing impacted columns across models
+                  per-kind gaps and concrete paths. An \"assumes\" line names
+                  each assumed column list and the conclusions that rely on it
+  mermaid         Mermaid flowchart (LR) showing impacted columns across models,
+                  with gap and assumption notes
   dot             Graphviz DOT format; models as clusters, columns as nodes
                   color-coded by transformation type (pipe to `dot -Tsvg`)
 

@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 
 use crate::graph::column_lineage::{
-    ColumnImpactReport, DependencyKind, DependencyRef, ExplorationStatus, Ident, ImpactScope,
-    ModelColumnLineage, ModelOutputRef, ModelPathHop, OutputShape, OutputSlotId, TraceBoundary,
+    ColumnImpactReport, ColumnSource, CoverageBasis, DependencyKind, DependencyRef, EvidenceId,
+    ExplorationStatus, Ident, ImpactScope, ModelColumnLineage, ModelOutputRef, ModelPathHop,
+    OutputShape, OutputSlot, OutputSlotId, SchemaEvidenceRecord, TraceBoundary,
     TraceBoundaryReason, TraceGap, TransformationType, UnexpandedStar, UnresolvedContribution,
 };
 
@@ -14,12 +15,15 @@ const GAP_NOTE_COLOR: &str = "#F5B7B1";
 /// Fill of the DOT nodes that stand for columns that are not listed.
 const UNLISTED_COLOR: &str = "#FFFFFF";
 const BOUNDARY_COLOR: &str = "#D5F5E3";
+/// Fill of the note nodes that name an assumption a result relies on.
+const ASSUMPTION_COLOR: &str = "#FCF3CF";
 const POSSIBLE_EDGE_COLOR: &str = "#C0392B";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoteStyle {
     Gap,
     Boundary,
+    Assumption,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -289,8 +293,139 @@ fn build_upstream_graph(reports: &[ModelColumnLineage]) -> ColumnGraph {
         for boundary in &report.boundaries {
             graph.note(describe_boundary(boundary), boundary_note_style(boundary));
         }
+        for line in lineage_assumption_lines(report) {
+            graph.note(format!("{}: {line}", report.model), NoteStyle::Assumption);
+        }
     }
     graph
+}
+
+fn note_color(style: NoteStyle) -> &'static str {
+    match style {
+        NoteStyle::Gap => GAP_NOTE_COLOR,
+        NoteStyle::Boundary => BOUNDARY_COLOR,
+        NoteStyle::Assumption => ASSUMPTION_COLOR,
+    }
+}
+
+// ── Assumptions ──────────────────────────────────────────────────────────────
+
+/// A conclusion of a result, named for display, and the evidence it cites.
+type Conclusion<'a> = (String, Vec<&'a EvidenceId>);
+
+/// One line per assumption that some conclusion relies on, in id order:
+/// `assumes <id> (<basis>): <conclusion>; <conclusion>`. A conclusion relies
+/// on an assumption it cites, or one that evidence it cites was derived from.
+fn assumption_lines(
+    ledger: &[SchemaEvidenceRecord],
+    conclusions: &[Conclusion<'_>],
+) -> Vec<String> {
+    let mut relying: BTreeMap<&EvidenceId, Vec<&str>> = BTreeMap::new();
+    for (label, cited) in conclusions {
+        for assumption in relied_assumptions(cited, ledger) {
+            let labels = relying.entry(&assumption.id).or_default();
+            if !labels.contains(&label.as_str()) {
+                labels.push(label);
+            }
+        }
+    }
+    relying
+        .into_iter()
+        .filter_map(|(id, labels)| {
+            let record = ledger.iter().find(|record| &record.id == id)?;
+            Some(format!(
+                "assumes {} ({}): {}",
+                id,
+                assumption_label(record),
+                labels.join("; ")
+            ))
+        })
+        .collect()
+}
+
+/// The assumption records of `ledger` that `cited` relies on.
+fn relied_assumptions<'a>(
+    cited: &[&EvidenceId],
+    ledger: &'a [SchemaEvidenceRecord],
+) -> Vec<&'a SchemaEvidenceRecord> {
+    let mut wanted: Vec<&EvidenceId> = cited.to_vec();
+    let mut seen: BTreeSet<&EvidenceId> = BTreeSet::new();
+    let mut found = Vec::new();
+    while let Some(id) = wanted.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(record) = ledger.iter().find(|record| &record.id == id) {
+            wanted.extend(&record.derived_from);
+            if record.is_assumption() {
+                found.push(record);
+            }
+        }
+    }
+    found
+}
+
+fn assumption_label(record: &SchemaEvidenceRecord) -> &'static str {
+    match record.coverage_basis {
+        CoverageBasis::AssumedByYamlPolicy => "YAML columns taken as exhaustive",
+        // A declaration is not a check of the built relation.
+        CoverageBasis::DeclaredEnforcedContract => {
+            "enforced contract columns taken as exhaustive, not verified"
+        }
+        CoverageBasis::Enumerated => "enumerated columns",
+    }
+}
+
+/// What a slot relies on: its name and position, and its lineage.
+fn slot_evidence(slot: &OutputSlot<ColumnSource>) -> Vec<&EvidenceId> {
+    slot.evidence
+        .structure
+        .iter()
+        .chain(&slot.evidence.lineage)
+        .collect()
+}
+
+/// The assumption lines of an upstream lineage result: each slot and the
+/// list of columns. A trace boundary is reached from a slot, whose lineage
+/// already cites what the trace relied on.
+fn lineage_assumption_lines(report: &ModelColumnLineage) -> Vec<String> {
+    let mut conclusions: Vec<Conclusion<'_>> = Vec::new();
+    if let Some(output) = &report.output {
+        for slot in &output.columns {
+            conclusions.push((slot.name.to_string(), slot_evidence(slot)));
+        }
+        conclusions.push(("column list".to_string(), output.evidence.iter().collect()));
+    }
+    assumption_lines(&report.evidence, &conclusions)
+}
+
+/// The assumption lines of an impact report: each confirmed and possible
+/// impact, and each exploration, which is the "no impact" conclusion when
+/// the report supports it.
+fn impact_assumption_lines(report: &ColumnImpactReport) -> Vec<String> {
+    let mut conclusions: Vec<Conclusion<'_>> = Vec::new();
+    for impact in &report.confirmed {
+        conclusions.push((
+            format!("confirmed {}.{}", impact.target.model, impact.target.column),
+            impact.evidence.iter().collect(),
+        ));
+    }
+    for impact in &report.possible {
+        conclusions.push((
+            format!("possible {}.{}", impact.target.model, impact.target.column),
+            impact.evidence.iter().collect(),
+        ));
+    }
+    let no_impact = report.proves_no_impact();
+    for exploration in &report.exploration {
+        let label = if no_impact {
+            "no impact".to_string()
+        } else {
+            format!("{} exploration", dependency_kind_label(exploration.kind))
+        };
+        conclusions.push((label, exploration.evidence.iter().collect()));
+    }
+    assumption_lines(&report.evidence, &conclusions)
 }
 
 // ── Column graph (upstream lineage) ──────────────────────────────────────────
@@ -391,6 +526,9 @@ pub fn render_column_graph_plain_to_writer<W: Write>(
                 writeln!(w, "  ({})", unexpanded_note(star))?;
             }
         }
+        for line in lineage_assumption_lines(report) {
+            writeln!(w, "  {line}")?;
+        }
     }
     Ok(())
 }
@@ -458,11 +596,7 @@ fn write_mermaid<W: Write>(w: &mut W, graph: &ColumnGraph) -> io::Result<()> {
     }
     for (i, (note, style)) in graph.notes.iter().enumerate() {
         writeln!(w, "  gap{i}[\"{}\"]", super::mermaid_escape(note))?;
-        let color = match style {
-            NoteStyle::Gap => GAP_NOTE_COLOR,
-            NoteStyle::Boundary => BOUNDARY_COLOR,
-        };
-        writeln!(w, "  style gap{i} fill:{color}")?;
+        writeln!(w, "  style gap{i} fill:{}", note_color(*style))?;
     }
 
     writeln!(w)?;
@@ -590,6 +724,9 @@ pub fn render_column_impact_plain_to_writer<W: Write>(
             }
         }
         write_exploration_gaps(w, report)?;
+        for line in impact_assumption_lines(report) {
+            writeln!(w, "  {line}")?;
+        }
     }
     Ok(())
 }
@@ -923,6 +1060,14 @@ fn build_impact_graph(reports: &[ColumnImpactReport]) -> ColumnGraph {
         }
     }
     graph.notes = gap_notes(reports);
+    for report in reports {
+        for line in impact_assumption_lines(report) {
+            graph.note(
+                format!("{}.{}: {line}", report.model, report.column),
+                NoteStyle::Assumption,
+            );
+        }
+    }
     graph
 }
 
@@ -1010,14 +1155,11 @@ fn write_dot_column_graph<W: Write>(w: &mut W, graph: &ColumnGraph) -> io::Resul
         writeln!(w, "  }}")?;
     }
     for (i, (note, style)) in graph.notes.iter().enumerate() {
-        let color = match style {
-            NoteStyle::Gap => GAP_NOTE_COLOR,
-            NoteStyle::Boundary => BOUNDARY_COLOR,
-        };
         writeln!(
             w,
-            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{color}"];"#,
-            dot_escape(note)
+            r#"  "gap{i}" [label="{}", shape=note, fillcolor="{}"];"#,
+            dot_escape(note),
+            note_color(*style)
         )?;
     }
 
