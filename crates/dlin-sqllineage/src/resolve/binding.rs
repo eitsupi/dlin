@@ -67,6 +67,10 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sou
             resolve_row_value_candidate(name, *env, binding.clone(), cx)
         }
 
+        RawNode::Unsupported { what } => {
+            Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
+        }
+
         RawNode::Star { .. } | RawNode::Output { .. } => Sources::default(),
     };
 

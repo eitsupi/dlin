@@ -76,4 +76,7 @@ pub(crate) enum RawNode {
         env: BindingEnv,
         binding: Option<Binding>,
     },
+    /// An expression the engine does not model, which may still depend on
+    /// columns: its value is unresolved, never a source-free value.
+    Unsupported { what: &'static str },
 }

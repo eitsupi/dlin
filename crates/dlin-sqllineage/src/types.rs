@@ -368,6 +368,14 @@ impl Dialect {
     pub(crate) const fn supports_relation_alias_row_value(self) -> bool {
         matches!(self, Self::BigQuery | Self::PostgreSql)
     }
+
+    /// Whether an ordinary derived table in a FROM clause sees the FROM items
+    /// before it, as if it were written with `LATERAL`. `DuckDB` binds such a
+    /// reference to the preceding item (an implicit lateral join); other
+    /// dialects reject it.
+    pub(crate) const fn derived_tables_are_implicitly_lateral(self) -> bool {
+        matches!(self, Self::DuckDb)
+    }
 }
 
 /// A statement the engine cannot analyze because of what it contains.

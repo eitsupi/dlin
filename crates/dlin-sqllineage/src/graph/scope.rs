@@ -261,7 +261,8 @@ impl ScopeTree {
     /// settle them. It depends on how the scope is introduced:
     ///
     /// - an ordinary derived table cannot see the other items of the FROM
-    ///   clause it belongs to, only what its parent could see from outside;
+    ///   clause it belongs to, only what its parent could see from outside,
+    ///   except in a dialect where it is implicitly lateral;
     /// - a lateral derived table also sees the items before it;
     /// - a subquery in an expression, a set-operation operand, a CTE and the
     ///   body of a query with a WITH clause see what was introduced in their
@@ -271,11 +272,13 @@ impl ScopeTree {
         let parent = this.parent?;
         match this.kind {
             ScopeKind::Root => None,
-            // TODO: DuckDB lets a plain derived table see the FROM items
-            // before it (implicit LATERAL). Decide this per dialect instead
-            // of denying sibling visibility for every dialect.
-            ScopeKind::DerivedTable => self.outer(parent),
-            ScopeKind::Cte
+            // DuckDB treats an ordinary derived table as lateral when it
+            // refers to the items before it.
+            ScopeKind::DerivedTable if !self.dialect.derived_tables_are_implicitly_lateral() => {
+                self.outer(parent)
+            }
+            ScopeKind::DerivedTable
+            | ScopeKind::Cte
             | ScopeKind::Body
             | ScopeKind::Subquery
             | ScopeKind::LateralDerivedTable

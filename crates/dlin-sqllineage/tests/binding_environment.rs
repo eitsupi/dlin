@@ -173,9 +173,18 @@ isolated_test!(lateral_derived_table_sees_the_items_before_it, || {
     assert_eq!(sources(&result, "v"), [pair("u", "x")]);
 });
 
+/// Dialects whose ordinary derived table does not see the items before it.
+/// DuckDB treats it as lateral when it refers to them.
+const NON_LATERAL_DERIVED_DIALECTS: [Dialect; 4] = [
+    Dialect::Generic,
+    Dialect::PostgreSql,
+    Dialect::Snowflake,
+    Dialect::BigQuery,
+];
+
 #[test]
 fn ordinary_derived_table_does_not_see_its_sibling_items() {
-    for dialect in ALL_DIALECTS {
+    for dialect in NON_LATERAL_DERIVED_DIALECTS {
         for sql in [
             "SELECT d.v FROM t, (SELECT x AS v) AS d",
             "SELECT d.v FROM t AS a, (SELECT a.x AS v) AS d",
@@ -321,7 +330,7 @@ fn range_variables_do_not_hide_or_replace_cte_names() {
 // before it means, in a scope that cannot see the new item.
 #[test]
 fn appending_an_unrelated_from_item_keeps_an_ordinary_derived_table_meaning() {
-    for dialect in ALL_DIALECTS {
+    for dialect in NON_LATERAL_DERIVED_DIALECTS {
         for catalog in [false, true] {
             let base = analyze("SELECT d.v FROM t, (SELECT x AS v) AS d", dialect, catalog);
             for appended in [", u", ", u AS w", " CROSS JOIN u", ", (SELECT 1 AS z) AS z"] {
@@ -1137,4 +1146,90 @@ fn a_non_recursive_inner_cte_body_reads_the_outer_cte_of_the_same_name() {
     let result = analyze(sql, Dialect::PostgreSql, false);
     assert_eq!(sources(&result, "v"), [pair("t", "x")]);
     assert_eq!(read_names(&result), ["t"]);
+}
+
+#[test]
+fn duckdb_derived_table_sees_the_items_before_it() {
+    // DuckDB binds a reference from an ordinary derived table to a preceding
+    // FROM item, as if the derived table were LATERAL.
+    for sql in [
+        "SELECT d.v FROM t, (SELECT x AS v) AS d",
+        "SELECT d.v FROM t AS a, (SELECT a.x AS v) AS d",
+    ] {
+        let result = analyze(sql, Dialect::DuckDb, false);
+        assert_eq!(
+            concrete_sources_of(&result.output.columns[0]),
+            [pair("t", "x")],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn duckdb_derived_table_does_not_see_the_items_after_it() {
+    for catalog in [false, true] {
+        let base = analyze(
+            "SELECT d.v FROM t, (SELECT x AS v) AS d",
+            Dialect::DuckDb,
+            catalog,
+        );
+        for appended in [", u", ", u AS w", " CROSS JOIN u", ", t AS t2"] {
+            let sql = format!("SELECT d.v FROM t, (SELECT x AS v) AS d{appended}");
+            let longer = analyze(&sql, Dialect::DuckDb, catalog);
+            assert_eq!(
+                base.output.columns[0].lineage, longer.output.columns[0].lineage,
+                "catalog={catalog}: {sql}"
+            );
+        }
+        // An item after the derived table is not visible to it.
+        let result = analyze(
+            "SELECT d.v FROM (SELECT x AS v) AS d, t",
+            Dialect::DuckDb,
+            catalog,
+        );
+        assert!(
+            known_sources(&result.output.columns[0]).is_empty(),
+            "catalog={catalog}: {:?}",
+            result.output.columns[0].lineage
+        );
+    }
+}
+
+#[test]
+fn unqualified_name_reads_a_derived_table_without_a_range_variable() {
+    for dialect in ALL_DIALECTS {
+        let result = analyze("SELECT x FROM (SELECT a AS x FROM t)", dialect, false);
+        assert_eq!(
+            concrete_sources_of(&result.output.columns[0]),
+            [pair("t", "a")],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn derived_table_without_a_range_variable_competes_with_a_named_relation() {
+    // `v` may be a column of `u`, whose columns are not known, so it has no
+    // single owner.
+    let result = analyze(
+        "SELECT v FROM (SELECT x AS v FROM t), u",
+        Dialect::DuckDb,
+        false,
+    );
+    let column = &result.output.columns[0];
+    assert!(
+        matches!(&column.lineage, Lineage::Partial { .. }),
+        "{:?}",
+        column.lineage
+    );
+    // With a catalog that lists `u` without `v`, the derived table owns it.
+    let result = analyze(
+        "SELECT v FROM (SELECT x AS v FROM t), u",
+        Dialect::DuckDb,
+        true,
+    );
+    assert_eq!(
+        concrete_sources_of(&result.output.columns[0]),
+        [pair("t", "x")]
+    );
 }

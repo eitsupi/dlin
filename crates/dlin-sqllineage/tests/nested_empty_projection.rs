@@ -13,7 +13,8 @@ fn join_on_subquery_keeps_empty_projection_warning() {
             .iter()
             .map(|relation| relation.name.value.as_str())
             .collect::<Vec<_>>(),
-        ["a", "b"]
+        // EXISTS reads whether `c` has rows.
+        ["a", "b", "c"]
     );
     assert_eq!(result.output.columns.len(), 1);
     assert!(
@@ -127,7 +128,9 @@ fn nested_empty_projection_keeps_dialect_severity_and_deduplicates() {
                 .iter()
                 .map(|relation| relation.name.value.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "b"]
+            // The subqueries of the join condition and of ORDER BY read
+            // their relations too.
+            ["a", "b", "c", "d"]
         );
     }
 }

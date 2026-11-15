@@ -189,44 +189,81 @@ fn from_first_with_a_select_list_is_not_an_empty_projection() {
     assert_eq!(source_pairs(&result.slots()[0]), [("t", "a")]);
 }
 
+/// A model-level failure that is not a parse failure: the SQL is valid, but
+/// column lineage cannot trace it.
+fn assert_untraceable(
+    result: &ModelColumnLineage,
+    kind: ColumnLineageErrorKind,
+    what: &str,
+    why: &str,
+) {
+    let error = only_error(result);
+    assert_eq!(error.kind, kind);
+    assert_eq!(error.column, None);
+    assert_eq!(error.what, what);
+    assert_eq!(error.why.as_deref(), Some(why));
+    assert!(error.is_model_failure());
+    assert_eq!(result.output, None);
+}
+
+const NOT_A_QUERY: &str = "the SQL of 'stg_orders' is not a single query";
+
 #[test]
 fn multiple_statements_message() {
-    let result = generic("SELECT a FROM t; SELECT b FROM u", &["a"]);
-    assert_parse_failure(&result, "expected exactly one statement, found 2");
-
-    // Without YAML columns the failure is the same: no statement is analysed.
-    let result = generic("SELECT a FROM t; SELECT b FROM u", &[]);
-    assert_eq!(
-        only_error(&result).kind,
-        ColumnLineageErrorKind::ParseFailure
-    );
+    for yaml in [&["a"][..], &[]] {
+        let result = generic("SELECT a FROM t; SELECT b FROM u", yaml);
+        assert_untraceable(
+            &result,
+            ColumnLineageErrorKind::UnsupportedStatement,
+            NOT_A_QUERY,
+            "expected exactly one statement, found 2",
+        );
+    }
 }
 
 #[test]
 fn empty_sql_message() {
     let result = generic("", &["a"]);
-    assert_parse_failure(&result, "no statements in analysis result");
+    assert_untraceable(
+        &result,
+        ColumnLineageErrorKind::UnsupportedStatement,
+        NOT_A_QUERY,
+        "the SQL has no statement",
+    );
 }
 
 #[test]
 fn non_lineage_statement_message() {
     let result = generic("CREATE TABLE x (a INT)", &["a"]);
-    assert_parse_failure(&result, "statement is not lineage-bearing");
+    assert_untraceable(
+        &result,
+        ColumnLineageErrorKind::UnsupportedStatement,
+        NOT_A_QUERY,
+        "the statement is not a query whose output columns can be traced",
+    );
 }
 
 #[test]
 fn unsupported_syntax_messages() {
+    const WHAT: &str = "the SQL of 'stg_orders' uses syntax that column lineage does not model";
     let result = generic("SELECT * FROM t |> SELECT x", &["x"]);
-    assert_parse_failure(&result, "SQL parse error: pipe operators are not supported");
+    assert_untraceable(
+        &result,
+        ColumnLineageErrorKind::UnsupportedSyntax,
+        WHAT,
+        "not supported: pipe operators",
+    );
 
     let result = analyze(
         "SELECT v FROM t, UNPIVOT t.attrs AS v AT k",
         &["v"],
         DlinDialect::Redshift,
     );
-    assert_parse_failure(
+    assert_untraceable(
         &result,
-        "SQL parse error: UNPIVOT on an expression is not supported",
+        ColumnLineageErrorKind::UnsupportedSyntax,
+        WHAT,
+        "not supported: UNPIVOT on an expression",
     );
 }
 

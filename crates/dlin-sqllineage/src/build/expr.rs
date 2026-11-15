@@ -268,6 +268,31 @@ impl LineageBuilder {
                 for order in &func.within_group {
                     ancestors.extend(self.collect_ancestors(&order.expr));
                 }
+                // Those clauses still read the relations of their subqueries.
+                if let Some(filter) = &func.filter {
+                    self.scan_expr_for_tables(filter);
+                }
+                if let FunctionArguments::List(list) = &func.args {
+                    for clause in &list.clauses {
+                        match clause {
+                            ast::FunctionArgumentClause::Where(expr)
+                            | ast::FunctionArgumentClause::Limit(expr)
+                            | ast::FunctionArgumentClause::Having(ast::HavingBound(_, expr)) => {
+                                self.scan_expr_for_tables(expr);
+                            }
+                            ast::FunctionArgumentClause::OrderBy(orders) => {
+                                for order in orders {
+                                    self.scan_expr_for_tables(&order.expr);
+                                }
+                            }
+                            ast::FunctionArgumentClause::IgnoreOrRespectNulls(_)
+                            | ast::FunctionArgumentClause::OnOverflow(_)
+                            | ast::FunctionArgumentClause::Separator(_)
+                            | ast::FunctionArgumentClause::JsonNullClause(_)
+                            | ast::FunctionArgumentClause::JsonReturningClause(_) => {}
+                        }
+                    }
+                }
                 if let FunctionArguments::Subquery(q) = &func.args {
                     self.visit_subquery(ScopeKind::Subquery, q);
                 }
@@ -353,13 +378,28 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::GroupingSets(_)
-            | Expr::Cube(_)
-            | Expr::Rollup(_)
-            | Expr::Dictionary(_)
-            | Expr::Interval(_)
-            | Expr::Lambda(_)
-            | Expr::MatchAgainst { .. } => vec![],
+            Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
+                let mut v = Vec::new();
+                for expr in sets.iter().flatten() {
+                    v.extend(self.collect_ancestors(expr));
+                }
+                v
+            }
+
+            Expr::Dictionary(fields) => {
+                let mut v = Vec::new();
+                for field in fields {
+                    v.extend(self.collect_ancestors(&field.value));
+                }
+                v
+            }
+
+            Expr::Interval(interval) => self.collect_ancestors(&interval.value),
+
+            // A lambda body may read columns of the enclosing query, and its
+            // parameters are not modelled as bindings.
+            Expr::Lambda(_) => vec![self.graph.add_unsupported("lambda")],
+            Expr::MatchAgainst { .. } => vec![self.graph.add_unsupported("MATCH ... AGAINST")],
         }
     }
 

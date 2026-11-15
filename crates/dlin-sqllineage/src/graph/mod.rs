@@ -88,6 +88,10 @@ impl RawGraph {
         self.add_node(RawNode::RowValueCandidate { name, env, binding })
     }
 
+    pub fn add_unsupported(&mut self, what: &'static str) -> NodeId {
+        self.add_node(RawNode::Unsupported { what })
+    }
+
     pub fn add_star(&mut self, base: StarBase, options: StarOptions, env: BindingEnv) -> NodeId {
         self.add_node(RawNode::Star { base, options, env })
     }

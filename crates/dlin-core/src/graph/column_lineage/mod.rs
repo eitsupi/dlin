@@ -13,8 +13,8 @@ mod tests;
 mod types;
 
 use backend::sqllineage::{
-    OutputFailureKind, analyze_parsed, lineage_failure, parse_sql, single_lineage_statement,
-    unresolved_reason,
+    OutputFailureKind, StatementFailure, analyze_parsed, lineage_failure, parse_sql,
+    single_lineage_statement, unresolved_reason,
 };
 pub use backend::{
     CatalogSnapshot, DialectClassification, DlinDialect, REMOVED_DIALECTS, check_sql_parses,
@@ -45,6 +45,34 @@ use types::{
     InternalColumnSource, InternalModelColumnLineage, OPEN_SHAPE_HINT, merge_evidence,
     normalize_column_lineage_errors,
 };
+
+/// The result of a model whose compiled SQL cannot be traced as a whole.
+fn statement_failure(node: &ManifestNode, failure: StatementFailure) -> InternalModelColumnLineage {
+    let model = node.name.as_str();
+    let (what, hint) = match failure.kind {
+        ColumnLineageErrorKind::UnsupportedSyntax => (
+            format!("the SQL of '{model}' uses syntax that column lineage does not model"),
+            "Column lineage is not available for this model",
+        ),
+        ColumnLineageErrorKind::UnsupportedStatement => (
+            format!("the SQL of '{model}' is not a single query"),
+            "Column lineage needs the compiled SQL to be one SELECT statement",
+        ),
+        _ => return parse_failure(node, failure.detail),
+    };
+    InternalModelColumnLineage::failed(
+        &node.unique_id,
+        model,
+        ColumnLineageError {
+            kind: failure.kind,
+            column: None,
+            slot: None,
+            what,
+            why: Some(failure.detail),
+            hint: Some(hint.to_string()),
+        },
+    )
+}
 
 fn parse_failure(node: &ManifestNode, reason: String) -> InternalModelColumnLineage {
     let model = node.name.as_str();
@@ -320,7 +348,7 @@ pub(super) fn compute_column_lineage_internal(
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
     let statement = match single_lineage_statement(&analyzed) {
         Ok(statement) => statement,
-        Err(detail) => return parse_failure(node, detail),
+        Err(failure) => return statement_failure(node, failure),
     };
 
     // The SQL output is the only source of output slots. Columns that the

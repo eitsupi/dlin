@@ -3,7 +3,7 @@ use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarOptions};
 use crate::graph::scope::ScopeColumn;
 use crate::types::{StatementType, TableRef};
-use sqlparser::ast::{self, AssignmentTarget, FunctionArguments, MergeAction, Statement};
+use sqlparser::ast::{self, AssignmentTarget, MergeAction, Statement};
 
 impl LineageBuilder {
     pub(crate) fn visit_statement(&mut self, stmt: &Statement) -> StatementType {
@@ -344,81 +344,12 @@ impl LineageBuilder {
         );
     }
 
+    /// Register the relations that `expr` reads without making it a value of
+    /// any output: a filter, a join condition or a grouping key. The walk is
+    /// the one that collects values, so a subquery gets the same scope, sees
+    /// the same names and reads the same relations wherever it is written.
     pub(crate) fn scan_expr_for_tables(&mut self, expr: &ast::Expr) {
-        match expr {
-            ast::Expr::Subquery(query) => {
-                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, query);
-            }
-            ast::Expr::InSubquery { subquery, expr, .. } => {
-                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, subquery);
-                self.scan_expr_for_tables(expr);
-            }
-            ast::Expr::Exists { subquery, .. } => {
-                self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, subquery);
-            }
-            ast::Expr::BinaryOp { left, right, .. } => {
-                self.scan_expr_for_tables(left);
-                self.scan_expr_for_tables(right);
-            }
-            ast::Expr::UnaryOp { expr, .. } => {
-                self.scan_expr_for_tables(expr);
-            }
-            ast::Expr::Nested(inner) => {
-                self.scan_expr_for_tables(inner);
-            }
-            ast::Expr::Between {
-                expr, low, high, ..
-            } => {
-                self.scan_expr_for_tables(expr);
-                self.scan_expr_for_tables(low);
-                self.scan_expr_for_tables(high);
-            }
-            ast::Expr::InList { expr, list, .. } => {
-                self.scan_expr_for_tables(expr);
-                for item in list {
-                    self.scan_expr_for_tables(item);
-                }
-            }
-            ast::Expr::IsNull(e) | ast::Expr::IsNotNull(e) | ast::Expr::Cast { expr: e, .. } => {
-                self.scan_expr_for_tables(e);
-            }
-            ast::Expr::Case {
-                operand,
-                conditions,
-                else_result,
-                ..
-            } => {
-                if let Some(op) = operand {
-                    self.scan_expr_for_tables(op);
-                }
-                for cw in conditions {
-                    self.scan_expr_for_tables(&cw.condition);
-                    self.scan_expr_for_tables(&cw.result);
-                }
-                if let Some(el) = else_result {
-                    self.scan_expr_for_tables(el);
-                }
-            }
-            ast::Expr::Function(func) => {
-                if let FunctionArguments::List(list) = &func.args {
-                    for arg in &list.args {
-                        match arg {
-                            ast::FunctionArg::Unnamed(arg_expr)
-                            | ast::FunctionArg::Named { arg: arg_expr, .. }
-                            | ast::FunctionArg::ExprNamed { arg: arg_expr, .. } => {
-                                if let ast::FunctionArgExpr::Expr(e) = arg_expr {
-                                    self.scan_expr_for_tables(e);
-                                }
-                            }
-                        }
-                    }
-                }
-                if let FunctionArguments::Subquery(q) = &func.args {
-                    self.visit_subquery(crate::graph::scope::ScopeKind::Subquery, q);
-                }
-            }
-            _ => {}
-        }
+        let _ = self.collect_ancestors(expr);
     }
 
     pub(crate) fn table_ref_from_object_name(name: &ast::ObjectName) -> TableRef {

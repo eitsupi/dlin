@@ -135,7 +135,7 @@ CTE with the same name, and does not take its place.
 
 | Scope | What a reference inside it can see |
 | --- | --- |
-| Ordinary derived table | The environment of the enclosing query, but not the other items of its own FROM clause |
+| Ordinary derived table | The environment of the enclosing query, but not the other items of its own FROM clause. In DuckDB, also the FROM items before it, as for `LATERAL` (see "Dialect extensions") |
 | `LATERAL` derived table, `APPLY` | The FROM items before it. Never a later item, and never the derived table being defined |
 | Argument of a FROM item such as `UNNEST` | The FROM items before it. The alias being defined does not exist yet |
 | Expression subquery (`IN`, `EXISTS`, scalar, `ARRAY(...)`) | The enclosing query as it stands at the position of the subquery |
@@ -161,12 +161,21 @@ silently read as a physical relation, and never silently bound to the CTE.
 **Structural walks share the scope rules.** Any walk that crosses query
 boundaries, for example one that collects the relations a statement reads or the
 bindings of a scope, uses the same scope rules as name resolution. No collector
-leaks an inner binding or an inner output into the enclosing query (B3).
+leaks an inner binding or an inner output into the enclosing query (B3). The
+relations a statement reads are collected by the same walk as values, in every
+clause: the projection, FROM and join conditions, `WHERE`, `GROUP BY`,
+`HAVING`, `QUALIFY` and `ORDER BY`.
+
+**Derived tables without a range variable.** A derived table written without an
+alias is a relation of its FROM clause like any other. An unqualified name may
+be one of its columns, and it competes with the other relations of the clause
+under the usual rule. In an ambiguity it is a derived-table candidate without a
+name.
 
 **Dialect extensions.** DuckDB lets a derived table see earlier FROM items
-without writing `LATERAL`. That implicit lateral reference is a dialect
-extension the engine does not model yet. A reference that depends on it is
-reported as unresolved. It is never bound to a wrong object.
+without writing `LATERAL` (an implicit lateral join). The engine follows it: in
+DuckDB an ordinary derived table sees the FROM items before it, never a later
+one. Other dialects reject such a reference, and it stays unresolved there.
 
 Cases: B1, B2, B3, B4, B5, B6, B7, I5.
 
