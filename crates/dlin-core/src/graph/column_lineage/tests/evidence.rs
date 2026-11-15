@@ -592,3 +592,33 @@ fn a_possible_impact_cites_what_left_its_edge_unresolved() {
     ));
     assert_eq!(report.no_impact_evidence(), None);
 }
+
+#[test]
+fn an_impact_path_cites_what_placed_its_target() {
+    // `d.target` is the second output only because `b.*` is one column wide,
+    // which rests on the YAML list of `raw_b`.
+    let manifest = project(
+        &[
+            ("a", &[], "SELECT 1 AS id"),
+            ("b", &["raw_b"], "SELECT * FROM raw_b"),
+            (
+                "d",
+                &["a", "b"],
+                "SELECT b.*, a.id AS target FROM b CROSS JOIN a",
+            ),
+        ],
+        &[("raw_b", &["y"])],
+    );
+    let report = impact(&manifest, "a", "id");
+    assert_eq!(report.confirmed.len(), 1, "{report:?}");
+    let confirmed = &report.confirmed[0];
+    assert_eq!(confirmed.target.column, "target");
+    assert_eq!(
+        confirmed.evidence,
+        ids(&[
+            "sql:model.proj.a",
+            "sql:model.proj.b",
+            "yaml:source.proj.raw.raw_b"
+        ])
+    );
+}

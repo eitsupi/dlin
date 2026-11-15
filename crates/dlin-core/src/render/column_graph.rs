@@ -391,8 +391,19 @@ fn slot_evidence(slot: &OutputSlot<ColumnSource>) -> Vec<&EvidenceId> {
 fn lineage_assumption_lines(report: &ModelColumnLineage) -> Vec<String> {
     let mut conclusions: Vec<Conclusion<'_>> = Vec::new();
     if let Some(output) = &report.output {
-        for slot in &output.columns {
-            conclusions.push((slot.name.to_string(), slot_evidence(slot)));
+        let names: Vec<String> = output
+            .columns
+            .iter()
+            .map(|slot| slot.name.to_string())
+            .collect();
+        for (slot, name) in output.columns.iter().zip(&names) {
+            // Outputs with the same name are told apart by their slot.
+            let label = if names.iter().filter(|other| *other == name).count() > 1 {
+                format!("{name} ({})", slot.id)
+            } else {
+                name.clone()
+            };
+            conclusions.push((label, slot_evidence(slot)));
         }
         conclusions.push(("column list".to_string(), output.evidence.iter().collect()));
     }
@@ -403,16 +414,37 @@ fn lineage_assumption_lines(report: &ModelColumnLineage) -> Vec<String> {
 /// impact, and each exploration, which is the "no impact" conclusion when
 /// the report supports it.
 fn impact_assumption_lines(report: &ColumnImpactReport) -> Vec<String> {
+    // Targets with the same model and column name are told apart by their
+    // slot.
+    let mut slots: BTreeMap<(&str, &str), BTreeSet<OutputSlotId>> = BTreeMap::new();
+    for target in report
+        .confirmed
+        .iter()
+        .map(|impact| &impact.target)
+        .chain(report.possible.iter().map(|impact| &impact.target))
+    {
+        slots
+            .entry((&target.unique_id, &target.column))
+            .or_default()
+            .insert(target.slot);
+    }
+    let target_label = |target: &ModelOutputRef| {
+        if slots[&(target.unique_id.as_str(), target.column.as_str())].len() > 1 {
+            format!("{}.{} ({})", target.model, target.column, target.slot)
+        } else {
+            format!("{}.{}", target.model, target.column)
+        }
+    };
     let mut conclusions: Vec<Conclusion<'_>> = Vec::new();
     for impact in &report.confirmed {
         conclusions.push((
-            format!("confirmed {}.{}", impact.target.model, impact.target.column),
+            format!("confirmed {}", target_label(&impact.target)),
             impact.evidence.iter().collect(),
         ));
     }
     for impact in &report.possible {
         conclusions.push((
-            format!("possible {}.{}", impact.target.model, impact.target.column),
+            format!("possible {}", target_label(&impact.target)),
             impact.evidence.iter().collect(),
         ));
     }

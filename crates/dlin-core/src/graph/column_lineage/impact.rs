@@ -774,6 +774,11 @@ pub(super) fn compute_column_impact(
                     }
 
                     path_slots.insert(entry.id);
+                    // The edge names the output by its slot, so it also relies
+                    // on what decided that the output exists at that position,
+                    // such as the width of a star before it.
+                    merge_evidence(&mut confirmed_evidence, &entry.evidence.structure);
+                    merge_evidence(&mut possible_evidence, &entry.evidence.structure);
                     let edge = ImpactEdge {
                         from: source_ref.clone(),
                         to: output.clone(),

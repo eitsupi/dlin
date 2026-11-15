@@ -173,8 +173,10 @@ output, `user:` and the relation for a user-typed schema.
   after selecting columns.
 - An impact report cites evidence per conclusion. A confirmed or possible
   impact cites what each edge of its path relied on: the evidence of the
-  sources or unresolved parts of the dependent that make the edge, and what
-  identified the slot of the model they read. A confirmed edge and a possible
+  sources or unresolved parts of the dependent that make the edge, what
+  identified the slot of the model they read, and what decided that the
+  dependent's output exists at its position, such as the width of a star
+  before it. A confirmed edge and a possible
   edge to the same output each keep their own evidence. What only another
   input of the dependent relied on is not part of a path. The exploration of
   a kind cites what the search relied on: what identified the input, the shape
@@ -186,7 +188,8 @@ output, `user:` and the relation for a user-typed schema.
   that is a column list taken as exhaustive by the YAML policy or by an
   enforced contract, with the conclusions that rely on it: columns and the
   column list of a model result, and the impacts, explorations or "no impact"
-  of an impact report.
+  of an impact report. Outputs with the same name are told apart by their
+  slot.
 
 ### Cross-model tracing
 

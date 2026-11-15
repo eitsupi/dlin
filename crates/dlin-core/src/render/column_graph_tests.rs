@@ -1295,3 +1295,37 @@ fn test_lineage_outputs_name_the_assumption_of_each_column() {
     let dot = graph_dot(&[report]);
     assert!(dot.contains(r##"fillcolor="#FCF3CF""##), "{dot}");
 }
+
+#[test]
+fn test_assumption_lines_tell_outputs_with_the_same_name_apart() {
+    let mut first = slot(
+        0,
+        "id",
+        TransformationType::Direct,
+        ValueLineage::complete(vec![source("orders", "id")]),
+    );
+    first.evidence.lineage = vec![evidence_id(SQL_STG)];
+    let second = slot(
+        1,
+        "id",
+        TransformationType::Direct,
+        ValueLineage::complete(vec![]),
+    );
+    let mut report = lineage_of("mart", vec![first, second], OutputShape::Closed);
+    report.evidence = ledger(CoverageBasis::AssumedByYamlPolicy);
+    let plain = graph_plain(&[report]);
+    assert!(
+        plain.contains("(YAML columns taken as exhaustive): id (#0)\n"),
+        "{plain}"
+    );
+
+    let mut report = assumed_impact(CoverageBasis::AssumedByYamlPolicy);
+    let mut other = report.confirmed[0].clone();
+    other.target.slot = OutputSlotId::new(1);
+    report.confirmed.push(other);
+    let plain = impact_plain(&[report]);
+    assert!(
+        plain.contains("confirmed mart.id (#0); confirmed mart.id (#1); value exploration\n"),
+        "{plain}"
+    );
+}
