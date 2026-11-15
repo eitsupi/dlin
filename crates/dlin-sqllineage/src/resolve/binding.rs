@@ -9,16 +9,18 @@ use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, BindingEnv, VirtualSourceId};
-use crate::types::{ColumnOrigin, TransformKind};
+use crate::types::{ColumnOrigin, Evidence, Origin, Sources, TransformKind};
 use crate::{Candidate, Ident, Relation, Unresolved};
 
-pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Option<ColumnOrigin> {
+/// The value a reference node denotes on its own. Empty when the reference
+/// denotes nothing, which can still rely on evidence.
+pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sources {
     let graph = cx.graph;
     if let Some(origin) = ambiguous_qualified_origin(node_id, graph) {
-        return Some(origin);
+        return Sources::one(origin);
     }
-    if let Some(ref origin) = cx.resolved[node_id] {
-        return Some(origin.clone());
+    if let Some(ref sources) = cx.resolved[node_id] {
+        return sources.clone();
     }
     let generation = cx.cut_generation();
 
@@ -41,7 +43,7 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Opt
                 // The qualifier names no relation in scope. Building a table
                 // out of its text would present a guess as a confident
                 // source, so the reference stays unresolved.
-                Some(ColumnOrigin::Ambiguous {
+                Sources::one(ColumnOrigin::Ambiguous {
                     column: name.clone(),
                     candidates: Vec::new(),
                 })
@@ -65,20 +67,18 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Opt
             resolve_row_value_candidate(name, *env, binding.clone(), cx)
         }
 
-        RawNode::Star { .. } => None,
-
-        RawNode::Output { .. } => None,
+        RawNode::Star { .. } | RawNode::Output { .. } => Sources::default(),
     };
 
     // An origin found while a cycle was cut depends on where the walk
     // started, so it is returned and not kept.
     if cx.cut_generation() == generation {
-        cx.resolved[node_id].clone_from(&origin);
+        cx.resolved[node_id] = Some(origin.clone());
     }
     origin
 }
 
-pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Option<ColumnOrigin> {
+pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Option<Origin> {
     let RawNode::Ref {
         name,
         qualifier: Some(parts),
@@ -99,6 +99,7 @@ pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Opti
                 column: name.clone(),
                 candidates,
             })
+            .into()
         })
 }
 
@@ -126,29 +127,34 @@ fn resolve_row_value_candidate(
     env: BindingEnv,
     binding: Option<Binding>,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<ColumnOrigin> {
+) -> Sources {
     let graph = cx.graph;
     let catalog = cx.catalog;
     let binding = binding.or_else(|| graph.scopes.lookup(env, name).cloned());
-    let Some(binding) = binding else {
-        return Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
+    let row_value = || {
+        Sources::one(ColumnOrigin::Unresolved(Unresolved::RowValue {
             alias: name.clone(),
-        }));
+        }))
+    };
+    let Some(binding) = binding else {
+        return row_value();
     };
 
     match binding {
         Binding::Table(table) => {
+            // Whether the relation has a column of this name decides between a
+            // column and a whole-row value either way.
+            let evidence = Evidence::relation(&table);
             if let Some(owner) = catalog
                 .and_then(|catalog| catalog.resolve_column(name, std::slice::from_ref(&table)))
             {
-                Some(ColumnOrigin::Concrete {
+                Sources::one(ColumnOrigin::Concrete {
                     table: owner,
                     column: name.clone(),
                 })
+                .relying_on(&evidence)
             } else {
-                Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
-                    alias: name.clone(),
-                }))
+                row_value().relying_on(&evidence)
             }
         }
         Binding::Cte(target_scope) | Binding::DerivedTable(target_scope) => {
@@ -162,14 +168,10 @@ fn resolve_row_value_candidate(
             if is_named_column {
                 resolve_through_scope(name, target_scope, cx)
             } else {
-                Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
-                    alias: name.clone(),
-                }))
+                row_value()
             }
         }
-        Binding::VirtualSource(_) => Some(ColumnOrigin::Unresolved(Unresolved::RowValue {
-            alias: name.clone(),
-        })),
+        Binding::VirtualSource(_) => row_value(),
     }
 }
 
@@ -177,34 +179,39 @@ pub(super) fn resolve_captured_binding(
     name: &Ident,
     binding: Binding,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<ColumnOrigin> {
+) -> Sources {
     let graph = cx.graph;
     match binding {
         Binding::Table(table) => {
+            let evidence = Evidence::relation(&table);
             if cx.catalog.is_some_and(|catalog| {
                 matches!(
                     catalog.column_presence(&table, name),
                     ColumnPresence::Duplicate
                 )
             }) {
-                return Some(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+                return Sources::one(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: name.clone(),
                     candidates: vec![Candidate::Relation(Relation {
                         catalog: table.catalog,
                         schema: table.schema,
                         name: table.table,
                     })],
-                }));
+                }))
+                .relying_on(&evidence);
             }
-            Some(ColumnOrigin::Concrete {
+            Sources::one(ColumnOrigin::Concrete {
                 table,
                 column: name.clone(),
             })
+            .relying_on(&evidence)
         }
         Binding::Cte(scope) | Binding::DerivedTable(scope) => {
             resolve_through_scope(name, scope, cx)
         }
-        Binding::VirtualSource(source) => virtual_column_origin(name, source, graph),
+        Binding::VirtualSource(source) => virtual_column_origin(name, source, graph)
+            .map(Sources::one)
+            .unwrap_or_default(),
     }
 }
 
@@ -215,7 +222,7 @@ pub(super) fn find_unqualified_binding(
     env: BindingEnv,
     cx: &mut EvalContext<'_, '_>,
 ) -> Option<Binding> {
-    lookup_input(env, name, cx).binding()
+    lookup_input(env, name, cx).0.binding()
 }
 
 /// Resolve an unqualified column that no range variable names, from every
@@ -225,7 +232,7 @@ pub(super) fn find_unqualified_binding(
 pub(super) fn resolve_input_reference(
     node_id: NodeId,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+) -> Option<(Sources, bool, TransformKind)> {
     let (name, env) = match &cx.graph.nodes[node_id] {
         RawNode::Ref {
             name,
@@ -252,19 +259,18 @@ pub(super) fn resolve_input_reference(
 /// ambiguity, a physical relation) is returned in full by
 /// `resolve_input_reference` before a node is resolved on its own, so no merged
 /// source can reach here to be reduced to its first.
-fn resolve_unqualified(
-    name: &Ident,
-    env: BindingEnv,
-    cx: &mut EvalContext<'_, '_>,
-) -> Option<ColumnOrigin> {
-    match lookup_input(env, name, cx) {
-        InputLookup::Scope { scope: target, .. } => resolve_through_scope(name, target, cx),
+fn resolve_unqualified(name: &Ident, env: BindingEnv, cx: &mut EvalContext<'_, '_>) -> Sources {
+    let (lookup, evidence) = lookup_input(env, name, cx);
+    match lookup {
+        InputLookup::Scope { scope: target, .. } => {
+            resolve_through_scope(name, target, cx).relying_on(&evidence)
+        }
         lookup => {
             debug_assert!(
                 matches!(lookup, InputLookup::NoSource),
                 "an answered lookup never reaches node resolution: {lookup:?}"
             );
-            None
+            Sources::default()
         }
     }
 }
@@ -301,20 +307,24 @@ fn resolve_through_scope(
     column_name: &Ident,
     target_scope: usize,
     cx: &mut EvalContext<'_, '_>,
-) -> Option<ColumnOrigin> {
+) -> Sources {
     // Resolve through the scope's model, which also lists the names a
     // catalog-expanded star introduced.
-    if let Some((origins, has_back, _)) = named_scope_sources(column_name, target_scope, cx) {
+    if let Some((sources, has_back, _)) = named_scope_sources(column_name, target_scope, cx) {
         return if has_back {
-            Some(ColumnOrigin::Recursive {
-                base_sources: origins,
-            })
+            sources.recursive()
         } else {
-            origins.into_iter().next()
+            // A reference resolved on its own stands for one origin; what the
+            // others and the conclusion relied on stays with the value.
+            let evidence = sources.all_evidence();
+            Sources {
+                origins: sources.origins.into_iter().take(1).collect(),
+                evidence,
+            }
         };
     }
     // The scope publishes nothing under this name.
-    Some(ColumnOrigin::Ambiguous {
+    Sources::one(ColumnOrigin::Ambiguous {
         column: column_name.clone(),
         candidates: Vec::new(),
     })

@@ -29,7 +29,7 @@ use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
 use crate::graph::node::{NodeId, StarBase, StarColumnName};
 use crate::graph::scope::{ScopeId, VirtualSourceId};
-use crate::types::TableRef;
+use crate::types::{Evidence, TableRef};
 use crate::{Dialect, Ident, OutputName};
 
 /// The number of columns an output has.
@@ -195,6 +195,9 @@ pub(super) struct ColumnSlot {
     pub candidate_ranges: Rc<[RangeRef]>,
     pub value: ValueId,
     pub origin: SlotOrigin,
+    /// The schemas that establish that this column exists here: its name and
+    /// its position, including the widths of what comes before it.
+    pub structure: Evidence,
 }
 
 /// Columns the analysis cannot enumerate, with the names they may still
@@ -212,6 +215,8 @@ pub(super) struct UnknownSegment {
     pub provider: UnknownProvider,
     pub ranges: Rc<[RangeRef]>,
     pub domain: NameDomain,
+    /// The schemas that establish this interval and its position.
+    pub structure: Evidence,
 }
 
 impl ColumnSlot {
@@ -255,6 +260,7 @@ impl UnknownSegment {
             provider: UnknownProvider::Opaque(reason),
             ranges: Rc::from([]),
             domain: NameDomain::default(),
+            structure: Evidence::default(),
         }
     }
 }
@@ -372,6 +378,10 @@ pub(super) struct OutputModel {
     /// stars and FROM clauses, which publish nothing.
     pub publication: Option<u32>,
     pub set_operation: Option<SetOperationModel>,
+    /// The schemas that decide which names this model publishes, whether it
+    /// publishes more, and its width. A name looked up in the model relies on
+    /// them, also when the model is found not to publish it.
+    pub schema: Evidence,
 }
 
 /// The elements of a model that may carry one name.
@@ -412,6 +422,7 @@ impl OutputModel {
             forwarded: Vec::new(),
             publication: None,
             set_operation: None,
+            schema: Evidence::default(),
         }
     }
 
@@ -543,9 +554,27 @@ fn minimum_width(elements: &[OutputElement]) -> usize {
 struct Group {
     members: Vec<Ident>,
     elements: Vec<OutputElement>,
+    /// The schemas of the relations in the group.
+    schema: Evidence,
 }
 
 impl OutputElement {
+    /// The schemas that establish this element.
+    pub(super) fn structure(&self) -> &Evidence {
+        match self {
+            Self::Column(slot) => &slot.structure,
+            Self::Unknown(segment) => &segment.structure,
+        }
+    }
+
+    /// The element also relies on `evidence` for its existence or position.
+    pub(super) fn rely_on(&mut self, evidence: &Evidence) {
+        match self {
+            Self::Column(slot) => slot.structure.extend(evidence),
+            Self::Unknown(segment) => segment.structure.extend(evidence),
+        }
+    }
+
     /// The published output this element forwards, when it forwards one.
     pub(super) fn forwards(&self) -> Option<OutputRef> {
         match self {

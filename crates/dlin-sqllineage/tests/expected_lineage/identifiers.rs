@@ -622,6 +622,7 @@ pub fn cases() -> Vec<Case> {
                         ],
                     }],
                 },
+                evidence: Default::default(),
             }],
         }),
     );

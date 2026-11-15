@@ -1,6 +1,6 @@
 //! Public SQL lineage results.
 
-use super::{Diagnostic, Ident, Relation};
+use super::{Diagnostic, EvidenceRef, Ident, Relation};
 use serde::Serialize;
 use std::fmt;
 
@@ -118,6 +118,9 @@ pub struct Output {
     pub columns: Vec<OutputColumn>,
     /// Whether the output contains columns beyond those listed.
     pub shape: Shape,
+    /// Schema evidence that decides which columns the output lists, whether it
+    /// has more, and their positions. Sorted and deduplicated.
+    pub evidence: Vec<EvidenceRef>,
 }
 
 impl Output {
@@ -184,6 +187,8 @@ pub struct UnexpandedStar {
     pub after_ordinal: Option<usize>,
     /// Known value dependencies and unresolved contributions for this projection.
     pub lineage: Lineage,
+    /// Schema evidence this projection and its lineage rely on.
+    pub evidence: ColumnEvidence,
 }
 
 /// One output column and its derivation.
@@ -197,6 +202,48 @@ pub struct OutputColumn {
     pub lineage: Lineage,
     /// Transformation applied to its sources.
     pub transform: Transform,
+    /// Schema evidence the column and its lineage rely on.
+    pub evidence: ColumnEvidence,
+}
+
+/// The schema evidence a conclusion about an output relies on.
+///
+/// It lists the catalog entries whose listed columns, absent names, coverage
+/// or order the analysis used to reach the conclusion. Evidence that was available but did not decide anything
+/// is not listed. Every list is sorted and deduplicated.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ColumnEvidence {
+    /// Evidence that the output exists under its name at its position.
+    pub structure: Vec<EvidenceRef>,
+    /// Evidence for the lineage as a whole: every contribution, and the
+    /// decisions that left none, such as a name proven absent from the other
+    /// relations of a join.
+    pub lineage: Vec<EvidenceRef>,
+    /// Evidence for each known source that relies on any, in the order of the
+    /// lineage's known sources. A source that is not listed relies on none.
+    pub known: Vec<SourceEvidence>,
+    /// Evidence for each unresolved contribution that relies on any, in the
+    /// order of the lineage's unresolved contributions.
+    pub unresolved: Vec<UnresolvedEvidence>,
+}
+
+/// The evidence one known source relies on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SourceEvidence {
+    /// The source.
+    pub source: SourceColumn,
+    /// Evidence that this column contributes to the output.
+    pub evidence: Vec<EvidenceRef>,
+}
+
+/// The evidence one unresolved contribution relies on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnresolvedEvidence {
+    /// The contribution.
+    pub unresolved: Unresolved,
+    /// Evidence that this contribution is what it is, such as the schemas that
+    /// left its candidates.
+    pub evidence: Vec<EvidenceRef>,
 }
 
 /// Name of an output column.
@@ -427,9 +474,11 @@ mod tests {
                     name,
                     lineage: Lineage::Complete(Vec::new()),
                     transform: Transform::Unknown,
+                    evidence: ColumnEvidence::default(),
                 })
                 .collect(),
             shape,
+            evidence: Vec::new(),
         }
     }
 
@@ -471,6 +520,7 @@ mod tests {
                             what: "star expansion",
                         }],
                     },
+                    evidence: ColumnEvidence::default(),
                 }],
             },
         );

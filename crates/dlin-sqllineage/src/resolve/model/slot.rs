@@ -57,6 +57,8 @@ pub(in crate::resolve) struct SlotDef {
     pub value: ValueId,
     /// Which publication of the owner defined the column.
     pub publication: u32,
+    /// The schemas that establish the column and its position.
+    pub structure: crate::types::Evidence,
 }
 
 /// The definition of a published segment.
@@ -69,6 +71,8 @@ pub(in crate::resolve) struct SegmentDef {
     pub position: StarPosition,
     /// Which publication of the owner defined the segment.
     pub publication: u32,
+    /// The schemas that establish the segment and its position.
+    pub structure: crate::types::Evidence,
 }
 
 /// Every published column and segment of one statement. Append-only.
@@ -114,6 +118,14 @@ impl SlotArena {
         match output {
             OutputRef::Slot(id) => self.slots[id.0 as usize].publication,
             OutputRef::Segment(id) => self.segments[id.0 as usize].publication,
+        }
+    }
+
+    /// The schemas that establish `output` and its position.
+    pub(in crate::resolve) fn structure(&self, output: OutputRef) -> &crate::types::Evidence {
+        match output {
+            OutputRef::Slot(id) => &self.slots[id.0 as usize].structure,
+            OutputRef::Segment(id) => &self.segments[id.0 as usize].structure,
         }
     }
 

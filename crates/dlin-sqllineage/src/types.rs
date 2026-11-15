@@ -104,13 +104,144 @@ pub(crate) struct ColumnMapping {
     /// Proven zero-based position in the complete output order.
     pub ordinal: Option<usize>,
     /// Source columns contributing to this output.
-    pub sources: Vec<ColumnOrigin>,
+    pub sources: Sources,
     /// The kind of transformation applied.
     pub transform: TransformKind,
     /// The column or segment of the scope's published model that this mapping
     /// stands for. `None` is used only before publication or for a cut marker.
     #[serde(skip)]
     pub slot: Option<crate::resolve::OutputRef>,
+}
+
+/// The physical relations whose catalog answers a conclusion relies on: the
+/// columns a relation lists, the names it proves absent, and the order and
+/// coverage of its schema. The catalog answers the same way for a relation
+/// within one analysis, so the relations stand for the evidence their catalog
+/// entries carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct Evidence(std::collections::BTreeSet<TableRef>);
+
+impl Evidence {
+    /// The evidence of one relation's catalog entry.
+    pub(crate) fn relation(table: &TableRef) -> Self {
+        Self(std::iter::once(table.clone()).collect())
+    }
+
+    pub(crate) fn extend(&mut self, other: &Self) {
+        self.0.extend(other.0.iter().cloned());
+    }
+
+    pub(crate) fn add(&mut self, table: &TableRef) {
+        self.0.insert(table.clone());
+    }
+
+    pub(crate) fn relations(&self) -> impl Iterator<Item = &TableRef> {
+        self.0.iter()
+    }
+}
+
+/// A contribution to an output and the catalog evidence it was decided by.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Origin {
+    pub kind: ColumnOrigin,
+    pub evidence: Evidence,
+}
+
+impl Origin {
+    pub(crate) fn new(kind: ColumnOrigin, evidence: Evidence) -> Self {
+        Self { kind, evidence }
+    }
+
+    /// The same contribution, also relying on `evidence`.
+    pub(crate) fn with(mut self, evidence: &Evidence) -> Self {
+        self.evidence.extend(evidence);
+        self
+    }
+}
+
+impl From<ColumnOrigin> for Origin {
+    fn from(kind: ColumnOrigin) -> Self {
+        Self {
+            kind,
+            evidence: Evidence::default(),
+        }
+    }
+}
+
+/// What a value is found to depend on: its contributions, and the evidence
+/// the conclusion relies on beyond them. A value without contributions can
+/// still rely on evidence, such as a name that one relation's schema proved
+/// absent so that a source-free column of another relation is the one read.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct Sources {
+    pub origins: Vec<Origin>,
+    pub evidence: Evidence,
+}
+
+impl Sources {
+    pub(crate) fn one(origin: impl Into<Origin>) -> Self {
+        Self {
+            origins: vec![origin.into()],
+            evidence: Evidence::default(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.origins.is_empty()
+    }
+
+    pub(crate) fn push(&mut self, origin: impl Into<Origin>) {
+        self.origins.push(origin.into());
+    }
+
+    /// Add the contributions of `other` and what its conclusion relies on.
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.origins.extend(other.origins);
+        self.evidence.extend(&other.evidence);
+    }
+
+    /// The conclusion and each of its contributions also rely on `evidence`.
+    pub(crate) fn rely_on(&mut self, evidence: &Evidence) {
+        self.evidence.extend(evidence);
+        for origin in &mut self.origins {
+            origin.evidence.extend(evidence);
+        }
+    }
+
+    /// The same as [`Self::rely_on`], by value.
+    pub(crate) fn relying_on(mut self, evidence: &Evidence) -> Self {
+        self.rely_on(evidence);
+        self
+    }
+
+    /// Every piece of evidence the value relies on.
+    pub(crate) fn all_evidence(&self) -> Evidence {
+        let mut all = self.evidence.clone();
+        for origin in &self.origins {
+            all.extend(&origin.evidence);
+        }
+        all
+    }
+
+    /// Wrap the value as the base of a recursive contribution, keeping what
+    /// its conclusion relies on.
+    pub(crate) fn recursive(self) -> Self {
+        Self::one(Origin::new(
+            ColumnOrigin::Recursive {
+                base_sources: self.origins,
+            },
+            self.evidence,
+        ))
+    }
+}
+
+impl From<Vec<Origin>> for Sources {
+    fn from(origins: Vec<Origin>) -> Self {
+        Self {
+            origins,
+            evidence: Evidence::default(),
+        }
+    }
 }
 
 /// Resolution state of a source column.
@@ -137,7 +268,7 @@ pub(crate) enum ColumnOrigin {
     /// consumer cannot mistake partial lineage for complete lineage.
     SourceFree { column: Ident },
     /// Derived via recursive CTE; base case sources only.
-    Recursive { base_sources: Vec<ColumnOrigin> },
+    Recursive { base_sources: Vec<Origin> },
     /// Star whose relation or width cannot be determined.
     UnknownStar,
     /// Typed unresolved contribution preserved by the resolver.

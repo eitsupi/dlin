@@ -115,6 +115,7 @@ pub fn cases() -> Vec<Case> {
                         relation: relation("s"),
                     }],
                 },
+                evidence: Default::default(),
             }],
         })
         .unresolved_stars(true),

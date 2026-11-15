@@ -475,8 +475,10 @@ mod tests {
                     name: OutputName::Explicit(u("value")),
                     lineage: complete(vec![]),
                     transform: dlin_sqllineage::Transform::Expression,
+                    evidence: Default::default(),
                 }],
                 shape: Shape::Closed,
+                evidence: Default::default(),
             },
             has_unresolved_stars: false,
             diagnostics: vec![],
@@ -709,6 +711,7 @@ mod tests {
             name: column.name,
             lineage: column.lineage,
             transform: dlin_sqllineage::Transform::Direct,
+            evidence: Default::default(),
         })
         .collect();
         actual.diagnostics = vec![duplicate_name(u("id"), vec![0, 2])];
@@ -819,6 +822,7 @@ mod tests {
                 name: column.name.clone(),
                 lineage: column.lineage.clone(),
                 transform: dlin_sqllineage::Transform::Direct,
+                evidence: Default::default(),
             })
             .collect();
         fixed.diagnostics.clear();

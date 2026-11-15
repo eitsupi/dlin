@@ -14,12 +14,15 @@ use crate::Ident;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
-use crate::types::{ColumnMapping, ColumnOrigin, ColumnRef, TableRef, TransformKind};
+use crate::types::{
+    ColumnMapping, ColumnOrigin, ColumnRef, Evidence, Origin, Sources, TableRef, TransformKind,
+};
 
 pub(super) fn wildcard_mapping(
     output_table: Option<&TableRef>,
     source_table: TableRef,
 ) -> ColumnMapping {
+    let evidence = Evidence::relation(&source_table);
     ColumnMapping {
         star_position: crate::types::StarPosition::Inferred,
         output_name: None,
@@ -28,9 +31,12 @@ pub(super) fn wildcard_mapping(
             table: output_table.cloned(),
             column: Ident::unquoted("*"),
         },
-        sources: vec![ColumnOrigin::Wildcard {
-            table: source_table,
-        }],
+        sources: Sources::one(Origin::new(
+            ColumnOrigin::Wildcard {
+                table: source_table,
+            },
+            evidence,
+        )),
         transform: TransformKind::Direct,
         slot: None,
     }

@@ -242,6 +242,30 @@ Rules:
   has that column more than once. A reference to the name does not denote one
   of them, so it is ambiguous. It is never bound to the first listed one.
 
+**Reported evidence.** The engine reports, with each conclusion, the
+`EvidenceRef`s of the catalog entries it used. It does not interpret them; the
+catalog provider owns their meaning.
+
+- An output column carries the evidence of its name and position
+  (`structure`), of its lineage as a whole (`lineage`), and of each known
+  source and each unresolved contribution separately. The output carries the
+  evidence of which columns it lists and whether it has more.
+- A name resolved among several relations relies on the schemas of all of
+  them, because the schemas that rule a candidate out decide the answer as much
+  as the one that lists the column. In `SELECT x FROM a CROSS JOIN b` with
+  `a = Exhaustive[x]` and `b = Exhaustive[y]`, `a.x` relies on `a` and `b`. A
+  lineage with no source can still rely on evidence this way.
+- A qualified name relies only on what its qualifier names. A value that reads
+  no column relies on nothing, even when its query reads a relation with a
+  schema.
+- A column's position relies on the schemas that decide the widths before it.
+  A positional set operation relies on the positions of both operands, also
+  for `EXCEPT`, whose right operand supplies no values.
+- Internally the engine records which relations' catalog answers a conclusion
+  used, and reports their entries' evidence when it assembles the result. This
+  is exact because a catalog answers the same way for a relation within one
+  analysis.
+
 How the dbt layer chooses these values for YAML is described in the `dlin-core`
 architecture document.
 

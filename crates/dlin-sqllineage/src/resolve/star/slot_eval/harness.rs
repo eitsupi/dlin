@@ -75,10 +75,11 @@ pub(super) fn slot_ids(model: &OutputModel) -> Vec<SlotId> {
 
 /// A short rendering of origins: `t.a` for a concrete column, `?a` for the
 /// unresolved marker of the column `a`, and the debug form of anything else.
-pub(super) fn show(origins: &[ColumnOrigin]) -> Vec<String> {
-    origins
+pub(super) fn show(sources: &crate::types::Sources) -> Vec<String> {
+    sources
+        .origins
         .iter()
-        .map(|origin| match origin {
+        .map(|origin| match &origin.kind {
             ColumnOrigin::Concrete { table, column } => {
                 format!("{}.{}", table.table.value, column.value)
             }

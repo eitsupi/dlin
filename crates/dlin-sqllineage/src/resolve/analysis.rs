@@ -3,19 +3,45 @@ use std::collections::BTreeMap;
 use crate::catalog::CatalogContext;
 use crate::keys::{candidate_key, relation_key, sort_dedup_by_key, source_key, unresolved_key};
 use crate::types::{
-    ColumnMapping, ColumnOrigin, SemanticError, StatementType, TableLineage, TableRef,
-    TransformKind, Warning, WarningKind,
+    ColumnMapping, ColumnOrigin, Evidence, Origin, SemanticError, StatementType, TableLineage,
+    TableRef, TransformKind, Warning, WarningKind,
 };
 use crate::{
-    Candidate, Diagnostic, DiagnosticKind, Dialect, Ident, Lineage, Location, Output, OutputColumn,
-    OutputName, Relation, RowDependencies, Severity, Shape, SourceColumn, StatementAnalysis,
-    StatementKind, Transform, UnexpandedStar, Unresolved,
+    Candidate, ColumnEvidence, Diagnostic, DiagnosticKind, Dialect, EvidenceRef, Ident, Lineage,
+    Location, Output, OutputColumn, OutputName, Relation, RowDependencies, Severity, Shape,
+    SourceColumn, SourceEvidence, StatementAnalysis, StatementKind, Transform, UnexpandedStar,
+    Unresolved, UnresolvedEvidence,
 };
+
+/// The structure evidence of each mapping and the evidence of the output's
+/// shape, which come from the models the mappings were evaluated from.
+#[derive(Default)]
+pub(super) struct Structure {
+    /// Parallel to the mappings.
+    pub columns: Vec<Evidence>,
+    pub shape: Evidence,
+}
+
+/// The evidence the catalog entries of `evidence`'s relations carry.
+fn references(evidence: &Evidence, catalog: Option<&CatalogContext<'_>>) -> Vec<EvidenceRef> {
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    let mut references: Vec<EvidenceRef> = evidence
+        .relations()
+        .filter_map(|table| catalog.entry(table))
+        .flat_map(|entry| entry.evidence.into_owned())
+        .collect();
+    references.sort_by(|left, right| left.0.cmp(&right.0));
+    references.dedup();
+    references
+}
 
 /// Assemble resolved output slots without revisiting the SQL syntax tree.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn assemble(
     mappings: &[ColumnMapping],
+    structure: &Structure,
     tables: &TableLineage,
     target_columns: &[Ident],
     warnings: &[Warning],
@@ -41,10 +67,35 @@ pub(super) fn assemble(
     for (index, mapping) in mappings.iter().enumerate() {
         let mut known = Vec::new();
         let mut unresolved = Vec::new();
-        for origin in &mapping.sources {
+        for origin in &mapping.sources.origins {
             contribute(origin, catalog, &mut known, &mut unresolved);
         }
-        let lineage = normalize_lineage(known, unresolved, dialect, &read_order);
+        let (lineage, known, unresolved) =
+            normalize_lineage(known, unresolved, dialect, &read_order);
+        let evidence = ColumnEvidence {
+            structure: structure
+                .columns
+                .get(index)
+                .map(|evidence| references(evidence, catalog))
+                .unwrap_or_default(),
+            lineage: references(&mapping.sources.all_evidence(), catalog),
+            known: known
+                .into_iter()
+                .map(|(source, evidence)| SourceEvidence {
+                    source,
+                    evidence: references(&evidence, catalog),
+                })
+                .filter(|source| !source.evidence.is_empty())
+                .collect(),
+            unresolved: unresolved
+                .into_iter()
+                .map(|(unresolved, evidence)| UnresolvedEvidence {
+                    unresolved,
+                    evidence: references(&evidence, catalog),
+                })
+                .filter(|unresolved| !unresolved.evidence.is_empty())
+                .collect(),
+        };
         if let Some(name) = &mapping.output_name {
             columns.push(OutputColumn {
                 ordinal: mapping.ordinal,
@@ -55,10 +106,11 @@ pub(super) fn assemble(
                 },
                 lineage,
                 transform: transform(&mapping.transform),
+                evidence,
             });
         } else {
             let mut relations = Vec::new();
-            star_relations(&mapping.sources, &mut relations);
+            star_relations(&mapping.sources.origins, &mut relations);
             // One interval can reach the same relation through several
             // operand paths. Those paths do not publish additional intervals.
             let mut seen = Vec::new();
@@ -87,6 +139,7 @@ pub(super) fn assemble(
                         crate::types::StarPosition::After(after) => Some(after),
                     },
                     lineage: lineage.clone(),
+                    evidence: evidence.clone(),
                 });
             }
         }
@@ -148,6 +201,7 @@ pub(super) fn assemble(
             } else {
                 Shape::Open { unexpanded }
             },
+            evidence: references(&structure.shape, catalog),
         },
         has_unresolved_stars,
         diagnostics,
@@ -155,23 +209,31 @@ pub(super) fn assemble(
     }
 }
 
+/// A contribution with the evidence it relies on.
+type Evidenced<T> = (T, Evidence);
+
 fn contribute(
-    origin: &ColumnOrigin,
+    origin: &Origin,
     catalog: Option<&CatalogContext<'_>>,
-    known: &mut Vec<SourceColumn>,
-    unresolved: &mut Vec<Unresolved>,
+    known: &mut Vec<Evidenced<SourceColumn>>,
+    unresolved: &mut Vec<Evidenced<Unresolved>>,
 ) {
-    match origin {
-        ColumnOrigin::Concrete { table, column } => known.push(SourceColumn {
-            relation: catalog
-                .and_then(|catalog| catalog.entry(table))
-                .map_or_else(|| plain_relation(table), |entry| entry.relation),
-            column: catalog
-                .and_then(|catalog| catalog.column(table, column))
-                .unwrap_or_else(|| column.clone()),
-        }),
+    let evidence = &origin.evidence;
+    let mut unresolved_item = |item| unresolved.push((item, evidence.clone()));
+    match &origin.kind {
+        ColumnOrigin::Concrete { table, column } => known.push((
+            SourceColumn {
+                relation: catalog
+                    .and_then(|catalog| catalog.entry(table))
+                    .map_or_else(|| plain_relation(table), |entry| entry.relation),
+                column: catalog
+                    .and_then(|catalog| catalog.column(table, column))
+                    .unwrap_or_else(|| column.clone()),
+            },
+            evidence.clone(),
+        )),
         ColumnOrigin::Ambiguous { column, candidates } => {
-            unresolved.push(if candidates.is_empty() {
+            unresolved_item(if candidates.is_empty() {
                 Unresolved::Unbound {
                     column: column.clone(),
                 }
@@ -185,15 +247,15 @@ fn contribute(
                 }
             });
         }
-        ColumnOrigin::UnknownStar => unresolved.push(Unresolved::Unsupported {
+        ColumnOrigin::UnknownStar => unresolved_item(Unresolved::Unsupported {
             what: "star expansion",
         }),
-        ColumnOrigin::Unresolved(item) => unresolved.push(item.clone()),
-        ColumnOrigin::Wildcard { table } => unresolved.push(Unresolved::BehindStar {
+        ColumnOrigin::Unresolved(item) => unresolved_item(item.clone()),
+        ColumnOrigin::Wildcard { table } => unresolved_item(Unresolved::BehindStar {
             relation: plain_relation(table),
         }),
         ColumnOrigin::NamedWildcard { table, column } => {
-            unresolved.push(Unresolved::NamedBehindStar {
+            unresolved_item(Unresolved::NamedBehindStar {
                 relation: plain_relation(table),
                 column: column.clone(),
             });
@@ -201,16 +263,16 @@ fn contribute(
         ColumnOrigin::SourceFree { .. } => {}
         ColumnOrigin::Recursive { base_sources } => {
             for source in base_sources {
-                contribute(source, catalog, known, unresolved);
+                contribute(&source.clone().with(evidence), catalog, known, unresolved);
             }
-            unresolved.push(Unresolved::Recursive);
+            unresolved.push((Unresolved::Recursive, evidence.clone()));
         }
     }
 }
 
-fn star_relations(origins: &[ColumnOrigin], result: &mut Vec<Option<Relation>>) {
+fn star_relations(origins: &[Origin], result: &mut Vec<Option<Relation>>) {
     for origin in origins {
-        match origin {
+        match &origin.kind {
             ColumnOrigin::Wildcard { table } => result.push(Some(plain_relation(table))),
             ColumnOrigin::Recursive { base_sources } => star_relations(base_sources, result),
             _ => {}
@@ -218,36 +280,63 @@ fn star_relations(origins: &[ColumnOrigin], result: &mut Vec<Option<Relation>>) 
     }
 }
 
+/// The lineage of an output, with the evidence of each contribution that is
+/// left after duplicates are merged. A contribution reached along several
+/// paths relies on the evidence of each of them.
 fn normalize_lineage(
-    mut known: Vec<SourceColumn>,
-    unresolved: Vec<Unresolved>,
+    mut known: Vec<Evidenced<SourceColumn>>,
+    unresolved: Vec<Evidenced<Unresolved>>,
     dialect: Dialect,
     read_order: &[Relation],
-) -> Lineage {
+) -> (
+    Lineage,
+    Vec<Evidenced<SourceColumn>>,
+    Vec<Evidenced<Unresolved>>,
+) {
     // Keep the first spelling encountered along this output's contribution
     // paths. Catalog-resolved sources already carry canonical column names.
-    for source in &mut known {
+    for (source, _) in &mut known {
         retain_first_relation_spelling(&mut source.relation, read_order, dialect);
     }
-    sort_dedup_by_key(&mut known, |source| source_key(source, dialect));
-    let mut unique = Vec::new();
-    for mut item in unresolved {
-        normalize_unresolved(&mut item, read_order, dialect);
-        if !unique
-            .iter()
-            .any(|seen| unresolved_key(seen, dialect) == unresolved_key(&item, dialect))
-        {
-            unique.push(item);
+    // A stable sort keeps the first spelling of equal keys in front.
+    known.sort_by(|(left, _), (right, _)| {
+        source_key(left, dialect).cmp(&source_key(right, dialect))
+    });
+    let mut unique_known: Vec<Evidenced<SourceColumn>> = Vec::new();
+    for (source, evidence) in known {
+        match unique_known.last_mut() {
+            Some((seen, seen_evidence))
+                if source_key(seen, dialect) == source_key(&source, dialect) =>
+            {
+                seen_evidence.extend(&evidence);
+            }
+            _ => unique_known.push((source, evidence)),
         }
     }
-    if unique.is_empty() {
-        Lineage::Complete(known)
+    let mut unique: Vec<Evidenced<Unresolved>> = Vec::new();
+    for (mut item, evidence) in unresolved {
+        normalize_unresolved(&mut item, read_order, dialect);
+        match unique
+            .iter_mut()
+            .find(|(seen, _)| unresolved_key(seen, dialect) == unresolved_key(&item, dialect))
+        {
+            Some((_, seen_evidence)) => seen_evidence.extend(&evidence),
+            None => unique.push((item, evidence)),
+        }
+    }
+    let sources = unique_known
+        .iter()
+        .map(|(source, _)| source.clone())
+        .collect();
+    let lineage = if unique.is_empty() {
+        Lineage::Complete(sources)
     } else {
         Lineage::Partial {
-            known,
-            unresolved: unique,
+            known: sources,
+            unresolved: unique.iter().map(|(item, _)| item.clone()).collect(),
         }
-    }
+    };
+    (lineage, unique_known, unique)
 }
 
 fn retain_first_relation_spelling(
@@ -336,6 +425,7 @@ pub(crate) fn semantic_failure(
         output: Output {
             columns: Vec::new(),
             shape: Shape::Closed,
+            evidence: Vec::new(),
         },
         has_unresolved_stars: false,
         diagnostics,
