@@ -141,8 +141,8 @@ pub(super) struct StarFilter {
 #[derive(Debug, Clone, Default)]
 pub(super) struct NameDomain {
     filters: Vec<(Rc<StarFilter>, Rc<[RangeRef]>)>,
-    /// When an alias list cannot be matched to a complete width, only its
-    /// declared names can be attributed to the unresolved output.
+    /// A finite set of names this segment can publish, when its namespace is
+    /// limited to explicit aliases or other individually known names.
     allowed: Option<Vec<Ident>>,
     /// Names the segment no longer publishes: merged by USING or renamed away.
     removed: Vec<Ident>,
@@ -510,6 +510,10 @@ impl OutputModel {
                             segment.provider,
                             UnknownProvider::Opaque(OpaqueReason::Unsupported(
                                 "BY NAME set operation"
+                                    | "column alias position unknown"
+                                    | "column alias count mismatch"
+                                    | "column alias output shape unknown"
+                                    | "column aliases unsupported by dialect"
                             ))
                         ))
                         && segment.domain.admits(name, dialect) =>

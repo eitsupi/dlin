@@ -75,6 +75,51 @@ fn duckdb_unnest_ordinality_uses_the_alias_at_its_position() {
 }
 
 #[test]
+fn postgres_unnest_with_too_many_aliases_keeps_all_outputs_unresolved() {
+    for (sql, dialect, names) in [
+        (
+            "SELECT x, n FROM UNNEST(ARRAY[1]) WITH ORDINALITY AS u(x, n, extra)",
+            Dialect::PostgreSql,
+            vec!["x", "n"],
+        ),
+        (
+            "SELECT x FROM UNNEST([1]) AS u(x, extra)",
+            Dialect::Generic,
+            vec!["x"],
+        ),
+    ] {
+        let result = analyze_one_with(sql, dialect, None);
+        for name in names {
+            let mapping = find_mapping(&result.output.columns, name);
+            assert!(
+                matches!(
+                    &mapping.lineage,
+                    Lineage::Partial { unresolved, .. }
+                        if matches!(unresolved.as_slice(), [Unresolved::Unsupported { what }] if *what == "UNNEST alias count mismatch")
+                ),
+                "{name}: {:?}",
+                mapping.lineage
+            );
+        }
+    }
+}
+
+#[test]
+fn duckdb_unnest_ignores_surplus_aliases() {
+    let result = analyze_one_with(
+        "SELECT x FROM UNNEST([1]) AS u(x, extra)",
+        Dialect::DuckDb,
+        None,
+    );
+
+    let mapping = find_mapping(&result.output.columns, "x");
+    assert!(matches!(
+        &mapping.lineage,
+        Lineage::Complete(sources) if sources.is_empty()
+    ));
+}
+
+#[test]
 fn a_local_physical_column_shadows_an_outer_virtual_column() {
     let catalog = KnownTables(&[("u", &["item"])]);
     let result = analyze_with_catalog(

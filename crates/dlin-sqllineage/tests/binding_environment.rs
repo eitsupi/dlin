@@ -1065,12 +1065,13 @@ fn a_cte_that_reads_itself_is_recursive() {
         Dialect::SQLite,
         Dialect::MsSql,
     ] {
-        let result = analyze(
-            "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) \
-             SELECT n FROM c",
-            dialect,
-            false,
-        );
+        let sql = if dialect == Dialect::BigQuery {
+            // GoogleSQL names the CTE columns in its projection, not after c.
+            "WITH RECURSIVE c AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c"
+        } else {
+            "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c"
+        };
+        let result = analyze(sql, dialect, false);
         let column = &result.output.columns[0];
         assert_eq!(known_sources(column), [source("t", "n")], "{dialect:?}");
         assert!(

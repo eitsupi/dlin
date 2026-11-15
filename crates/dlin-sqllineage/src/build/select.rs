@@ -454,16 +454,29 @@ impl LineageBuilder {
             return;
         };
         let array_count = dependencies.len();
-        let mut columns = Vec::with_capacity(
-            array_count + usize::from(with_offset) + usize::from(with_ordinality),
-        );
-        for (index, deps) in dependencies.into_iter().enumerate() {
+        let output_count = array_count + usize::from(with_offset || with_ordinality);
+        // PostgreSQL rejects an UNNEST column alias list wider than the
+        // function's known output. Generic SQL has no dialect-specific rule
+        // to rely on, so keep those slots unresolved there as well. DuckDB
+        // deliberately ignores surplus aliases.
+        let surplus_aliases = alias.is_some_and(|alias| alias.columns.len() > output_count)
+            && matches!(
+                self.dialect,
+                crate::Dialect::PostgreSql | crate::Dialect::Generic
+            );
+        let surplus_alias_dependency =
+            surplus_aliases.then(|| self.graph.add_unsupported("UNNEST alias count mismatch"));
+        let mut columns = Vec::with_capacity(output_count);
+        for (index, mut deps) in dependencies.into_iter().enumerate() {
             let name = alias
                 .and_then(|alias| alias.columns.get(index))
                 .map_or_else(
                     || alias_name.clone(),
                     |column| Ident::from_ast(&column.name),
                 );
+            if let Some(unsupported) = surplus_alias_dependency {
+                deps.push(unsupported);
+            }
             columns.push(VirtualColumn {
                 name,
                 state: if deps.is_empty() {
@@ -475,6 +488,10 @@ impl LineageBuilder {
             });
         }
         if with_offset {
+            let mut dependencies = Vec::new();
+            if let Some(unsupported) = surplus_alias_dependency {
+                dependencies.push(unsupported);
+            }
             columns.push(VirtualColumn {
                 name: with_offset_alias
                     .map(Ident::from_ast)
@@ -484,10 +501,18 @@ impl LineageBuilder {
                             .map(|column| Ident::from_ast(&column.name))
                     })
                     .unwrap_or_else(|| Ident::unquoted("offset")),
-                dependencies: Vec::new(),
-                state: VirtualColumnState::KnownEmpty,
+                state: if dependencies.is_empty() {
+                    VirtualColumnState::KnownEmpty
+                } else {
+                    VirtualColumnState::Unknown
+                },
+                dependencies,
             });
         } else if with_ordinality {
+            let mut dependencies = Vec::new();
+            if let Some(unsupported) = surplus_alias_dependency {
+                dependencies.push(unsupported);
+            }
             columns.push(VirtualColumn {
                 name: alias
                     .and_then(|alias| alias.columns.get(array_count))
@@ -495,8 +520,12 @@ impl LineageBuilder {
                         || Ident::unquoted("ordinality"),
                         |column| Ident::from_ast(&column.name),
                     ),
-                dependencies: Vec::new(),
-                state: VirtualColumnState::KnownEmpty,
+                state: if dependencies.is_empty() {
+                    VirtualColumnState::KnownEmpty
+                } else {
+                    VirtualColumnState::Unknown
+                },
+                dependencies,
             });
         }
 

@@ -458,9 +458,36 @@ the same value-input path. This path requires one explicitly projected output;
 a multi-column projection or a star is unresolved, rather than source-free.
 `EXISTS` still contributes no projected value dependency.
 
-CTE and derived-table column alias lists rename outputs by position, before
-readers resolve names. An alias list whose correspondence cannot be established
-does not guess the original names or positions: affected values are unresolved.
+CTE and derived-table column alias lists use one positional rule, before
+readers resolve names: the first N outputs receive the N aliases, and the
+remaining outputs keep their names. Only proven positions are renamed. A
+known column after an unknown-width interval keeps its name only when its
+minimum position is past the alias prefix. Otherwise its name and value remain
+unresolved. An affected unknown interval may expose both original names and
+aliases; an alias list never proves that no other names exist.
+
+PostgreSQL, Snowflake and Generic apply this prefix rule and reject a proven excess of
+aliases as unresolved. Generic is the engine's permissive SQL policy, rather
+than a database with its own alias-list specification. DuckDB also uses prefix
+renaming: a derived table rejects excess aliases, while a CTE definition ignores
+them. BigQuery does not support these column alias lists; if the parser accepts
+one, the resolver reports it as unsupported. Snowflake follows the PostgreSQL
+rule as an explicit engine policy: its published [FROM](https://docs.snowflake.com/en/sql-reference/constructs/from)
+and [WITH](https://docs.snowflake.com/en/sql-reference/constructs/with) documentation does
+not specify the behavior of shorter or longer alias lists.
+
+The rules follow PostgreSQL's [table alias documentation](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-TABLE-ALIASES)
+and [CTE target-list implementation](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/parser/parse_cte.c), DuckDB's [WITH documentation](https://duckdb.org/docs/stable/sql/query_syntax/with.html)
+and [alias binding implementation](https://github.com/duckdb/duckdb/blob/main/src/planner/bind_context.cpp),
+and BigQuery's [query grammar](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax).
+DuckDB's [CTE binding](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/query_node/bind_cte_node.cpp)
+limits renaming to the available outputs. Width-unknown VALUES outputs go
+through the same conservative interval rule; alias names alone never establish
+their width or their values. UNNEST uses its modeled argument columns plus any
+OFFSET/ORDINALITY output as its known width. PostgreSQL and Generic keep an
+excess alias list unresolved; DuckDB ignores surplus aliases on UNNEST, as it
+does on CTE definitions ([table-function binding](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/tableref/bind_table_function.cpp)). Neither path requires exactly as many aliases as
+output columns.
 
 Reading a field of an unnested element retains the dependency on its parent
 argument, such as `t.items` for `item.x`. Nested fields are not separate physical
