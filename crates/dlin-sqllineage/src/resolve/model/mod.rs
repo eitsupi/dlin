@@ -28,7 +28,7 @@ pub(super) use slot::{Forwarding, SegmentId, SlotId};
 use super::target::{excluded_matches_name, ilike_matches, same_column_name};
 
 use crate::graph::node::{NodeId, StarBase, StarColumnName};
-use crate::graph::scope::{ScopeId, VirtualSourceId};
+use crate::graph::scope::{JoinOperand, ScopeId, VirtualSourceId};
 use crate::types::{Evidence, TableRef};
 use crate::{Dialect, Ident, OutputName};
 
@@ -565,7 +565,7 @@ fn minimum_width(elements: &[OutputElement]) -> usize {
 /// The output of the relations a join combined, which can be merged further.
 #[derive(Debug, Clone)]
 struct Group {
-    members: Vec<Ident>,
+    members: Vec<JoinOperand>,
     elements: Vec<OutputElement>,
     /// The schemas of the relations in the group.
     schema: Evidence,

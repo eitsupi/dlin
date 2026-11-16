@@ -170,7 +170,8 @@ clause: the projection, FROM and join conditions, `WHERE`, `GROUP BY`,
 alias is a relation of its FROM clause like any other. An unqualified name may
 be one of its columns, and it competes with the other relations of the clause
 under the usual rule. In an ambiguity it is a derived-table candidate without a
-name.
+name. A star expands its columns at the place the clause lists it, and a
+`USING` or `NATURAL` join merges its columns like those of any other operand.
 
 **Dialect extensions.** DuckDB lets a derived table see earlier FROM items
 without writing `LATERAL` (an implicit lateral join). The engine follows it: in

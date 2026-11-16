@@ -154,14 +154,30 @@ pub(crate) enum MergedColumns {
     Natural,
 }
 
-/// A `USING` or `NATURAL` join. Each side lists the binding names of the
-/// relations it combines (several for an earlier join or a parenthesized
-/// join), so a merged column can be attributed to exactly those relations
-/// rather than to the whole scope.
+/// A FROM item one side of a join combines: a range variable, by its name,
+/// or a derived table written without one.
+#[derive(Debug, Clone)]
+pub(crate) enum JoinOperand {
+    Named(Ident),
+    Anonymous(ScopeId),
+}
+
+/// How much of a scope's FROM clause has been introduced; see
+/// [`ScopeTree::binding_mark`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BindingMark {
+    entries: usize,
+    anonymous: usize,
+}
+
+/// A `USING` or `NATURAL` join. Each side lists the relations it combines
+/// (several for an earlier join or a parenthesized join), so a merged column
+/// can be attributed to exactly those relations rather than to the whole
+/// scope.
 #[derive(Debug, Clone)]
 pub(crate) struct JoinMerge {
-    pub left: Vec<Ident>,
-    pub right: Vec<Ident>,
+    pub left: Vec<JoinOperand>,
+    pub right: Vec<JoinOperand>,
     pub columns: MergedColumns,
     pub kind: JoinMergeKind,
     /// Number of entries the scope had when the join was complete. An
@@ -405,15 +421,29 @@ impl ScopeTree {
         lookup
     }
 
-    /// Number of entries added to `scope` so far; pass it to
+    /// What `scope` has introduced so far; pass it to
     /// [`Self::bindings_added_since`] to learn what a FROM item introduced.
-    pub fn binding_mark(&self, scope: ScopeId) -> usize {
-        self.scopes[scope].binding_log.len()
+    pub fn binding_mark(&self, scope: ScopeId) -> BindingMark {
+        BindingMark {
+            entries: self.scopes[scope].binding_log.len(),
+            anonymous: self.scopes[scope].anonymous_derived.len(),
+        }
     }
 
-    /// Binding names added to `scope` since `mark`, in the order added.
-    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<Ident> {
-        self.scopes[scope].binding_log[mark..].to_vec()
+    /// The FROM items added to `scope` since `mark`: range variables by name
+    /// and derived tables without one.
+    pub fn bindings_added_since(&self, scope: ScopeId, mark: BindingMark) -> Vec<JoinOperand> {
+        let scope = &self.scopes[scope];
+        scope.binding_log[mark.entries..]
+            .iter()
+            .cloned()
+            .map(JoinOperand::Named)
+            .chain(
+                scope.anonymous_derived[mark.anonymous..]
+                    .iter()
+                    .map(|(_, child)| JoinOperand::Anonymous(*child)),
+            )
+            .collect()
     }
 
     pub fn add_join_merge(&mut self, scope: ScopeId, mut merge: JoinMerge) {
@@ -682,13 +712,16 @@ impl ScopeTree {
         self.scopes[parent].anonymous_derived.push((at, child));
     }
 
-    /// Derived tables without a range variable in the FROM clause at `env`.
-    pub fn anonymous_derived(&self, env: BindingEnv) -> Vec<ScopeId> {
+    /// Derived tables without a range variable in the FROM clause at `env`,
+    /// each with the number of entries the scope had when it was added: it
+    /// comes after the range variables before that position and before the
+    /// ones from it on.
+    pub fn anonymous_derived(&self, env: BindingEnv) -> Vec<(usize, ScopeId)> {
         self.scopes[env.scope]
             .anonymous_derived
             .iter()
             .filter(|(at, _)| *at <= env.visible)
-            .map(|(_, child)| *child)
+            .copied()
             .collect()
     }
 
@@ -702,6 +735,16 @@ impl ScopeTree {
         self.scopes[clause.scope]
             .visible_entries(clause.visible)
             .map(|entry| (entry.name.clone(), entry.binding.clone()))
+            .collect()
+    }
+
+    /// The position each range variable of [`Self::clause_bindings`] was
+    /// introduced at, in the same order.
+    pub fn clause_binding_positions(&self, env: BindingEnv) -> Vec<usize> {
+        let clause = self.clause_env(env);
+        self.scopes[clause.scope]
+            .visible_entries(clause.visible)
+            .map(|entry| entry.seq)
             .collect()
     }
 

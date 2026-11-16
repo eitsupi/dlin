@@ -9,7 +9,7 @@ use super::{
     ColumnSlot, Group, OutputElement, RangeRef, SlotOrigin, UnknownProvider, ValueId,
     unknown_publishers,
 };
-use crate::graph::scope::{JoinMerge, JoinMergeKind, MergedColumns};
+use crate::graph::scope::{JoinMerge, JoinMergeKind, JoinOperand, MergedColumns};
 use crate::types::Evidence;
 use crate::{Dialect, Ident, OutputName, Relation};
 
@@ -298,6 +298,18 @@ fn take_key(
     }
 }
 
+/// Whether two join operands are the same FROM item: range variables by
+/// name, derived tables without one by what they read.
+fn same_operand(left: &JoinOperand, right: &JoinOperand, dialect: Dialect) -> bool {
+    match (left, right) {
+        (JoinOperand::Named(left), JoinOperand::Named(right)) => {
+            same_column_name(left, right, dialect)
+        }
+        (JoinOperand::Anonymous(left), JoinOperand::Anonymous(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn fold_groups(
     mut groups: Vec<Group>,
     merges: &[JoinMerge],
@@ -307,12 +319,16 @@ fn fold_groups(
     if groups
         .iter()
         .flat_map(|group| &group.members)
+        .filter_map(|member| match member {
+            JoinOperand::Named(name) => Some(name),
+            JoinOperand::Anonymous(_) => None,
+        })
         .any(|member| !seen.insert(member.column_key(dialect).into_owned()))
     {
         return None;
     }
     for merge in merges {
-        let side = |members: &[Ident]| {
+        let side = |members: &[JoinOperand]| {
             groups
                 .iter()
                 .enumerate()
@@ -320,10 +336,10 @@ fn fold_groups(
                     group
                         .members
                         .iter()
-                        .any(|name| {
+                        .any(|operand| {
                             members
                                 .iter()
-                                .any(|member| same_column_name(member, name, dialect))
+                                .any(|member| same_operand(member, operand, dialect))
                         })
                         .then_some(index)
                 })

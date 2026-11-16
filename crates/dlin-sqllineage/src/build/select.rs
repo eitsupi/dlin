@@ -8,8 +8,8 @@ use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
-    Binding, JoinMerge, JoinMergeKind, MergedColumns, ScopeColumn, ScopeKind, VirtualColumn,
-    VirtualColumnState,
+    Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn, ScopeKind,
+    VirtualColumn, VirtualColumnState,
 };
 use crate::types::SemanticError;
 use crate::{Ident, OutputName};
@@ -250,7 +250,12 @@ impl LineageBuilder {
     /// Record the columns a join merges between the relations on its two
     /// sides, so an unqualified reference to one of them is not reported as
     /// ambiguous between those relations.
-    fn note_join_constraint(&mut self, join: &Join, left: Vec<Ident>, right: Vec<Ident>) {
+    fn note_join_constraint(
+        &mut self,
+        join: &Join,
+        left: Vec<JoinOperand>,
+        right: Vec<JoinOperand>,
+    ) {
         let Some(constraint) = join_constraint(&join.join_operator) else {
             return;
         };

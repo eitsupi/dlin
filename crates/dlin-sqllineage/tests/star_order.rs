@@ -148,3 +148,123 @@ fn star_in_each_set_operation_branch_keeps_position() {
         assert_eq!(result.output.columns.len(), 4);
     }
 }
+
+/// Dialects whose parser accepts a derived table without a range variable.
+const ANONYMOUS_DERIVED_DIALECTS: [Dialect; 3] =
+    [Dialect::Generic, Dialect::PostgreSql, Dialect::DuckDb];
+
+fn ordinals(result: &StatementAnalysis) -> Vec<Option<usize>> {
+    result
+        .output
+        .columns
+        .iter()
+        .map(|mapping| mapping.ordinal)
+        .collect()
+}
+
+#[test]
+fn derived_table_without_alias_expands_where_it_is_written() {
+    for dialect in ANONYMOUS_DERIVED_DIALECTS {
+        let result = run("SELECT * FROM (SELECT a AS z FROM t), u", dialect);
+        assert_eq!(targets(&result), ["z", "p", "q"], "{dialect:?}");
+        assert_eq!(
+            concrete(&result),
+            [row("z", "t", "a"), row("p", "u", "p"), row("q", "u", "q")],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            ordinals(&result),
+            [Some(0), Some(1), Some(2)],
+            "{dialect:?}"
+        );
+
+        let result = run("SELECT * FROM u, (SELECT a AS z FROM t), t", dialect);
+        assert_eq!(targets(&result), ["p", "q", "z", "x", "y"], "{dialect:?}");
+        assert_eq!(
+            concrete(&result),
+            [
+                row("p", "u", "p"),
+                row("q", "u", "q"),
+                row("z", "t", "a"),
+                row("x", "t", "x"),
+                row("y", "t", "y"),
+            ],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            ordinals(&result),
+            [Some(0), Some(1), Some(2), Some(3), Some(4)],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn derived_tables_without_alias_keep_their_order_around_joins() {
+    for dialect in ANONYMOUS_DERIVED_DIALECTS {
+        let result = run(
+            "SELECT * FROM (SELECT a AS z FROM t) JOIN u ON true, (SELECT b AS w FROM t)",
+            dialect,
+        );
+        assert_eq!(targets(&result), ["z", "p", "q", "w"], "{dialect:?}");
+        assert_eq!(
+            concrete(&result),
+            [
+                row("z", "t", "a"),
+                row("p", "u", "p"),
+                row("q", "u", "q"),
+                row("w", "t", "b"),
+            ],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn positional_alias_over_derived_table_without_alias_follows_from_order() {
+    for dialect in [Dialect::PostgreSql, Dialect::DuckDb] {
+        let result = run(
+            "WITH c(m, n, o) AS (SELECT * FROM (SELECT a AS z FROM t), u) SELECT m, n, o FROM c",
+            dialect,
+        );
+        assert_eq!(
+            concrete(&result),
+            [row("m", "t", "a"), row("n", "u", "p"), row("o", "u", "q")],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn join_merges_columns_of_derived_table_without_alias() {
+    for dialect in [Dialect::PostgreSql, Dialect::DuckDb] {
+        for (sql, expected) in [
+            (
+                "SELECT * FROM (SELECT a AS p FROM t) JOIN u USING (p)",
+                &["p#0 C[t.a, u.p]", "q#1 C[u.q]", "Closed"][..],
+            ),
+            (
+                "SELECT * FROM u JOIN (SELECT a AS p FROM t) USING (p)",
+                &["p#0 C[t.a, u.p]", "q#1 C[u.q]", "Closed"],
+            ),
+            (
+                "SELECT * FROM (SELECT a AS p FROM t) NATURAL JOIN u",
+                &["p#0 C[t.a, u.p]", "q#1 C[u.q]", "Closed"],
+            ),
+            (
+                "SELECT * FROM (SELECT a AS p FROM t) LEFT JOIN u USING (p)",
+                &["p#0 C[t.a]", "q#1 C[u.q]", "Closed"],
+            ),
+            (
+                "SELECT * FROM (SELECT a AS p FROM t) JOIN (SELECT b AS p FROM t) USING (p)",
+                &["p#0 C[t.a, t.b]", "Closed"],
+            ),
+            (
+                "SELECT p FROM (SELECT a AS p FROM t) JOIN u USING (p)",
+                &["p#0 C[t.a, u.p]", "Closed"],
+            ),
+        ] {
+            common::expect_rendered_with(sql, dialect, &Catalog, expected);
+        }
+    }
+}

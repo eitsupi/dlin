@@ -10,11 +10,11 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::build::{CacheKey, OutputModels, forward_scope};
+use super::build::{CacheKey, OutputModels};
 use super::join::fold_join_columns;
 use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
 use crate::catalog::ColumnPresence;
-use crate::graph::scope::{Binding, BindingEnv, MergedColumns, ScopeId};
+use crate::graph::scope::{Binding, BindingEnv, JoinOperand, MergedColumns, ScopeId};
 use crate::keys::table_key;
 use crate::types::{Evidence, TableRef};
 use crate::{Candidate, Dialect, Ident, Relation};
@@ -566,21 +566,55 @@ impl OutputModels<'_, '_, '_> {
                 anonymous: false,
             })
             .collect();
+        let positions = graph.scopes.clause_binding_positions(env);
+        // A derived table without a range variable is a relation of the
+        // clause like any other: it takes its place among the others in the
+        // order the clause lists them, and an unqualified name may be one of
+        // its columns.
+        let mut anonymous = graph
+            .scopes
+            .anonymous_derived(env)
+            .into_iter()
+            .enumerate()
+            .map(|(offset, (at, child))| {
+                let range = RangeRef {
+                    index: ranges.len() + offset,
+                    name: Ident::unquoted(""),
+                    binding: Binding::DerivedTable(child),
+                    anonymous: true,
+                };
+                (at, range)
+            })
+            .peekable();
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
         let mut groups = Vec::new();
         let mut schema = Evidence::default();
-        for range in &ranges {
-            if let Some(model) = self.binding_model(&range.binding) {
+        let mut push_group = |this: &mut Self, range: &RangeRef| {
+            if let Some(model) = this.binding_model(&range.binding) {
                 reads.push((range.index, model));
             }
-            let group_schema = self.binding_schema(&range.binding);
+            let group_schema = this.binding_schema(&range.binding);
             schema.extend(&group_schema);
             groups.push(Group {
-                members: vec![range.name.clone()],
-                elements: self.binding_part(range),
+                members: vec![match &range.binding {
+                    Binding::DerivedTable(child) if range.anonymous => {
+                        JoinOperand::Anonymous(*child)
+                    }
+                    _ => JoinOperand::Named(range.name.clone()),
+                }],
+                elements: this.binding_part(range),
                 schema: group_schema,
             });
+        };
+        for (range, &position) in ranges.iter().zip(&positions) {
+            while let Some((_, earlier)) = anonymous.next_if(|(at, _)| *at <= position) {
+                push_group(self, &earlier);
+            }
+            push_group(self, range);
+        }
+        for (_, range) in anonymous {
+            push_group(self, &range);
         }
         let merges = graph.scopes.join_merges(env);
         let mut seen = HashSet::new();
@@ -606,27 +640,7 @@ impl OutputModels<'_, '_, '_> {
                 candidates: candidates_of(&ranges),
             })));
         }
-        let mut elements = fold_join_columns(groups, merges, dialect);
-        // A derived table without a range variable is a relation of the
-        // clause like any other: a star publishes its columns after the
-        // others, and an unqualified name may be one of them.
-        for (offset, child) in graph.scopes.anonymous_derived(env).into_iter().enumerate() {
-            let model = self.scope(child);
-            schema.extend(&model.schema);
-            let range = RangeRef {
-                index: ranges.len() + offset,
-                name: Ident::unquoted(""),
-                binding: Binding::DerivedTable(child),
-                anonymous: true,
-            };
-            elements.extend(forward_scope(
-                child,
-                &model,
-                &Rc::from([range.clone()]),
-                None,
-            ));
-            reads.push((range.index, model));
-        }
+        let elements = fold_join_columns(groups, merges, dialect);
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;
         model.reads = reads;
