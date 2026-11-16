@@ -91,7 +91,10 @@ fn nested_empty_projections_in_other_clauses_preserve_analysis() {
         actual
             .diagnostics
             .retain(|diagnostic| diagnostic.kind != DiagnosticKind::EmptyProjection);
-        let control = analyze(&sql.replace("SELECT FROM c", "SELECT 1 FROM c"));
+        // Neither an empty projection nor a multi-column projection supplies
+        // one scalar value. Keep that unresolved value in both versions so
+        // this comparison isolates the structural empty-projection warning.
+        let control = analyze(&sql.replace("SELECT FROM c", "SELECT 1, 2 FROM c"));
         assert_eq!(
             actual, control,
             "only the empty-projection diagnostic changes: {sql}"

@@ -106,6 +106,9 @@ struct Scope {
     /// added at.
     anonymous_derived: Vec<(usize, ScopeId)>,
     output_columns: Vec<ScopeColumn>,
+    /// Positional names supplied by a CTE or derived-table alias list.
+    /// Applied after schema expansion, when the actual output slots are known.
+    output_aliases: Option<Vec<Ident>>,
     output_plan: OutputPlan,
     unknown_output_width: bool,
     unknown_output_reasons: Vec<&'static str>,
@@ -125,6 +128,7 @@ impl Scope {
             join_merges: Vec::new(),
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
+            output_aliases: None,
             output_plan: OutputPlan::Projection,
             unknown_output_width: false,
             unknown_output_reasons: Vec::new(),
@@ -579,6 +583,14 @@ impl ScopeTree {
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {
         &self.scopes[scope].output_columns
+    }
+
+    pub fn set_output_aliases(&mut self, scope: ScopeId, aliases: Vec<Ident>) {
+        self.scopes[scope].output_aliases = Some(aliases);
+    }
+
+    pub fn output_aliases(&self, scope: ScopeId) -> Option<&[Ident]> {
+        self.scopes[scope].output_aliases.as_deref()
     }
 
     pub fn mark_unknown_output_width(&mut self, scope: ScopeId, reason: &'static str) {

@@ -10,13 +10,13 @@ use super::model::{ModelStore, OutputModel, OutputModels};
 use super::set_operation::evaluate_set_operation;
 use super::star::projection_mappings;
 
-use crate::Ident;
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, ScopeId, VirtualColumnState};
 use crate::types::{
     ColumnMapping, ColumnOrigin, ColumnRef, Evidence, Origin, Sources, TableRef, TransformKind,
 };
+use crate::{Ident, Unresolved};
 
 pub(super) fn wildcard_mapping(
     output_table: Option<&TableRef>,
@@ -209,22 +209,85 @@ fn compute_scope_mappings(
 }
 
 /// Attach child mappings to the unique published outputs this model forwards.
-pub(super) fn retag(mappings: &mut [ColumnMapping], reader: &OutputModel) -> Result<(), Cut> {
+pub(super) fn retag(mappings: &mut Vec<ColumnMapping>, reader: &OutputModel) -> Result<(), Cut> {
     let mut published = HashSet::new();
-    for mapping in mappings {
+    let has_unresolved_alias_output = reader.elements.iter().any(|element| {
+        matches!(
+            element,
+            super::model::OutputElement::Unknown(segment)
+                if matches!(&segment.provider,
+                    super::model::UnknownProvider::Opaque(
+                        super::model::OpaqueReason::Unsupported(what)
+                    ) if is_column_alias_reason(what))
+        )
+    });
+    let mut retagged = Vec::with_capacity(mappings.len());
+    for mapping in mappings.iter_mut() {
         let Some(from) = mapping.slot else {
             return Err(Cut);
         };
-        let mut matches = reader.forwarded.iter().filter(|pair| pair.from == from);
-        let Some(pair) = matches.next() else {
+        let matches = reader
+            .forwarded
+            .iter()
+            .filter(|pair| pair.from == from)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            if has_unresolved_alias_output && matches.is_empty() {
+                continue;
+            }
             return Err(Cut);
-        };
-        if matches.next().is_some() || !published.insert(pair.to) {
+        }
+        let pair = matches[0];
+        if !published.insert(pair.to) {
             return Err(Cut);
         }
         mapping.slot = Some(pair.to);
+        retagged.push(mapping.clone());
     }
+    for element in &reader.elements {
+        let super::model::OutputElement::Unknown(segment) = element else {
+            continue;
+        };
+        let super::model::UnknownProvider::Opaque(super::model::OpaqueReason::Unsupported(what)) =
+            &segment.provider
+        else {
+            continue;
+        };
+        if !is_column_alias_reason(what) {
+            continue;
+        }
+        let slot = super::model::OutputRef::Segment(segment.published());
+        if reader.forwarded.iter().any(|pair| pair.to == slot) {
+            continue;
+        }
+        retagged.push(ColumnMapping {
+            star_position: segment.position,
+            output_name: None,
+            ordinal: None,
+            target: ColumnRef {
+                table: None,
+                column: Ident::unquoted("*"),
+            },
+            sources: Sources::one(Origin::new(
+                ColumnOrigin::Unresolved(Unresolved::Unsupported { what }),
+                segment.structure.clone(),
+            )),
+            transform: TransformKind::Unknown,
+            slot: Some(slot),
+        });
+    }
+    *mappings = retagged;
     Ok(())
+}
+
+fn is_column_alias_reason(what: &str) -> bool {
+    matches!(
+        what,
+        "column alias position unknown"
+            | "column alias count mismatch"
+            | "column alias output shape unknown"
+            | "column aliases unsupported by dialect"
+    )
 }
 
 pub(super) fn merge_transform(left: &TransformKind, right: &TransformKind) -> TransformKind {

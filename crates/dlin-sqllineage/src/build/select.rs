@@ -54,10 +54,9 @@ impl LineageBuilder {
                 SelectItem::UnnamedExpr(expr) => {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
-                    let name = infer_column_name(expr);
+                    let (name, output_name) = infer_output_name(expr);
                     let output = self.graph.add_output(name.clone(), kind.clone());
-                    self.graph
-                        .set_output_name(output, classify_output_name(expr));
+                    self.graph.set_output_name(output, output_name);
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -305,7 +304,46 @@ impl LineageBuilder {
     /// `applied` is set for the right side of an `APPLY` join.
     fn visit_table_factor_in(&mut self, factor: &TableFactor, applied: bool) {
         match factor {
-            TableFactor::Table { name, alias, .. } => {
+            TableFactor::Table {
+                name,
+                alias,
+                args,
+                with_ordinality,
+                ..
+            } => {
+                if self.dialect == crate::Dialect::DuckDb
+                    && is_unnest_function(name, self.dialect)
+                    && let Some(args) = args
+                {
+                    let dependencies = args
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            sqlparser::ast::FunctionArg::Unnamed(
+                                sqlparser::ast::FunctionArgExpr::Expr(expr),
+                            )
+                            | sqlparser::ast::FunctionArg::Named {
+                                arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                                ..
+                            }
+                            | sqlparser::ast::FunctionArg::ExprNamed {
+                                arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                                ..
+                            } => self.collect_ancestors(expr),
+                            _ => vec![self.graph.add_unsupported("UNNEST argument")],
+                        })
+                        .collect::<Vec<_>>();
+                    let default_alias = alias.is_none().then(|| Ident::unquoted("unnest"));
+                    self.add_virtual_unnest(
+                        alias.as_ref(),
+                        default_alias.as_ref(),
+                        dependencies,
+                        false,
+                        None,
+                        *with_ordinality,
+                    );
+                    return;
+                }
                 let table_ref = Self::table_ref_from_object_name(name);
                 let bindings = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
@@ -330,6 +368,13 @@ impl LineageBuilder {
                 let derived_scope = self.visit_subquery(kind, subquery);
 
                 if let Some(a) = alias {
+                    self.set_scope_output_aliases(
+                        derived_scope,
+                        a.columns
+                            .iter()
+                            .map(|column| Ident::from_ast(&column.name))
+                            .collect(),
+                    );
                     self.add_binding(
                         Ident::from_ast(&a.name),
                         Binding::DerivedTable(derived_scope),
@@ -356,60 +401,17 @@ impl LineageBuilder {
                 with_offset_alias,
                 with_ordinality,
             } => {
-                // The array expressions are evaluated in the scope visible
-                // before this FROM item is introduced. Capture their nodes
-                // first, then install the range-variable binding so it is
-                // visible to subsequent lateral FROM items and projection.
                 let dependencies = array_exprs
                     .iter()
                     .map(|expr| self.collect_ancestors(expr))
-                    .collect::<Vec<_>>();
-
-                let Some(alias) = alias else {
-                    return;
-                };
-
-                let mut columns = Vec::with_capacity(
-                    array_exprs.len() + usize::from(*with_offset) + usize::from(*with_ordinality),
-                );
-                for (index, deps) in dependencies.into_iter().enumerate() {
-                    let name = alias.columns.get(index).map_or_else(
-                        || Ident::from_ast(&alias.name),
-                        |column| Ident::from_ast(&column.name),
-                    );
-                    columns.push(VirtualColumn {
-                        name,
-                        state: if deps.is_empty() {
-                            VirtualColumnState::KnownEmpty
-                        } else {
-                            VirtualColumnState::Unknown
-                        },
-                        dependencies: deps,
-                    });
-                }
-                if *with_offset {
-                    columns.push(VirtualColumn {
-                        name: with_offset_alias
-                            .as_ref()
-                            .map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
-                        dependencies: Vec::new(),
-                        state: VirtualColumnState::KnownEmpty,
-                    });
-                } else if *with_ordinality {
-                    columns.push(VirtualColumn {
-                        name: Ident::unquoted("ordinality"),
-                        dependencies: Vec::new(),
-                        state: VirtualColumnState::KnownEmpty,
-                    });
-                }
-
-                let virtual_id = self
-                    .graph
-                    .scopes
-                    .add_virtual_source(self.current_scope, columns);
-                self.add_binding(
-                    Ident::from_ast(&alias.name),
-                    Binding::VirtualSource(virtual_id),
+                    .collect();
+                self.add_virtual_unnest(
+                    alias.as_ref(),
+                    None,
+                    dependencies,
+                    *with_offset,
+                    with_offset_alias.as_ref(),
+                    *with_ordinality,
                 );
             }
 
@@ -432,6 +434,116 @@ impl LineageBuilder {
             | TableFactor::SemanticView { .. } => {}
         }
     }
+
+    fn add_virtual_unnest(
+        &mut self,
+        alias: Option<&sqlparser::ast::TableAlias>,
+        default_alias: Option<&Ident>,
+        dependencies: Vec<Vec<crate::graph::node::NodeId>>,
+        with_offset: bool,
+        with_offset_alias: Option<&sqlparser::ast::Ident>,
+        with_ordinality: bool,
+    ) {
+        // The array expressions are evaluated before this range variable is
+        // introduced. Capture their value dependencies, then publish virtual
+        // output columns for later FROM items and the projection.
+        let Some(alias_name) = alias
+            .map(|alias| Ident::from_ast(&alias.name))
+            .or_else(|| default_alias.cloned())
+        else {
+            return;
+        };
+        let array_count = dependencies.len();
+        let output_count = array_count + usize::from(with_offset || with_ordinality);
+        // PostgreSQL rejects an UNNEST column alias list wider than the
+        // function's known output. Generic SQL has no dialect-specific rule
+        // to rely on, so keep those slots unresolved there as well. DuckDB
+        // deliberately ignores surplus aliases.
+        let surplus_aliases = alias.is_some_and(|alias| alias.columns.len() > output_count)
+            && matches!(
+                self.dialect,
+                crate::Dialect::PostgreSql | crate::Dialect::Generic
+            );
+        let surplus_alias_dependency =
+            surplus_aliases.then(|| self.graph.add_unsupported("UNNEST alias count mismatch"));
+        let mut columns = Vec::with_capacity(output_count);
+        for (index, mut deps) in dependencies.into_iter().enumerate() {
+            let name = alias
+                .and_then(|alias| alias.columns.get(index))
+                .map_or_else(
+                    || alias_name.clone(),
+                    |column| Ident::from_ast(&column.name),
+                );
+            if let Some(unsupported) = surplus_alias_dependency {
+                deps.push(unsupported);
+            }
+            columns.push(VirtualColumn {
+                name,
+                state: if deps.is_empty() {
+                    VirtualColumnState::KnownEmpty
+                } else {
+                    VirtualColumnState::Unknown
+                },
+                dependencies: deps,
+            });
+        }
+        if with_offset {
+            let mut dependencies = Vec::new();
+            if let Some(unsupported) = surplus_alias_dependency {
+                dependencies.push(unsupported);
+            }
+            columns.push(VirtualColumn {
+                name: with_offset_alias
+                    .map(Ident::from_ast)
+                    .or_else(|| {
+                        alias
+                            .and_then(|alias| alias.columns.get(array_count))
+                            .map(|column| Ident::from_ast(&column.name))
+                    })
+                    .unwrap_or_else(|| Ident::unquoted("offset")),
+                state: if dependencies.is_empty() {
+                    VirtualColumnState::KnownEmpty
+                } else {
+                    VirtualColumnState::Unknown
+                },
+                dependencies,
+            });
+        } else if with_ordinality {
+            let mut dependencies = Vec::new();
+            if let Some(unsupported) = surplus_alias_dependency {
+                dependencies.push(unsupported);
+            }
+            columns.push(VirtualColumn {
+                name: alias
+                    .and_then(|alias| alias.columns.get(array_count))
+                    .map_or_else(
+                        || Ident::unquoted("ordinality"),
+                        |column| Ident::from_ast(&column.name),
+                    ),
+                state: if dependencies.is_empty() {
+                    VirtualColumnState::KnownEmpty
+                } else {
+                    VirtualColumnState::Unknown
+                },
+                dependencies,
+            });
+        }
+
+        let virtual_id = self
+            .graph
+            .scopes
+            .add_virtual_source(self.current_scope, columns);
+        self.add_binding(alias_name, Binding::VirtualSource(virtual_id));
+    }
+}
+
+fn is_unnest_function(name: &ObjectName, dialect: crate::Dialect) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    part.as_ident().is_some_and(|ident| {
+        Ident::from_ast(ident).column_key(dialect) == Ident::unquoted("unnest").column_key(dialect)
+    })
 }
 
 /// The constraint of a join, if its operator has one.
@@ -461,39 +573,28 @@ fn join_constraint(operator: &JoinOperator) -> Option<&JoinConstraint> {
     }
 }
 
-/// Infer a column name from an expression.
-fn infer_column_name(expr: &Expr) -> Ident {
+/// Infer a column name and its classification from an expression.
+fn infer_output_name(expr: &Expr) -> (Ident, OutputName) {
     match expr {
-        Expr::Identifier(ident) => Ident::from_ast(ident),
-        Expr::CompoundIdentifier(parts) => parts
-            .last()
-            .map_or_else(|| Ident::unquoted(""), Ident::from_ast),
-        Expr::Function(func) => func
-            .name
-            .0
-            .last()
-            .and_then(|part| part.as_ident())
-            .map_or_else(|| Ident::unquoted(""), Ident::from_ast),
-        Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
-        _ => Ident::unquoted(""),
-    }
-}
-
-fn classify_output_name(expr: &Expr) -> OutputName {
-    match expr {
-        Expr::Identifier(ident) => OutputName::Explicit(Ident::from_ast(ident)),
-        Expr::CompoundIdentifier(parts) => parts
-            .last()
-            .map(Ident::from_ast)
-            .map_or(OutputName::Anonymous, OutputName::Explicit),
-        Expr::Cast { expr, .. } | Expr::Nested(expr) => classify_output_name(expr),
+        Expr::Identifier(ident) => {
+            let name = Ident::from_ast(ident);
+            (name.clone(), OutputName::Explicit(name))
+        }
+        Expr::CompoundIdentifier(parts) => parts.last().map(Ident::from_ast).map_or_else(
+            || (Ident::unquoted(""), OutputName::Anonymous),
+            |name| (name.clone(), OutputName::Explicit(name)),
+        ),
+        Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_output_name(expr),
         Expr::Function(func) => func
             .name
             .0
             .last()
             .and_then(|part| part.as_ident())
             .map(Ident::from_ast)
-            .map_or(OutputName::Anonymous, OutputName::Inferred),
-        _ => OutputName::Anonymous,
+            .map_or_else(
+                || (Ident::unquoted(""), OutputName::Anonymous),
+                |name| (name.clone(), OutputName::Inferred(name)),
+            ),
+        _ => (Ident::unquoted(""), OutputName::Anonymous),
     }
 }

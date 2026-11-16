@@ -141,13 +141,20 @@ pub(super) struct StarFilter {
 #[derive(Debug, Clone, Default)]
 pub(super) struct NameDomain {
     filters: Vec<(Rc<StarFilter>, Rc<[RangeRef]>)>,
+    /// A finite set of names this segment can publish, when its namespace is
+    /// limited to explicit aliases or other individually known names.
+    allowed: Option<Vec<Ident>>,
     /// Names the segment no longer publishes: merged by USING or renamed away.
     removed: Vec<Ident>,
 }
 
 impl NameDomain {
     pub(super) fn admits(&self, name: &Ident, dialect: Dialect) -> bool {
-        !self
+        self.allowed.as_ref().is_none_or(|allowed| {
+            allowed
+                .iter()
+                .any(|candidate| same_column_name(candidate, name, dialect))
+        }) && !self
             .removed
             .iter()
             .any(|removed| same_column_name(removed, name, dialect))
@@ -503,6 +510,10 @@ impl OutputModel {
                             segment.provider,
                             UnknownProvider::Opaque(OpaqueReason::Unsupported(
                                 "BY NAME set operation"
+                                    | "column alias position unknown"
+                                    | "column alias count mismatch"
+                                    | "column alias output shape unknown"
+                                    | "column aliases unsupported by dialect"
                             ))
                         ))
                         && segment.domain.admits(name, dialect) =>

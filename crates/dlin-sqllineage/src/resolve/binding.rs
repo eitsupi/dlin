@@ -117,13 +117,9 @@ pub(super) fn lookup_virtual_binding(
 ) -> Option<Binding> {
     graph
         .scopes
-        .visible_bindings(env)
-        .into_iter()
-        .find(|(binding_name, binding)| {
-            matches!(binding, Binding::VirtualSource(_))
-                && binding_name.column_key(graph.dialect) == name.column_key(graph.dialect)
-        })
-        .map(|(_, binding)| binding)
+        .lookup(env, name)
+        .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
+        .cloned()
 }
 
 fn resolve_row_value_candidate(
@@ -247,7 +243,7 @@ pub(super) fn resolve_input_reference(
         | RawNode::Unqualified {
             name,
             env,
-            binding: None,
+            binding: None | Some(Binding::VirtualSource(_)),
         } => (name, *env),
         _ => return None,
     };
@@ -288,20 +284,44 @@ fn virtual_has_column(name: &Ident, source: VirtualSourceId, graph: &RawGraph) -
         .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
 }
 
+pub(super) fn virtual_column_indexes(
+    name: &Ident,
+    source: VirtualSourceId,
+    graph: &RawGraph,
+) -> Vec<usize> {
+    graph
+        .scopes
+        .virtual_source(source)
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            (column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
+                .then_some(index)
+        })
+        .collect()
+}
+
 pub(super) fn find_virtual_sources_for_column(
     env: BindingEnv,
     name: &Ident,
     graph: &RawGraph,
 ) -> Vec<VirtualSourceId> {
-    effective_bindings(env, graph)
-        .into_iter()
-        .filter_map(|(_, binding)| match binding {
-            Binding::VirtualSource(source) if virtual_has_column(name, source, graph) => {
-                Some(source)
-            }
-            _ => None,
-        })
-        .collect()
+    for clause in graph.scopes.clause_envs(env) {
+        let matches = effective_bindings(clause, graph)
+            .into_iter()
+            .filter_map(|(_, binding)| match binding {
+                Binding::VirtualSource(source) if virtual_has_column(name, source, graph) => {
+                    Some(source)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return matches;
+        }
+    }
+    Vec::new()
 }
 
 /// The origin of `column_name` read from the output of `target_scope`. A scope

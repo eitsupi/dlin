@@ -377,15 +377,16 @@ isolated_test!(
 
 #[test]
 fn appending_an_unrelated_from_item_keeps_an_unnest_argument_meaning() {
+    let catalog = KnownTables(&[("base", &["items"]), ("other", &["items"])]);
     for dialect in [Dialect::Generic, Dialect::PostgreSql, Dialect::BigQuery] {
-        let base = analyze(
+        let base = analyze_one_with(
             "SELECT item FROM base, UNNEST(items) AS item",
             dialect,
-            false,
+            Some(&catalog),
         );
         for appended in [", other", ", other AS o"] {
             let sql = format!("SELECT item FROM base, UNNEST(items) AS item{appended}");
-            let longer = analyze(&sql, dialect, false);
+            let longer = analyze_one_with(&sql, dialect, Some(&catalog));
             assert_eq!(
                 base.output.columns[0].lineage, longer.output.columns[0].lineage,
                 "{dialect:?}: {sql}"
@@ -1064,12 +1065,13 @@ fn a_cte_that_reads_itself_is_recursive() {
         Dialect::SQLite,
         Dialect::MsSql,
     ] {
-        let result = analyze(
-            "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) \
-             SELECT n FROM c",
-            dialect,
-            false,
-        );
+        let sql = if dialect == Dialect::BigQuery {
+            // GoogleSQL names the CTE columns in its projection, not after c.
+            "WITH RECURSIVE c AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c"
+        } else {
+            "WITH RECURSIVE c(n) AS (SELECT n FROM t UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT n FROM c"
+        };
+        let result = analyze(sql, dialect, false);
         let column = &result.output.columns[0];
         assert_eq!(known_sources(column), [source("t", "n")], "{dialect:?}");
         assert!(

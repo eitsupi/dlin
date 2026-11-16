@@ -313,7 +313,9 @@ impl Walk {
                 });
                 // The same physical relation at both levels supplies the
                 // same column either way.
-                if let [Candidate::Relation(_)] = candidates.as_slice() {
+                if values.is_empty()
+                    && let [Candidate::Relation(_)] = candidates.as_slice()
+                {
                     return Some(answer);
                 }
                 Some(InputLookup::Ambiguous {
@@ -500,7 +502,13 @@ impl OutputModels<'_, '_, '_> {
                             Choice::Absent => Standing::Absent,
                         }
                     }
-                    Binding::VirtualSource(_) => Standing::Absent,
+                    Binding::VirtualSource(_) => {
+                        let input = self.input(env);
+                        evidence.extend(&input.model.schema);
+                        input.standing(name, |provider| {
+                            provider.has_by_name_reason(self.graph, &self.store.arena)
+                        })
+                    }
                 };
                 (standing, single)
             }

@@ -18,8 +18,8 @@ use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
-use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, SetCorrespondence};
-use crate::types::{Evidence, TableRef};
+use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, ScopeKind, SetCorrespondence};
+use crate::types::{Dialect, Evidence, TableRef};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheKey {
@@ -173,6 +173,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut reads = Vec::new();
         // The scope and the model whose output this scope only re-expresses.
         let mut source = None;
+        let mut skip_forward_check = false;
         let mut set_operation_source = None;
         let mut schema = Evidence::default();
         let mut elements = match graph.scopes.output_plan(scope) {
@@ -318,6 +319,33 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 OpaqueReason::UnknownWidth,
             )));
         }
+        if let Some(aliases) = graph.scopes.output_aliases(scope)
+            && !aliases.is_empty()
+        {
+            let width_known = !graph.scopes.has_unknown_output_width(scope)
+                && elements
+                    .iter()
+                    .all(|element| matches!(element, OutputElement::Column(_)));
+            let cte = graph.scopes.kind(scope) == ScopeKind::Cte;
+            match apply_output_aliases(&mut elements, aliases, graph.dialect, cte, width_known) {
+                AliasApplication::Applied {
+                    invalidated_forwarding,
+                } => {
+                    if invalidated_forwarding {
+                        skip_forward_check = true;
+                    }
+                }
+                AliasApplication::Unsupported(reason) => {
+                    elements = vec![OutputElement::Unknown(opaque_alias_segment(
+                        aliases.to_vec(),
+                        reason,
+                        &schema,
+                        PositionRange { min: 0, max: None },
+                    ))];
+                    skip_forward_check = true;
+                }
+            }
+        }
         let forwarded = self.publish(scope, publication, &mut elements);
         let mut model = OutputModel::new(
             elements,
@@ -333,8 +361,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         });
         if let Some((source_scope, source)) = source {
             model.forwarded = forwarded;
-            if let Err(problem) =
-                model.check_forwarding(&self.store.arena, scope, source_scope, &source)
+            if !skip_forward_check
+                && let Err(problem) =
+                    model.check_forwarding(&self.store.arena, scope, source_scope, &source)
             {
                 debug_assert!(false, "scope {scope} publishes inconsistently: {problem}");
             }
@@ -590,6 +619,167 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     }
 }
 
+enum AliasApplication {
+    Applied { invalidated_forwarding: bool },
+    Unsupported(&'static str),
+}
+
+/// Apply range-variable aliases to output positions. A complete prefix can be
+/// renamed directly; when an output's position is uncertain, publish an
+/// opaque segment for the names it may have instead of guessing its value.
+fn apply_output_aliases(
+    elements: &mut Vec<OutputElement>,
+    aliases: &[crate::Ident],
+    dialect: Dialect,
+    is_cte: bool,
+    width_known: bool,
+) -> AliasApplication {
+    if dialect == Dialect::BigQuery {
+        return AliasApplication::Unsupported("column aliases unsupported by dialect");
+    }
+
+    let prefix_allowed = matches!(
+        dialect,
+        Dialect::Generic | Dialect::PostgreSql | Dialect::DuckDb | Dialect::Snowflake
+    );
+    let mut aliases = aliases;
+    if width_known && aliases.len() > elements.len() {
+        if dialect == Dialect::DuckDb && is_cte {
+            aliases = &aliases[..elements.len()];
+        } else {
+            return AliasApplication::Unsupported("column alias count mismatch");
+        }
+    }
+    if width_known && !prefix_allowed && aliases.len() != elements.len() {
+        return AliasApplication::Unsupported("column alias count mismatch");
+    }
+    if !width_known && !prefix_allowed {
+        return AliasApplication::Unsupported("column alias output shape unknown");
+    }
+
+    let mut renamed = Vec::with_capacity(elements.len());
+    // A wide unknown segment can conservatively overlap positions that are
+    // already occupied by explicitly enumerated outputs. Those positions
+    // cannot also contribute a name from the alias list.
+    let occupied_positions: Vec<_> = elements
+        .iter()
+        .filter_map(|element| match element {
+            OutputElement::Column(slot) => slot.ordinal.or_else(|| {
+                (slot.position.max == Some(slot.position.min)).then_some(slot.position.min)
+            }),
+            OutputElement::Unknown(_) => None,
+        })
+        .collect();
+    let mut invalidated_forwarding = false;
+    for element in std::mem::take(elements) {
+        match element {
+            OutputElement::Column(mut slot) => {
+                let exact_position = slot.ordinal.or_else(|| {
+                    (slot.position.max == Some(slot.position.min)).then_some(slot.position.min)
+                });
+                if let Some(position) = exact_position {
+                    if let Some(alias) = aliases.get(position) {
+                        slot.name = alias.clone();
+                        slot.output_name = OutputName::Explicit(alias.clone());
+                    }
+                    renamed.push(OutputElement::Column(slot));
+                } else if slot.position.min >= aliases.len() {
+                    renamed.push(OutputElement::Column(slot));
+                } else {
+                    let mut possible_names = aliases_in_range(aliases, slot.position);
+                    let may_be_after_prefix =
+                        slot.position.max.is_none_or(|end| end >= aliases.len());
+                    if may_be_after_prefix {
+                        possible_names.push(slot.name.clone());
+                    }
+                    renamed.push(OutputElement::Unknown(opaque_alias_segment(
+                        possible_names,
+                        "column alias position unknown",
+                        &slot.structure,
+                        slot.position,
+                    )));
+                    invalidated_forwarding = true;
+                }
+            }
+            OutputElement::Unknown(mut segment) => {
+                if segment.position_range.min >= aliases.len() {
+                    renamed.push(OutputElement::Unknown(segment));
+                    continue;
+                }
+
+                let possible_aliases = aliases
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, _)| {
+                        *position >= segment.position_range.min
+                            && segment
+                                .position_range
+                                .max
+                                .is_none_or(|end| *position <= end)
+                            && !occupied_positions.contains(position)
+                    })
+                    .map(|(_, alias)| alias.clone())
+                    .collect::<Vec<_>>();
+                if possible_aliases.is_empty() {
+                    renamed.push(OutputElement::Unknown(segment));
+                } else {
+                    segment.provider = UnknownProvider::Opaque(OpaqueReason::Unsupported(
+                        "column alias position unknown",
+                    ));
+                    let alias_names = possible_aliases;
+                    let alias_range = segment.position_range;
+                    let alias_segment = opaque_alias_segment(
+                        alias_names,
+                        "column alias position unknown",
+                        &segment.structure,
+                        alias_range,
+                    );
+                    renamed.push(OutputElement::Unknown(segment));
+                    renamed.push(OutputElement::Unknown(alias_segment));
+                    invalidated_forwarding = true;
+                }
+            }
+        }
+    }
+    *elements = renamed;
+    AliasApplication::Applied {
+        invalidated_forwarding,
+    }
+}
+
+fn aliases_in_range(aliases: &[crate::Ident], range: PositionRange) -> Vec<crate::Ident> {
+    aliases
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| {
+            *position >= range.min && range.max.is_none_or(|end| *position <= end)
+        })
+        .map(|(_, alias)| alias.clone())
+        .collect()
+}
+
+fn opaque_alias_segment(
+    aliases: Vec<crate::Ident>,
+    reason: &'static str,
+    evidence: &Evidence,
+    position_range: PositionRange,
+) -> UnknownSegment {
+    let mut segment = UnknownSegment::opaque(OpaqueReason::Unsupported(reason));
+    segment.domain.allowed = Some(aliases);
+    segment.position = crate::types::StarPosition::Unproven;
+    segment.position_range = position_range;
+    segment.schema_relations = evidence
+        .relations()
+        .map(|table| crate::Relation {
+            catalog: table.catalog.clone(),
+            schema: table.schema.clone(),
+            name: table.table.clone(),
+        })
+        .collect();
+    segment.structure.extend(evidence);
+    segment
+}
+
 fn relation_unknown(
     table: &Rc<TableRef>,
     ranges: &Rc<[RangeRef]>,
@@ -616,6 +806,7 @@ fn relation_unknown(
         ranges: ranges.clone(),
         domain: NameDomain {
             filters: Vec::new(),
+            allowed: None,
             removed: listed_names.to_vec(),
         },
         structure: Evidence::relation(table),

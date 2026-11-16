@@ -9,6 +9,29 @@ use crate::graph::scope::{Binding, ScopeKind};
 use crate::types::TableRef;
 
 impl LineageBuilder {
+    /// Add the projected value of a scalar subquery as an expression input.
+    /// Query traversal is shared by scalar subqueries, `IN`, and query-valued
+    /// function arguments so all three use the same output shape rules.
+    fn collect_subquery_value_inputs(&mut self, query: &ast::Query) -> Vec<NodeId> {
+        let scope = self.visit_subquery(ScopeKind::Subquery, query);
+        let [column] = self.graph.scopes.output_columns(scope) else {
+            return vec![self.graph.add_unsupported("subquery value output")];
+        };
+        if !matches!(
+            self.graph.nodes[column.node_id],
+            crate::graph::node::RawNode::Output { .. }
+        ) {
+            return vec![self.graph.add_unsupported("subquery value output")];
+        }
+        let name = column.name.clone();
+        vec![self.graph.add_ref_with_binding(
+            name,
+            None,
+            self.env(),
+            Some(Binding::DerivedTable(scope)),
+        )]
+    }
+
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
         match expr {
             Expr::Identifier(ident) => {
@@ -294,7 +317,7 @@ impl LineageBuilder {
                     }
                 }
                 if let FunctionArguments::Subquery(q) = &func.args {
-                    self.visit_subquery(ScopeKind::Subquery, q);
+                    ancestors.extend(self.collect_subquery_value_inputs(q));
                 }
                 if let Some(WindowType::WindowSpec(spec)) = &func.over {
                     for expr in &spec.partition_by {
@@ -327,32 +350,11 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::Subquery(query) => {
-                let scope = self.visit_subquery(ScopeKind::Subquery, query);
-                let [column] = self.graph.scopes.output_columns(scope) else {
-                    return vec![];
-                };
-                // Keep multi-column and star subqueries outside the scalar
-                // value path. A captured scope binding preserves correlation,
-                // alias shadowing and the projection's inherited transform.
-                if !matches!(
-                    self.graph.nodes[column.node_id],
-                    crate::graph::node::RawNode::Output { .. }
-                ) {
-                    return vec![];
-                }
-                let name = column.name.clone();
-                vec![self.graph.add_ref_with_binding(
-                    name,
-                    None,
-                    self.env(),
-                    Some(Binding::DerivedTable(scope)),
-                )]
-            }
+            Expr::Subquery(query) => self.collect_subquery_value_inputs(query),
 
             Expr::InSubquery { expr, subquery, .. } => {
-                let v = self.collect_ancestors(expr);
-                self.visit_subquery(ScopeKind::Subquery, subquery);
+                let mut v = self.collect_ancestors(expr);
+                v.extend(self.collect_subquery_value_inputs(subquery));
                 v
             }
 

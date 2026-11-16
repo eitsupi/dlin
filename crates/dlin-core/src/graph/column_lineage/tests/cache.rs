@@ -823,42 +823,15 @@ fn seeded_cache_file(project_dir: &std::path::Path) -> ColumnLineageCacheFile {
 }
 
 #[test]
-fn test_column_cache_stores_and_uses_matching_semantics_id() {
+fn test_column_cache_uses_package_version_as_compatibility_boundary() {
     let tmp = tempfile::tempdir().unwrap();
     let file = seeded_cache_file(tmp.path());
-    assert_eq!(file.semantics_id, ANALYSIS_SEMANTICS_ID);
+    assert_eq!(file.version, env!("CARGO_PKG_VERSION"));
+    let json = serde_json::to_value(file).unwrap();
+    assert!(json.get("semantics_id").is_none());
 
     let reloaded = ColumnLineageCache::load(tmp.path(), None);
     assert!(reloaded.get("m", DlinDialect::Generic, 0).is_some());
-}
-
-#[test]
-fn test_column_cache_ignores_file_with_different_semantics_id() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut file = seeded_cache_file(tmp.path());
-    file.semantics_id = format!("{ANALYSIS_SEMANTICS_ID}-other");
-    std::fs::write(
-        cache_file_path(tmp.path()),
-        serde_json::to_string(&file).unwrap(),
-    )
-    .unwrap();
-
-    let reloaded = ColumnLineageCache::load(tmp.path(), None);
-    assert!(reloaded.get("m", DlinDialect::Generic, 0).is_none());
-}
-
-#[test]
-fn test_column_cache_ignores_file_without_semantics_id() {
-    let tmp = tempfile::tempdir().unwrap();
-    seeded_cache_file(tmp.path());
-    let path = cache_file_path(tmp.path());
-    let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    json.as_object_mut().unwrap().remove("semantics_id");
-    std::fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
-
-    let reloaded = ColumnLineageCache::load(tmp.path(), None);
-    assert!(reloaded.get("m", DlinDialect::Generic, 0).is_none());
 }
 
 /// Edits to the source YAML that dlin makes through the manifest. dlin cannot
