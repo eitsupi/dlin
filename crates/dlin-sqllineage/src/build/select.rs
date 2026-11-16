@@ -349,6 +349,26 @@ impl LineageBuilder {
                     );
                     return;
                 }
+                // A column alias list renames the relation's columns by
+                // position, exactly as it does for `(SELECT * FROM t) AS
+                // d(p)`. Read the relation that way, so the renaming follows
+                // the one rule for CTE and derived-table aliases.
+                if let Some(alias) = alias
+                    && !alias.columns.is_empty()
+                {
+                    let mut inner = factor.clone();
+                    if let TableFactor::Table {
+                        alias: Some(inner_alias),
+                        ..
+                    } = &mut inner
+                    {
+                        inner_alias.columns.clear();
+                    }
+                    self.bind_star_scope(ScopeKind::DerivedTable, alias, |builder| {
+                        builder.visit_table_factor(&inner);
+                    });
+                    return;
+                }
                 let table_ref = Self::table_ref_from_object_name(name);
                 let bindings = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
@@ -394,10 +414,18 @@ impl LineageBuilder {
             TableFactor::NestedJoin {
                 table_with_joins,
                 alias,
-            } => {
-                self.visit_table_with_joins(table_with_joins);
-                let _ = alias;
-            }
+            } => match alias {
+                // An alias makes the parenthesized join one range variable
+                // that hides the relations inside it, as `(SELECT * FROM t
+                // JOIN u) AS j` would. The join may hold LATERAL items that
+                // refer to the FROM items before it, so it sees them.
+                Some(alias) => {
+                    self.bind_star_scope(ScopeKind::LateralDerivedTable, alias, |builder| {
+                        builder.visit_table_with_joins(table_with_joins);
+                    });
+                }
+                None => self.visit_table_with_joins(table_with_joins),
+            },
 
             TableFactor::UNNEST {
                 alias,
@@ -438,6 +466,30 @@ impl LineageBuilder {
             | TableFactor::XmlTable { .. }
             | TableFactor::SemanticView { .. } => {}
         }
+    }
+
+    /// Bind `alias` to a scope that publishes `SELECT *` over the FROM items
+    /// `visit_from` introduces, with the alias's column list applied to its
+    /// output like a derived table's.
+    fn bind_star_scope(
+        &mut self,
+        kind: ScopeKind,
+        alias: &sqlparser::ast::TableAlias,
+        visit_from: impl FnOnce(&mut Self),
+    ) {
+        let scope = self.push_scope(kind);
+        visit_from(self);
+        self.visit_projection(&[SelectItem::Wildcard(WildcardAdditionalOptions::default())]);
+        self.pop_scope();
+        self.set_scope_output_aliases(
+            scope,
+            alias
+                .columns
+                .iter()
+                .map(|column| Ident::from_ast(&column.name))
+                .collect(),
+        );
+        self.add_binding(Ident::from_ast(&alias.name), Binding::DerivedTable(scope));
     }
 
     fn add_virtual_unnest(
