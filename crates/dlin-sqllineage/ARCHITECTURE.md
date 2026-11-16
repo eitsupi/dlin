@@ -467,6 +467,15 @@ minimum position is past the alias prefix. Otherwise its name and value remain
 unresolved. An affected unknown interval may expose both original names and
 aliases; an alias list never proves that no other names exist.
 
+A column alias list on a table or CTE reference, as in `t AS d(p)`, renames
+that range's columns by the same rule, as if it were `(SELECT * FROM t) AS
+d(p)`. Each range has its own renaming, and the original names are not read
+through it again. An alias on a parenthesized join, as in `(t JOIN u USING (x))
+AS j(a)`, makes the join one range variable `j` over the join's merged output.
+The relations inside it are hidden from the rest of the query, and its column
+alias list applies after the join's columns are merged. A parenthesized join
+without an alias keeps its relations visible.
+
 PostgreSQL, Snowflake and Generic apply this prefix rule and reject a proven excess of
 aliases as unresolved. Generic is the engine's permissive SQL policy, rather
 than a database with its own alias-list specification. DuckDB also uses prefix

@@ -214,6 +214,11 @@ pub(crate) enum ScopeKind {
     /// A `LATERAL` derived table (or the right side of an `APPLY`); the items
     /// of its FROM clause before it are visible.
     LateralDerivedTable,
+    /// A parenthesized join with an alias, which publishes the join as one
+    /// range variable. The join itself and its LATERAL items see the items
+    /// before it, as they would without the alias; an ordinary derived table
+    /// inside it does not.
+    JoinGroup,
     /// One operand of a set operation.
     SetOperation,
 }
@@ -278,6 +283,9 @@ impl ScopeTree {
     ///   clause it belongs to, only what its parent could see from outside,
     ///   except in a dialect where it is implicitly lateral;
     /// - a lateral derived table also sees the items before it;
+    /// - an aliased parenthesized join continues the FROM clause around it:
+    ///   it sees the items before it, and an ordinary derived table inside it
+    ///   sees neither clause;
     /// - a subquery in an expression, a set-operation operand, a CTE and the
     ///   body of a query with a WITH clause see what was introduced in their
     ///   parent before them (for a CTE, the CTEs defined earlier).
@@ -289,9 +297,10 @@ impl ScopeTree {
             // DuckDB treats an ordinary derived table as lateral when it
             // refers to the items before it.
             ScopeKind::DerivedTable if !self.dialect.derived_tables_are_implicitly_lateral() => {
-                self.outer(parent)
+                self.outside_from_clause(parent)
             }
             ScopeKind::DerivedTable
+            | ScopeKind::JoinGroup
             | ScopeKind::Cte
             | ScopeKind::Body
             | ScopeKind::Subquery
@@ -300,6 +309,16 @@ impl ScopeTree {
                 scope: parent,
                 visible: this.parent_visible,
             }),
+        }
+    }
+
+    /// What a scope that cannot see the FROM clause of `scope` falls back to.
+    /// A join group's FROM clause continues the one around it, so that one is
+    /// skipped as well.
+    fn outside_from_clause(&self, scope: ScopeId) -> Option<BindingEnv> {
+        match self.scopes[scope].kind {
+            ScopeKind::JoinGroup => self.outside_from_clause(self.scopes[scope].parent?),
+            _ => self.outer(scope),
         }
     }
 
