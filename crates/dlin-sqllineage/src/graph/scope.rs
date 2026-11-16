@@ -96,14 +96,16 @@ struct Scope {
     /// share the name `t`), with the position it was added at. Multi-part
     /// qualifiers are matched against these.
     relations: Vec<(usize, TableRef)>,
-    /// Names in the order entries were introduced, including names that a
-    /// later relation took over. A join reads the slice added while its
+    /// Entries in the order they were introduced: range variables (including
+    /// names that a later relation took over), CTE definitions and derived
+    /// tables without a range variable. A position in this log is what an
+    /// environment's `visible` counts. A join reads the slice added while its
     /// operands were visited to learn which relations it combines.
-    binding_log: Vec<Ident>,
+    binding_log: Vec<JoinOperand>,
     /// Joins in this scope that merge columns, in source order.
     join_merges: Vec<JoinMerge>,
-    /// Derived tables without a range variable, with the position they were
-    /// added at.
+    /// Derived tables without a range variable, with their position in
+    /// `binding_log`.
     anonymous_derived: Vec<(usize, ScopeId)>,
     output_columns: Vec<ScopeColumn>,
     /// Positional names supplied by a CTE or derived-table alias list.
@@ -160,14 +162,6 @@ pub(crate) enum MergedColumns {
 pub(crate) enum JoinOperand {
     Named(Ident),
     Anonymous(ScopeId),
-}
-
-/// How much of a scope's FROM clause has been introduced; see
-/// [`ScopeTree::binding_mark`].
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BindingMark {
-    entries: usize,
-    anonymous: usize,
 }
 
 /// A `USING` or `NATURAL` join. Each side lists the relations it combines
@@ -335,7 +329,9 @@ impl ScopeTree {
     pub fn add_binding(&mut self, scope: ScopeId, name: Ident, binding: Binding) {
         let key = name.column_key(self.dialect).into_owned();
         let seq = self.scopes[scope].binding_log.len();
-        self.scopes[scope].binding_log.push(name.clone());
+        self.scopes[scope]
+            .binding_log
+            .push(JoinOperand::Named(name.clone()));
         if let Binding::Table(table) = &binding {
             self.scopes[scope].relations.push((seq, table.clone()));
         }
@@ -383,7 +379,9 @@ impl ScopeTree {
             let id = self.scopes.len();
             self.scopes
                 .push(Scope::new(Some(holder), ScopeKind::Cte, visible));
-            self.scopes[holder].binding_log.push(name.clone());
+            self.scopes[holder]
+                .binding_log
+                .push(JoinOperand::Named(name.clone()));
             self.scopes[holder].ctes.push(CteEntry {
                 name,
                 scope: id,
@@ -421,29 +419,16 @@ impl ScopeTree {
         lookup
     }
 
-    /// What `scope` has introduced so far; pass it to
+    /// Number of entries added to `scope` so far; pass it to
     /// [`Self::bindings_added_since`] to learn what a FROM item introduced.
-    pub fn binding_mark(&self, scope: ScopeId) -> BindingMark {
-        BindingMark {
-            entries: self.scopes[scope].binding_log.len(),
-            anonymous: self.scopes[scope].anonymous_derived.len(),
-        }
+    pub fn binding_mark(&self, scope: ScopeId) -> usize {
+        self.scopes[scope].binding_log.len()
     }
 
-    /// The FROM items added to `scope` since `mark`: range variables by name
-    /// and derived tables without one.
-    pub fn bindings_added_since(&self, scope: ScopeId, mark: BindingMark) -> Vec<JoinOperand> {
-        let scope = &self.scopes[scope];
-        scope.binding_log[mark.entries..]
-            .iter()
-            .cloned()
-            .map(JoinOperand::Named)
-            .chain(
-                scope.anonymous_derived[mark.anonymous..]
-                    .iter()
-                    .map(|(_, child)| JoinOperand::Anonymous(*child)),
-            )
-            .collect()
+    /// The FROM items added to `scope` since `mark`, in the order added:
+    /// range variables by name and derived tables without one.
+    pub fn bindings_added_since(&self, scope: ScopeId, mark: usize) -> Vec<JoinOperand> {
+        self.scopes[scope].binding_log[mark..].to_vec()
     }
 
     pub fn add_join_merge(&mut self, scope: ScopeId, mut merge: JoinMerge) {
@@ -470,8 +455,8 @@ impl ScopeTree {
         let anonymous = scope
             .anonymous_derived
             .iter()
-            .filter(|(at, _)| *at <= step.visible)
-            .map(|(at, _)| *at);
+            .filter(|(at, _)| *at < step.visible)
+            .map(|(at, _)| *at + 1);
         entries.chain(anonymous).max()
     }
 
@@ -709,18 +694,20 @@ impl ScopeTree {
 
     pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {
         let at = self.scopes[parent].binding_log.len();
+        self.scopes[parent]
+            .binding_log
+            .push(JoinOperand::Anonymous(child));
         self.scopes[parent].anonymous_derived.push((at, child));
     }
 
     /// Derived tables without a range variable in the FROM clause at `env`,
-    /// each with the number of entries the scope had when it was added: it
-    /// comes after the range variables before that position and before the
-    /// ones from it on.
+    /// each with its position among the entries of the scope, which orders
+    /// it among the range variables of the clause.
     pub fn anonymous_derived(&self, env: BindingEnv) -> Vec<(usize, ScopeId)> {
         self.scopes[env.scope]
             .anonymous_derived
             .iter()
-            .filter(|(at, _)| *at <= env.visible)
+            .filter(|(at, _)| *at < env.visible)
             .copied()
             .collect()
     }

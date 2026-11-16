@@ -268,3 +268,31 @@ fn join_merges_columns_of_derived_table_without_alias() {
         }
     }
 }
+
+#[test]
+fn lateral_derived_table_sees_only_derived_tables_without_alias_before_it() {
+    for dialect in [Dialect::PostgreSql, Dialect::DuckDb] {
+        for sql in [
+            "SELECT q FROM (SELECT a AS p FROM t) CROSS JOIN LATERAL (SELECT p + 1 AS q) NATURAL JOIN (SELECT b AS p FROM u)",
+            "SELECT q FROM (SELECT a AS p FROM t) CROSS JOIN LATERAL (SELECT p + 1 AS q) CROSS JOIN (SELECT b AS p FROM u)",
+            "SELECT q FROM (SELECT a AS p FROM t), LATERAL (SELECT p + 1 AS q), (SELECT b AS p FROM u)",
+        ] {
+            common::expect_rendered_with(
+                sql,
+                dialect,
+                &Catalog,
+                &["q#0 C[t.a] Expression", "Closed"],
+            );
+        }
+    }
+}
+
+#[test]
+fn duckdb_implicit_lateral_sees_only_derived_tables_without_alias_before_it() {
+    common::expect_rendered_with(
+        "SELECT q FROM (SELECT a AS p FROM t), (SELECT p + 1 AS q), (SELECT b AS p FROM u)",
+        Dialect::DuckDb,
+        &Catalog,
+        &["q#0 C[t.a] Expression", "Closed"],
+    );
+}

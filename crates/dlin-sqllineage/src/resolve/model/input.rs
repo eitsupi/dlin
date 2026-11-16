@@ -608,7 +608,7 @@ impl OutputModels<'_, '_, '_> {
             });
         };
         for (range, &position) in ranges.iter().zip(&positions) {
-            while let Some((_, earlier)) = anonymous.next_if(|(at, _)| *at <= position) {
+            while let Some((_, earlier)) = anonymous.next_if(|(at, _)| *at < position) {
                 push_group(self, &earlier);
             }
             push_group(self, range);
