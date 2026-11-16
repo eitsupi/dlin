@@ -417,10 +417,9 @@ impl LineageBuilder {
             } => match alias {
                 // An alias makes the parenthesized join one range variable
                 // that hides the relations inside it, as `(SELECT * FROM t
-                // JOIN u) AS j` would. The join may hold LATERAL items that
-                // refer to the FROM items before it, so it sees them.
+                // JOIN u) AS j` would.
                 Some(alias) => {
-                    self.bind_star_scope(ScopeKind::LateralDerivedTable, alias, |builder| {
+                    self.bind_star_scope(ScopeKind::JoinGroup, alias, |builder| {
                         builder.visit_table_with_joins(table_with_joins);
                     });
                 }

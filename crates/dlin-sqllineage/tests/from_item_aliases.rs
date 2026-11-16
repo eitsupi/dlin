@@ -212,3 +212,16 @@ fn lateral_item_inside_an_aliased_join_sees_earlier_items() {
         );
     }
 }
+
+#[test]
+fn ordinary_derived_table_inside_an_aliased_join_does_not_see_earlier_items() {
+    let sql = "SELECT w FROM t, (u CROSS JOIN (SELECT t.x AS w) l) AS j";
+    expect_rendered_with(
+        sql,
+        Dialect::PostgreSql,
+        &Catalog,
+        &["w#0 P[ | Unbound(t)]", "Closed"],
+    );
+    // DuckDB lets an ordinary derived table see the items before it.
+    expect_rendered_with(sql, Dialect::DuckDb, &Catalog, &["w#0 C[t.x]", "Closed"]);
+}
