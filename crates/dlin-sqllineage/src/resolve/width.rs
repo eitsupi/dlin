@@ -57,7 +57,8 @@ fn scope_arity(
             let left_width = scope_arity(left, models, active)?;
             let right_width = scope_arity(right, models, active)?;
             if correspondence == SetCorrespondence::ByName {
-                None
+                // Widths need not agree; the model decides the output.
+                models.scope(scope).width.exact()
             } else {
                 match (left_width, right_width) {
                     (Some(left), Some(right)) if left != right => {

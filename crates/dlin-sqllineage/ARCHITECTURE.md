@@ -397,6 +397,22 @@ the mode and the list:
 A form the engine does not model is `Unsupported`. It is never processed as a
 plain `BY NAME`.
 
+The parser accepts only the forms without a mode or a column list. The engine
+models those with the strict meaning, and only in the dialects that document
+it:
+
+- `BigQuery`: `UNION ALL`, `UNION DISTINCT`, `INTERSECT DISTINCT` and
+  `EXCEPT DISTINCT`, followed by `BY NAME`. The quantifier must be written.
+- `DuckDB` and Snowflake: `UNION [ALL | DISTINCT] BY NAME`. These pad a name one
+  operand lacks with `NULL`, which equals the strict meaning when both
+  operands have the same names.
+
+The correspondence is proven only when both operands list their names, each
+once, without an unknown segment, and the two sets of names are equal under
+the dialect's rule for comparing column names (`DuckDB` folds only ASCII
+letters). Every other `BY NAME` operation, including names that differ, keeps
+the values of the left operand and is `Unsupported(BY NAME set operation)`.
+
 Correspondence and dependency propagation are separate steps. `BY NAME` and its
 mode first align the slots of both operands, padding missing columns with
 `NULL` slots. The per-operator rules above then decide value and row

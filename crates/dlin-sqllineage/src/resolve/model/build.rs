@@ -176,6 +176,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let mut skip_forward_check = false;
         let mut set_operation_source = None;
         let mut schema = Evidence::default();
+        let mut reasons = graph.scopes.unknown_output_reasons(scope);
         let mut elements = match graph.scopes.output_plan(scope) {
             OutputPlan::Projection => {
                 let mut elements = Vec::new();
@@ -260,6 +261,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 operator,
                 quantifier,
                 correspondence,
+                strict_by_name,
             } => {
                 let model = self.scope(*left);
                 invalid.push(Invalidity::Whole(model.clone()));
@@ -271,18 +273,17 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 if let Some(right) = &right_model {
                     schema.extend(&right.schema);
                 }
-                set_operation_source = Some((
-                    crate::SetOperationKind {
-                        operator: *operator,
-                        quantifier: *quantifier,
-                        correspondence: *correspondence,
-                    },
-                    *recursive,
-                    model.clone(),
-                    right_model,
-                ));
+                // Names correspond only in a strict form whose operands list
+                // the same names; otherwise which output a right column
+                // feeds, and whether it adds one, is not modelled.
+                let by_name_aligned = *correspondence == SetCorrespondence::ByName
+                    && *strict_by_name
+                    && right_model
+                        .as_deref()
+                        .is_some_and(|right| same_listed_names(&model, right, graph.dialect));
                 let mut elements = elements;
-                if *correspondence == SetCorrespondence::ByName {
+                if *correspondence == SetCorrespondence::ByName && !by_name_aligned {
+                    reasons.push("BY NAME set operation");
                     // No right-operand names are enumerated until name-based
                     // correspondence is implemented. Keep the unknown remainder
                     // separate from the left operand's listed names.
@@ -304,6 +305,17 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                         elements.push(OutputElement::Unknown(remainder));
                     }
                 }
+                set_operation_source = Some((
+                    crate::SetOperationKind {
+                        operator: *operator,
+                        quantifier: *quantifier,
+                        correspondence: *correspondence,
+                    },
+                    *recursive,
+                    by_name_aligned,
+                    model.clone(),
+                    right_model,
+                ));
                 source = Some((*left, model));
                 elements
             }
@@ -353,18 +365,15 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
         }
         let forwarded = self.publish(scope, publication, &mut elements);
-        let mut model = OutputModel::new(
-            elements,
-            graph.scopes.unknown_output_reasons(scope),
-            graph.dialect,
-        );
+        let mut model = OutputModel::new(elements, reasons, graph.dialect);
         model.invalid = invalid;
         model.reads = reads;
         model.schema = schema;
         model.publication = Some(publication);
-        model.set_operation = set_operation_source.map(|(kind, recursive, left, right)| {
-            build_set_operation_model(kind, recursive, &left, right.as_deref())
-        });
+        model.set_operation =
+            set_operation_source.map(|(kind, recursive, by_name_aligned, left, right)| {
+                build_set_operation_model(kind, recursive, by_name_aligned, &left, right.as_deref())
+            });
         if let Some((source_scope, source)) = source {
             model.forwarded = forwarded;
             if !skip_forward_check
@@ -832,9 +841,39 @@ fn relation_unknown(
     })
 }
 
+/// Whether two operands list the same names, each once, with no unknown
+/// segment that could publish another: the condition under which a `BY NAME`
+/// operation pairs every output with exactly one column of each operand.
+fn same_listed_names(left: &OutputModel, right: &OutputModel, dialect: Dialect) -> bool {
+    let names = |model: &OutputModel| {
+        let mut keys = Vec::with_capacity(model.elements.len());
+        for element in &model.elements {
+            let OutputElement::Column(slot) = element else {
+                return None;
+            };
+            keys.push(by_name_key(&slot.name, dialect));
+        }
+        let count = keys.len();
+        keys.sort();
+        keys.dedup();
+        (keys.len() == count).then_some(keys)
+    };
+    matches!((names(left), names(right)), (Some(left), Some(right)) if left == right)
+}
+
+/// The key two names of a `BY NAME` operation are matched by. `DuckDB` folds
+/// only ASCII letters, quoted or not.
+fn by_name_key(name: &crate::Ident, dialect: Dialect) -> String {
+    match dialect {
+        Dialect::DuckDb => name.value.to_ascii_lowercase(),
+        _ => name.column_key(dialect).into_owned(),
+    }
+}
+
 fn build_set_operation_model(
     kind: crate::SetOperationKind,
     recursive: bool,
+    by_name_aligned: bool,
     left: &OutputModel,
     right: Option<&OutputModel>,
 ) -> SetOperationModel {
@@ -860,6 +899,21 @@ fn build_set_operation_model(
         match element {
             OutputElement::Column(left_slot) => {
                 let mut matches = Vec::new();
+                if by_name_aligned && let Some(right) = right {
+                    let key = by_name_key(&left_slot.name, right.names.dialect);
+                    matches.extend(right.elements.iter().filter_map(|element| match element {
+                        OutputElement::Column(right_slot)
+                            if by_name_key(&right_slot.name, right.names.dialect) == key =>
+                        {
+                            Some(SlotMatch {
+                                operand: crate::SetOperand::Right,
+                                output: OutputRef::Slot(right_slot.published()),
+                                kind: SlotMatchKind::Proven,
+                            })
+                        }
+                        _ => None,
+                    }));
+                }
                 if let Some(right) = right
                     && kind.correspondence == SetCorrespondence::Positional
                     && !recursive
