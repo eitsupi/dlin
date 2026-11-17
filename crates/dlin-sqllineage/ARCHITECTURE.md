@@ -409,8 +409,9 @@ it:
 
 The correspondence is proven only when both operands list their names, each
 once, without an unknown segment, and the two sets of names are equal under
-the dialect's rule for comparing column names (`DuckDB` folds only ASCII
-letters). Every other `BY NAME` operation, including names that differ, keeps
+the dialect's rule for comparing column names. `DuckDB` folds only ASCII
+letters, while the engine's shared key for its column names folds every
+letter, so a `DuckDB` operation with a name outside ASCII is not modelled. Every other `BY NAME` operation, including names that differ, keeps
 the values of the left operand and is `Unsupported(BY NAME set operation)`.
 
 Correspondence and dependency propagation are separate steps. `BY NAME` and its

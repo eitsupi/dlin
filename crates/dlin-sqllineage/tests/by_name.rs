@@ -428,6 +428,13 @@ fn by_name_forms_without_a_proven_correspondence_stay_unsupported() {
             Dialect::BigQuery,
             "SELECT a, a FROM left_t UNION ALL BY NAME SELECT a, a FROM right_t",
         ),
+        // DuckDB folds only ASCII letters, which the engine's shared name
+        // key does not follow.
+        (
+            Dialect::DuckDb,
+            "SELECT a AS \"Á\", b AS \"á\" FROM left_t UNION ALL BY NAME \
+             SELECT d AS \"á\", c AS \"Á\" FROM right_t",
+        ),
         // A star the catalog cannot expand.
         (
             Dialect::BigQuery,

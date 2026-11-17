@@ -851,7 +851,7 @@ fn same_listed_names(left: &OutputModel, right: &OutputModel, dialect: Dialect) 
             let OutputElement::Column(slot) = element else {
                 return None;
             };
-            keys.push(by_name_key(&slot.name, dialect));
+            keys.push(by_name_key(&slot.name, dialect)?);
         }
         let count = keys.len();
         keys.sort();
@@ -861,13 +861,13 @@ fn same_listed_names(left: &OutputModel, right: &OutputModel, dialect: Dialect) 
     matches!((names(left), names(right)), (Some(left), Some(right)) if left == right)
 }
 
-/// The key two names of a `BY NAME` operation are matched by. `DuckDB` folds
-/// only ASCII letters, quoted or not.
-fn by_name_key(name: &crate::Ident, dialect: Dialect) -> String {
-    match dialect {
-        Dialect::DuckDb => name.value.to_ascii_lowercase(),
-        _ => name.column_key(dialect).into_owned(),
-    }
+/// The key two names of a `BY NAME` operation are matched by: the dialect's
+/// key for column names, which every later lookup of the output uses too.
+/// `None` where that key is not the dialect's own rule: `DuckDB` folds only
+/// ASCII letters, while the shared key folds every letter.
+fn by_name_key(name: &crate::Ident, dialect: Dialect) -> Option<String> {
+    (dialect != Dialect::DuckDb || name.value.is_ascii())
+        .then(|| name.column_key(dialect).into_owned())
 }
 
 fn build_set_operation_model(
@@ -903,7 +903,8 @@ fn build_set_operation_model(
                     let key = by_name_key(&left_slot.name, right.names.dialect);
                     matches.extend(right.elements.iter().filter_map(|element| match element {
                         OutputElement::Column(right_slot)
-                            if by_name_key(&right_slot.name, right.names.dialect) == key =>
+                            if key.is_some()
+                                && by_name_key(&right_slot.name, right.names.dialect) == key =>
                         {
                             Some(SlotMatch {
                                 operand: crate::SetOperand::Right,

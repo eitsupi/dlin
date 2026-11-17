@@ -175,15 +175,23 @@ pub(super) fn apply_options(
             }
             if candidates.len() > listed {
                 let candidates: Rc<[RangeRef]> = candidates.into();
-                slot.value = ValueId::Uncertain {
-                    column: new.clone(),
-                    candidates: candidates.clone(),
-                };
+                // The ambiguity keeps why the other columns are unknown.
+                slot.value = ValueId::Merged(
+                    Box::new(ValueId::Uncertain {
+                        column: new.clone(),
+                        candidates: candidates.clone(),
+                    }),
+                    Box::new(ValueId::UnsupportedReasons {
+                        providers,
+                        column: old.clone(),
+                    }),
+                );
                 slot.candidate_ranges = candidates;
                 slot.origin = SlotOrigin::Defined;
             }
             continue;
         }
+        let (providers, ranges) = unknown_publishers(&elements, old, dialect);
         if providers.is_empty() {
             continue;
         }

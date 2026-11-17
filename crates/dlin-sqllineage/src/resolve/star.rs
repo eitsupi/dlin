@@ -231,6 +231,18 @@ impl Evaluator<'_, '_, '_> {
                 sources.extend(right_sources);
                 (sources, merge_transform(&left_transform, &right_transform))
             }
+            ValueId::UnsupportedReasons { providers, column } => {
+                let mut reasons = Vec::new();
+                for provider in providers {
+                    let sources = self.provider_sources(provider, column);
+                    unsupported_reasons(&sources.origins, &mut reasons);
+                }
+                let mut sources = Sources::default();
+                for what in reasons {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
+                }
+                (sources, TransformKind::Direct)
+            }
             ValueId::Uncertain { column, candidates } => (
                 Sources::one(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
                     column: column.clone(),

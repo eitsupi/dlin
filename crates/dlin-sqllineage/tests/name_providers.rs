@@ -428,3 +428,27 @@ fn a_renamed_listed_column_competes_with_another_relation_that_may_publish_the_o
         Lineage::Complete(vec![source("a", "id")])
     );
 }
+
+/// When the other provider of the old name is a construct the analysis does
+/// not model, the renamed column's ambiguity keeps that reason.
+#[test]
+fn a_renamed_listed_column_keeps_the_reason_of_an_unmodelled_competitor() {
+    let sql = "SELECT d.z FROM (SELECT * RENAME (a AS z) \
+               FROM (SELECT a FROM x) s, TABLE(FLATTEN(INPUT => PARSE_JSON('[1]'))) g) d";
+    let Lineage::Partial { known, unresolved } = lineage_in(sql, Dialect::Snowflake, &[]) else {
+        panic!("{sql}: expected a partial lineage");
+    };
+    assert!(known.is_empty(), "{sql}: {known:?}");
+    assert!(
+        unresolved
+            .iter()
+            .any(|reason| matches!(reason, Unresolved::Ambiguous { .. })),
+        "{sql}: {unresolved:?}"
+    );
+    assert!(
+        unresolved.contains(&Unresolved::Unsupported {
+            what: "table function"
+        }),
+        "{sql}: {unresolved:?}"
+    );
+}
