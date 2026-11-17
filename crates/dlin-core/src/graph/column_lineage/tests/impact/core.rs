@@ -198,6 +198,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
         compiled_code: sql.map(str::to_string),
         database: Some("warehouse".to_string()),
         schema: schema.map(str::to_string),
+        relation_name: None,
     };
 
     let manifest = Manifest {
@@ -326,6 +327,7 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -348,6 +350,7 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
                     ),
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -403,6 +406,7 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
                     compiled_code: None,
                     database: Some("warehouse".to_string()),
                     schema: Some("raw".to_string()),
+                    relation_name: None,
                 },
             ),
             (
@@ -423,6 +427,7 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
                     compiled_code: Some("select orders.id as id".to_string()),
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -478,6 +483,7 @@ fn test_column_impact_does_not_attribute_ambiguous_bare_source() {
         compiled_code: Some(compiled_code.to_string()),
         database: database.map(str::to_string),
         schema: schema.map(str::to_string),
+        relation_name: None,
     };
 
     let orders_a_id = "model.pkg.orders_a";

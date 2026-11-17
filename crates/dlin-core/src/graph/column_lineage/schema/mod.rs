@@ -150,12 +150,13 @@ pub(super) fn compute_semantic_digest(
 }
 
 fn append_node_local_parts(parts: &mut Vec<String>, node: &crate::parser::manifest::ManifestNode) {
-    parts.push(format!("relation:{}", node.relation_name()));
+    parts.push(format!("relation:{}", node.identifier()));
     parts.push(format!("resource_type:{}", node.resource_type));
     parts.push(format!("materialized:{:?}", node.config.materialized));
     parts.push("trace_boundary_policy:snapshot_unsupported_seed_external".to_string());
     parts.push(format!("database:{:?}", node.database));
     parts.push(format!("schema:{:?}", node.schema));
+    parts.push(format!("relation_name:{:?}", node.relation_name));
     append_columns(parts, &node.columns);
     // Absent, `enforced: false` and `enforced: true` give different coverage
     // bases, so the three states stay distinct.
@@ -178,6 +179,7 @@ fn append_source_local_parts(
     parts.push(format!("identifier:{:?}", source.identifier));
     parts.push(format!("database:{:?}", source.database));
     parts.push(format!("schema:{:?}", source.schema));
+    parts.push(format!("relation_name:{:?}", source.relation_name));
     append_columns(parts, &source.columns);
 }
 

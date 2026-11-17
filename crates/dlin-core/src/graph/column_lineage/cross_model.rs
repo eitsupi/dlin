@@ -92,10 +92,11 @@ fn compute_cross_model_inner(
                     unique_id: Some(root_uid.clone()),
                     name: root_node.name.clone(),
                     kind: TraceResourceKind::Model,
-                    relation: RelationRef::from_manifest(
+                    relation: RelationRef::from_manifest_resource(
+                        root_node.relation_name.as_deref(),
                         root_node.database.as_deref(),
                         root_node.schema.as_deref(),
-                        root_node.relation_name(),
+                        root_node.identifier(),
                     ),
                     column: slot.name.ident().cloned(),
                     candidates: Vec::new(),
@@ -321,10 +322,11 @@ pub(super) fn upstream_resource_candidates(
                     unique_id: node.unique_id.clone(),
                     name: node.name.clone(),
                     kind,
-                    relation: RelationRef::from_manifest(
+                    relation: RelationRef::from_manifest_resource(
+                        node.relation_name.as_deref(),
                         node.database.as_deref(),
                         node.schema.as_deref(),
-                        node.relation_name(),
+                        node.identifier(),
                     ),
                 },
                 reason,
@@ -335,7 +337,8 @@ pub(super) fn upstream_resource_candidates(
                     unique_id: source.unique_id.clone(),
                     name: format!("{}.{}", source.source_name, source.name),
                     kind: TraceResourceKind::Source,
-                    relation: RelationRef::from_manifest(
+                    relation: RelationRef::from_manifest_resource(
+                        source.relation_name.as_deref(),
                         source.database.as_deref(),
                         source.schema.as_deref(),
                         source.identifier.as_deref().unwrap_or(&source.name),

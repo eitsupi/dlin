@@ -81,6 +81,7 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
             compiled_code: None, // no compiled SQL
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 

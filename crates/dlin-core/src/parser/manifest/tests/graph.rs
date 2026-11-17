@@ -26,6 +26,7 @@ fn test_build_graph_from_minimal_manifest() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::from([(
@@ -42,6 +43,7 @@ fn test_build_graph_from_minimal_manifest() {
                 database: None,
                 schema: None,
                 identifier: None,
+                relation_name: None,
             },
         )]),
         ..Default::default()
@@ -95,6 +97,7 @@ fn test_build_graph_preserves_canonical_manifest_ids_and_ambiguous_aliases() {
                 compiled_code: Some(format!("select '{package}'")),
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         );
     }
@@ -119,6 +122,7 @@ fn test_build_graph_preserves_canonical_manifest_ids_and_ambiguous_aliases() {
             compiled_code: None,
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -183,6 +187,7 @@ fn test_build_graph_with_exposures() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),
@@ -307,6 +312,7 @@ fn test_build_graph_with_seeds_and_snapshots() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -330,6 +336,7 @@ fn test_build_graph_with_seeds_and_snapshots() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -373,6 +380,7 @@ fn test_build_graph_with_tests() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -393,6 +401,7 @@ fn test_build_graph_with_tests() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -452,6 +461,7 @@ fn test_build_graph_missing_dependency() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),
@@ -487,6 +497,7 @@ fn test_build_graph_optional_fields() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),
@@ -575,6 +586,7 @@ fn test_original_file_path_preferred_over_path() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),
@@ -608,6 +620,7 @@ fn test_build_graph_unknown_resource_is_not_a_model() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),
@@ -646,6 +659,7 @@ fn test_build_graph_complex_chain() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -666,6 +680,7 @@ fn test_build_graph_complex_chain() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -694,6 +709,7 @@ fn test_build_graph_complex_chain() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -712,6 +728,7 @@ fn test_build_graph_complex_chain() {
                     database: None,
                     schema: None,
                     identifier: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -728,6 +745,7 @@ fn test_build_graph_complex_chain() {
                     database: None,
                     schema: None,
                     identifier: None,
+                    relation_name: None,
                 },
             ),
         ]),

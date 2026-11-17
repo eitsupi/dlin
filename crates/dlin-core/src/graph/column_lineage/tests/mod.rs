@@ -43,6 +43,7 @@ fn make_test_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -74,6 +75,7 @@ fn make_test_manifest() -> Manifest {
             compiled_code: Some("select o.order_id, o.customer_id, p.amount as total_amount from stg_orders o left join stg_payments p on o.order_id = p.order_id".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         });
 
     // stg_payments (upstream, for schema)
@@ -106,6 +108,7 @@ fn make_test_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -135,6 +138,7 @@ fn make_test_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -175,6 +179,7 @@ fn make_cross_model_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -203,6 +208,7 @@ fn make_cross_model_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -238,6 +244,7 @@ fn make_cross_model_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -273,6 +280,7 @@ fn make_cross_model_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -318,6 +326,7 @@ fn make_cross_model_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -356,6 +365,7 @@ fn make_cross_model_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -397,6 +407,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             compiled_code: Some("select customer_id from raw_customers".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -429,6 +440,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             compiled_code: Some("select customer_id from stg_orders".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -461,6 +473,7 @@ fn make_duplicate_name_manifest() -> Manifest {
             compiled_code: Some("select customer_id from stg_orders".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -551,6 +564,7 @@ fn make_diamond_manifest() -> Manifest {
             compiled_code: Some("select x, y from source_table".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -583,6 +597,7 @@ fn make_diamond_manifest() -> Manifest {
             compiled_code: Some("select x, y from raw_data".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -613,6 +628,7 @@ fn make_diamond_manifest() -> Manifest {
             compiled_code: Some("select x from shared".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -643,6 +659,7 @@ fn make_diamond_manifest() -> Manifest {
             compiled_code: Some("select y from shared".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -681,6 +698,7 @@ fn make_diamond_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -721,6 +739,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -762,6 +781,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -802,6 +822,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -842,6 +863,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -899,6 +921,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
         compiled_code: Some(sql.to_string()),
         database: None,
         schema: None,
+        relation_name: None,
     };
 
     nodes.insert(

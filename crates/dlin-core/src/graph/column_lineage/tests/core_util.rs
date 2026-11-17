@@ -417,6 +417,7 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
     let manifest = Manifest {

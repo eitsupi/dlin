@@ -44,6 +44,7 @@ fn source_free_union_manifest() -> Manifest {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
 
@@ -60,6 +61,7 @@ fn source_free_union_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         }
     }
 
@@ -145,6 +147,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
 
@@ -166,6 +169,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -237,6 +241,7 @@ fn bigquery_struct_field_cross_model_manifest() -> Manifest {
             compiled_code: Some(sql.to_string()),
             database: Some("p".to_string()),
             schema: Some("d".to_string()),
+            relation_name: None,
         }
     }
 
@@ -314,6 +319,7 @@ fn same_named_deep_error_manifest() -> Manifest {
             compiled_code: Some(sql.to_string()),
             database: Some("p".to_string()),
             schema: Some("d".to_string()),
+            relation_name: None,
         }
     }
 
@@ -420,6 +426,7 @@ fn duplicate_column_error_manifest() -> Manifest {
                 compiled_code: Some(sql.to_string()),
                 database: None,
                 schema: None,
+                relation_name: None,
             }
         };
 
@@ -495,6 +502,7 @@ fn bigquery_nested_star_manifest() -> Manifest {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
 
@@ -511,6 +519,7 @@ fn bigquery_nested_star_manifest() -> Manifest {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         }
     }
 

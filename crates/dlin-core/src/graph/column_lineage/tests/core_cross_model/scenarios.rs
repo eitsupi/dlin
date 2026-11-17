@@ -695,6 +695,7 @@ fn seed_is_an_external_relation_under_the_fixed_policy() {
         compiled_code: None,
         database: None,
         schema: None,
+        relation_name: None,
     };
     let reader = ManifestNode {
         unique_id: model_id.to_string(),
@@ -712,6 +713,7 @@ fn seed_is_an_external_relation_under_the_fixed_policy() {
         compiled_code: Some("select id from seed_orders".to_string()),
         database: None,
         schema: None,
+        relation_name: None,
     };
     let manifest = Manifest {
         nodes: HashMap::from([(seed_id.to_string(), seed), (model_id.to_string(), reader)]),
@@ -751,6 +753,7 @@ fn source_free_output_has_a_source_free_boundary_without_a_fake_source() {
             compiled_code: Some("select 1 as value".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
     let downstream_id = "model.proj.constant_downstream";
@@ -772,6 +775,7 @@ fn source_free_output_has_a_source_free_boundary_without_a_fake_source() {
             compiled_code: Some("select value from constant_model".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
     let result = compute_cross_model_column_lineage(
@@ -852,6 +856,7 @@ fn analysis_failure_two_hops_away_is_partial_without_a_fake_source() {
             compiled_code: Some("select order_id from orders".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
     let result = compute_cross_model_column_lineage(
@@ -988,6 +993,7 @@ fn model_cycle_is_kept_as_an_incomplete_boundary() {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
     let left = "model.proj.cycle_left";
@@ -1040,6 +1046,7 @@ fn model_level_cycle_does_not_cut_an_acyclic_slot_path() {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
     let left = "model.proj.slot_cycle_left";
@@ -1104,6 +1111,7 @@ fn diamond_can_visit_the_same_slot_in_separate_branches() {
             compiled_code: Some(sql.to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
     let shared = "model.proj.diamond_shared";
@@ -1374,4 +1382,84 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
         "model_path should retain the upstream output name ID: {:?}",
         source.model_path
     );
+}
+
+/// A ClickHouse manifest gives each resource a `database` and a `schema`, but
+/// the adapter renders relations with two parts, as `relation_name` records.
+/// The compiled SQL reads `analytics.stg_orders`, which is the upstream model,
+/// not an external relation of three parts that nothing matches.
+#[test]
+fn a_relation_rendered_with_fewer_parts_than_the_manifest_fields_is_the_upstream_model() {
+    let manifest = |sql: &str| -> Manifest {
+        serde_json::from_value(serde_json::json!({
+            "nodes": {
+                "model.proj.stg_orders": {
+                    "unique_id": "model.proj.stg_orders",
+                    "name": "stg_orders",
+                    "resource_type": "model",
+                    "database": "",
+                    "schema": "analytics",
+                    "relation_name": "`analytics`.`stg_orders`",
+                    "depends_on": {"nodes": ["source.proj.raw.orders"]},
+                    "compiled_code": "SELECT id AS order_id FROM `raw`.`orders`",
+                    "columns": {}
+                },
+                "model.proj.orders": {
+                    "unique_id": "model.proj.orders",
+                    "name": "orders",
+                    "resource_type": "model",
+                    "database": "",
+                    "schema": "analytics",
+                    "relation_name": "`analytics`.`orders`",
+                    "depends_on": {"nodes": ["model.proj.stg_orders"]},
+                    "compiled_code": sql,
+                    "columns": {}
+                }
+            },
+            "sources": {
+                "source.proj.raw.orders": {
+                    "unique_id": "source.proj.raw.orders",
+                    "name": "orders",
+                    "source_name": "raw",
+                    "resource_type": "source",
+                    "database": "",
+                    "schema": "raw",
+                    "identifier": "orders",
+                    "relation_name": "`raw`.`orders`",
+                    "columns": {}
+                }
+            }
+        }))
+        .expect("manifest parses")
+    };
+    // The upstream model also provides its columns to a star over it.
+    for sql in [
+        "SELECT order_id FROM `analytics`.`stg_orders`",
+        "SELECT * FROM `analytics`.`stg_orders`",
+    ] {
+        let result = compute_cross_model_column_lineage(
+            &manifest(sql),
+            "orders",
+            DlinDialect::ClickHouse,
+            &mut ColumnLineageCache::disabled(),
+        );
+        assert!(result.errors.is_empty(), "{sql}: {:?}", result.errors);
+        let [order_id] = result.slots() else {
+            panic!("{sql}: {:?}", result.slots());
+        };
+        assert_eq!(order_id.column(), "order_id", "{sql}");
+        let known = order_id.lineage.known();
+        assert_eq!(known.len(), 1, "{sql}: {known:?}");
+        assert_eq!(known[0].table, "raw.orders", "{sql}");
+        assert_eq!(known[0].column, "id", "{sql}");
+        assert_eq!(
+            known[0]
+                .model_path
+                .iter()
+                .map(|hop| hop.output.model.as_str())
+                .collect::<Vec<_>>(),
+            ["stg_orders"],
+            "{sql}"
+        );
+    }
 }
