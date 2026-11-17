@@ -1,7 +1,13 @@
 use dlin_sqllineage::*;
 
 fn one(sql: &str) -> StatementAnalysis {
-    Analyzer::new(Dialect::Generic)
+    one_in(sql, Dialect::Generic)
+}
+
+/// `TABLE name` is analyzed only in a dialect where the name means the same
+/// quoted or not, which the generic dialect's case folding rules out.
+fn one_in(sql: &str, dialect: Dialect) -> StatementAnalysis {
+    Analyzer::new(dialect)
         .analyze(sql)
         .expect("should parse")
         .into_single()
@@ -248,32 +254,30 @@ fn target_column_lists_absent_preserves_query_names_and_values_behavior() {
 }
 
 #[test]
-fn uneven_values_rows_keep_legacy_output_without_target_diagnostics() {
-    for sql in [
-        "INSERT INTO target (a) VALUES (1), (2, 3)",
-        "INSERT INTO target (a, b) VALUES (1, 2), (3)",
+fn uneven_values_rows_are_rejected() {
+    for (sql, first, row) in [
+        ("INSERT INTO target (a) VALUES (1), (2, 3)", 1, 2),
+        ("INSERT INTO target (a, b) VALUES (1, 2), (3)", 2, 1),
+        ("SELECT * FROM (VALUES (1), (2, 3)) AS v", 1, 2),
+        ("SELECT x FROM s UNION ALL VALUES (1, 2), (3)", 2, 1),
     ] {
         let result = one(sql);
+        assert!(result.output.columns.is_empty(), "{sql}");
         assert_eq!(
-            result.output,
-            Output {
-                columns: vec![],
-                shape: Shape::Closed,
-                evidence: Default::default(),
-            },
+            result.diagnostics,
+            [Diagnostic {
+                severity: Severity::Error,
+                kind: DiagnosticKind::ValuesRowArityMismatch { first, row },
+                location: None,
+            }],
             "{sql}"
-        );
-        assert!(
-            result.diagnostics.is_empty(),
-            "{sql}: {:?}",
-            result.diagnostics
         );
     }
 }
 
 #[test]
 fn unmodeled_table_source_is_not_a_known_zero_width() {
-    let result = one("INSERT INTO target (a) TABLE source");
+    let result = one_in("INSERT INTO target (a) TABLE source", Dialect::DuckDb);
     assert!(result.output.columns.is_empty());
     assert!(result.diagnostics.is_empty());
 }
@@ -295,7 +299,10 @@ fn values_keep_source_free_and_mixed_row_expression_transforms() {
 
 #[test]
 fn explicit_projection_width_is_known_over_an_unmodeled_cte_source() {
-    let result = one("INSERT INTO target (a) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c");
+    let result = one_in(
+        "INSERT INTO target (a) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.output.columns[0].name,
         OutputName::Explicit(Ident::unquoted("a"))
@@ -366,7 +373,7 @@ fn ordinary_set_operations_do_not_treat_unmodeled_branches_as_zero_width() {
     ]
     .into_iter()
     .filter_map(|sql| {
-        let result = one(sql);
+        let result = one_in(sql, Dialect::DuckDb);
         (!result.diagnostics.is_empty()).then(|| format!("{sql}: {:?}", result.diagnostics))
     })
     .collect::<Vec<_>>();
@@ -381,7 +388,10 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
         "INSERT INTO target (a) ",
         "INSERT INTO target (a, b) ",
     ] {
-        for branch in ["TABLE other_source", "VALUES (1)", "VALUES (1), (2, 3)"] {
+        for (branch, what) in [
+            ("VALUES (1)", "VALUES source"),
+            ("SELECT * FROM generate_series(1, 3)", "table function"),
+        ] {
             if prefix.contains("(a") && branch == "VALUES (1)" {
                 continue; // A uniform target-body VALUES branch is modeled.
             }
@@ -410,11 +420,7 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
                 );
             }
             assert_eq!(result.output.shape, Shape::Closed, "{sql}");
-            let mut expected_read = vec![source("s", "x").relation];
-            if branch.starts_with("TABLE") {
-                expected_read.insert(0, source("other_source", "x").relation);
-            }
-            assert_eq!(result.read, expected_read, "{sql}");
+            assert_eq!(result.read, vec![source("s", "x").relation], "{sql}");
             assert_eq!(result.output.columns.len(), 1, "{sql}");
             assert_eq!(
                 result.output.columns[0].name,
@@ -431,13 +437,7 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
                     known: vec![source("s", "x")],
                     unresolved: vec![
                         alignment_unknown(vec![], vec![SetOperand::Right]),
-                        Unresolved::Unsupported {
-                            what: if branch.starts_with("TABLE") {
-                                "TABLE source"
-                            } else {
-                                "VALUES source"
-                            },
-                        }
+                        Unresolved::Unsupported { what }
                     ],
                 },
                 "{sql}"
@@ -452,7 +452,7 @@ fn target_width_uses_the_left_model_through_output_plans() {
         "INSERT INTO target (a, b) WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
         "INSERT INTO target (a, b) (SELECT x FROM s UNION ALL TABLE public.other_source)",
     ] {
-        let result = one(sql);
+        let result = one_in(sql, Dialect::DuckDb);
         assert!(
             matches!(
                 result.diagnostics.as_slice(),
@@ -472,16 +472,22 @@ fn target_width_uses_the_left_model_through_output_plans() {
             OutputName::Explicit(Ident::unquoted("x"))
         );
     }
-    // The left side itself is unmodeled here; its target width stays unknown.
-    let result = one("INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v");
+    // The left side is a star over a relation without catalog columns; its
+    // target width stays unknown.
+    let result = one_in(
+        "INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v",
+        Dialect::DuckDb,
+    );
     assert!(result.diagnostics.is_empty());
     assert!(result.output.columns.is_empty());
 }
 
 #[test]
 fn nested_unknown_cte_does_not_hide_a_known_projection_width_mismatch() {
-    let result =
-        one("INSERT INTO target (a, b) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c");
+    let result = one_in(
+        "INSERT INTO target (a, b) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.output.columns[0].name,
         OutputName::Explicit(Ident::unquoted("x"))
@@ -502,12 +508,12 @@ fn nested_unknown_cte_does_not_hide_a_known_projection_width_mismatch() {
 #[test]
 fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
     for sql in [
-        "WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
-        "SELECT x FROM s UNION ALL (SELECT x FROM s UNION ALL TABLE public.other_source)",
+        "WITH c AS (SELECT 1) SELECT x FROM s UNION ALL VALUES (1)",
+        "SELECT x FROM s UNION ALL (SELECT x FROM s UNION ALL VALUES (1))",
         "SELECT x FROM s UNION ALL (WITH c AS (SELECT 1) SELECT x FROM s UNION ALL VALUES (1))",
-        "SELECT q.x FROM (SELECT x FROM s UNION ALL TABLE public.other_source) q",
-        "WITH q AS (SELECT x FROM s UNION ALL TABLE public.other_source) SELECT x FROM q",
-        "SELECT x, y FROM s UNION ALL TABLE public.other_source",
+        "SELECT q.x FROM (SELECT x FROM s UNION ALL VALUES (1)) q",
+        "WITH q AS (SELECT x FROM s UNION ALL VALUES (1)) SELECT x FROM q",
+        "SELECT x, y FROM s UNION ALL VALUES (1)",
     ] {
         let result = one(sql);
         assert!(
@@ -516,11 +522,6 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
             result.diagnostics
         );
         assert_eq!(result.output.shape, Shape::Closed, "{sql}");
-        let what = if sql.contains("TABLE") {
-            "TABLE source"
-        } else {
-            "VALUES source"
-        };
         for (index, column) in result.output.columns.iter().enumerate() {
             assert_eq!(
                 column.lineage,
@@ -528,7 +529,9 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
                     known: vec![source("s", if index == 0 { "x" } else { "y" })],
                     unresolved: vec![
                         alignment_unknown(vec![], vec![SetOperand::Right]),
-                        Unresolved::Unsupported { what }
+                        Unresolved::Unsupported {
+                            what: "VALUES source"
+                        }
                     ],
                 },
                 "{sql}"
@@ -539,95 +542,92 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
 }
 
 #[test]
-fn table_source_registers_read_without_fabricating_columns() {
-    let result = one("INSERT INTO target TABLE public.other_source");
-    assert_eq!(
-        result.read,
-        vec![Relation {
-            catalog: None,
-            schema: Some(Ident::unquoted("public")),
-            name: Ident::unquoted("other_source"),
-        }]
+fn table_source_reads_like_a_star_over_the_relation() {
+    let result = one_in(
+        "INSERT INTO target TABLE public.other_source",
+        Dialect::DuckDb,
     );
+    let relation = Relation {
+        catalog: None,
+        schema: Some(Ident::unquoted("public")),
+        name: Ident::unquoted("other_source"),
+    };
+    assert_eq!(result.read, vec![relation.clone()]);
     assert!(result.output.columns.is_empty());
-    assert_eq!(result.output.shape, Shape::Closed);
+    let Shape::Open { unexpanded } = &result.output.shape else {
+        panic!("a relation without catalog columns leaves the star open");
+    };
+    assert_eq!(unexpanded.len(), 1);
+    assert_eq!(unexpanded[0].relation, Some(relation));
     assert!(result.diagnostics.is_empty());
 }
 
 #[test]
 fn nested_unknown_branch_kinds_are_retained_without_tainting_unrelated_values() {
-    let result = one("SELECT x FROM s UNION ALL (TABLE public.t UNION ALL VALUES (1))");
+    let result = one_in(
+        "SELECT x FROM s UNION ALL (TABLE public.t UNION ALL VALUES (1))",
+        Dialect::PostgreSql,
+    );
     assert_eq!(
         result.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![source("s", "x")],
             unresolved: vec![
                 alignment_unknown(vec![], vec![SetOperand::Right]),
-                Unresolved::Unsupported {
-                    what: "TABLE source"
-                },
                 Unresolved::Unsupported {
                     what: "VALUES source"
                 },
             ],
         }
     );
-    let result = one("WITH q AS (SELECT x FROM s UNION ALL TABLE public.t) SELECT 1 FROM q");
+    let result = one("WITH q AS (SELECT x FROM s UNION ALL VALUES (1)) SELECT 1 FROM q");
     assert_eq!(result.output.columns[0].lineage, Lineage::Complete(vec![]));
 }
 
 #[test]
-fn table_cte_source_does_not_fabricate_a_physical_read() {
-    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE c");
+fn table_cte_source_reads_the_cte_columns() {
+    let result = one_in(
+        "WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE c",
+        Dialect::PostgreSql,
+    );
     assert_eq!(result.read, vec![source("s", "x").relation]);
     assert_eq!(
         result.output.columns[0].lineage,
-        Lineage::Partial {
-            known: vec![source("s", "x")],
-            unresolved: vec![
-                alignment_unknown(vec![], vec![SetOperand::Right]),
-                Unresolved::Unsupported {
-                    what: "TABLE source"
-                }
-            ],
-        }
+        Lineage::Complete(vec![source("s", "x")])
     );
 }
 
 #[test]
 fn unknown_left_branch_keeps_right_sources_as_candidates_without_publishing_names() {
-    for branch in ["TABLE public.t", "VALUES (1), (2, 3)"] {
-        for prefix in ["INSERT INTO target ", "INSERT INTO target (a) "] {
-            let result = one(&format!("{prefix}{branch} UNION ALL SELECT x FROM s"));
-            assert!(result.diagnostics.is_empty());
-            assert!(result.output.columns.is_empty());
-            let Shape::Open { unexpanded } = &result.output.shape else {
-                panic!("an unmodeled left operand cannot enumerate the output");
-            };
-            assert_eq!(unexpanded.len(), 1);
-            let Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
-                panic!("unmodeled correspondence cannot be complete");
-            };
-            assert!(known.is_empty());
-            assert!(unresolved.contains(&alignment_unknown(
-                vec![source("s", "x")],
-                vec![SetOperand::Left]
-            )));
-            assert!(unresolved.contains(&Unresolved::Unsupported {
-                what: if branch.starts_with("TABLE") {
-                    "TABLE source"
-                } else {
-                    "VALUES source"
-                }
-            }));
-        }
+    for prefix in ["INSERT INTO target ", "INSERT INTO target (a) "] {
+        let result = one(&format!(
+            "{prefix}SELECT * FROM generate_series(1, 3) UNION ALL SELECT x FROM s"
+        ));
+        assert!(result.diagnostics.is_empty());
+        assert!(result.output.columns.is_empty());
+        let Shape::Open { unexpanded } = &result.output.shape else {
+            panic!("an unmodeled left operand cannot enumerate the output");
+        };
+        assert_eq!(unexpanded.len(), 1);
+        let Lineage::Partial { known, unresolved } = &unexpanded[0].lineage else {
+            panic!("unmodeled correspondence cannot be complete");
+        };
+        assert!(known.is_empty());
+        assert!(unresolved.contains(&alignment_unknown(
+            vec![source("s", "x")],
+            vec![SetOperand::Left]
+        )));
+        assert!(unresolved.contains(&Unresolved::Unsupported {
+            what: "table function"
+        }));
     }
 }
 
 #[test]
 fn a_named_read_of_an_unmodeled_left_operand_does_not_claim_right_sources() {
-    let result =
-        one("WITH q AS (TABLE public.other_source UNION ALL SELECT x FROM s) SELECT x FROM q");
+    let result = one(
+        "WITH q AS (SELECT * FROM generate_series(1, 3) UNION ALL SELECT x FROM s) SELECT x FROM q",
+    );
     let Lineage::Partial { known, unresolved } = &result.output.columns[0].lineage else {
         panic!("the name is not proven to be supplied by the right operand");
     };
@@ -637,15 +637,15 @@ fn a_named_read_of_an_unmodeled_left_operand_does_not_claim_right_sources() {
         vec![SetOperand::Left]
     )));
     assert!(unresolved.contains(&Unresolved::Unsupported {
-        what: "TABLE source"
+        what: "table function"
     }));
 }
 
 #[test]
 fn unknown_branch_marker_survives_unknown_star_merges() {
     for sql in [
-        "SELECT * FROM u UNION ALL (SELECT x FROM s UNION ALL TABLE public.t)",
-        "(SELECT x FROM s UNION ALL TABLE public.t) UNION ALL SELECT * FROM u",
+        "SELECT * FROM u UNION ALL (SELECT x FROM s UNION ALL VALUES (1))",
+        "(SELECT x FROM s UNION ALL VALUES (1)) UNION ALL SELECT * FROM u",
     ] {
         let result = one(sql);
         let unexpanded = match &result.output.shape {
@@ -668,7 +668,7 @@ fn unknown_branch_marker_survives_unknown_star_merges() {
         {
             assert!(
                 matches!(lineage, Lineage::Partial { unresolved, .. }
-                if unresolved.contains(&Unresolved::Unsupported { what: "TABLE source" })),
+                if unresolved.contains(&Unresolved::Unsupported { what: "VALUES source" })),
                 "{sql}: {lineage:?}"
             );
         }
@@ -677,7 +677,10 @@ fn unknown_branch_marker_survives_unknown_star_merges() {
 
 #[test]
 fn qualified_table_source_is_not_hidden_by_a_same_named_cte() {
-    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE public.c");
+    let result = one_in(
+        "WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE public.c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.read,
         vec![

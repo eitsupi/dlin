@@ -97,14 +97,18 @@ fn candidates(origins: &[Origin], result: &mut Vec<SourceColumn>) -> bool {
     complete
 }
 
+/// The alignment contribution of the right outputs `matches`, followed by the
+/// unsupported constructs that keep any of them from being known. Those are
+/// not the alignment's own uncertainty, so they are kept apart from it.
 fn alignment(
     operation: SetOperationKind,
     matches: &[SlotMatch],
     left_unknown: bool,
     cx: &mut EvalContext<'_, '_>,
-) -> Origin {
+) -> Sources {
     let mut possible_sources = Vec::new();
     let mut unknown_operands = Vec::new();
+    let mut unsupported = Vec::new();
     // The candidates rely on what decided each of them.
     let mut evidence = Evidence::default();
     if left_unknown {
@@ -114,6 +118,7 @@ fn alignment(
         match output_mapping(matched.output, cx) {
             Ok(Some(mapping)) => {
                 evidence.extend(&mapping.sources.all_evidence());
+                super::star::unsupported_reasons(&mapping.sources.origins, &mut unsupported);
                 if !candidates(&mapping.sources.origins, &mut possible_sources)
                     || matches!(matched.output, OutputRef::Segment(_))
                 {
@@ -123,14 +128,18 @@ fn alignment(
             Ok(None) | Err(Cut) => unknown_operands.push(matched.operand),
         }
     }
-    Origin::new(
+    let mut sources = Sources::one(Origin::new(
         ColumnOrigin::Unresolved(Unresolved::AlignmentUnknown {
             operation,
             possible_sources,
             unknown_operands,
         }),
         evidence,
-    )
+    ));
+    for what in unsupported {
+        sources.push(incomplete(what));
+    }
+    sources
 }
 
 fn append_reasons(sources: &mut Sources, model: &OutputModel) {
@@ -203,7 +212,7 @@ pub(super) fn evaluate_set_operation(
                         let right = output_mapping(proven.output, cx)?.ok_or(Cut)?;
                         merge_values(&mut mapping, &right);
                     } else {
-                        mapping.sources.push(alignment(
+                        mapping.sources.extend(alignment(
                             operation.kind,
                             &aligned.matches,
                             false,
@@ -256,7 +265,7 @@ pub(super) fn evaluate_set_operation(
                                     marker_sources(&right.sources.origins, &mut mapping.sources);
                                 }
                             }
-                            mapping.sources.push(alignment(
+                            mapping.sources.extend(alignment(
                                 operation.kind,
                                 &aligned.matches,
                                 true,
@@ -330,7 +339,7 @@ pub(super) fn set_operation_segment_sources(
         if operation.recursive {
             sources = sources.recursive();
         } else if right_supplies_values(operation) {
-            sources.push(alignment(operation.kind, &aligned.matches, true, cx));
+            sources.extend(alignment(operation.kind, &aligned.matches, true, cx));
         }
         sources.rely_on(&evidence);
     }

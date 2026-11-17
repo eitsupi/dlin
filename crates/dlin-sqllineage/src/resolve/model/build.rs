@@ -315,8 +315,14 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 .iter()
                 .any(|element| matches!(element, OutputElement::Unknown(_)))
         {
+            let reason = graph
+                .scopes
+                .unknown_output_reasons(scope)
+                .first()
+                .copied()
+                .unwrap_or("unknown output width");
             elements.push(OutputElement::Unknown(UnknownSegment::opaque(
-                OpaqueReason::UnknownWidth,
+                OpaqueReason::UnmodelledSource(reason),
             )));
         }
         if let Some(aliases) = graph.scopes.output_aliases(scope)
@@ -723,17 +729,30 @@ fn apply_output_aliases(
                 if possible_aliases.is_empty() {
                     renamed.push(OutputElement::Unknown(segment));
                 } else {
-                    segment.provider = UnknownProvider::Opaque(OpaqueReason::Unsupported(
-                        "column alias position unknown",
-                    ));
+                    // A source the analysis does not model stays the reason
+                    // for both the renamed and the remaining columns.
+                    let unmodelled = match segment.provider {
+                        UnknownProvider::Opaque(reason @ OpaqueReason::UnmodelledSource(_)) => {
+                            Some(reason)
+                        }
+                        _ => None,
+                    };
+                    if unmodelled.is_none() {
+                        segment.provider = UnknownProvider::Opaque(OpaqueReason::Unsupported(
+                            "column alias position unknown",
+                        ));
+                    }
                     let alias_names = possible_aliases;
                     let alias_range = segment.position_range;
-                    let alias_segment = opaque_alias_segment(
+                    let mut alias_segment = opaque_alias_segment(
                         alias_names,
                         "column alias position unknown",
                         &segment.structure,
                         alias_range,
                     );
+                    if let Some(reason) = unmodelled {
+                        alias_segment.provider = UnknownProvider::Opaque(reason);
+                    }
                     renamed.push(OutputElement::Unknown(segment));
                     renamed.push(OutputElement::Unknown(alias_segment));
                     invalidated_forwarding = true;

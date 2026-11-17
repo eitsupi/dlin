@@ -4,6 +4,8 @@ use sqlparser::ast::{
     WildcardAdditionalOptions,
 };
 
+use std::ops::ControlFlow;
+
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
@@ -48,7 +50,7 @@ impl LineageBuilder {
     }
 
     /// Process projection items — creates Output nodes and edges.
-    fn visit_projection(&mut self, items: &[SelectItem]) {
+    pub(crate) fn visit_projection(&mut self, items: &[SelectItem]) {
         for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
@@ -316,10 +318,23 @@ impl LineageBuilder {
                 with_ordinality,
                 ..
             } => {
-                if self.dialect == crate::Dialect::DuckDb
-                    && is_unnest_function(name, self.dialect)
-                    && let Some(args) = args
+                let unnest = self.dialect == crate::Dialect::DuckDb
+                    && is_unnest_function(name, self.dialect);
+                if let Some(args) = args
+                    && !unnest
                 {
+                    // A name with arguments is a table function, not a
+                    // relation: it reads nothing by its name.
+                    self.bind_unmodelled_factor(
+                        "table function",
+                        alias.as_ref(),
+                        last_name_part(name),
+                        ScopeKind::LateralDerivedTable,
+                        |builder| builder.scan_outermost_exprs(&args.args),
+                    );
+                    return;
+                }
+                if unnest && let Some(args) = args {
                     let dependencies = args
                         .args
                         .iter()
@@ -455,16 +470,252 @@ impl LineageBuilder {
                 self.reject(SemanticError::UnpivotExpression);
             }
 
-            TableFactor::TableFunction { .. }
-            | TableFactor::Function { .. }
-            | TableFactor::JsonTable { .. }
-            | TableFactor::OpenJsonTable { .. }
-            | TableFactor::Pivot { .. }
-            | TableFactor::Unpivot { .. }
-            | TableFactor::MatchRecognize { .. }
-            | TableFactor::XmlTable { .. }
-            | TableFactor::SemanticView { .. } => {}
+            // The output of these is not modelled. Each still binds its range
+            // variable, so its columns are not mistaken for those of another
+            // relation, and the relations its arguments read are recorded.
+            // The arguments are not taken as the value of any output column.
+            TableFactor::TableFunction { expr, alias } => {
+                self.bind_unmodelled_factor(
+                    "table function",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::LateralDerivedTable,
+                    |builder| builder.scan_outermost_exprs(expr),
+                );
+            }
+            TableFactor::Function {
+                name, args, alias, ..
+            } => {
+                self.bind_unmodelled_factor(
+                    "table function",
+                    alias.as_ref(),
+                    last_name_part(name),
+                    ScopeKind::LateralDerivedTable,
+                    |builder| builder.scan_outermost_exprs(args),
+                );
+            }
+            TableFactor::JsonTable {
+                json_expr,
+                columns,
+                alias,
+                ..
+            } => {
+                self.bind_unmodelled_factor(
+                    "JSON_TABLE",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::LateralDerivedTable,
+                    |builder| {
+                        builder.scan_outermost_exprs(json_expr);
+                        builder.scan_outermost_exprs(columns);
+                    },
+                );
+            }
+            TableFactor::OpenJsonTable {
+                json_expr,
+                columns,
+                alias,
+                ..
+            } => {
+                self.bind_unmodelled_factor(
+                    "OPENJSON",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::LateralDerivedTable,
+                    |builder| {
+                        builder.scan_outermost_exprs(json_expr);
+                        builder.scan_outermost_exprs(columns);
+                    },
+                );
+            }
+            TableFactor::XmlTable {
+                namespaces,
+                row_expression,
+                passing,
+                columns,
+                alias,
+            } => {
+                self.bind_unmodelled_factor(
+                    "XMLTABLE",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::LateralDerivedTable,
+                    |builder| {
+                        builder.scan_outermost_exprs(namespaces);
+                        builder.scan_outermost_exprs(row_expression);
+                        builder.scan_outermost_exprs(passing);
+                        builder.scan_outermost_exprs(columns);
+                    },
+                );
+            }
+            // The semantic view is a relation the query reads. The dimensions,
+            // metrics and facts name its members, not columns of the query.
+            TableFactor::SemanticView {
+                name,
+                where_clause,
+                alias,
+                ..
+            } => {
+                let table_ref = Self::table_ref_from_object_name(name);
+                let default_name = table_ref.table.clone();
+                self.bind_unmodelled_factor(
+                    "semantic view",
+                    alias.as_ref(),
+                    Some(default_name),
+                    ScopeKind::DerivedTable,
+                    |builder| {
+                        builder.graph.tables.inputs.push(table_ref);
+                        builder.scan_outermost_exprs(where_clause);
+                    },
+                );
+            }
+            // These reshape the rows of the FROM item they wrap. The wrapped
+            // item is visited in a scope of its own, so its range variable is
+            // hidden behind the reshaped output, as it is in SQL.
+            TableFactor::Pivot {
+                table,
+                aggregate_functions,
+                value_column,
+                value_source,
+                default_on_null,
+                alias,
+            } => {
+                self.bind_unmodelled_factor(
+                    "PIVOT",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::JoinGroup,
+                    |builder| {
+                        builder.visit_table_factor_in(table, applied);
+                        builder.scan_outermost_exprs(aggregate_functions);
+                        builder.scan_outermost_exprs(value_column);
+                        builder.scan_outermost_exprs(value_source);
+                        builder.scan_outermost_exprs(default_on_null);
+                    },
+                );
+            }
+            TableFactor::Unpivot {
+                table,
+                value,
+                columns,
+                alias,
+                ..
+            } => {
+                self.bind_unmodelled_factor(
+                    "UNPIVOT",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::JoinGroup,
+                    |builder| {
+                        builder.visit_table_factor_in(table, applied);
+                        builder.scan_outermost_exprs(value);
+                        builder.scan_outermost_exprs(columns);
+                    },
+                );
+            }
+            TableFactor::MatchRecognize {
+                table,
+                partition_by,
+                order_by,
+                measures,
+                symbols,
+                alias,
+                ..
+            } => {
+                self.bind_unmodelled_factor(
+                    "MATCH_RECOGNIZE",
+                    alias.as_ref(),
+                    None,
+                    ScopeKind::JoinGroup,
+                    |builder| {
+                        builder.visit_table_factor_in(table, applied);
+                        builder.scan_outermost_exprs(partition_by);
+                        builder.scan_outermost_exprs(order_by);
+                        builder.scan_outermost_exprs(measures);
+                        builder.scan_outermost_exprs(symbols);
+                    },
+                );
+            }
         }
+    }
+
+    /// Bind a FROM item whose output columns the analysis does not model. It
+    /// gets a scope of its own, of the given kind, in which `visit_inputs`
+    /// records what the item reads. The scope publishes an output of unknown
+    /// width for `what`, which may carry any name. The item is bound under its
+    /// alias, or else under `default_name`, or else as an anonymous relation
+    /// that still takes part in unqualified lookups and stars.
+    fn bind_unmodelled_factor(
+        &mut self,
+        what: &'static str,
+        alias: Option<&sqlparser::ast::TableAlias>,
+        default_name: Option<Ident>,
+        kind: ScopeKind,
+        visit_inputs: impl FnOnce(&mut Self),
+    ) {
+        let scope = self.push_scope(kind);
+        visit_inputs(self);
+        self.graph.scopes.mark_unknown_output_width(scope, what);
+        self.pop_scope();
+        if let Some(alias) = alias {
+            self.set_scope_output_aliases(
+                scope,
+                alias
+                    .columns
+                    .iter()
+                    .map(|column| Ident::from_ast(&column.name))
+                    .collect(),
+            );
+        }
+        match alias
+            .map(|alias| Ident::from_ast(&alias.name))
+            .or(default_name)
+        {
+            Some(name) => self.add_binding(name, Binding::DerivedTable(scope)),
+            None => self
+                .graph
+                .scopes
+                .add_anonymous_derived(self.current_scope, scope),
+        }
+    }
+
+    /// Record the relations read by the outermost expressions and queries
+    /// within `node`, as for a filter. Nested expressions are covered by the
+    /// walk of the expression that contains them.
+    fn scan_outermost_exprs<V: sqlparser::ast::Visit>(&mut self, node: &V) {
+        struct Outermost<'b> {
+            builder: &'b mut LineageBuilder,
+            depth: usize,
+        }
+        impl sqlparser::ast::Visitor for Outermost<'_> {
+            type Break = ();
+            fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<()> {
+                if self.depth == 0 {
+                    self.builder.visit_subquery(ScopeKind::Subquery, query);
+                }
+                self.depth += 1;
+                ControlFlow::Continue(())
+            }
+            fn post_visit_query(&mut self, _: &sqlparser::ast::Query) -> ControlFlow<()> {
+                self.depth -= 1;
+                ControlFlow::Continue(())
+            }
+            fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+                if self.depth == 0 {
+                    self.builder.scan_expr_for_tables(expr);
+                }
+                self.depth += 1;
+                ControlFlow::Continue(())
+            }
+            fn post_visit_expr(&mut self, _: &Expr) -> ControlFlow<()> {
+                self.depth -= 1;
+                ControlFlow::Continue(())
+            }
+        }
+        let _ = node.visit(&mut Outermost {
+            builder: self,
+            depth: 0,
+        });
     }
 
     /// Bind `alias` to a scope that publishes `SELECT *` over the FROM items
@@ -591,6 +842,12 @@ impl LineageBuilder {
             .add_virtual_source(self.current_scope, columns);
         self.add_binding(alias_name, Binding::VirtualSource(virtual_id));
     }
+}
+
+/// The last part of a function name: the range variable PostgreSQL gives a
+/// function in FROM that has no alias.
+fn last_name_part(name: &ObjectName) -> Option<Ident> {
+    name.0.last()?.as_ident().map(Ident::from_ast)
 }
 
 fn is_unnest_function(name: &ObjectName, dialect: crate::Dialect) -> bool {

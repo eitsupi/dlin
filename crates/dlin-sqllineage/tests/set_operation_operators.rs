@@ -156,18 +156,18 @@ fn unbound_name_on_the_right_of_except_leaves_the_left_value_complete() {
 
 #[test]
 fn unsupported_sources_on_the_right_of_except_do_not_reach_the_values() {
-    for right in ["VALUES (1)", "TABLE t2"] {
-        let statement = analyze(&format!("SELECT a FROM t1 EXCEPT {right}"));
-        assert_complete(&statement, 0, &[source("t1", "a")]);
-        let union = analyze(&format!("SELECT a FROM t1 UNION {right}"));
-        let (_, unresolved) = partial(&union, 0);
-        assert!(
-            unresolved
-                .iter()
-                .any(|reason| matches!(reason, Unresolved::Unsupported { .. })),
-            "{right}"
-        );
-    }
+    let statement = analyze("SELECT a FROM t1 EXCEPT VALUES (1)");
+    assert_complete(&statement, 0, &[source("t1", "a")]);
+    let union = analyze("SELECT a FROM t1 UNION VALUES (1)");
+    let (_, unresolved) = partial(&union, 0);
+    assert!(
+        unresolved
+            .iter()
+            .any(|reason| matches!(reason, Unresolved::Unsupported { .. }))
+    );
+    // `TABLE t2` is a star over a relation without catalog columns.
+    let statement = analyze_in(Dialect::DuckDb, "SELECT a FROM t1 EXCEPT TABLE t2");
+    assert_complete(&statement, 0, &[source("t1", "a")]);
 }
 
 #[test]

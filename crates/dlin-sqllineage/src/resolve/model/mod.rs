@@ -118,8 +118,9 @@ pub(super) enum OpaqueReason {
     Expression(NodeId),
     /// A star whose qualifier names several relations.
     Ambiguous(NodeId),
-    /// A source whose columns are not modeled, such as VALUES.
-    UnknownWidth,
+    /// A source whose columns are not modeled, such as VALUES or a table
+    /// function, named by the construct. It may publish any name.
+    UnmodelledSource(&'static str),
     /// A shape whose correspondence is not implemented.
     Unsupported(&'static str),
     /// A scope that reads itself.
@@ -505,17 +506,7 @@ impl OutputModel {
         for &index in unlisted {
             match &self.elements[index] {
                 OutputElement::Unknown(segment)
-                    if (!matches!(segment.provider, UnknownProvider::Opaque(_))
-                        || matches!(
-                            segment.provider,
-                            UnknownProvider::Opaque(OpaqueReason::Unsupported(
-                                "BY NAME set operation"
-                                    | "column alias position unknown"
-                                    | "column alias count mismatch"
-                                    | "column alias output shape unknown"
-                                    | "column aliases unsupported by dialect"
-                            ))
-                        ))
+                    if segment.provider.publishes_names()
                         && segment.domain.admits(name, dialect) =>
                 {
                     matches.unknown.push(index);
@@ -628,42 +619,36 @@ fn unknown_publishers(
 #[cfg(test)]
 mod tests;
 
+impl OpaqueReason {
+    /// Whether a segment for this reason may publish a name that is not
+    /// listed, so a lookup of any admitted name has to consider it. A star
+    /// over a field path or an expression, an ambiguous star and a recursive
+    /// cut do not stand for the columns of one relation.
+    fn publishes_names(self) -> bool {
+        match self {
+            Self::UnmodelledSource(_) => true,
+            Self::Unsupported(what) => matches!(
+                what,
+                "BY NAME set operation"
+                    | "column alias position unknown"
+                    | "column alias count mismatch"
+                    | "column alias output shape unknown"
+                    | "column aliases unsupported by dialect"
+            ),
+            Self::FieldPath(_) | Self::Expression(_) | Self::Ambiguous(_) | Self::Recursive => {
+                false
+            }
+        }
+    }
+}
+
 impl UnknownProvider {
-    /// Whether an unknown name depends on unimplemented BY NAME
-    /// correspondence. Follow published segments without evaluating values,
-    /// so ambiguity can retain this reason without claiming any candidate.
-    pub(in crate::resolve) fn has_by_name_reason(
-        &self,
-        graph: &crate::graph::RawGraph,
-        arena: &slot::SlotArena,
-    ) -> bool {
-        let mut provider = self.clone();
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            provider = match provider {
-                Self::Relation(_) => return false,
-                Self::Opaque(OpaqueReason::Unsupported("BY NAME set operation")) => return true,
-                Self::Opaque(_) => return false,
-                Self::Segment { id, .. } => {
-                    if !seen.insert(id) {
-                        return false;
-                    }
-                    arena.segment(id).provider.clone()
-                }
-                Self::SetOperation { op, left } => {
-                    if graph
-                        .scopes
-                        .unknown_output_reasons(op)
-                        .contains(&"BY NAME set operation")
-                    {
-                        return true;
-                    }
-                    if !seen.insert(left) {
-                        return false;
-                    }
-                    arena.segment(left).provider.clone()
-                }
-            };
+    /// Whether a segment with this provider may publish a name it does not
+    /// list.
+    pub(super) fn publishes_names(&self) -> bool {
+        match self {
+            Self::Opaque(reason) => reason.publishes_names(),
+            Self::Relation(_) | Self::Segment { .. } | Self::SetOperation { .. } => true,
         }
     }
 }

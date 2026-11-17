@@ -205,24 +205,55 @@ impl LineageBuilder {
             SetExpr::Query(q) => {
                 self.visit_query_with_target(q, target_values);
             }
-            SetExpr::Values(values) if target_values => self.visit_target_values(values),
-            SetExpr::Values(_) => {
+            SetExpr::Values(values) if target_values => {
+                if self.check_values_rows(values) {
+                    self.visit_target_values(values);
+                }
+            }
+            // The columns of other VALUES lists are not modelled; their
+            // expressions still read relations.
+            SetExpr::Values(values) => {
+                if self.check_values_rows(values) {
+                    for expr in values.rows.iter().flat_map(|row| row.iter()) {
+                        self.scan_expr_for_tables(expr);
+                    }
+                }
                 self.graph
                     .scopes
                     .mark_unknown_output_width(self.current_scope, "VALUES source");
             }
+            // `TABLE t` is `SELECT * FROM t`. The parser keeps the name only as
+            // text, without its quoting. Where quoting could change what the
+            // name refers to, neither the relation it reads nor its output can
+            // be told, so the statement is refused.
             SetExpr::Table(table) => {
-                if let Some(table_name) = &table.table_name {
-                    let table_ref = crate::types::TableRef {
-                        catalog: None,
-                        schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
-                        table: crate::Ident::unquoted(table_name.as_str()),
-                    };
-                    self.bind_relation_reference(table_ref);
+                let Some(table_name) = &table.table_name else {
+                    self.graph
+                        .scopes
+                        .mark_unknown_output_width(self.current_scope, "TABLE source");
+                    return;
+                };
+                let modelled = table
+                    .schema_name
+                    .iter()
+                    .chain([table_name])
+                    .all(|part| quoting_is_irrelevant(part, self.dialect));
+                if !modelled {
+                    self.reject(SemanticError::QuotingDependentTableName);
+                    return;
                 }
-                self.graph
-                    .scopes
-                    .mark_unknown_output_width(self.current_scope, "TABLE source");
+                let table_ref = crate::types::TableRef {
+                    catalog: None,
+                    schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
+                    table: crate::Ident::unquoted(table_name.as_str()),
+                };
+                let range = table_ref.table.clone();
+                for binding in self.bind_relation_reference(table_ref) {
+                    self.add_binding(range.clone(), binding);
+                }
+                self.visit_projection(&[sqlparser::ast::SelectItem::Wildcard(
+                    sqlparser::ast::WildcardAdditionalOptions::default(),
+                )]);
             }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
@@ -234,16 +265,28 @@ impl LineageBuilder {
         }
     }
 
+    /// Reject a VALUES list whose rows have different widths, which no
+    /// dialect accepts. Returns whether the rows agree.
+    fn check_values_rows(&mut self, values: &sqlparser::ast::Values) -> bool {
+        let Some(first) = values.rows.first() else {
+            return true;
+        };
+        match values.rows.iter().find(|row| row.len() != first.len()) {
+            Some(row) => {
+                self.reject(SemanticError::ValuesRowArityMismatch {
+                    first: first.len(),
+                    row: row.len(),
+                });
+                false
+            }
+            None => true,
+        }
+    }
+
     fn visit_target_values(&mut self, values: &sqlparser::ast::Values) {
         let Some(first) = values.rows.first() else {
             return;
         };
-        if values.rows.iter().any(|row| row.len() != first.len()) {
-            self.graph
-                .scopes
-                .mark_unknown_output_width(self.current_scope, "VALUES source");
-            return;
-        }
         for index in 0..first.len() {
             let name = crate::Ident::unquoted(format!("column{}", index + 1));
             let intrinsic = values
@@ -279,4 +322,13 @@ impl LineageBuilder {
             );
         }
     }
+}
+
+/// Whether the dialect compares a name part spelled `text` the same way
+/// whether or not it is quoted, as a relation name and as a CTE name.
+fn quoting_is_irrelevant(text: &str, dialect: crate::Dialect) -> bool {
+    let unquoted = crate::Ident::unquoted(text);
+    let quoted = crate::Ident::quoted(text, crate::Quote::Double);
+    unquoted.column_key(dialect) == quoted.column_key(dialect)
+        && unquoted.relation_key(dialect) == quoted.relation_key(dialect)
 }

@@ -511,7 +511,33 @@ same name too; selecting the virtual column by its qualifier avoids that
 ambiguity. An inner clause that proves it provides a name takes precedence over
 an outer virtual column.
 
-Cases: Z3, Z4, U1, U2, U3, U4, R1, R2, R3, R4, V1, V2.
+A FROM item whose output columns are not modelled still binds its range
+variable: a table function (a function name with arguments is never a relation
+that is read), `JSON_TABLE`, `OPENJSON`, `XMLTABLE`, a semantic view, a `VALUES`
+list, and the wrappers `PIVOT`, `UNPIVOT` and `MATCH_RECOGNIZE`. Its output is
+one unknown segment that may carry any name, with the construct as its
+`Unsupported` reason. A column read through it is unresolved with that reason.
+An unqualified name it may carry is not settled on another relation of the FROM
+clause; the ambiguity keeps the reason. A star over it stays open. The
+relations its arguments read are recorded, but the arguments are not the value
+of any output column. A wrapper hides the FROM item it reshapes, whose range
+variable is no longer visible. A function without an alias is named after the
+last part of its name, as in PostgreSQL. An item without any name still takes
+part in unqualified lookups and stars (U5, U6). Through a set operation, the
+reason of each operand that supplies values is kept next to the alignment
+contribution; the right operand of `EXCEPT` supplies none.
+
+`TABLE t` is `SELECT * FROM t` (U3). The parser keeps the name of a `TABLE`
+query without its quoting. Where quoting would change what the name refers to
+in the dialect, as for `"T"` in PostgreSQL or any lower case name in Snowflake
+or the generic dialect, neither the relation it reads nor its output can be
+told. The statement is refused with an unsupported-syntax diagnostic, rather
+than reporting a read of a relation the name may not denote.
+
+A `VALUES` list whose rows have different widths is rejected by every dialect.
+It is a failed input with a diagnostic, not an output of unknown width (U7).
+
+Cases: Z3, Z4, U1, U2, U3, U4, U5, U6, U7, R1, R2, R3, R4, V1, V2.
 
 ## 9. Invariants and their preconditions
 
@@ -668,8 +694,11 @@ table in section 1 states.
 | --- | --- | --- | --- | --- |
 | U1 | DuckDB | `SELECT t.id, list_transform(t.items, x -> x + t.bias) AS xs FROM t` | none, lambda unsupported | `id` = `C[t.id]`, `xs` = `P[[t.items]; [Unsupported(Lambda)]]`, Closed. The unsupported construct does not affect `id` |
 | U2 | PostgreSQL | `SELECT * FROM t` | no catalog | Open with `BehindStar(t)`. Not `Unsupported` |
-| U3 | PostgreSQL | `SELECT x FROM s UNION ALL TABLE t` | none, before `TABLE` is modelled | Keeps the known `s.x` and adds `Unsupported(TableSource)`. `t` is included among the relations read. Once `TABLE t` is modelled like `SELECT * FROM t`, the unsupported marker goes away and the unknown-star reason applies when there is no catalog |
+| U3 | PostgreSQL | `SELECT x FROM s UNION ALL TABLE t` | none | `TABLE t` is `SELECT * FROM t`. Keeps the known `s.x` and adds the alignment reason of the unknown star over `t`, not `Unsupported`. `t` is included among the relations read |
 | U4 | PostgreSQL | `SELECT (` | none | Parse failure. Not a successful empty output and not `C[]` |
+| U5 | PostgreSQL | `SELECT j.z, x FROM t, JSON_TABLE(t.y, '$' COLUMNS (z INT PATH '$.z')) AS j` | `t(x, y)`, exhaustive | `z` = `P[[]; [Unsupported(JSON_TABLE)]]`. `x` = `P[[]; [Ambiguous(t, j), Unsupported(JSON_TABLE)]]`, because `j` may carry `x`. Closed. `t` is read; `t.y` is not in the value lineage |
+| U6 | PostgreSQL | `SELECT * FROM t, LATERAL (VALUES (t.x)) AS j` | `t(x, y)`, exhaustive | `x` = `C[t.x]`, `y` = `C[t.y]`, then an unknown segment with `Unsupported(VALUES)`. Open, not Closed with the segment dropped |
+| U7 | PostgreSQL | `SELECT * FROM (VALUES (1), (2, 3)) AS v` | none | Failure with a `VALUES` row arity diagnostic. Not a successful empty output |
 
 ### Invariants
 

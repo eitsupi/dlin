@@ -175,6 +175,13 @@ fn semantic_error(statement: &sqllineage::StatementAnalysis) -> Option<Statement
                     ),
                 ))
             }
+            DiagnosticKind::ValuesRowArityMismatch { first, row } => Some(StatementFailure::new(
+                ColumnLineageErrorKind::ParseFailure,
+                format!(
+                    "SQL parse error: VALUES row arity mismatch: the first row has {first} \
+                     columns, another row has {row} columns"
+                ),
+            )),
             DiagnosticKind::TargetColumnCountMismatch { target, source } => {
                 Some(StatementFailure::new(
                     ColumnLineageErrorKind::ParseFailure,
