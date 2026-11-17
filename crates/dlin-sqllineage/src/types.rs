@@ -387,6 +387,8 @@ pub(crate) enum SemanticError {
     PipeOperators,
     /// `UNPIVOT` applied to an expression rather than a relation.
     UnpivotExpression,
+    /// A row of a `VALUES` list has a different width than the first row.
+    ValuesRowArityMismatch { first: usize, row: usize },
 }
 
 impl fmt::Display for SemanticError {
@@ -398,6 +400,10 @@ impl fmt::Display for SemanticError {
             ),
             Self::PipeOperators => f.write_str("pipe operators are not supported"),
             Self::UnpivotExpression => f.write_str("UNPIVOT on an expression is not supported"),
+            Self::ValuesRowArityMismatch { first, row } => write!(
+                f,
+                "VALUES row arity mismatch: the first row has {first} columns, another row has {row} columns"
+            ),
         }
     }
 }

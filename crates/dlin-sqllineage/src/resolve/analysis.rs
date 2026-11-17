@@ -408,6 +408,12 @@ pub(crate) fn semantic_failure(
         SemanticError::UnpivotExpression => DiagnosticKind::UnsupportedSyntax {
             what: "UNPIVOT on an expression",
         },
+        SemanticError::ValuesRowArityMismatch { first, row } => {
+            DiagnosticKind::ValuesRowArityMismatch {
+                first: *first,
+                row: *row,
+            }
+        }
     };
     sort_dedup_by_key(&mut read, |relation| relation_key(relation, dialect));
     diagnostics.insert(

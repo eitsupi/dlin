@@ -178,7 +178,7 @@ impl InputModel {
     fn standing(
         &self,
         name: &Ident,
-        by_name: impl Fn(&super::UnknownProvider) -> bool,
+        unsupported: impl Fn(&super::UnknownProvider) -> Option<&'static str>,
     ) -> Standing {
         let elements = &self.model.elements;
         match self.model.choose(name) {
@@ -214,9 +214,9 @@ impl InputModel {
                                 let OutputElement::Unknown(segment) = &elements[index] else {
                                     return None;
                                 };
-                                by_name(&segment.provider).then(|| ValueId::Named {
+                                unsupported(&segment.provider).map(|what| ValueId::Named {
                                     providers: vec![super::UnknownProvider::Opaque(
-                                        OpaqueReason::Unsupported("BY NAME set operation"),
+                                        OpaqueReason::Unsupported(what),
                                     )],
                                     column: name.clone(),
                                 })
@@ -506,7 +506,7 @@ impl OutputModels<'_, '_, '_> {
                         let input = self.input(env);
                         evidence.extend(&input.model.schema);
                         input.standing(name, |provider| {
-                            provider.has_by_name_reason(self.graph, &self.store.arena)
+                            provider.unsupported_reason(self.graph, &self.store.arena)
                         })
                     }
                 };
@@ -517,7 +517,7 @@ impl OutputModels<'_, '_, '_> {
                 evidence.extend(&input.model.schema);
                 (
                     input.standing(name, |provider| {
-                        provider.has_by_name_reason(self.graph, &self.store.arena)
+                        provider.unsupported_reason(self.graph, &self.store.arena)
                     }),
                     InputLookup::Absent,
                 )

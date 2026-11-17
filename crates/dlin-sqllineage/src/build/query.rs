@@ -205,8 +205,19 @@ impl LineageBuilder {
             SetExpr::Query(q) => {
                 self.visit_query_with_target(q, target_values);
             }
-            SetExpr::Values(values) if target_values => self.visit_target_values(values),
-            SetExpr::Values(_) => {
+            SetExpr::Values(values) if target_values => {
+                if self.check_values_rows(values) {
+                    self.visit_target_values(values);
+                }
+            }
+            // The columns of other VALUES lists are not modelled; their
+            // expressions still read relations.
+            SetExpr::Values(values) => {
+                if self.check_values_rows(values) {
+                    for expr in values.rows.iter().flat_map(|row| row.iter()) {
+                        self.scan_expr_for_tables(expr);
+                    }
+                }
                 self.graph
                     .scopes
                     .mark_unknown_output_width(self.current_scope, "VALUES source");
@@ -243,16 +254,28 @@ impl LineageBuilder {
         }
     }
 
+    /// Reject a VALUES list whose rows have different widths, which no
+    /// dialect accepts. Returns whether the rows agree.
+    fn check_values_rows(&mut self, values: &sqlparser::ast::Values) -> bool {
+        let Some(first) = values.rows.first() else {
+            return true;
+        };
+        match values.rows.iter().find(|row| row.len() != first.len()) {
+            Some(row) => {
+                self.reject(SemanticError::ValuesRowArityMismatch {
+                    first: first.len(),
+                    row: row.len(),
+                });
+                false
+            }
+            None => true,
+        }
+    }
+
     fn visit_target_values(&mut self, values: &sqlparser::ast::Values) {
         let Some(first) = values.rows.first() else {
             return;
         };
-        if values.rows.iter().any(|row| row.len() != first.len()) {
-            self.graph
-                .scopes
-                .mark_unknown_output_width(self.current_scope, "VALUES source");
-            return;
-        }
         for index in 0..first.len() {
             let name = crate::Ident::unquoted(format!("column{}", index + 1));
             let intrinsic = values

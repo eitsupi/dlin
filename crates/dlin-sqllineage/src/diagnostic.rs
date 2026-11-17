@@ -72,6 +72,13 @@ pub enum DiagnosticKind {
         /// Number of columns in the right operand.
         right: usize,
     },
+    /// The rows of a `VALUES` list have different widths.
+    ValuesRowArityMismatch {
+        /// Number of columns in the first row.
+        first: usize,
+        /// Number of columns in the first row that differs from it.
+        row: usize,
+    },
     /// A target column list and its source have different output arities.
     TargetColumnCountMismatch {
         /// Number of columns in the target list.
@@ -107,6 +114,7 @@ impl DiagnosticKind {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::SetOperationArityMismatch { .. } => "SET_OPERATION_ARITY_MISMATCH",
+            Self::ValuesRowArityMismatch { .. } => "VALUES_ROW_ARITY_MISMATCH",
             Self::TargetColumnCountMismatch { .. } => "TARGET_COLUMN_COUNT_MISMATCH",
             Self::UnexpectedCycle => "UNEXPECTED_CYCLE",
             Self::EmptyProjection => "EMPTY_PROJECTION",
@@ -126,6 +134,10 @@ mod tests {
             (
                 DiagnosticKind::SetOperationArityMismatch { left: 1, right: 2 },
                 "SET_OPERATION_ARITY_MISMATCH",
+            ),
+            (
+                DiagnosticKind::ValuesRowArityMismatch { first: 1, row: 2 },
+                "VALUES_ROW_ARITY_MISMATCH",
             ),
             (
                 DiagnosticKind::TargetColumnCountMismatch {

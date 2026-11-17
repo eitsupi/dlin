@@ -356,10 +356,10 @@ impl Evaluator<'_, '_, '_> {
                 // The value is not known, but what would produce it is: an
                 // aggregate over an ambiguous column is still an aggregation.
                 let mut transform = TransformKind::Direct;
-                let mut by_name = false;
+                let mut reasons = Vec::new();
                 for value in &values {
                     let (sources, _, listed) = self.read_value(value, name);
-                    by_name |= has_by_name_reason(&sources.origins);
+                    unsupported_reasons(&sources.origins, &mut reasons);
                     transform = merge_transform(&transform, &listed);
                 }
                 let origin = if typed {
@@ -384,10 +384,8 @@ impl Evaluator<'_, '_, '_> {
                     }
                 };
                 let mut sources = Sources::one(origin);
-                if by_name {
-                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
-                        what: "BY NAME set operation",
-                    }));
+                for what in reasons {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
                 }
                 Some((sources, false, transform))
             }
@@ -429,14 +427,23 @@ impl Evaluator<'_, '_, '_> {
                     ));
                 }
                 let mut transform = TransformKind::Direct;
-                let mut by_name = model.unknown_reasons.contains(&"BY NAME set operation")
-                    || model.matches(name).unknown.iter().any(|&index| {
-                        matches!(&model.elements[index], OutputElement::Unknown(segment)
-                            if segment.provider.has_by_name_reason(self.cx.graph, &self.cx.mapping_cache.models.arena))
-                    });
+                let mut reasons = Vec::new();
+                if model.unknown_reasons.contains(&"BY NAME set operation") {
+                    reasons.push("BY NAME set operation");
+                }
+                for &index in &model.matches(name).unknown {
+                    if let OutputElement::Unknown(segment) = &model.elements[index]
+                        && let Some(what) = segment
+                            .provider
+                            .unsupported_reason(self.cx.graph, &self.cx.mapping_cache.models.arena)
+                        && !reasons.contains(&what)
+                    {
+                        reasons.push(what);
+                    }
+                }
                 for &index in &ambiguity.listed {
                     let (sources, _, listed) = self.slot_read(listed_slot(model, index));
-                    by_name |= has_by_name_reason(&sources.origins);
+                    unsupported_reasons(&sources.origins, &mut reasons);
                     transform = merge_transform(&transform, &listed);
                 }
                 let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
@@ -444,10 +451,8 @@ impl Evaluator<'_, '_, '_> {
                     candidates,
                 });
                 let mut sources = Sources::one(ambiguous);
-                if by_name {
-                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported {
-                        what: "BY NAME set operation",
-                    }));
+                for what in reasons {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
                 }
                 return Some((sources, false, transform));
             }
@@ -494,13 +499,15 @@ impl Evaluator<'_, '_, '_> {
                 | OpaqueReason::Expression(star)
                 | OpaqueReason::Ambiguous(star)),
             ) => Some(self.opaque_star(*star, *reason)),
-            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
+            UnknownProvider::Opaque(
+                OpaqueReason::Unsupported(what) | OpaqueReason::UnmodelledSource(what),
+            ) => {
                 let mut mapping = cut_segment();
                 mapping.sources =
                     Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
                 Some(mapping)
             }
-            UnknownProvider::Opaque(OpaqueReason::UnknownWidth | OpaqueReason::Recursive) => None,
+            UnknownProvider::Opaque(OpaqueReason::Recursive) => None,
         };
         if let Some(mapping) = &mut mapping
             && !matches!(position, crate::types::StarPosition::Inferred)
@@ -612,9 +619,9 @@ impl Evaluator<'_, '_, '_> {
             UnknownProvider::SetOperation { op, left } => {
                 super::set_operation::set_operation_segment_sources(*op, *left, column, self.cx)
             }
-            UnknownProvider::Opaque(OpaqueReason::Unsupported(what)) => {
-                Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
-            }
+            UnknownProvider::Opaque(
+                OpaqueReason::Unsupported(what) | OpaqueReason::UnmodelledSource(what),
+            ) => Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what })),
             // What an opaque segment provides is not known: a value read
             // through it is unresolved, never source-free.
             UnknownProvider::Opaque(OpaqueReason::Recursive) => {
@@ -623,8 +630,7 @@ impl Evaluator<'_, '_, '_> {
             UnknownProvider::Opaque(
                 OpaqueReason::FieldPath(_)
                 | OpaqueReason::Expression(_)
-                | OpaqueReason::Ambiguous(_)
-                | OpaqueReason::UnknownWidth,
+                | OpaqueReason::Ambiguous(_),
             ) => Sources::one(ColumnOrigin::UnknownStar),
         }
     }
@@ -658,14 +664,21 @@ impl Evaluator<'_, '_, '_> {
     }
 }
 
-/// Ambiguity discards possible value sources, but keeps the reason that a
-/// candidate's set-operation correspondence could not be evaluated.
-fn has_by_name_reason(sources: &[Origin]) -> bool {
-    sources.iter().any(|source| match &source.kind {
-        ColumnOrigin::Unresolved(Unresolved::Unsupported {
-            what: "BY NAME set operation",
-        }) => true,
-        ColumnOrigin::Recursive { base_sources } => has_by_name_reason(base_sources),
-        _ => false,
-    })
+/// Ambiguity discards possible value sources, but keeps the reasons that a
+/// candidate's value could not be evaluated: a set-operation correspondence
+/// or a source the analysis does not model. Adds each to `reasons` once.
+fn unsupported_reasons(sources: &[Origin], reasons: &mut Vec<&'static str>) {
+    for source in sources {
+        match &source.kind {
+            ColumnOrigin::Unresolved(Unresolved::Unsupported { what }) => {
+                if !reasons.contains(what) {
+                    reasons.push(what);
+                }
+            }
+            ColumnOrigin::Recursive { base_sources } => {
+                unsupported_reasons(base_sources, reasons);
+            }
+            _ => {}
+        }
+    }
 }

@@ -248,25 +248,23 @@ fn target_column_lists_absent_preserves_query_names_and_values_behavior() {
 }
 
 #[test]
-fn uneven_values_rows_keep_legacy_output_without_target_diagnostics() {
-    for sql in [
-        "INSERT INTO target (a) VALUES (1), (2, 3)",
-        "INSERT INTO target (a, b) VALUES (1, 2), (3)",
+fn uneven_values_rows_are_rejected() {
+    for (sql, first, row) in [
+        ("INSERT INTO target (a) VALUES (1), (2, 3)", 1, 2),
+        ("INSERT INTO target (a, b) VALUES (1, 2), (3)", 2, 1),
+        ("SELECT * FROM (VALUES (1), (2, 3)) AS v", 1, 2),
+        ("SELECT x FROM s UNION ALL VALUES (1, 2), (3)", 2, 1),
     ] {
         let result = one(sql);
+        assert!(result.output.columns.is_empty(), "{sql}");
         assert_eq!(
-            result.output,
-            Output {
-                columns: vec![],
-                shape: Shape::Closed,
-                evidence: Default::default(),
-            },
+            result.diagnostics,
+            [Diagnostic {
+                severity: Severity::Error,
+                kind: DiagnosticKind::ValuesRowArityMismatch { first, row },
+                location: None,
+            }],
             "{sql}"
-        );
-        assert!(
-            result.diagnostics.is_empty(),
-            "{sql}: {:?}",
-            result.diagnostics
         );
     }
 }
@@ -381,7 +379,12 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
         "INSERT INTO target (a) ",
         "INSERT INTO target (a, b) ",
     ] {
-        for branch in ["VALUES (1)", "VALUES (1), (2, 3)"] {
+        // A star over a table function is unknown the way a star over a
+        // relation without catalog columns is: only the alignment says so.
+        for (branch, what) in [
+            ("VALUES (1)", Some("VALUES source")),
+            ("SELECT * FROM generate_series(1, 3)", None),
+        ] {
             if prefix.contains("(a") && branch == "VALUES (1)" {
                 continue; // A uniform target-body VALUES branch is modeled.
             }
@@ -425,12 +428,9 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
                 result.output.columns[0].lineage,
                 Lineage::Partial {
                     known: vec![source("s", "x")],
-                    unresolved: vec![
-                        alignment_unknown(vec![], vec![SetOperand::Right]),
-                        Unresolved::Unsupported {
-                            what: "VALUES source"
-                        }
-                    ],
+                    unresolved: std::iter::once(alignment_unknown(vec![], vec![SetOperand::Right]))
+                        .chain(what.map(|what| Unresolved::Unsupported { what }))
+                        .collect(),
                 },
                 "{sql}"
             );
@@ -579,7 +579,7 @@ fn table_cte_source_reads_the_cte_columns() {
 fn unknown_left_branch_keeps_right_sources_as_candidates_without_publishing_names() {
     for prefix in ["INSERT INTO target ", "INSERT INTO target (a) "] {
         let result = one(&format!(
-            "{prefix}VALUES (1), (2, 3) UNION ALL SELECT x FROM s"
+            "{prefix}SELECT * FROM generate_series(1, 3) UNION ALL SELECT x FROM s"
         ));
         assert!(result.diagnostics.is_empty());
         assert!(result.output.columns.is_empty());
@@ -596,14 +596,16 @@ fn unknown_left_branch_keeps_right_sources_as_candidates_without_publishing_name
             vec![SetOperand::Left]
         )));
         assert!(unresolved.contains(&Unresolved::Unsupported {
-            what: "VALUES source"
+            what: "table function"
         }));
     }
 }
 
 #[test]
 fn a_named_read_of_an_unmodeled_left_operand_does_not_claim_right_sources() {
-    let result = one("WITH q AS (VALUES (1), (2, 3) UNION ALL SELECT x FROM s) SELECT x FROM q");
+    let result = one(
+        "WITH q AS (SELECT * FROM generate_series(1, 3) UNION ALL SELECT x FROM s) SELECT x FROM q",
+    );
     let Lineage::Partial { known, unresolved } = &result.output.columns[0].lineage else {
         panic!("the name is not proven to be supplied by the right operand");
     };
@@ -613,7 +615,7 @@ fn a_named_read_of_an_unmodeled_left_operand_does_not_claim_right_sources() {
         vec![SetOperand::Left]
     )));
     assert!(unresolved.contains(&Unresolved::Unsupported {
-        what: "VALUES source"
+        what: "table function"
     }));
 }
 
