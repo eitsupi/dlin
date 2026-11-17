@@ -37,6 +37,7 @@ fn model(
         compiled_code: Some(sql.to_string()),
         database: None,
         schema: None,
+        relation_name: None,
     }
 }
 
@@ -315,6 +316,7 @@ fn model_and_source_sharing_a_relation_create_a_possible_path_and_gap() {
             database: None,
             schema: None,
             identifier: Some("shared".to_string()),
+            relation_name: None,
         },
     );
     let manifest = Manifest {
@@ -471,6 +473,7 @@ fn open_relation_manifest(declare_relation: bool) -> Manifest {
                 database: None,
                 schema: None,
                 identifier: None,
+                relation_name: None,
             },
         );
     }
@@ -874,6 +877,7 @@ fn partial_lineage_keeps_known_paths_and_excludes_only_declared_unrelated_remain
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
     let manifest = Manifest {

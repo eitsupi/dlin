@@ -31,6 +31,7 @@ fn test_cte_alias_resolution() {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -63,6 +64,7 @@ fn test_cte_alias_resolution() {
             compiled_code: Some("select id as item_id, name, status from items".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -104,6 +106,7 @@ fn test_cte_alias_resolution() {
             ),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -173,6 +176,7 @@ fn test_select_star_chain_with_join() {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -201,6 +205,7 @@ fn test_select_star_chain_with_join() {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -233,6 +238,7 @@ fn test_select_star_chain_with_join() {
             compiled_code: Some("select id, name, area from users".to_string()),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 
@@ -265,6 +271,7 @@ fn test_select_star_chain_with_join() {
             compiled_code: Some("select id, region_name from regions".to_string()),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 
@@ -318,6 +325,7 @@ fn test_select_star_chain_with_join() {
             ),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 
@@ -411,6 +419,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -439,6 +448,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
             database: None,
             schema: None,
             identifier: None,
+            relation_name: None,
         },
     );
 
@@ -471,6 +481,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
             compiled_code: Some("select id, name, area from users".to_string()),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 
@@ -503,6 +514,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
             compiled_code: Some("select id, region_name from regions".to_string()),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 
@@ -553,6 +565,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
             ),
             database: Some("mydb".to_string()),
             schema: Some("myschema".to_string()),
+            relation_name: None,
         },
     );
 

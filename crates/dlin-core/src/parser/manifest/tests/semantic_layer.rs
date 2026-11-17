@@ -19,6 +19,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
                 compiled_code: None,
                 database: None,
                 schema: None,
+                relation_name: None,
             },
         )]),
         sources: HashMap::new(),

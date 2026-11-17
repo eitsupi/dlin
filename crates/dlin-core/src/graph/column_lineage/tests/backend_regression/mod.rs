@@ -73,6 +73,7 @@ fn make_node(
         compiled_code: compiled_code.map(str::to_string),
         database: None,
         schema: None,
+        relation_name: None,
     }
 }
 

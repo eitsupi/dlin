@@ -36,6 +36,7 @@ fn duplicate_column_impact_manifest() -> Manifest {
                 compiled_code: Some(sql.to_string()),
                 database: None,
                 schema: None,
+                relation_name: None,
             }
         };
 
@@ -112,6 +113,7 @@ fn make_off_path_error_manifest() -> Manifest {
             compiled_code: Some("select col_x, col_y from raw_table".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -142,6 +144,7 @@ fn make_off_path_error_manifest() -> Manifest {
             compiled_code: Some("select col_x from source_model".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 
@@ -179,6 +182,7 @@ fn make_off_path_error_manifest() -> Manifest {
             compiled_code: Some("select col_y from source_model".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         },
     );
 

@@ -50,6 +50,7 @@ fn node(
         compiled_code: sql.map(str::to_string),
         database: database.map(str::to_string),
         schema: schema_name.map(str::to_string),
+        relation_name: None,
     }
 }
 
@@ -136,7 +137,7 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
         None,
     );
-    assert_eq!(node_alias.relation_name(), "resolved_alias");
+    assert_eq!(node_alias.identifier(), "resolved_alias");
 
     let config_alias = node(
         "model.proj.config_alias",
@@ -149,7 +150,7 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
         None,
     );
-    assert_eq!(config_alias.relation_name(), "config_alias");
+    assert_eq!(config_alias.identifier(), "config_alias");
 
     let no_alias = node(
         "model.proj.no_alias",
@@ -162,7 +163,7 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
         None,
     );
-    assert_eq!(no_alias.relation_name(), "model_name");
+    assert_eq!(no_alias.identifier(), "model_name");
 
     let empty_node_alias = node(
         "model.proj.empty_node_alias",
@@ -175,7 +176,7 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
         None,
     );
-    assert_eq!(empty_node_alias.relation_name(), "config_alias");
+    assert_eq!(empty_node_alias.identifier(), "config_alias");
 
     let empty_both = node(
         "model.proj.empty_both",
@@ -188,7 +189,7 @@ fn relation_name_prefers_resolved_node_alias_then_config_alias_then_name() {
         None,
         None,
     );
-    assert_eq!(empty_both.relation_name(), "model_name");
+    assert_eq!(empty_both.identifier(), "model_name");
 }
 
 #[test]
@@ -413,5 +414,6 @@ fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSourc
         database: None,
         schema: None,
         identifier: None,
+        relation_name: None,
     }
 }

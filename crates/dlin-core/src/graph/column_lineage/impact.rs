@@ -1241,6 +1241,7 @@ mod impact_relevance_tests {
             compiled_code: Some("SELECT 1".to_string()),
             database: None,
             schema: None,
+            relation_name: None,
         }
     }
 

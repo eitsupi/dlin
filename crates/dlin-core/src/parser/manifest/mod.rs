@@ -147,6 +147,12 @@ pub struct ManifestNode {
     pub database: Option<String>,
     #[serde(default)]
     pub schema: Option<String>,
+    /// The relation as the adapter renders it in SQL, such as
+    /// `"db"."schema"."orders"`. It has as many parts as the adapter
+    /// qualifies relations with, which `database` and `schema` alone do not
+    /// tell.
+    #[serde(default)]
+    pub relation_name: Option<String>,
 }
 
 /// A source entry in the manifest
@@ -168,6 +174,10 @@ pub struct ManifestSource {
     pub schema: Option<String>,
     #[serde(default)]
     pub identifier: Option<String>,
+    /// The relation as the adapter renders it in SQL; see
+    /// [`ManifestNode::relation_name`].
+    #[serde(default)]
+    pub relation_name: Option<String>,
 }
 
 /// A column entry in the manifest
@@ -269,7 +279,8 @@ pub struct ManifestContractConfig {
 }
 
 impl ManifestNode {
-    pub fn relation_name(&self) -> &str {
+    /// The identifier of the node's relation: its alias, or else its name.
+    pub fn identifier(&self) -> &str {
         self.alias
             .as_deref()
             .filter(|alias| !alias.is_empty())

@@ -262,6 +262,12 @@ into an external source, and a failed model is not called a terminal source
 | Relation for which the manifest expects a node, but the definition or node is missing | `MissingDefinition` | Incomplete |
 | Reference that matches several nodes | `AmbiguousModel` | Incomplete |
 
+A relation in the compiled SQL is matched against the relation each manifest
+resource records as the adapter renders it (`relation_name`), which has as
+many parts as the adapter qualifies relations with. `database` and `schema`
+alone can name a part the adapter does not render, as in ClickHouse, so the
+relation is built from them only when `relation_name` is absent.
+
 An unresolved physical relation is external only when no expected dbt node
 identity requires an in-scope definition. `Unsupported` and `MissingDefinition`
 boundaries make the relevant exploration incomplete. A snapshot is treated as

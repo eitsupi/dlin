@@ -230,15 +230,17 @@ impl<'a> SchemaContext<'a> {
             if let Some(dep_node) = manifest.nodes.get(dep_id) {
                 has_entries |= register_model_relation(
                     &mut catalog,
+                    dep_node.relation_name.as_deref(),
                     dep_node.database.as_deref(),
                     dep_node.schema.as_deref(),
-                    dep_node.relation_name(),
+                    dep_node.identifier(),
                     evidence.clone(),
                 );
             } else if let Some(source) = manifest.sources.get(dep_id) {
                 let physical_identifier = source.identifier.as_deref().unwrap_or(&source.name);
                 has_entries |= register_source_relation(
                     &mut catalog,
+                    source.relation_name.as_deref(),
                     source.database.as_deref(),
                     source.schema.as_deref(),
                     physical_identifier,
@@ -361,12 +363,14 @@ fn sql_output_evidence(
 
 fn register_model_relation(
     schema: &mut CatalogSnapshot,
+    rendered: Option<&str>,
     database: Option<&str>,
     schema_name: Option<&str>,
     relation_name: &str,
     evidence: SchemaEvidence,
 ) -> bool {
-    let relation = RelationRef::from_manifest(database, schema_name, relation_name);
+    let relation =
+        RelationRef::from_manifest_resource(rendered, database, schema_name, relation_name);
     let was_present = schema.contains_relation(&relation);
     schema.add_relation(relation.clone(), relation.render(), evidence);
     if relation.qualification_len() > 1 {
@@ -378,8 +382,10 @@ fn register_model_relation(
     !was_present
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_source_relation(
     schema: &mut CatalogSnapshot,
+    rendered: Option<&str>,
     database: Option<&str>,
     schema_name: Option<&str>,
     physical_identifier: &str,
@@ -387,7 +393,8 @@ fn register_source_relation(
     logical_name: &str,
     evidence: SchemaEvidence,
 ) -> bool {
-    let physical = RelationRef::from_manifest(database, schema_name, physical_identifier);
+    let physical =
+        RelationRef::from_manifest_resource(rendered, database, schema_name, physical_identifier);
     let was_present = schema.contains_relation(&physical);
     schema.add_relation(physical.clone(), physical.render(), evidence);
 

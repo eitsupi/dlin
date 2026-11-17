@@ -646,6 +646,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         compiled_code: Some("select * from orders".to_string()),
         database: None,
         schema: None,
+        relation_name: None,
     };
     external_manifest
         .nodes

@@ -134,6 +134,28 @@ impl RelationRef {
         }
     }
 
+    /// The relation of a manifest resource. dbt records it as the adapter
+    /// renders it in SQL (`relation_name`), with as many parts as the adapter
+    /// qualifies relations with: a ClickHouse model has a `database` and a
+    /// `schema` but is rendered as `schema.table`. That form is read when it
+    /// is present, with its components' quoting left unknown as for every
+    /// manifest identifier. Without it (an ephemeral model, an older
+    /// manifest), the relation is built from `database`, `schema` and the
+    /// identifier.
+    pub(crate) fn from_manifest_resource(
+        rendered: Option<&str>,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        name: &str,
+    ) -> Self {
+        rendered
+            .and_then(|rendered| Self::parse(rendered).ok())
+            .map_or_else(
+                || Self::from_manifest(catalog, schema, name),
+                |relation| relation.as_manifest(),
+            )
+    }
+
     /// Construct a relation from a backend table reference. Backends expose
     /// component values but not their original quote tokens, so the spelling
     /// is represented as unquoted SQL.

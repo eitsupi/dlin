@@ -20,6 +20,7 @@ fn test_collect_file_paths() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -38,6 +39,7 @@ fn test_collect_file_paths() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -56,6 +58,7 @@ fn test_collect_file_paths() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -73,6 +76,7 @@ fn test_collect_file_paths() {
                 database: None,
                 schema: None,
                 identifier: None,
+                relation_name: None,
             },
         )]),
         ..Default::default()
@@ -107,6 +111,7 @@ fn test_collect_file_paths_deduplicates() {
                     database: None,
                     schema: None,
                     identifier: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -123,6 +128,7 @@ fn test_collect_file_paths_deduplicates() {
                     database: None,
                     schema: None,
                     identifier: None,
+                    relation_name: None,
                 },
             ),
         ]),
@@ -167,6 +173,7 @@ fn test_collect_sql_contents_from_manifest() {
                     compiled_code: Some("select * from raw.orders".to_string()),
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -185,6 +192,7 @@ fn test_collect_sql_contents_from_manifest() {
                     compiled_code: Some("select count(*) from orders where id is null".to_string()),
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
             (
@@ -203,6 +211,7 @@ fn test_collect_sql_contents_from_manifest() {
                     compiled_code: None,
                     database: None,
                     schema: None,
+                    relation_name: None,
                 },
             ),
         ]),
