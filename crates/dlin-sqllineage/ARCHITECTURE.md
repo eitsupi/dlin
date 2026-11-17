@@ -523,7 +523,15 @@ relations its arguments read are recorded, but the arguments are not the value
 of any output column. A wrapper hides the FROM item it reshapes, whose range
 variable is no longer visible. A function without an alias is named after the
 last part of its name, as in PostgreSQL. An item without any name still takes
-part in unqualified lookups and stars (U5, U6).
+part in unqualified lookups and stars (U5, U6). Through a set operation, the
+reason of each operand that supplies values is kept next to the alignment
+contribution; the right operand of `EXCEPT` supplies none.
+
+`TABLE t` is `SELECT * FROM t` (U3). The parser keeps the name of a `TABLE`
+query without its quoting. Where quoting would change what the name refers to
+in the dialect, as for `"T"` in PostgreSQL or any lower case name in Snowflake,
+the output is not modelled and is `Unsupported(TABLE source)`, rather than
+bound to a relation the name may not denote.
 
 A `VALUES` list whose rows have different widths is rejected by every dialect.
 It is a failed input with a diagnostic, not an output of unknown width (U7).

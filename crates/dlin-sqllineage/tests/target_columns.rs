@@ -1,7 +1,11 @@
 use dlin_sqllineage::*;
 
 fn one(sql: &str) -> StatementAnalysis {
-    Analyzer::new(Dialect::Generic)
+    one_in(sql, Dialect::Generic)
+}
+
+fn one_in(sql: &str, dialect: Dialect) -> StatementAnalysis {
+    Analyzer::new(dialect)
         .analyze(sql)
         .expect("should parse")
         .into_single()
@@ -379,11 +383,9 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
         "INSERT INTO target (a) ",
         "INSERT INTO target (a, b) ",
     ] {
-        // A star over a table function is unknown the way a star over a
-        // relation without catalog columns is: only the alignment says so.
         for (branch, what) in [
-            ("VALUES (1)", Some("VALUES source")),
-            ("SELECT * FROM generate_series(1, 3)", None),
+            ("VALUES (1)", "VALUES source"),
+            ("SELECT * FROM generate_series(1, 3)", "table function"),
         ] {
             if prefix.contains("(a") && branch == "VALUES (1)" {
                 continue; // A uniform target-body VALUES branch is modeled.
@@ -428,9 +430,10 @@ fn known_left_width_controls_target_names_despite_unknown_right_alignment() {
                 result.output.columns[0].lineage,
                 Lineage::Partial {
                     known: vec![source("s", "x")],
-                    unresolved: std::iter::once(alignment_unknown(vec![], vec![SetOperand::Right]))
-                        .chain(what.map(|what| Unresolved::Unsupported { what }))
-                        .collect(),
+                    unresolved: vec![
+                        alignment_unknown(vec![], vec![SetOperand::Right]),
+                        Unresolved::Unsupported { what }
+                    ],
                 },
                 "{sql}"
             );
@@ -530,7 +533,10 @@ fn unknown_branch_lineage_propagates_through_delegates_and_nested_sets() {
 
 #[test]
 fn table_source_reads_like_a_star_over_the_relation() {
-    let result = one("INSERT INTO target TABLE public.other_source");
+    let result = one_in(
+        "INSERT INTO target TABLE public.other_source",
+        Dialect::DuckDb,
+    );
     let relation = Relation {
         catalog: None,
         schema: Some(Ident::unquoted("public")),
@@ -548,7 +554,10 @@ fn table_source_reads_like_a_star_over_the_relation() {
 
 #[test]
 fn nested_unknown_branch_kinds_are_retained_without_tainting_unrelated_values() {
-    let result = one("SELECT x FROM s UNION ALL (TABLE public.t UNION ALL VALUES (1))");
+    let result = one_in(
+        "SELECT x FROM s UNION ALL (TABLE public.t UNION ALL VALUES (1))",
+        Dialect::PostgreSql,
+    );
     assert_eq!(
         result.output.columns[0].lineage,
         Lineage::Partial {
@@ -567,7 +576,10 @@ fn nested_unknown_branch_kinds_are_retained_without_tainting_unrelated_values() 
 
 #[test]
 fn table_cte_source_reads_the_cte_columns() {
-    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE c");
+    let result = one_in(
+        "WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE c",
+        Dialect::PostgreSql,
+    );
     assert_eq!(result.read, vec![source("s", "x").relation]);
     assert_eq!(
         result.output.columns[0].lineage,

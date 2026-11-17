@@ -107,10 +107,13 @@ fn column_aliases_without_a_proven_mapping_stay_unresolved() {
         ],
     );
     // Without a schema the first column is not known, so the alias is not
-    // read as a column of that name.
+    // read as a column of that name, and the ambiguity says why.
     expect(
         "SELECT d.p FROM missing AS d(p)",
-        &["p#0 P[ | Ambiguous(p: missing)]", "Closed"],
+        &[
+            "p#0 P[ | Ambiguous(p: missing), Unsupported { what: \"column alias position unknown\" }]",
+            "Closed",
+        ],
     );
     expect(
         "SELECT * FROM missing AS d(p)",

@@ -175,11 +175,7 @@ impl InputModel {
     }
 
     /// Decide what the unqualified `name` denotes among several relations.
-    fn standing(
-        &self,
-        name: &Ident,
-        unsupported: impl Fn(&super::UnknownProvider) -> Option<&'static str>,
-    ) -> Standing {
+    fn standing(&self, name: &Ident) -> Standing {
         let elements = &self.model.elements;
         match self.model.choose(name) {
             Choice::Absent => Standing::Absent,
@@ -214,10 +210,10 @@ impl InputModel {
                                 let OutputElement::Unknown(segment) = &elements[index] else {
                                     return None;
                                 };
-                                unsupported(&segment.provider).map(|what| ValueId::Named {
-                                    providers: vec![super::UnknownProvider::Opaque(
-                                        OpaqueReason::Unsupported(what),
-                                    )],
+                                // Evaluated only for the reasons it cannot
+                                // be known; an ambiguity claims no source.
+                                Some(ValueId::Named {
+                                    providers: vec![segment.provider.clone()],
                                     column: name.clone(),
                                 })
                             }),
@@ -505,9 +501,7 @@ impl OutputModels<'_, '_, '_> {
                     Binding::VirtualSource(_) => {
                         let input = self.input(env);
                         evidence.extend(&input.model.schema);
-                        input.standing(name, |provider| {
-                            provider.unsupported_reason(self.graph, &self.store.arena)
-                        })
+                        input.standing(name)
                     }
                 };
                 (standing, single)
@@ -515,12 +509,7 @@ impl OutputModels<'_, '_, '_> {
             _ => {
                 let input = self.input(env);
                 evidence.extend(&input.model.schema);
-                (
-                    input.standing(name, |provider| {
-                        provider.unsupported_reason(self.graph, &self.store.arena)
-                    }),
-                    InputLookup::Absent,
-                )
+                (input.standing(name), InputLookup::Absent)
             }
         }
     }

@@ -281,3 +281,61 @@ fn a_wrapper_hides_the_item_it_reshapes() {
     assert!(!output[0].contains("C["), "{output:?}");
     assert_eq!(read, ["t"]);
 }
+
+/// The unsupported reasons of a statement output, in its columns and its
+/// open segments.
+fn reasons(sql: &str) -> Vec<String> {
+    let analysis = analyze_one_with(sql, Dialect::PostgreSql, Some(&CATALOG));
+    let mut lineages: Vec<_> = analysis.output.columns.iter().map(|c| &c.lineage).collect();
+    if let dlin_sqllineage::Shape::Open { unexpanded } = &analysis.output.shape {
+        lineages.extend(unexpanded.iter().map(|star| &star.lineage));
+    }
+    let mut reasons = Vec::new();
+    for lineage in lineages {
+        if let dlin_sqllineage::Lineage::Partial { unresolved, .. } = lineage {
+            for reason in unresolved {
+                if let dlin_sqllineage::Unresolved::Unsupported { what } = reason
+                    && !reasons.contains(&what.to_string())
+                {
+                    reasons.push(what.to_string());
+                }
+            }
+        }
+    }
+    reasons
+}
+
+#[test]
+fn a_set_operation_keeps_the_reasons_of_the_operands_that_supply_values() {
+    for (sql, expected) in [
+        (
+            "SELECT t.x FROM t UNION ALL SELECT * FROM generate_series(1, 3) g",
+            &["table function"][..],
+        ),
+        (
+            "SELECT * FROM generate_series(1, 3) g UNION ALL SELECT * FROM (VALUES (1)) v",
+            &["table function", "VALUES source"][..],
+        ),
+        (
+            "SELECT * FROM (VALUES (1)) v UNION ALL SELECT * FROM generate_series(1, 3) g",
+            &["VALUES source", "table function"][..],
+        ),
+        (
+            "SELECT x FROM (SELECT * FROM generate_series(1, 3) g \
+             UNION ALL SELECT * FROM (VALUES (1)) v) d, t",
+            &["table function", "VALUES source"][..],
+        ),
+        // The right operand of EXCEPT supplies no values.
+        (
+            "SELECT t.x FROM t EXCEPT SELECT * FROM generate_series(1, 3) g",
+            &[][..],
+        ),
+        (
+            "SELECT x FROM (SELECT * FROM generate_series(1, 3) g \
+             EXCEPT SELECT * FROM (VALUES (1)) v) d, t",
+            &["table function"][..],
+        ),
+    ] {
+        assert_eq!(reasons(sql), expected, "{sql}");
+    }
+}

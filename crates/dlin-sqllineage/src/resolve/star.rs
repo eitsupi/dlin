@@ -432,13 +432,9 @@ impl Evaluator<'_, '_, '_> {
                     reasons.push("BY NAME set operation");
                 }
                 for &index in &model.matches(name).unknown {
-                    if let OutputElement::Unknown(segment) = &model.elements[index]
-                        && let Some(what) = segment
-                            .provider
-                            .unsupported_reason(self.cx.graph, &self.cx.mapping_cache.models.arena)
-                        && !reasons.contains(&what)
-                    {
-                        reasons.push(what);
+                    if let OutputElement::Unknown(segment) = &model.elements[index] {
+                        let sources = self.provider_sources(&segment.provider, name);
+                        unsupported_reasons(&sources.origins, &mut reasons);
                     }
                 }
                 for &index in &ambiguity.listed {
@@ -667,7 +663,7 @@ impl Evaluator<'_, '_, '_> {
 /// Ambiguity discards possible value sources, but keeps the reasons that a
 /// candidate's value could not be evaluated: a set-operation correspondence
 /// or a source the analysis does not model. Adds each to `reasons` once.
-fn unsupported_reasons(sources: &[Origin], reasons: &mut Vec<&'static str>) {
+pub(super) fn unsupported_reasons(sources: &[Origin], reasons: &mut Vec<&'static str>) {
     for source in sources {
         match &source.kind {
             ColumnOrigin::Unresolved(Unresolved::Unsupported { what }) => {

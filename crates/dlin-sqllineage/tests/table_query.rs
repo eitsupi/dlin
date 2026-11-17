@@ -62,3 +62,33 @@ fn a_table_query_expands_catalog_columns() {
     );
     assert_eq!(analysis.read, vec![table("t")]);
 }
+
+/// The parser keeps the name of `TABLE name` without its quoting. Where the
+/// quoting would change what the name refers to, the output is not modelled
+/// rather than bound to the wrong relation.
+#[test]
+fn a_name_whose_quoting_matters_is_not_bound() {
+    for (dialect, sql) in [
+        (
+            Dialect::PostgreSql,
+            "WITH \"T\" AS (SELECT 1 AS x) SELECT x FROM t UNION ALL TABLE \"T\"",
+        ),
+        (Dialect::Snowflake, "SELECT x FROM t UNION ALL TABLE t"),
+        (Dialect::Generic, "SELECT x FROM t UNION ALL TABLE t"),
+    ] {
+        let rendered = analyze_rendered(sql, dialect, None);
+        assert!(
+            rendered[0].contains("Unsupported { what: \"TABLE source\" }"),
+            "{dialect:?} {sql}: {rendered:?}"
+        );
+    }
+    // Lower case names are the same quoted or not in PostgreSQL.
+    assert_eq!(
+        analyze_rendered(
+            "SELECT x, y FROM t UNION ALL TABLE t",
+            Dialect::PostgreSql,
+            Some(&CATALOG)
+        ),
+        ["x#0 C[t.x]", "y#1 C[t.y]", "Closed"]
+    );
+}

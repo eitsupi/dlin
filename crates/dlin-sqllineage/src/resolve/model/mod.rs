@@ -651,44 +651,4 @@ impl UnknownProvider {
             Self::Relation(_) | Self::Segment { .. } | Self::SetOperation { .. } => true,
         }
     }
-
-    /// Why the names this provider publishes are not known, when the reason
-    /// is an unsupported construct: a BY NAME correspondence or a source the
-    /// analysis does not model. Follow published segments without evaluating
-    /// values, so ambiguity can retain the reason without claiming any
-    /// candidate.
-    pub(in crate::resolve) fn unsupported_reason(
-        &self,
-        graph: &crate::graph::RawGraph,
-        arena: &slot::SlotArena,
-    ) -> Option<&'static str> {
-        const BY_NAME: &str = "BY NAME set operation";
-        let mut provider = self.clone();
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            provider = match provider {
-                Self::Relation(_) => return None,
-                Self::Opaque(
-                    OpaqueReason::Unsupported(what @ BY_NAME)
-                    | OpaqueReason::UnmodelledSource(what),
-                ) => return Some(what),
-                Self::Opaque(_) => return None,
-                Self::Segment { id, .. } => {
-                    if !seen.insert(id) {
-                        return None;
-                    }
-                    arena.segment(id).provider.clone()
-                }
-                Self::SetOperation { op, left } => {
-                    if graph.scopes.unknown_output_reasons(op).contains(&BY_NAME) {
-                        return Some(BY_NAME);
-                    }
-                    if !seen.insert(left) {
-                        return None;
-                    }
-                    arena.segment(left).provider.clone()
-                }
-            };
-        }
-    }
 }
