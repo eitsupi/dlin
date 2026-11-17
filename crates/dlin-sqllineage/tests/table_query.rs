@@ -64,10 +64,10 @@ fn a_table_query_expands_catalog_columns() {
 }
 
 /// The parser keeps the name of `TABLE name` without its quoting. Where the
-/// quoting would change what the name refers to, the output is not modelled
-/// rather than bound to the wrong relation.
+/// quoting would change what the name refers to, neither the relation it reads
+/// nor its output can be told, so the statement is refused.
 #[test]
-fn a_name_whose_quoting_matters_is_not_bound() {
+fn a_name_whose_quoting_matters_is_refused() {
     for (dialect, sql) in [
         (
             Dialect::PostgreSql,
@@ -76,10 +76,19 @@ fn a_name_whose_quoting_matters_is_not_bound() {
         (Dialect::Snowflake, "SELECT x FROM t UNION ALL TABLE t"),
         (Dialect::Generic, "SELECT x FROM t UNION ALL TABLE t"),
     ] {
-        let rendered = analyze_rendered(sql, dialect, None);
-        assert!(
-            rendered[0].contains("Unsupported { what: \"TABLE source\" }"),
-            "{dialect:?} {sql}: {rendered:?}"
+        let analysis = analyze_one_with(sql, dialect, None);
+        assert!(analysis.output.columns.is_empty(), "{dialect:?} {sql}");
+        assert!(analysis.read.is_empty(), "{dialect:?} {sql}");
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| &diagnostic.kind)
+                .collect::<Vec<_>>(),
+            [&dlin_sqllineage::DiagnosticKind::UnsupportedSyntax {
+                what: "TABLE with a name whose meaning depends on quoting"
+            }],
+            "{dialect:?} {sql}"
         );
     }
     // Lower case names are the same quoted or not in PostgreSQL.

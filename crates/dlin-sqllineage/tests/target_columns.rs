@@ -4,6 +4,8 @@ fn one(sql: &str) -> StatementAnalysis {
     one_in(sql, Dialect::Generic)
 }
 
+/// `TABLE name` is analyzed only in a dialect where the name means the same
+/// quoted or not, which the generic dialect's case folding rules out.
 fn one_in(sql: &str, dialect: Dialect) -> StatementAnalysis {
     Analyzer::new(dialect)
         .analyze(sql)
@@ -275,7 +277,7 @@ fn uneven_values_rows_are_rejected() {
 
 #[test]
 fn unmodeled_table_source_is_not_a_known_zero_width() {
-    let result = one("INSERT INTO target (a) TABLE source");
+    let result = one_in("INSERT INTO target (a) TABLE source", Dialect::DuckDb);
     assert!(result.output.columns.is_empty());
     assert!(result.diagnostics.is_empty());
 }
@@ -297,7 +299,10 @@ fn values_keep_source_free_and_mixed_row_expression_transforms() {
 
 #[test]
 fn explicit_projection_width_is_known_over_an_unmodeled_cte_source() {
-    let result = one("INSERT INTO target (a) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c");
+    let result = one_in(
+        "INSERT INTO target (a) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.output.columns[0].name,
         OutputName::Explicit(Ident::unquoted("a"))
@@ -368,7 +373,7 @@ fn ordinary_set_operations_do_not_treat_unmodeled_branches_as_zero_width() {
     ]
     .into_iter()
     .filter_map(|sql| {
-        let result = one(sql);
+        let result = one_in(sql, Dialect::DuckDb);
         (!result.diagnostics.is_empty()).then(|| format!("{sql}: {:?}", result.diagnostics))
     })
     .collect::<Vec<_>>();
@@ -447,7 +452,7 @@ fn target_width_uses_the_left_model_through_output_plans() {
         "INSERT INTO target (a, b) WITH c AS (SELECT 1) SELECT x FROM s UNION ALL TABLE public.other_source",
         "INSERT INTO target (a, b) (SELECT x FROM s UNION ALL TABLE public.other_source)",
     ] {
-        let result = one(sql);
+        let result = one_in(sql, Dialect::DuckDb);
         assert!(
             matches!(
                 result.diagnostics.as_slice(),
@@ -469,15 +474,20 @@ fn target_width_uses_the_left_model_through_output_plans() {
     }
     // The left side is a star over a relation without catalog columns; its
     // target width stays unknown.
-    let result = one("INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v");
+    let result = one_in(
+        "INSERT INTO target (a) SELECT * FROM (TABLE public.other_source) v",
+        Dialect::DuckDb,
+    );
     assert!(result.diagnostics.is_empty());
     assert!(result.output.columns.is_empty());
 }
 
 #[test]
 fn nested_unknown_cte_does_not_hide_a_known_projection_width_mismatch() {
-    let result =
-        one("INSERT INTO target (a, b) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c");
+    let result = one_in(
+        "INSERT INTO target (a, b) WITH c AS (TABLE public.source) SELECT 1 AS x FROM c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.output.columns[0].name,
         OutputName::Explicit(Ident::unquoted("x"))
@@ -667,7 +677,10 @@ fn unknown_branch_marker_survives_unknown_star_merges() {
 
 #[test]
 fn qualified_table_source_is_not_hidden_by_a_same_named_cte() {
-    let result = one("WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE public.c");
+    let result = one_in(
+        "WITH c AS (SELECT x FROM s) SELECT x FROM s UNION ALL TABLE public.c",
+        Dialect::DuckDb,
+    );
     assert_eq!(
         result.read,
         vec![

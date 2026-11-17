@@ -529,9 +529,10 @@ contribution; the right operand of `EXCEPT` supplies none.
 
 `TABLE t` is `SELECT * FROM t` (U3). The parser keeps the name of a `TABLE`
 query without its quoting. Where quoting would change what the name refers to
-in the dialect, as for `"T"` in PostgreSQL or any lower case name in Snowflake,
-the output is not modelled and is `Unsupported(TABLE source)`, rather than
-bound to a relation the name may not denote.
+in the dialect, as for `"T"` in PostgreSQL or any lower case name in Snowflake
+or the generic dialect, neither the relation it reads nor its output can be
+told. The statement is refused with an unsupported-syntax diagnostic, rather
+than reporting a read of a relation the name may not denote.
 
 A `VALUES` list whose rows have different widths is rejected by every dialect.
 It is a failed input with a diagnostic, not an output of unknown width (U7).

@@ -223,9 +223,9 @@ impl LineageBuilder {
                     .mark_unknown_output_width(self.current_scope, "VALUES source");
             }
             // `TABLE t` is `SELECT * FROM t`. The parser keeps the name only as
-            // text, without its quoting, so it is read that way only where
-            // quoting cannot change what the name refers to. Otherwise the
-            // relation is recorded as read and the output is not modelled.
+            // text, without its quoting. Where quoting could change what the
+            // name refers to, neither the relation it reads nor its output can
+            // be told, so the statement is refused.
             SetExpr::Table(table) => {
                 let Some(table_name) = &table.table_name else {
                     self.graph
@@ -238,25 +238,22 @@ impl LineageBuilder {
                     .iter()
                     .chain([table_name])
                     .all(|part| quoting_is_irrelevant(part, self.dialect));
+                if !modelled {
+                    self.reject(SemanticError::QuotingDependentTableName);
+                    return;
+                }
                 let table_ref = crate::types::TableRef {
                     catalog: None,
                     schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
                     table: crate::Ident::unquoted(table_name.as_str()),
                 };
                 let range = table_ref.table.clone();
-                let bindings = self.bind_relation_reference(table_ref);
-                if modelled {
-                    for binding in bindings {
-                        self.add_binding(range.clone(), binding);
-                    }
-                    self.visit_projection(&[sqlparser::ast::SelectItem::Wildcard(
-                        sqlparser::ast::WildcardAdditionalOptions::default(),
-                    )]);
-                } else {
-                    self.graph
-                        .scopes
-                        .mark_unknown_output_width(self.current_scope, "TABLE source");
+                for binding in self.bind_relation_reference(table_ref) {
+                    self.add_binding(range.clone(), binding);
                 }
+                self.visit_projection(&[sqlparser::ast::SelectItem::Wildcard(
+                    sqlparser::ast::WildcardAdditionalOptions::default(),
+                )]);
             }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)

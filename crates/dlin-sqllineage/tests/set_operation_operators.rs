@@ -166,7 +166,7 @@ fn unsupported_sources_on_the_right_of_except_do_not_reach_the_values() {
             .any(|reason| matches!(reason, Unresolved::Unsupported { .. }))
     );
     // `TABLE t2` is a star over a relation without catalog columns.
-    let statement = analyze("SELECT a FROM t1 EXCEPT TABLE t2");
+    let statement = analyze_in(Dialect::DuckDb, "SELECT a FROM t1 EXCEPT TABLE t2");
     assert_complete(&statement, 0, &[source("t1", "a")]);
 }
 
