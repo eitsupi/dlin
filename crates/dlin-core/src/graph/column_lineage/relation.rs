@@ -138,10 +138,12 @@ impl RelationRef {
     /// renders it in SQL (`relation_name`), with as many parts as the adapter
     /// qualifies relations with: a ClickHouse model has a `database` and a
     /// `schema` but is rendered as `schema.table`. That form is read when it
-    /// is present, with its components' quoting left unknown as for every
-    /// manifest identifier. Without it (an ephemeral model, an older
-    /// manifest), the relation is built from `database`, `schema` and the
-    /// identifier.
+    /// is present and its last part is the resource's identifier, with its
+    /// components' quoting left unknown as for every manifest identifier.
+    /// Otherwise (an ephemeral model, an older manifest, or a rendering this
+    /// parser does not split into the same parts, such as a BigQuery path in
+    /// one pair of backticks), the relation is built from `database`, `schema`
+    /// and the identifier.
     pub(crate) fn from_manifest_resource(
         rendered: Option<&str>,
         catalog: Option<&str>,
@@ -150,6 +152,7 @@ impl RelationRef {
     ) -> Self {
         rendered
             .and_then(|rendered| Self::parse(rendered).ok())
+            .filter(|relation| relation.name.value == name)
             .map_or_else(
                 || Self::from_manifest(catalog, schema, name),
                 |relation| relation.as_manifest(),
@@ -508,6 +511,42 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_manifest_resource_takes_the_parts_its_adapter_renders() {
+        // ClickHouse: database and schema are set, the relation has two parts.
+        let relation = RelationRef::from_manifest_resource(
+            Some("`analytics`.`stg_orders`"),
+            Some(""),
+            Some("analytics"),
+            "stg_orders",
+        );
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(None, Some("analytics"), "stg_orders")
+        );
+        // A dotted table name stays one component.
+        let relation = RelationRef::from_manifest_resource(
+            Some("\"db\".\"sch\".\"orders.v2\""),
+            Some("db"),
+            Some("sch"),
+            "orders.v2",
+        );
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(Some("db"), Some("sch"), "orders.v2")
+        );
+        // Without a rendered form, or with one whose last part is not the
+        // identifier (a BigQuery path in one pair of backticks), the fields
+        // decide.
+        for rendered in [None, Some("`proj-id.ds.up`"), Some("not..valid")] {
+            assert_eq!(
+                RelationRef::from_manifest_resource(rendered, Some("proj-id"), Some("ds"), "up"),
+                RelationRef::from_manifest(Some("proj-id"), Some("ds"), "up"),
+                "{rendered:?}"
+            );
+        }
+    }
 
     fn parsed(input: &str) -> RelationRef {
         RelationRef::parse(input).expect("relation should parse")
