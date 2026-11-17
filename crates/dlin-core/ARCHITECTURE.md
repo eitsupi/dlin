@@ -265,8 +265,10 @@ into an external source, and a failed model is not called a terminal source
 A relation in the compiled SQL is matched against the relation each manifest
 resource records as the adapter renders it (`relation_name`), which has as
 many parts as the adapter qualifies relations with. `database` and `schema`
-alone can name a part the adapter does not render, as in ClickHouse, so the
-relation is built from them only when `relation_name` is absent.
+alone can name a part the adapter does not render, as in ClickHouse. The
+relation is built from `database`, `schema` and the identifier only when
+`relation_name` is absent, cannot be parsed, or has a last part that is not
+the resource's identifier (as for a BigQuery path in one pair of backticks).
 
 An unresolved physical relation is external only when no expected dbt node
 identity requires an in-scope definition. `Unsupported` and `MissingDefinition`
