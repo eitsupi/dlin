@@ -668,7 +668,7 @@ table in section 1 states.
 | --- | --- | --- | --- | --- |
 | U1 | DuckDB | `SELECT t.id, list_transform(t.items, x -> x + t.bias) AS xs FROM t` | none, lambda unsupported | `id` = `C[t.id]`, `xs` = `P[[t.items]; [Unsupported(Lambda)]]`, Closed. The unsupported construct does not affect `id` |
 | U2 | PostgreSQL | `SELECT * FROM t` | no catalog | Open with `BehindStar(t)`. Not `Unsupported` |
-| U3 | PostgreSQL | `SELECT x FROM s UNION ALL TABLE t` | none, before `TABLE` is modelled | Keeps the known `s.x` and adds `Unsupported(TableSource)`. `t` is included among the relations read. Once `TABLE t` is modelled like `SELECT * FROM t`, the unsupported marker goes away and the unknown-star reason applies when there is no catalog |
+| U3 | PostgreSQL | `SELECT x FROM s UNION ALL TABLE t` | none | `TABLE t` is `SELECT * FROM t`. Keeps the known `s.x` and adds the alignment reason of the unknown star over `t`, not `Unsupported`. `t` is included among the relations read |
 | U4 | PostgreSQL | `SELECT (` | none | Parse failure. Not a successful empty output and not `C[]` |
 
 ### Invariants

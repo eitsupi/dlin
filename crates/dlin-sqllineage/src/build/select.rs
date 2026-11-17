@@ -48,7 +48,7 @@ impl LineageBuilder {
     }
 
     /// Process projection items — creates Output nodes and edges.
-    fn visit_projection(&mut self, items: &[SelectItem]) {
+    pub(crate) fn visit_projection(&mut self, items: &[SelectItem]) {
         for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => {

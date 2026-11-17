@@ -211,6 +211,8 @@ impl LineageBuilder {
                     .scopes
                     .mark_unknown_output_width(self.current_scope, "VALUES source");
             }
+            // `TABLE t` is `SELECT * FROM t`. The parser keeps the name only
+            // as text, so it is read as an unquoted name.
             SetExpr::Table(table) => {
                 if let Some(table_name) = &table.table_name {
                     let table_ref = crate::types::TableRef {
@@ -218,11 +220,18 @@ impl LineageBuilder {
                         schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
                         table: crate::Ident::unquoted(table_name.as_str()),
                     };
-                    self.bind_relation_reference(table_ref);
+                    let range = table_ref.table.clone();
+                    for binding in self.bind_relation_reference(table_ref) {
+                        self.add_binding(range.clone(), binding);
+                    }
+                    self.visit_projection(&[sqlparser::ast::SelectItem::Wildcard(
+                        sqlparser::ast::WildcardAdditionalOptions::default(),
+                    )]);
+                } else {
+                    self.graph
+                        .scopes
+                        .mark_unknown_output_width(self.current_scope, "TABLE source");
                 }
-                self.graph
-                    .scopes
-                    .mark_unknown_output_width(self.current_scope, "TABLE source");
             }
             SetExpr::Update(stmt)
             | SetExpr::Insert(stmt)
