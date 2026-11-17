@@ -527,7 +527,7 @@ mod tests {
         );
         // A dotted table name stays one component.
         let relation = RelationRef::from_manifest_resource(
-            Some("\"db\".\"sch\".\"orders.v2\""),
+            Some(r#""db"."sch"."orders.v2""#),
             Some("db"),
             Some("sch"),
             "orders.v2",
