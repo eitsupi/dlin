@@ -198,7 +198,16 @@ pub(super) fn evaluate_set_operation(
                     .find(|aligned| aligned.left == left_id)
                     .ok_or(Cut)?;
                 let mut mapping = output_mapping(left, cx)?.ok_or(Cut)?;
-                if operation.kind.correspondence == SetCorrespondence::Positional {
+                // A BY NAME operation pairs outputs only when its model proved
+                // the names correspond; then they merge as positions do.
+                let corresponds = match operation.kind.correspondence {
+                    SetCorrespondence::Positional => true,
+                    SetCorrespondence::ByName => aligned
+                        .matches
+                        .iter()
+                        .any(|matched| matched.kind == SlotMatchKind::Proven),
+                };
+                if corresponds {
                     let evidence = correspondence(left, &aligned.matches, cx);
                     if operation.recursive {
                         mapping.sources = mapping.sources.recursive();

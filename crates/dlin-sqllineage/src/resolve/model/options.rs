@@ -156,9 +156,39 @@ pub(super) fn apply_options(
     }
 
     for (old, new) in &options.rename {
+        let (providers, ranges) = unknown_publishers(&elements, old, dialect);
         if let Some(slot) = first_slot_named(&mut elements, old, dialect) {
             slot.name.clone_from(new);
             slot.output_name = OutputName::Explicit(new.clone());
+            // An unknown segment of another range variable may publish the
+            // old name too, as a reference to it would find. Which column the
+            // RENAME names, and so the value of the renamed one, is then as
+            // ambiguous as that reference. A segment of the same range is
+            // left to that range's own lookup of the old name, which the
+            // column forwards.
+            let mut candidates: Vec<RangeRef> = slot.candidate_ranges.to_vec();
+            let listed = candidates.len();
+            for range in ranges {
+                if !candidates.iter().any(|seen| seen.index == range.index) {
+                    candidates.push(range);
+                }
+            }
+            if candidates.len() > listed {
+                let candidates: Rc<[RangeRef]> = candidates.into();
+                // The ambiguity keeps why the other columns are unknown.
+                slot.value = ValueId::Merged(
+                    Box::new(ValueId::Uncertain {
+                        column: new.clone(),
+                        candidates: candidates.clone(),
+                    }),
+                    Box::new(ValueId::UnsupportedReasons {
+                        providers,
+                        column: old.clone(),
+                    }),
+                );
+                slot.candidate_ranges = candidates;
+                slot.origin = SlotOrigin::Defined;
+            }
             continue;
         }
         let (providers, ranges) = unknown_publishers(&elements, old, dialect);

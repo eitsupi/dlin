@@ -93,6 +93,13 @@ pub(super) enum ValueId {
         column: Ident,
         candidates: Rc<[RangeRef]>,
     },
+    /// Only the reasons that the columns `providers` publish under `column`
+    /// cannot be known, without any of their sources: what an ambiguity
+    /// between them keeps.
+    UnsupportedReasons {
+        providers: Vec<UnknownProvider>,
+        column: Ident,
+    },
 }
 
 /// Why a segment of columns cannot be enumerated.

@@ -235,6 +235,10 @@ pub(crate) enum OutputPlan {
         operator: SetOperator,
         quantifier: SetQuantifier,
         correspondence: SetCorrespondence,
+        /// For `BY NAME`, whether the dialect accepts this operator and
+        /// quantifier with the strict meaning the engine models: the same
+        /// names on both sides, in the order of the left operand.
+        strict_by_name: bool,
     },
     Delegate(ScopeId),
 }
@@ -644,14 +648,9 @@ impl ScopeTree {
             || match self.output_plan(scope) {
                 OutputPlan::Projection => false,
                 OutputPlan::Delegate(child) => self.has_unknown_output_width(*child),
-                OutputPlan::SetOperation {
-                    left,
-                    correspondence,
-                    ..
-                } => {
-                    *correspondence == SetCorrespondence::ByName
-                        || self.has_unknown_output_width(*left)
-                }
+                // A BY NAME operation decides its width in its model, which
+                // marks a correspondence it cannot prove.
+                OutputPlan::SetOperation { left, .. } => self.has_unknown_output_width(*left),
             }
     }
 
@@ -674,12 +673,8 @@ impl ScopeTree {
                 right,
                 recursive,
                 operator,
-                correspondence,
                 ..
             } => {
-                if *correspondence == SetCorrespondence::ByName {
-                    reasons.push("BY NAME set operation");
-                }
                 // Value incompleteness follows both operands even though
                 // the output namespace and shape follow only the left. A
                 // non-recursive EXCEPT takes values from the left only, so

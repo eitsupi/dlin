@@ -884,6 +884,18 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
     explicit_flag.ordinal = None;
     let mut renamed_flag = partial_col(0, u("kept"), vec![], vec![behind("b", "flag")]);
     renamed_flag.ordinal = None;
+    let renamed_ambiguous = partial_col(
+        1,
+        u("renamed"),
+        vec![],
+        vec![Unresolved::Ambiguous {
+            column: u("renamed"),
+            candidates: vec![
+                dlin_sqllineage::Candidate::Relation(relation("a")),
+                dlin_sqllineage::Candidate::Relation(relation("b")),
+            ],
+        }],
+    );
     vec![
         // REPLACE keeps the position and name of the known column and only
         // changes where its value comes from.
@@ -917,18 +929,13 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
         .catalog(a_columns.clone())
         .shape(open_star("b", Some(1)))
         .unresolved_stars(true),
+        // `b` may have a `left_value` too, so which column the RENAME names
+        // is as ambiguous as a reference to `left_value` would be.
         Case::new(
             "partial_catalog_rename_known_column",
             &format!("SELECT * RENAME (left_value AS renamed) {from}"),
             Dialect::Generic,
-            vec![
-                physical(0, "a", "id"),
-                col(
-                    1,
-                    u("renamed"),
-                    vec![source(relation("a"), u("left_value"))],
-                ),
-            ],
+            vec![physical(0, "a", "id"), renamed_ambiguous],
         )
         .catalog(a_columns.clone())
         .shape(open_star("b", Some(1)))
@@ -963,10 +970,17 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
             "partial_catalog_renamed_known_column_read_through_derived_table",
             &format!("SELECT renamed FROM (SELECT * RENAME (left_value AS renamed) {from}) d"),
             Dialect::Generic,
-            vec![col(
+            vec![partial_col(
                 0,
                 u("renamed"),
-                vec![source(relation("a"), u("left_value"))],
+                vec![],
+                vec![Unresolved::Ambiguous {
+                    column: u("renamed"),
+                    candidates: vec![
+                        dlin_sqllineage::Candidate::Relation(relation("a")),
+                        dlin_sqllineage::Candidate::Relation(relation("b")),
+                    ],
+                }],
             )],
         )
         .catalog(a_columns.clone())

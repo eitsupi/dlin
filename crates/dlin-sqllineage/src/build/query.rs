@@ -171,6 +171,9 @@ impl LineageBuilder {
                         crate::graph::scope::SetOperator::Except
                     }
                 };
+                // No dialect accepts MINUS with BY NAME.
+                let strict_by_name = !matches!(op, SqlSetOperator::Minus)
+                    && strict_by_name_form(self.dialect, operator, *set_quantifier);
                 let quantifier = match set_quantifier {
                     SetQuantifier::All | SetQuantifier::AllByName => {
                         crate::graph::scope::SetQuantifier::All
@@ -189,6 +192,7 @@ impl LineageBuilder {
                         operator,
                         quantifier,
                         correspondence,
+                        strict_by_name,
                     },
                 );
 
@@ -331,4 +335,41 @@ fn quoting_is_irrelevant(text: &str, dialect: crate::Dialect) -> bool {
     let quoted = crate::Ident::quoted(text, crate::Quote::Double);
     unquoted.column_key(dialect) == quoted.column_key(dialect)
         && unquoted.relation_key(dialect) == quoted.relation_key(dialect)
+}
+
+/// Whether a `BY NAME` form has the strict meaning the engine models in the
+/// dialect: the operands publish the same names, matched by the dialect's
+/// rule, and the output follows the left operand.
+///
+/// - `BigQuery` accepts `UNION ALL`, `UNION DISTINCT`, `INTERSECT DISTINCT` and
+///   `EXCEPT DISTINCT` with `BY NAME`, which requires the same names on both
+///   sides. The quantifier must be written.
+/// - `DuckDB` and Snowflake accept `UNION [ALL | DISTINCT] BY NAME`, which
+///   pads the names one side lacks with `NULL`. With the same names on both
+///   sides that is the strict meaning; the engine checks that in the model.
+/// - Other dialects do not document `BY NAME`, and other operators are not
+///   accepted, so the operation stays unsupported.
+fn strict_by_name_form(
+    dialect: crate::Dialect,
+    operator: crate::graph::scope::SetOperator,
+    quantifier: SetQuantifier,
+) -> bool {
+    use crate::graph::scope::SetOperator as Op;
+    match dialect {
+        crate::Dialect::BigQuery => matches!(
+            (operator, quantifier),
+            (
+                Op::Union,
+                SetQuantifier::AllByName | SetQuantifier::DistinctByName
+            ) | (Op::Intersect | Op::Except, SetQuantifier::DistinctByName)
+        ),
+        crate::Dialect::DuckDb | crate::Dialect::Snowflake => matches!(
+            (operator, quantifier),
+            (
+                Op::Union,
+                SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName
+            )
+        ),
+        _ => false,
+    }
 }

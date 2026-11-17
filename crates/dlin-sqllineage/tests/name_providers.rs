@@ -397,3 +397,58 @@ fn a_renamed_column_keeps_the_providers_of_its_old_name_when_the_new_name_is_exc
         assert_eq!(candidates, expected, "{sql}");
     }
 }
+
+/// A RENAME whose old name is a listed column of one relation, while another
+/// relation of unknown shape may publish the same name, names a column as
+/// ambiguously as a reference to the old name does. The renamed column takes
+/// that ambiguity, read directly and through a CTE.
+#[test]
+fn a_renamed_listed_column_competes_with_another_relation_that_may_publish_the_old_name() {
+    const A_ONLY: &[(&str, &[&str])] = &[("a", &["id", "v"])];
+    const NO_CATALOG: &[(&str, &[&str])] = &[];
+    for (with, from, catalog) in [
+        ("", "a, b", A_ONLY),
+        ("WITH c AS (SELECT a.id, b.* FROM a, b) ", "c", NO_CATALOG),
+    ] {
+        let direct = format!("{with}SELECT id FROM (SELECT * FROM {from}) AS d");
+        let expected = ambiguity_of(&direct, lineage_in(&direct, Dialect::Snowflake, catalog));
+        for sql in kept_readings(
+            with,
+            &format!("(SELECT * RENAME (id AS kept) FROM {from}) AS d"),
+        ) {
+            let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::Snowflake, catalog));
+            assert_eq!(candidates, expected, "{sql}");
+        }
+    }
+    // Without another relation that may publish it, the RENAME names the
+    // listed column.
+    let sql = "SELECT kept FROM (SELECT * RENAME (id AS kept) FROM a) AS d";
+    assert_eq!(
+        lineage_in(sql, Dialect::Snowflake, A_ONLY),
+        Lineage::Complete(vec![source("a", "id")])
+    );
+}
+
+/// When the other provider of the old name is a construct the analysis does
+/// not model, the renamed column's ambiguity keeps that reason.
+#[test]
+fn a_renamed_listed_column_keeps_the_reason_of_an_unmodelled_competitor() {
+    let sql = "SELECT d.z FROM (SELECT * RENAME (a AS z) \
+               FROM (SELECT a FROM x) s, TABLE(FLATTEN(INPUT => PARSE_JSON('[1]'))) g) d";
+    let Lineage::Partial { known, unresolved } = lineage_in(sql, Dialect::Snowflake, &[]) else {
+        panic!("{sql}: expected a partial lineage");
+    };
+    assert!(known.is_empty(), "{sql}: {known:?}");
+    assert!(
+        unresolved
+            .iter()
+            .any(|reason| matches!(reason, Unresolved::Ambiguous { .. })),
+        "{sql}: {unresolved:?}"
+    );
+    assert!(
+        unresolved.contains(&Unresolved::Unsupported {
+            what: "table function"
+        }),
+        "{sql}: {unresolved:?}"
+    );
+}
