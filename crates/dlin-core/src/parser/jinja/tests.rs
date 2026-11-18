@@ -1129,3 +1129,53 @@ fn test_model_macro_spans_ignore_unclosed_macro() {
         sql
     );
 }
+
+#[test]
+fn test_stub_functions_accept_keyword_arguments() {
+    // dbt templates pass keyword arguments to these functions; they must not
+    // make the render fail and fall back to regex recovery.
+    let sql = r#"
+{% do log('building', info=True) %}
+{% call statement('main', fetch_result=True) %}select 1{% endcall %}
+{% set rows = run_query(sql='select 1') %}
+{% set relation = adapter.dispatch('pick', macro_namespace='pkg')() %}
+select * from {{ ref('a', version=1) }}
+join {{ source('raw', 't') }} using (id)
+"#;
+    let ext = extract_complete(sql, "");
+    assert_eq!(
+        ext.refs,
+        vec![RefCall {
+            package: None,
+            name: "a".into(),
+            version: Some("1".into()),
+        }]
+    );
+    assert_eq!(ext.sources.len(), 1);
+}
+
+#[test]
+fn test_structured_project_vars_reach_templates() {
+    let vars = HashMap::from([
+        (
+            "sources".to_string(),
+            serde_json::json!({"orders": {"schema": "raw", "table": "orders"}}),
+        ),
+        ("models".to_string(), serde_json::json!(["a", "b"])),
+    ]);
+    let sql = r#"
+{% set cfg = var('sources')['orders'] %}
+select * from {{ source(cfg.schema, cfg['table']) }}
+{% for name in var('models') %} join {{ ref(name) }} using (id){% endfor %}
+"#;
+    let ext = extract_complete_with_vars(sql, "", &vars);
+    assert_eq!(
+        ext.sources,
+        vec![SourceCall {
+            source_name: "raw".into(),
+            table_name: "orders".into(),
+        }]
+    );
+    let names: Vec<_> = ext.refs.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["a", "b"]);
+}
