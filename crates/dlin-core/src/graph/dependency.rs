@@ -664,7 +664,15 @@ pub fn relative_display_path(path: &Path, base: &Path) -> String {
 
 fn to_slash(path: &Path) -> String {
     use path_slash::PathExt as _;
-    path.to_slash_lossy().into_owned()
+    let slashed = path.to_slash_lossy().into_owned();
+    // path-slash keeps the separators inside a Windows prefix, such as the
+    // `\\server\share` of a UNC path. A backslash is a separator only on
+    // Windows; elsewhere it is a valid file name character.
+    if cfg!(windows) {
+        slashed.replace('\\', "/")
+    } else {
+        slashed
+    }
 }
 
 #[cfg(test)]
