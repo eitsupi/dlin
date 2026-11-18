@@ -329,7 +329,7 @@ fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Envi
     environment.add_function(
         "var",
         move |args: minijinja::value::Rest<Value>,
-              _kwargs: minijinja::value::Kwargs|
+              kwargs: minijinja::value::Kwargs|
               -> Result<Value, minijinja::Error> {
             let name = args.first().ok_or_else(|| {
                 minijinja::Error::new(ErrorKind::MissingArgument, "var() requires a variable name")
@@ -338,8 +338,12 @@ fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Envi
             if let Some(value) = values.get(&name) {
                 return Ok(Value::from(minijinja::value::Serde(value)));
             }
-            if let Some(default) = args.get(1) {
-                return Ok(default.clone());
+            if let Some(default) = args
+                .get(1)
+                .cloned()
+                .or_else(|| kwargs.get::<Option<Value>>("default").ok().flatten())
+            {
+                return Ok(default);
             }
             Err(minijinja::Error::new(
                 ErrorKind::UndefinedError,
@@ -653,6 +657,18 @@ analysis-paths: ["analyses", "custom_analyses"]
         let project = DbtProject::load(tmp.path()).unwrap();
         assert_eq!(project.name, "test_project");
         assert_eq!(project.model_paths, vec!["models"]);
+    }
+
+    #[test]
+    fn test_load_renders_var_default_keyword() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: p\nmodel-paths: [\"{{ var('missing', default='custom_models') }}\"]\n",
+        )
+        .unwrap();
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(project.model_paths, vec!["custom_models"]);
     }
 
     #[test]
