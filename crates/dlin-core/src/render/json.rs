@@ -303,6 +303,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -442,6 +443,7 @@ mod tests {
             columns: vec!["order_id".into(), "customer_id".into()],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let output = render_to_string(&graph);
         insta::assert_snapshot!(output);
@@ -461,6 +463,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         graph.add_node(make_node(
             "source.raw.orders",
@@ -505,6 +508,7 @@ mod tests {
             columns: vec!["order_id".into(), "customer_id".into()],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let output = render_to_string(&graph);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -560,6 +564,7 @@ mod tests {
             columns: vec!["id".into()],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let fields = resolve_graph_fields(None, false).unwrap();
         let mut buf = Vec::new();
@@ -594,6 +599,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let fields =
             resolve_graph_fields(Some(&["unique_id".into(), "description".into()]), false).unwrap();
@@ -624,6 +630,7 @@ mod tests {
             columns: vec!["id".into()],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
@@ -669,6 +676,7 @@ mod tests {
                 }),
             }),
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
 
         let fields = resolve_graph_fields(None, true).unwrap();

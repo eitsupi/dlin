@@ -34,7 +34,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // Two version nodes: my_model.v1 and my_model.v2
     assert_eq!(graph.node_count(), 2);
@@ -94,7 +94,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // 3 nodes (v1, v2, downstream) — no phantom
     assert_eq!(graph.node_count(), 3);
@@ -152,7 +152,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // 3 nodes (v1, v2, downstream) — no phantom
     assert_eq!(graph.node_count(), 3);
@@ -219,7 +219,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // source + v1 + v2 = 3 nodes, no phantoms
     assert_eq!(graph.node_count(), 3);
@@ -285,7 +285,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // v2 + downstream + phantom(v1) = 3 nodes
     assert_eq!(graph.node_count(), 3);
@@ -350,7 +350,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     assert_eq!(graph.node_count(), 2);
     let ids: Vec<&str> = graph
@@ -407,7 +407,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // source + v1 + v2 = 3 nodes, no phantoms
     assert_eq!(graph.node_count(), 3);
@@ -478,7 +478,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // v1 + downstream + phantom(v2) = 3 nodes
     assert_eq!(graph.node_count(), 3);
@@ -555,7 +555,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
     // Two versioned nodes + downstream = 3
     assert_eq!(
         graph

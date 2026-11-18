@@ -412,6 +412,26 @@ analysis was attached to it.
 A reference whose target does not exist still creates a phantom node so the
 graph shows it, but the referencing node carries an `unresolved_ref` or
 `unresolved_source` reason. An edge to a phantom is not a known dependency.
+Every node that references the target carries the reason, not only the first.
+An exposure does not create phantoms: a `depends_on` target that does not
+exist is a `dependency_target_missing` reason.
+
+Some edges are kept although their target is a guess: a `ref()` naming
+another package is resolved by name (`unsupported_ref_package`), and a
+`ref()` matching several resources goes to the model, then the seed, then the
+snapshot (`ambiguous_ref`). Telling such edges apart from known ones is left
+to edge-level certainty, not to the node analysis.
+
+Which nodes are analysed:
+
+| Node | Analysis |
+| --- | --- |
+| Model, snapshot and singular test SQL | The Jinja extraction's reasons and the reasons raised while resolving its `ref()`/`source()` calls |
+| Exposure, YAML snapshot `relation`, YAML generic test arguments | The `ref()`/`source()` expressions written in YAML; anything else is `unsupported_dependency_expression` |
+| Seed, YAML source | Complete: they have no dependencies |
+| Phantom | `not_assessed` (`phantom_dependencies`) |
+| Semantic model, metric, saved query | `not_assessed` (`semantic_dependencies`) |
+| Any node in manifest mode | `not_assessed` (`manifest_dependencies`) |
 
 A reason raised by a call carries the call site in the node that uses it
 (`NodeCallSite`). While one file is extracted the owning node is not known

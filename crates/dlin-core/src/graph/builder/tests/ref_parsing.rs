@@ -15,6 +15,7 @@ fn test_resolve_ref_model() {
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
     });
     node_map.insert("model.orders".to_string(), idx);
 
@@ -36,6 +37,7 @@ fn test_resolve_ref_seed() {
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
     });
     node_map.insert("seed.countries".to_string(), idx);
 
@@ -57,6 +59,7 @@ fn test_resolve_ref_snapshot() {
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
     });
     node_map.insert("snapshot.snap_orders".to_string(), idx);
 

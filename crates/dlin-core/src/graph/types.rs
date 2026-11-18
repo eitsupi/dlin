@@ -1,5 +1,7 @@
 use petgraph::stable_graph::StableDiGraph;
 use serde::{Deserialize, Serialize};
+
+use super::dependency::DependencyAnalysis;
 use std::path::PathBuf;
 
 /// The lineage DAG type
@@ -103,6 +105,10 @@ pub struct NodeData {
     /// and used for compatibility name lookup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// How completely the node's declared dependencies were analysed.
+    /// Every node states it: a node whose dependencies were not analysed
+    /// carries a `not_assessed` reason rather than an empty analysis.
+    pub dependency_analysis: DependencyAnalysis,
 }
 
 impl NodeData {
@@ -212,6 +218,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         };
         assert_eq!(node.display_name(), "orders");
     }
@@ -229,6 +236,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         };
         assert_eq!(node.display_name(), "src:raw.orders");
     }
@@ -254,6 +262,7 @@ mod tests {
                 columns: vec![],
                 exposure: None,
                 aliases: vec![],
+                dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
             };
             assert_eq!(node.display_name(), expected, "Failed for {:?}", nt);
         }

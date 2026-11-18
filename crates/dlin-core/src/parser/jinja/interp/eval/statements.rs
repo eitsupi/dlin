@@ -190,11 +190,14 @@ impl<'a> Interp<'a> {
                     found.scan_expr(expr);
                 }
                 found.scan_stmts(body);
+                // The calls are found without evaluating the construct, so
+                // only the construct is located.
+                let at = self.site(*span);
                 for call in found.refs {
-                    self.rec.add_ref(call);
+                    self.rec.add_ref(call, at.clone());
                 }
                 for call in found.sources {
-                    self.rec.add_source(call);
+                    self.rec.add_source(call, at.clone());
                 }
             }
         }

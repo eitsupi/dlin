@@ -77,7 +77,11 @@ pub(crate) struct Decision {
 #[derive(Debug, Default)]
 pub(crate) struct Recorder {
     pub(crate) refs: Vec<RefCall>,
+    /// Where each of `refs` was first called, by index.
+    pub(crate) ref_sites: Vec<ExtractionSite>,
     pub(crate) sources: Vec<SourceCall>,
+    /// Where each of `sources` was first called, by index.
+    pub(crate) source_sites: Vec<ExtractionSite>,
     pub(crate) config: SqlConfig,
     pub(crate) reasons: BTreeSet<Reason>,
     pub(crate) decisions: Vec<Decision>,
@@ -86,15 +90,17 @@ pub(crate) struct Recorder {
 }
 
 impl Recorder {
-    fn add_ref(&mut self, call: RefCall) {
+    fn add_ref(&mut self, call: RefCall, at: ExtractionSite) {
         if !self.refs.contains(&call) {
             self.refs.push(call);
+            self.ref_sites.push(at);
         }
     }
 
-    fn add_source(&mut self, call: SourceCall) {
+    fn add_source(&mut self, call: SourceCall, at: ExtractionSite) {
         if !self.sources.contains(&call) {
             self.sources.push(call);
+            self.source_sites.push(at);
         }
     }
 

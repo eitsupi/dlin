@@ -98,7 +98,8 @@ pub(crate) fn build_dag(
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            let graph = graph::builder::build_graph(project_dir, &files, &project.vars)?;
+            let graph =
+                graph::builder::build_graph(project_dir, &project.name, &files, &project.vars)?;
             Ok((graph, Some(project), Vec::new(), None))
         }
     }

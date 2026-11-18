@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use petgraph::stable_graph::NodeIndex;
 
+use crate::graph::dependency::{DependencyAnalysis, NotAssessedScope};
 use crate::graph::types::*;
 
 use super::{
@@ -205,6 +206,9 @@ fn add_source_nodes(
             },
             exposure: None,
             aliases: identity.alias.into_iter().collect(),
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::ManifestDependencies,
+            ),
         });
         // Dependencies in manifests use canonical original IDs.
         index_node(node_map, orig_id, idx);
@@ -245,6 +249,9 @@ fn add_regular_nodes(
             },
             exposure: None,
             aliases: identity.alias.into_iter().collect(),
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::ManifestDependencies,
+            ),
         });
         index_node(node_map, orig_id, idx);
     }
@@ -278,6 +285,9 @@ fn add_exposure_nodes(
                 }),
             }),
             aliases: identity.alias.into_iter().collect(),
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::ManifestDependencies,
+            ),
         });
         index_node(node_map, orig_id, idx);
     }
@@ -437,6 +447,9 @@ fn add_semantic_layer_nodes<T: HasSemanticLayerFields>(
             columns: vec![],
             exposure: None,
             aliases: identity.alias.into_iter().collect(),
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::ManifestDependencies,
+            ),
         });
         index_node(node_map, orig_id, idx);
     }

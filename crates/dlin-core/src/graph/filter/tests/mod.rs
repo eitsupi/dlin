@@ -20,6 +20,7 @@ fn make_node(
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
     }
 }
 
@@ -127,6 +128,7 @@ fn make_node_with_desc(unique_id: &str, label: &str, description: Option<&str>) 
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
     }
 }
 

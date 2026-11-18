@@ -15,7 +15,8 @@ fn build_project(files: &[(&str, &[u8])]) -> (tempfile::TempDir, GraphBuild) {
     }
     let project = DbtProject::load(tmp.path()).unwrap();
     let discovered = discover_files(&project.resolve_paths(tmp.path())).unwrap();
-    let build = build_graph_report(tmp.path(), &discovered, &HashMap::new()).unwrap();
+    let build =
+        build_graph_report(tmp.path(), "test_project", &discovered, &HashMap::new()).unwrap();
     (tmp, build)
 }
 
@@ -152,7 +153,7 @@ fn discovery_gaps_are_reported_relative_sorted_and_deduplicated() {
         skipped_inputs: vec![entry(&outside), entry(&inside), entry(&inside)],
         ..Default::default()
     };
-    let build = build_graph_report(&project_dir, &files, &HashMap::new()).unwrap();
+    let build = build_graph_report(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
     let paths: Vec<_> = build
         .project_gaps
         .iter()
@@ -171,7 +172,7 @@ fn unreadable_yaml_is_still_fatal() {
         yaml_files: vec![tmp.path().join("models/missing.yml")],
         ..Default::default()
     };
-    assert!(build_graph_report(tmp.path(), &files, &HashMap::new()).is_err());
+    assert!(build_graph_report(tmp.path(), "test_project", &files, &HashMap::new()).is_err());
 }
 
 #[test]
@@ -184,7 +185,7 @@ fn unreadable_model_sql_is_still_fatal() {
         model_sql_files: vec![path],
         ..Default::default()
     };
-    assert!(build_graph_report(tmp.path(), &files, &HashMap::new()).is_err());
+    assert!(build_graph_report(tmp.path(), "test_project", &files, &HashMap::new()).is_err());
 }
 
 #[test]
@@ -195,7 +196,7 @@ fn macro_removed_after_discovery_is_a_gap() {
         macro_sql_files: vec![project_dir.join("macros/gone.sql")],
         ..Default::default()
     };
-    let build = build_graph_report(&project_dir, &files, &HashMap::new()).unwrap();
+    let build = build_graph_report(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
     assert_eq!(
         build.project_gaps,
         vec![skipped(

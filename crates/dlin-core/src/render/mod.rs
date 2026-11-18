@@ -133,6 +133,7 @@ pub(crate) mod test_helpers {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         }
     }
 
@@ -153,6 +154,7 @@ pub(crate) mod test_helpers {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         }
     }
 
@@ -173,6 +175,7 @@ pub(crate) mod test_helpers {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         }
     }
 

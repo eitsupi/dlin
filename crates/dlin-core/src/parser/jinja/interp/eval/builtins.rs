@@ -401,11 +401,12 @@ impl<'a> Interp<'a> {
             ),
             _ => return,
         };
+        let at = self.site(span);
         if let Some(r) = &reference {
-            self.rec.add_ref(r.clone());
+            self.rec.add_ref(r.clone(), at.clone());
         }
         if let Some(s) = &source {
-            self.rec.add_source(s.clone());
+            self.rec.add_source(s.clone(), at);
         }
         self.rec.decisions.push(Decision {
             function,

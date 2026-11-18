@@ -408,6 +408,11 @@ impl DependencyAnalysis {
         Self { unresolved }
     }
 
+    /// The analysis of a node whose dependencies were not assessed.
+    pub fn not_assessed(scope: NotAssessedScope) -> Self {
+        Self::new([DependencyReason::NotAssessed { scope }])
+    }
+
     pub fn status(&self) -> DependencyAnalysisStatus {
         if self.unresolved.is_empty() {
             DependencyAnalysisStatus::Complete

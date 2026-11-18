@@ -237,6 +237,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         }
     }
 
