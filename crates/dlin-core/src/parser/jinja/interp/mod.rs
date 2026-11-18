@@ -10,8 +10,6 @@
 
 use std::collections::HashMap;
 
-#[doc(hidden)]
-pub mod compare;
 mod convert;
 mod eval;
 mod ir;
@@ -39,11 +37,14 @@ pub(crate) struct DependencyExtraction {
     pub(crate) sources: Vec<SourceCall>,
     pub(crate) config: SqlConfig,
     /// Sorted and deduplicated.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "attached to graph nodes in a follow-up change")
+    )]
     pub(crate) reasons: Vec<ExtractedDependencyReason>,
-    /// How each ref/source call was treated, for comparing extractors.
+    /// How each ref/source call was treated, checked by the tests.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read it"))]
     pub(crate) decisions: Vec<Decision>,
-    /// Names of the macros that were called.
-    pub(crate) entered: std::collections::BTreeSet<std::sync::Arc<str>>,
 }
 
 /// Extract the dependencies of a SQL file.
@@ -96,14 +97,13 @@ pub(crate) fn extract_dependencies(
         config: rec.config,
         reasons: rec.reasons.into_iter().collect(),
         decisions: rec.decisions,
-        entered: rec.entered,
     }
 }
 
 /// A template that cannot be parsed: keep only calls whose arguments are
 /// all literals.
 fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
-    let (refs, sources) = recovery::extract_refs_and_sources_regex_scoped(sql, None);
+    let (refs, sources) = recovery::literal_calls(sql);
     DependencyExtraction {
         refs,
         sources,
@@ -112,6 +112,5 @@ fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
             at: ExtractionSite { line, expr: None },
         }],
         decisions: Vec::new(),
-        entered: Default::default(),
     }
 }

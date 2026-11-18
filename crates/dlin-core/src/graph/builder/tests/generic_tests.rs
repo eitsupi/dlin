@@ -44,7 +44,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 1 model + 1 source + 2 column tests + 1 source test + 2 model-level tests = 7
     assert_eq!(graph.node_count(), 7);
@@ -150,8 +150,7 @@ models:
         yaml_files: vec![yaml_a.clone(), yaml_b.clone()],
         ..Default::default()
     };
-    let graph_fwd =
-        build_graph(&project_dir, &files_fwd, None, true, false, &HashMap::new()).unwrap();
+    let graph_fwd = build_graph(&project_dir, &files_fwd, &HashMap::new()).unwrap();
 
     // Build with files in reverse order
     let files_rev = DiscoveredFiles {
@@ -159,8 +158,7 @@ models:
         yaml_files: vec![yaml_b, yaml_a],
         ..Default::default()
     };
-    let graph_rev =
-        build_graph(&project_dir, &files_rev, None, true, false, &HashMap::new()).unwrap();
+    let graph_rev = build_graph(&project_dir, &files_rev, &HashMap::new()).unwrap();
 
     // Both should produce the same set of test unique_ids
     let mut ids_fwd: Vec<String> = graph_fwd

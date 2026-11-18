@@ -92,6 +92,55 @@ fn project_vars_and_defaults_select_dependencies() {
 }
 
 #[test]
+fn env_var_defaults_select_dependencies_without_reading_the_environment() {
+    // `PATH` is set in any test environment; its value is never used.
+    let e = extract_with(
+        r#"
+{{ ref('stg_' ~ env_var('PATH', 'x')) }}
+{{ ref('stg_' ~ env_var('PATH', default='y')) }}
+{{ ref(env_var('X', var('other'))) }}
+{{ ref(env_var('X', var('missing', 'z'))) }}
+"#,
+        &[],
+        &[("other", serde_json::json!("w"))],
+    );
+    assert_eq!(ref_names(&e), vec!["stg_x", "stg_y", "w", "z"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn env_var_defaults_keep_their_own_unknown_causes() {
+    for (sql, code) in [
+        (
+            r#"{{ ref(env_var('X', var('missing'))) }}"#,
+            "unresolved_var",
+        ),
+        (
+            r#"{{ ref(env_var('X', env_var('Y'))) }}"#,
+            "runtime_value_unknown",
+        ),
+        (
+            r#"{{ ref(env_var(target.name, 'x')) }}"#,
+            "runtime_value_unknown",
+        ),
+        // dbt does not allow secrets in models, so a default is not a value.
+        (
+            r#"{{ ref(env_var('DBT_ENV_SECRET_KIND', 'x')) }}"#,
+            "runtime_value_unknown",
+        ),
+    ] {
+        let e = extract(sql);
+        assert!(e.refs.is_empty(), "{sql}: {:?}", e.refs);
+        assert_eq!(codes(&e), vec![code], "{sql}");
+    }
+    let e = extract(r#"{{ ref(env_var('X', env_var('Y'))) }}"#);
+    let DependencyReason::RuntimeValueUnknown { name, .. } = &e.reasons[0] else {
+        panic!("{:?}", e.reasons);
+    };
+    assert_eq!(name.as_deref(), Some("Y"));
+}
+
+#[test]
 fn known_false_branch_is_not_followed() {
     let e = extract(
         "{% if false %}{{ ref('never') }}{% endif %}\
@@ -596,32 +645,6 @@ fn loop_filter_decides_else_and_loop_info() {
     );
     assert_eq!(ref_names(&e), vec!["a", "none"]);
     assert_eq!(codes(&e), vec!["unresolved_var"]);
-}
-
-#[test]
-fn comparison_reports_config_only_differences_and_unreadable_files() {
-    let tmp = tempfile::tempdir().unwrap();
-    let models = tmp.path().join("models");
-    std::fs::create_dir_all(&models).unwrap();
-    std::fs::write(tmp.path().join("dbt_project.yml"), "name: p\n").unwrap();
-    // The render fails on the unknown namespace and recovers the config by
-    // regex, including the one in the branch known to be false.
-    std::fs::write(
-        models.join("a.sql"),
-        "{% if var('flag', false) %}{{ config(materialized='table') }}{% endif %}{{ pkg.m() }}select 1",
-    )
-    .unwrap();
-    std::fs::write(models.join("b.sql"), b"select '\xff'").unwrap();
-    let report = super::compare::compare_project(tmp.path()).unwrap();
-    assert_eq!(report.files, 1);
-    assert_eq!(report.unreadable, vec!["models/b.sql"]);
-    assert_eq!(
-        report.config_differences.len(),
-        1,
-        "{:?}",
-        report.config_differences
-    );
-    assert_eq!(report.identical_files, 0);
 }
 
 #[test]

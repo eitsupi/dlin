@@ -48,8 +48,12 @@ or reads manifest.json for full-fidelity graphs. Outputs as ASCII, DOT, JSON, Me
 or HTML.
 
 Data sources:
-  sql (default)   Parse SQL files via regex + minijinja. No Python or dbt required.
+  sql (default)   Interpret the Jinja in SQL files. No Python or dbt required.
                   Detects ref() and source() calls in SQL, plus exposures from YAML.
+                  Values come from the project, never from the environment: var() uses
+                  project vars or its default, env_var() uses its default, and execute
+                  is false as in dbt parsing. Values only known at run time (target,
+                  env_var() without a default) do not select dependencies.
                   Generic tests (not_null, unique, etc.) are inferred from YAML declarations
                   with dlin-specific IDs — use manifest mode for exact dependency resolution.
   manifest        Read a pre-compiled manifest.json for full accuracy. Requires

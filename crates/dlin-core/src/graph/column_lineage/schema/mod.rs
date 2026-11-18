@@ -11,7 +11,6 @@ pub use evidence::{
     SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin,
 };
 
-use crate::parser::cache::hash_str;
 use crate::parser::manifest::Manifest;
 
 /// Per-analysis memoization for semantic manifest digests.
@@ -134,6 +133,16 @@ impl SemanticDigestCache {
     pub(super) fn computed_nodes(&self) -> usize {
         self.computed_nodes
     }
+}
+
+/// FNV-1a string hash: deterministic across runs and platforms.
+fn hash_str(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in s.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 /// Compute one model's semantic input digest without retaining memoized state.

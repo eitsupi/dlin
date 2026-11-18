@@ -39,7 +39,7 @@ fn test_build_graph_with_macros() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // base_table + derived = 2 nodes
     assert_eq!(graph.node_count(), 2);
     // ref edge: base_table → derived
@@ -88,7 +88,7 @@ fn test_vars_yml_context_is_shared_by_macros_and_models() {
     let project = crate::parser::project::DbtProject::load(&project_dir).unwrap();
     let paths = project.resolve_paths(&project_dir);
     let files = crate::parser::discovery::discover_files(&paths).unwrap();
-    let graph = build_graph(&project_dir, &files, None, true, false, &project.vars).unwrap();
+    let graph = build_graph(&project_dir, &files, &project.vars).unwrap();
 
     let downstream = graph
         .node_indices()
@@ -147,7 +147,7 @@ fn test_var_list_expansion_resolves_refs() {
         serde_json::json!(["electronics", "clothing"]),
     );
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &vars).unwrap();
+    let graph = build_graph(&project_dir, &files, &vars).unwrap();
 
     // 3 model nodes: combined + stg_electronics_summary + stg_clothing_summary
     assert_eq!(graph.node_count(), 3);
@@ -198,7 +198,7 @@ snapshots:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 1 model + 2 snapshots = 3 nodes
     assert_eq!(graph.node_count(), 3);
@@ -265,7 +265,7 @@ snapshots:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 1 model + 1 snapshot = 2 nodes (no duplicate snapshot node)
     let snap_count = graph
@@ -306,7 +306,7 @@ snapshots:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 1 source + 1 snapshot = 2 nodes
     assert_eq!(graph.node_count(), 2);
@@ -358,7 +358,7 @@ snapshots:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 1 phantom source + 1 snapshot = 2 nodes
     assert_eq!(graph.node_count(), 2);
@@ -404,7 +404,7 @@ snapshots:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // 2 snapshots, no phantom nodes
     assert_eq!(graph.node_count(), 2);

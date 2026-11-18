@@ -274,7 +274,6 @@ impl<'a> Interp<'a> {
         caller: Option<AValue>,
     ) -> Ev<AValue> {
         let def = &target.def;
-        self.rec.entered.insert(def.name.clone());
         let base = match &target.closure {
             Closure::Project => Scope::new(),
             Closure::TemplateRoot => def

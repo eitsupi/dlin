@@ -168,7 +168,8 @@ fn walk_directory(
     let mut skipped = Vec::new();
 
     // Sorting makes the discovered order independent of the filesystem, so
-    // that the macro prefix and the diagnostics are deterministic.
+    // that the macro chosen among same-named ones and the diagnostics are
+    // deterministic.
     for entry in WalkDir::new(dir).sort_by_file_name() {
         let entry = match entry {
             Ok(entry) => entry,

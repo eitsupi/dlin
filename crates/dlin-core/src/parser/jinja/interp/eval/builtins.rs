@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Prefix dbt reserves for secret environment variables, which it only
+/// allows in profiles and packages.
+const SECRET_ENV_PREFIX: &str = "DBT_ENV_SECRET";
+
 impl<'a> Interp<'a> {
     pub(super) fn string_arg(
         &self,
@@ -224,12 +228,27 @@ impl<'a> Interp<'a> {
                 )))
             }
             Builtin::EnvVar => {
-                let name = args
-                    .first()
-                    .and_then(|value| self.string_arg(st, value, span).ok().flatten());
+                // The environment is never read, so the result does not depend
+                // on the machine: a default is taken like `var()`'s, and a
+                // variable without one stays unknown.
+                let Some(name) = args.first() else {
+                    return Ok(AValue::undefined());
+                };
+                let name = match self.string_arg(st, name, span) {
+                    Ok(Some(name)) => name,
+                    Ok(None) => return Ok(AValue::undefined()),
+                    Err(causes) => return Ok(AValue::Unknown(causes)),
+                };
+                // dbt refuses secret variables outside profiles and packages,
+                // so their defaults do not stand for a value dbt would use.
+                if !name.starts_with(SECRET_ENV_PREFIX)
+                    && let Some(default) = args.get(1).or_else(|| kwarg("default"))
+                {
+                    return Ok(default.clone());
+                }
                 Ok(AValue::Unknown(self.runtime(
                     RuntimeValueSource::EnvVar,
-                    name,
+                    Some(name),
                     span,
                 )))
             }

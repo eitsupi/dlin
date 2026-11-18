@@ -81,8 +81,6 @@ pub(crate) struct Recorder {
     pub(crate) config: SqlConfig,
     pub(crate) reasons: BTreeSet<Reason>,
     pub(crate) decisions: Vec<Decision>,
-    /// Names of the macros that were called.
-    pub(crate) entered: BTreeSet<Arc<str>>,
     /// Whether `materialized` was set to a value that is not known.
     pub(crate) materialized_unknown: bool,
 }

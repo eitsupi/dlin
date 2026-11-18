@@ -493,8 +493,6 @@ pub enum InputStage {
     Read,
     /// Parsing a file.
     Parse,
-    /// Combining a macro file with the other macro files.
-    MacroPrefix,
 }
 
 /// Why an input was skipped.

@@ -43,8 +43,4 @@ impl MacroLibrary {
     pub(crate) fn get(&self, name: &str) -> Option<&Arc<MacroDef>> {
         self.macros.get(name)
     }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<MacroDef>> {
-        self.macros.values()
-    }
 }

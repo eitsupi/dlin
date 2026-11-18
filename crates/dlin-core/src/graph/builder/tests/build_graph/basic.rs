@@ -19,7 +19,7 @@ fn test_build_graph_uses_logical_stem_for_jinja_sql_filename() {
         model_sql_files: vec![models_dir.join("upstream.sql"), orders_path.clone()],
         ..Default::default()
     };
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     let orders = graph
         .node_indices()
@@ -50,8 +50,7 @@ fn test_build_graph_sources_and_models() {
         ..Default::default()
     };
 
-    // Use no_cache: false to exercise the cache-enabled path end-to-end
-    let graph = build_graph(&project_dir, &files, None, false, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     // Should have source + 2 models = 3 nodes
     assert_eq!(graph.node_count(), 3);
@@ -80,7 +79,7 @@ fn test_build_graph_with_seeds() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     assert_eq!(graph.node_count(), 1);
     let node = &graph[graph.node_indices().next().unwrap()];
     assert_eq!(node.node_type, NodeType::Seed);
@@ -100,7 +99,7 @@ fn test_build_graph_with_snapshots() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     assert_eq!(graph.node_count(), 1);
     let node = &graph[graph.node_indices().next().unwrap()];
     assert_eq!(node.node_type, NodeType::Snapshot);
@@ -130,7 +129,7 @@ fn test_build_graph_with_tests() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // model + test = 2 nodes
     assert_eq!(graph.node_count(), 2);
     // test edge: stg_orders → assert_positive
@@ -171,7 +170,7 @@ exposures:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // model + exposure = 2 nodes
     assert_eq!(graph.node_count(), 2);
     // exposure edge: orders → weekly_report
@@ -214,7 +213,7 @@ exposures:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // v1 + v2 + exposure = 3 nodes
     assert_eq!(graph.node_count(), 3);
     // Only one edge: my_model.v1 → pinned_report
@@ -258,7 +257,7 @@ fn test_build_graph_ref_resolves_to_seed() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // seed + model = 2 nodes (no phantom)
     assert_eq!(graph.node_count(), 2);
     // ref edge: countries → stg_countries
@@ -289,7 +288,7 @@ fn test_build_graph_phantom_node_for_unresolved_ref() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // model + phantom = 2 nodes
     assert_eq!(graph.node_count(), 2);
     let phantom = graph
@@ -316,7 +315,7 @@ fn test_build_graph_phantom_node_for_unresolved_source() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // model + phantom source = 2 nodes
     assert_eq!(graph.node_count(), 2);
     let phantom = graph
@@ -336,7 +335,7 @@ fn test_build_graph_model_descriptions() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     let stg = graph
         .node_indices()
         .find(|&i| graph[i].label == "stg_orders")
@@ -359,7 +358,7 @@ fn test_build_graph_edge_types() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     let edge_types: Vec<EdgeType> = graph
         .edge_references()
         .map(|e| e.weight().edge_type)
@@ -372,7 +371,7 @@ fn test_build_graph_edge_types() {
 fn test_build_graph_empty_files() {
     let tmp = tempfile::tempdir().unwrap();
     let files = DiscoveredFiles::default();
-    let graph = build_graph(tmp.path(), &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(tmp.path(), &files, &HashMap::new()).unwrap();
     assert_eq!(graph.node_count(), 0);
     assert_eq!(graph.edge_count(), 0);
 }
@@ -412,7 +411,7 @@ models:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     let stg = graph
         .node_indices()
         .find(|&i| graph[i].label == "stg_orders")
@@ -444,7 +443,7 @@ fn test_build_graph_duplicate_model_name() {
     };
 
     // Should not panic, just warn on stderr about the duplicate
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
     // Both SQL files produce nodes (duplicate warning is informational)
     let order_nodes: Vec<_> = graph
         .node_indices()
@@ -471,9 +470,6 @@ fn test_build_graph_plain_and_jinja_sql_share_logical_model_identity() {
             ],
             ..Default::default()
         },
-        None,
-        true,
-        false,
         &HashMap::new(),
     )
     .unwrap();
@@ -510,7 +506,7 @@ fn test_build_graph_file_paths_are_relative() {
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
 
     for idx in graph.node_indices() {
         let node = &graph[idx];

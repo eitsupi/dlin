@@ -58,11 +58,11 @@ Examples:
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
         project_dir: PathBuf,
 
-        /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+        /// Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache)
         #[arg(long, env = "DLIN_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
 
-        /// Disable extraction cache (always re-parse all files, results are not saved)
+        /// Disable the manifest analysis cache (always re-parse the manifest, results are not saved)
         #[arg(long, env = "DLIN_NO_CACHE")]
         no_cache: bool,
 

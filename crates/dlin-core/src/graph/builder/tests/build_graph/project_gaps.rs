@@ -15,8 +15,7 @@ fn build_project(files: &[(&str, &[u8])]) -> (tempfile::TempDir, GraphBuild) {
     }
     let project = DbtProject::load(tmp.path()).unwrap();
     let discovered = discover_files(&project.resolve_paths(tmp.path())).unwrap();
-    let build =
-        build_graph_report(tmp.path(), &discovered, None, true, false, &HashMap::new()).unwrap();
+    let build = build_graph_report(tmp.path(), &discovered, &HashMap::new()).unwrap();
     (tmp, build)
 }
 
@@ -121,25 +120,6 @@ fn unparseable_macro_is_a_gap_and_valid_macros_are_still_expanded() {
 }
 
 #[test]
-fn macro_that_breaks_the_combined_prefix_is_a_gap() {
-    // Each file parses on its own, but a block name may be defined once.
-    let (_tmp, build) = build_project(&[
-        ("models/a.sql", b"select 1"),
-        ("macros/first.sql", b"{% block shared %}{% endblock %}"),
-        ("macros/second.sql", b"{% block shared %}{% endblock %}"),
-    ]);
-    assert_eq!(
-        build.project_gaps,
-        vec![skipped(
-            "macros/second.sql",
-            InputKind::Macro,
-            InputStage::MacroPrefix,
-            InputFailure::ParseError
-        )]
-    );
-}
-
-#[test]
 fn unreadable_macro_is_a_gap() {
     let (_tmp, build) = build_project(&[
         ("models/a.sql", b"select 1"),
@@ -172,8 +152,7 @@ fn discovery_gaps_are_reported_relative_sorted_and_deduplicated() {
         skipped_inputs: vec![entry(&outside), entry(&inside), entry(&inside)],
         ..Default::default()
     };
-    let build =
-        build_graph_report(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let build = build_graph_report(&project_dir, &files, &HashMap::new()).unwrap();
     let paths: Vec<_> = build
         .project_gaps
         .iter()
@@ -192,7 +171,7 @@ fn unreadable_yaml_is_still_fatal() {
         yaml_files: vec![tmp.path().join("models/missing.yml")],
         ..Default::default()
     };
-    assert!(build_graph_report(tmp.path(), &files, None, true, false, &HashMap::new()).is_err());
+    assert!(build_graph_report(tmp.path(), &files, &HashMap::new()).is_err());
 }
 
 #[test]
@@ -205,7 +184,7 @@ fn unreadable_model_sql_is_still_fatal() {
         model_sql_files: vec![path],
         ..Default::default()
     };
-    assert!(build_graph_report(tmp.path(), &files, None, true, false, &HashMap::new()).is_err());
+    assert!(build_graph_report(tmp.path(), &files, &HashMap::new()).is_err());
 }
 
 #[test]
@@ -216,8 +195,7 @@ fn macro_removed_after_discovery_is_a_gap() {
         macro_sql_files: vec![project_dir.join("macros/gone.sql")],
         ..Default::default()
     };
-    let build =
-        build_graph_report(&project_dir, &files, None, true, false, &HashMap::new()).unwrap();
+    let build = build_graph_report(&project_dir, &files, &HashMap::new()).unwrap();
     assert_eq!(
         build.project_gaps,
         vec![skipped(
@@ -257,41 +235,7 @@ fn macro_exclusions_are_attributed_to_the_right_file_after_a_read_failure() {
 }
 
 #[test]
-fn project_gaps_are_the_same_on_cache_miss_and_hit() {
-    let tmp = tempfile::tempdir().unwrap();
-    for (path, content) in [
-        ("dbt_project.yml", "name: p\n"),
-        ("models/a.sql", "select 1"),
-        ("models/b.sql", "select * from {{ ref('a') }}"),
-        ("models/broken.yml", "models: [unclosed\n"),
-        ("macros/bad.sql", "{% macro broken( %}"),
-    ] {
-        let path = tmp.path().join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, content).unwrap();
-    }
-    let cache_dir = tmp.path().join("cache");
-    let project = DbtProject::load(tmp.path()).unwrap();
-    let discovered = discover_files(&project.resolve_paths(tmp.path())).unwrap();
-    let build = || {
-        build_graph_report(
-            tmp.path(),
-            &discovered,
-            Some(&cache_dir),
-            false,
-            false,
-            &HashMap::new(),
-        )
-        .unwrap()
-    };
-    let miss = build();
-    let hit = build();
-    assert_eq!(miss.project_gaps.len(), 2);
-    assert_eq!(miss.project_gaps, hit.project_gaps);
-}
-
-#[test]
-fn interpreter_library_reports_unreadable_and_unparseable_macros() {
+fn macro_library_reports_unreadable_and_unparseable_macros() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("macros");
     fs::create_dir_all(&dir).unwrap();
@@ -307,7 +251,7 @@ fn interpreter_library_reports_unreadable_and_unparseable_macros() {
         ..Default::default()
     };
     let mut skipped = Vec::new();
-    let library = super::super::super::interpreter_library(&files, &mut skipped);
+    let library = super::super::super::load_macro_library(&files, &mut skipped);
     assert!(library.get("good").is_some());
     let found: Vec<_> = skipped
         .iter()
