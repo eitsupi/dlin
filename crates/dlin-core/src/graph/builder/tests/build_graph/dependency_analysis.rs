@@ -236,9 +236,12 @@ exposures:
       - source('raw', 't')
       - ref('missing')
       - metric('revenue')
+      - ref('a') | upper
+      - orders
 "#,
         ),
     ]);
+    // `ref('a') | upper` is evaluated like the others, as dbt does.
     assert!(has_edge(&graph, "model.a", "exposure.dashboard"));
     assert!(has_edge(&graph, "source.raw.t", "exposure.dashboard"));
     let exposure = node(&graph, "exposure.dashboard");
@@ -258,9 +261,14 @@ exposures:
         analysis(&graph, "exposure.dashboard")["unresolved"],
         json!([
             {
-                "type": "unsupported_dependency_expression",
-                "function": "metric",
+                "type": "unresolved_call",
+                "callee": "metric",
                 "at": at("metric('revenue')")
+            },
+            {
+                "type": "unsupported_dependency_expression",
+                "function": null,
+                "at": at("orders")
             },
             {
                 "type": "dependency_target_missing",
@@ -272,7 +280,7 @@ exposures:
 }
 
 #[test]
-fn generic_test_arguments_are_dependencies() {
+fn generic_test_arguments_are_dependencies_as_dbt_evaluates_them() {
     let (_tmp, graph) = build_project(&[
         ("models/a.sql", "select 1 as id"),
         ("models/b.sql", "select 1 as a_id"),
@@ -287,17 +295,28 @@ models:
         tests:
           - relationships:
               arguments:
-                to: ref('a')
+                to: ref ('a')
                 field: id
           - accepted_values:
               arguments:
-                values: ["ref(", "x"]
+                values: ["ref(", "see ref('a')", "x"]
       - name: id
         tests:
+          - accepted_values:
+              arguments:
+                values: ["ref('a')"]
           - relationships:
               arguments:
-                to: ref ('a')
+                to: ref(var('target_model'))
                 field: id
+          - dbt_utils.equality:
+              arguments:
+                compare_model: ref(var('compare', 'a'))
+                fallback: var('x', ref('a'))
+          - custom_check:
+              arguments:
+                relation: "{{ choose_relation() }}"
+                skipped: "{% if false %}{{ ref('never') }}{% endif %}"
           - dbt_utils.expression_is_true:
               arguments:
                 expression: "{{ ref('a') }} {{ ref(var('other')) }}"
@@ -307,49 +326,83 @@ models:
 "#,
         ),
     ]);
-    let relationships = "test.relationships.b.a_id";
-    assert!(has_edge(&graph, "model.b", relationships));
-    assert!(has_edge(&graph, "model.a", relationships));
-    assert_eq!(analysis(&graph, relationships), complete());
-    // Whitespace before the parenthesis is still a call.
-    assert!(has_edge(&graph, "model.a", "test.relationships.b.id"));
-    assert_eq!(analysis(&graph, "test.relationships.b.id"), complete());
-    // Calls in comments and string literals are not counted.
+    // A string that is a single call is evaluated, wherever it is in the
+    // arguments, as dbt does; whitespace before the parenthesis included.
+    for unique_id in ["test.relationships.b.a_id", "test.accepted_values.b.id"] {
+        assert!(has_edge(&graph, "model.b", unique_id), "{unique_id}");
+        assert!(has_edge(&graph, "model.a", unique_id), "{unique_id}");
+        assert_eq!(analysis(&graph, unique_id), complete(), "{unique_id}");
+    }
+    // Other strings are data, even when they mention `ref(`.
+    let data = "test.accepted_values.b.a_id";
+    assert!(!has_edge(&graph, "model.a", data));
+    assert_eq!(analysis(&graph, data), complete());
+    // Expressions are interpreted as in SQL: vars resolve from the project
+    // or their defaults, and arguments of other functions are evaluated.
+    assert_eq!(
+        analysis(&graph, "test.relationships.b.id")["unresolved"],
+        json!([{
+            "type": "unresolved_var",
+            "name": "target_model",
+            "at": {
+                "unique_id": "test.relationships.b.id",
+                "path": "models/schema.yml",
+                "line": null,
+                "expr": "var('target_model')"
+            }
+        }])
+    );
+    assert!(has_edge(&graph, "model.a", "test.dbt_utils.equality.b.id"));
+    assert_eq!(analysis(&graph, "test.dbt_utils.equality.b.id"), complete());
+    // A macro that is not defined may hide a dependency; a branch known to
+    // be false is not followed.
+    let custom = "test.custom_check.b.id";
+    assert_eq!(
+        analysis(&graph, custom)["unresolved"][0]["type"],
+        "unresolved_call"
+    );
+    assert!(
+        graph
+            .node_indices()
+            .all(|idx| graph[idx].unique_id != "model.never")
+    );
+    // A template is interpreted too; calls in comments and string literals
+    // are not calls.
+    let template = "test.dbt_utils.expression_is_true.b.id";
+    assert!(has_edge(&graph, "model.a", template));
+    assert_eq!(
+        analysis(&graph, template)["unresolved"][0]["type"],
+        "unresolved_var"
+    );
     assert!(has_edge(&graph, "model.a", "test.unique.b.id"));
     assert_eq!(analysis(&graph, "test.unique.b.id"), complete());
-    // Text that mentions a dependency function without a literal call, alone
-    // or next to a literal one.
-    for unique_id in [
-        "test.accepted_values.b.a_id",
-        "test.dbt_utils.expression_is_true.b.id",
-    ] {
-        assert_eq!(
-            analysis(&graph, unique_id)["unresolved"][0]["type"],
-            "unsupported_dependency_expression",
-            "{unique_id}"
-        );
-    }
-    assert!(has_edge(
-        &graph,
-        "model.a",
-        "test.dbt_utils.expression_is_true.b.id"
-    ));
 }
 
 #[test]
-fn yaml_snapshot_relation_that_is_not_a_dependency_call_is_reported() {
-    let (_tmp, graph) = build_project(&[(
-        "snapshots/snapshots.yml",
-        r#"
+fn yaml_snapshot_relation_is_interpreted_as_dbt_does() {
+    let (_tmp, graph) = build_project(&[
+        ("models/orders.sql", "select 1"),
+        (
+            "snapshots/snapshots.yml",
+            r#"
 version: 2
 snapshots:
-  - name: snap
+  - name: from_ref
+    relation: ref('orders')
+  - name: physical
     relation: "{{ target.schema }}.orders"
+  - name: from_macro
+    relation: "{{ pick_relation() }}"
 "#,
-    )]);
+        ),
+    ]);
+    assert!(has_edge(&graph, "model.orders", "snapshot.from_ref"));
+    assert_eq!(analysis(&graph, "snapshot.from_ref"), complete());
+    // A relation named in SQL has no dbt dependency.
+    assert_eq!(analysis(&graph, "snapshot.physical"), complete());
     assert_eq!(
-        analysis(&graph, "snapshot.snap")["unresolved"][0]["type"],
-        "unsupported_dependency_expression"
+        analysis(&graph, "snapshot.from_macro")["unresolved"][0]["type"],
+        "unresolved_call"
     );
 }
 

@@ -427,7 +427,7 @@ Which nodes are analysed:
 | Node | Analysis |
 | --- | --- |
 | Model, snapshot and singular test SQL | The Jinja extraction's reasons and the reasons raised while resolving its `ref()`/`source()` calls |
-| Exposure, YAML snapshot `relation`, YAML generic test arguments | The `ref()`/`source()` expressions written in YAML; anything else is `unsupported_dependency_expression` |
+| Exposure, YAML snapshot `relation`, YAML generic test arguments | The Jinja written in YAML, selected and interpreted as dbt evaluates it, with the same interpreter as SQL. An exposure entry that yields no dependency and no reason is `unsupported_dependency_expression` |
 | Seed, YAML source | Complete: they have no dependencies |
 | Phantom | `not_assessed` (`phantom_dependencies`) |
 | Semantic model, metric, saved query | `not_assessed` (`semantic_dependencies`) |

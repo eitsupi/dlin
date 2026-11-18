@@ -18,7 +18,7 @@ use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::{DiscoveredFiles, SkippedInput};
 use crate::parser::jinja::interp::{DependencyExtraction, MacroLibrary};
 use crate::parser::project::sql_file_stem;
-use crate::parser::sql::recovery::{dependency_call_count, literal_calls};
+use crate::parser::sql::recovery::literal_calls;
 use crate::parser::sql::{RefCall, SourceCall};
 use crate::parser::yaml_schema::{
     ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
@@ -65,7 +65,7 @@ fn extract_sql(
 use super::types::*;
 
 /// Shared state threaded through the build_graph helper functions
-struct GraphBuilder {
+struct GraphBuilder<'a> {
     graph: LineageGraph,
     node_map: HashMap<String, NodeIndex>,
     /// The project's name, which a `ref()` may name as its package.
@@ -74,11 +74,21 @@ struct GraphBuilder {
     /// given and normalised. Discovered paths are normalised, while the
     /// directory may be given as is.
     project_dirs: [PathBuf; 2],
+    /// The project's macros and vars, for the Jinja written in YAML.
+    library: &'a MacroLibrary,
+    vars: &'a HashMap<String, serde_json::Value>,
 }
 
-impl GraphBuilder {
-    fn new(project_dir: &Path, project_name: &str) -> Self {
+impl<'a> GraphBuilder<'a> {
+    fn new(
+        project_dir: &Path,
+        project_name: &str,
+        library: &'a MacroLibrary,
+        vars: &'a HashMap<String, serde_json::Value>,
+    ) -> Self {
         Self {
+            library,
+            vars,
             graph: LineageGraph::new(),
             node_map: HashMap::new(),
             project_name: project_name.to_string(),
@@ -98,6 +108,61 @@ impl GraphBuilder {
             .unwrap_or(path)
             .to_slash_lossy()
             .into_owned()
+    }
+
+    /// Interpret Jinja written in YAML for the node `unique_id` defined in
+    /// `yaml_path`, as SQL is interpreted. The returned reasons and call
+    /// sites are located at `text`, the YAML value, since YAML values have no
+    /// line of their own here.
+    fn evaluate_yaml(
+        &self,
+        template: &str,
+        text: &str,
+        unique_id: &str,
+        yaml_path: &Path,
+    ) -> YamlDependencies {
+        let extraction = extract_sql(template, self.library, self.vars);
+        let path = self.display_path(yaml_path);
+        let at = |site: &ExtractionSite| NodeCallSite {
+            unique_id: unique_id.to_string(),
+            path: path.clone(),
+            line: None,
+            expr: site.expr.clone().or_else(|| Some(text.trim().to_string())),
+        };
+        YamlDependencies {
+            refs: extraction
+                .refs
+                .into_iter()
+                .zip(extraction.ref_sites.iter().map(&at))
+                .collect(),
+            sources: extraction
+                .sources
+                .into_iter()
+                .zip(extraction.source_sites.iter().map(&at))
+                .collect(),
+            reasons: extraction
+                .reasons
+                .into_iter()
+                .map(|reason| reason.map_site(|site| at(&site)))
+                .collect(),
+            fallback_site: at(&ExtractionSite::default()),
+        }
+    }
+
+    /// Add the dependencies interpreted from YAML to the node at `owner`,
+    /// creating phantoms for missing targets as for SQL.
+    fn link_yaml(&mut self, owner: NodeIndex, deps: YamlDependencies, origin: &Path) {
+        let (ref_edge, source_edge) = match self.graph[owner].node_type {
+            NodeType::Test => (EdgeType::Test, EdgeType::Test),
+            _ => (EdgeType::Ref, EdgeType::Source),
+        };
+        for (call, at) in &deps.refs {
+            self.link_ref(owner, call, at.clone(), origin, ref_edge);
+        }
+        for (call, at) in &deps.sources {
+            self.link_source(owner, call, at.clone(), origin, source_edge);
+        }
+        self.add_reasons(owner, deps.reasons);
     }
 
     /// Add reasons to a node's dependency analysis.
@@ -596,39 +661,18 @@ fn process_sql_edges(
     Ok(())
 }
 
-/// A dependency written as text in YAML, such as an exposure's `depends_on`
-/// entry or a snapshot's `relation`.
-enum DependencyExpression {
-    Ref(RefCall),
-    Source(SourceCall),
-    /// Not a single `ref()` or `source()` call with literal arguments. The
-    /// function called, when one is recognised.
-    Unsupported(Option<String>),
+/// The dependencies interpreted from a Jinja value written in YAML.
+struct YamlDependencies {
+    refs: Vec<(RefCall, NodeCallSite)>,
+    sources: Vec<(SourceCall, NodeCallSite)>,
+    reasons: Vec<NodeDependencyReason>,
+    /// The YAML value itself, for reasons about the value as a whole.
+    fallback_site: NodeCallSite,
 }
 
-/// Parse a YAML dependency expression such as `ref('orders')`.
-fn parse_dependency_expression(text: &str) -> DependencyExpression {
-    let text = text.trim();
-    let function = text
-        .split_once('(')
-        .map(|(name, _)| name.trim())
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        })
-        .map(str::to_string);
-    let (mut refs, mut sources) = literal_calls(&format!("{{{{ {text} }}}}"));
-    match (function.as_deref(), refs.len(), sources.len()) {
-        (Some("ref"), 1, 0) => DependencyExpression::Ref(refs.remove(0)),
-        (Some("source"), 0, 1) => DependencyExpression::Source(sources.remove(0)),
-        _ => DependencyExpression::Unsupported(function),
-    }
-}
-
-/// Create exposure nodes and edges to their dependencies. An exposure does
-/// not create phantom nodes: a target that does not exist is a reason.
+/// Create exposure nodes and edges to their dependencies. Each `depends_on`
+/// entry is a Jinja expression, as dbt evaluates it. An exposure does not
+/// create phantom nodes: a target that does not exist is a reason.
 fn process_exposures(gb: &mut GraphBuilder, exposures: &[(ExposureDefinition, PathBuf)]) {
     for (exposure, yaml_path) in exposures {
         let unique_id = format!("exposure.{}", exposure.name);
@@ -656,58 +700,60 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[(ExposureDefinition, Pa
             dependency_analysis: DependencyAnalysis::new([]),
         });
 
-        let path = gb.display_path(yaml_path);
         for dep in &exposure.depends_on {
-            let at = NodeCallSite {
-                unique_id: unique_id.clone(),
-                path: path.clone(),
-                line: None,
-                expr: Some(dep.trim().to_string()),
-            };
-            let mut reasons = Vec::new();
-            let target = match parse_dependency_expression(dep) {
-                DependencyExpression::Ref(call) => {
-                    if let Some(package) = &call.package
-                        && *package != gb.project_name
-                    {
-                        reasons.push(DependencyReason::UnsupportedRefPackage {
-                            package: package.clone(),
-                            name: call.name.clone(),
-                            at: at.clone(),
-                        });
-                    }
-                    let (dep_id, name) = match &call.version {
-                        Some(v) => (
-                            format!("model.{}.v{}", call.name, v),
-                            format!("{}.v{}", call.name, v),
-                        ),
-                        None => {
-                            let candidates = ref_candidates(&call.name, &gb.node_map, &gb.graph);
-                            if candidates.len() > 1 {
-                                reasons.push(DependencyReason::AmbiguousRef {
-                                    name: call.name.clone(),
-                                    candidates,
-                                    at: at.clone(),
-                                });
-                            }
-                            (resolve_ref(&call.name, &gb.node_map), call.name.clone())
-                        }
-                    };
-                    Some((dep_id, name))
-                }
-                DependencyExpression::Source(call) => Some((
-                    format!("source.{}.{}", call.source_name, call.table_name),
-                    format!("{}.{}", call.source_name, call.table_name),
-                )),
-                DependencyExpression::Unsupported(function) => {
-                    reasons.push(DependencyReason::UnsupportedDependencyExpression {
-                        function,
+            let deps = gb.evaluate_yaml(&format!("{{{{ {dep} }}}}"), dep, &unique_id, yaml_path);
+            let mut reasons = deps.reasons;
+            if deps.refs.is_empty() && deps.sources.is_empty() && reasons.is_empty() {
+                // Nothing a dependency can come from, such as `metric(...)`
+                // or a bare name.
+                let function = dep
+                    .trim()
+                    .split_once('(')
+                    .map(|(name, _)| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
+                reasons.push(DependencyReason::UnsupportedDependencyExpression {
+                    function,
+                    at: deps.fallback_site.clone(),
+                });
+            }
+            let mut targets = Vec::new();
+            for (call, at) in deps.refs {
+                if let Some(package) = &call.package
+                    && *package != gb.project_name
+                {
+                    reasons.push(DependencyReason::UnsupportedRefPackage {
+                        package: package.clone(),
+                        name: call.name.clone(),
                         at: at.clone(),
                     });
-                    None
                 }
-            };
-            if let Some((dep_id, name)) = target {
+                match &call.version {
+                    Some(v) => targets.push((
+                        format!("model.{}.v{}", call.name, v),
+                        format!("{}.v{}", call.name, v),
+                        at,
+                    )),
+                    None => {
+                        let candidates = ref_candidates(&call.name, &gb.node_map, &gb.graph);
+                        if candidates.len() > 1 {
+                            reasons.push(DependencyReason::AmbiguousRef {
+                                name: call.name.clone(),
+                                candidates,
+                                at: at.clone(),
+                            });
+                        }
+                        targets.push((resolve_ref(&call.name, &gb.node_map), call.name, at));
+                    }
+                }
+            }
+            for (call, at) in deps.sources {
+                targets.push((
+                    format!("source.{}.{}", call.source_name, call.table_name),
+                    format!("{}.{}", call.source_name, call.table_name),
+                    at,
+                ));
+            }
+            for (dep_id, name, at) in targets {
                 match gb.node_map.get(&dep_id).copied() {
                     Some(dep_idx) => {
                         // An edge to a phantom node is kept, as for SQL
@@ -750,7 +796,10 @@ fn dedup_unique_id(
 
 /// Add a generic test node to the graph and connect it to the parent and to
 /// the `ref()`/`source()` calls in its arguments, such as the `to` of a
-/// `relationships` test.
+/// `relationships` test. Arguments are read as dbt evaluates them: a string
+/// that looks like a call to `ref`, `source`, `var`, `env_var` or `doc` is
+/// an expression, one holding Jinja is a template, and any other string is
+/// data. Both are interpreted like SQL.
 fn add_generic_test_node(
     gb: &mut GraphBuilder,
     parent_idx: NodeIndex,
@@ -780,57 +829,52 @@ fn add_generic_test_node(
         return;
     };
     let mut strings = Vec::new();
-    collect_strings(value, &mut strings);
-    let path = gb.display_path(yaml_path);
+    collect_test_strings(value, true, &mut strings);
     for text in strings {
-        let template = if text.contains("{{") || text.contains("{%") {
+        // dbt evaluates a string that looks like a call to one of a few
+        // functions as an expression and renders any other string as a
+        // template; a string without Jinja renders as itself.
+        let template = if RENDERED_TEST_ARGUMENT.is_match(text) {
+            format!("{{{{ {text} }}}}")
+        } else if text.contains("{{") || text.contains("{%") {
             text.to_string()
         } else {
-            format!("{{{{ {text} }}}}")
-        };
-        let calls = dependency_call_count(&template);
-        if calls == 0 {
             continue;
-        }
-        let at = NodeCallSite {
-            unique_id: unique_id.clone(),
-            path: path.clone(),
-            line: None,
-            expr: Some(text.trim().to_string()),
         };
-        let (refs, sources) = literal_calls(&template);
-        if refs.len() + sources.len() < calls {
-            // The text mentions a dependency function that is not a call
-            // with literal arguments, alone or next to literal calls.
-            gb.add_reasons(
-                idx,
-                [DependencyReason::UnsupportedDependencyExpression {
-                    function: None,
-                    at: at.clone(),
-                }],
-            );
-        }
-        for call in &refs {
-            gb.link_ref(idx, call, at.clone(), yaml_path, EdgeType::Test);
-        }
-        for call in &sources {
-            gb.link_source(idx, call, at.clone(), yaml_path, EdgeType::Test);
-        }
+        let deps = gb.evaluate_yaml(&template, text, &unique_id, yaml_path);
+        gb.link_yaml(idx, deps, yaml_path);
     }
 }
 
-/// Every string in a YAML value, depth first.
-fn collect_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
+/// A generic test argument string that dbt evaluates as an expression rather
+/// than as a template, as in dbt's `looks_like_func`. It does not check that
+/// the string is a single call: the expression is interpreted.
+static RENDERED_TEST_ARGUMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\s*(env_var|ref|var|source|doc)\s*\(.+\)\s*$").unwrap()
+});
+
+/// The strings of a generic test definition that dbt renders: its arguments
+/// and config, but not its name, description or top-level `column_name`.
+fn collect_test_strings<'v>(value: &'v serde_json::Value, top: bool, strings: &mut Vec<&'v str>) {
     match value {
         serde_json::Value::String(text) => strings.push(text),
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_strings(item, strings);
+                collect_test_strings(item, false, strings);
             }
         }
         serde_json::Value::Object(map) => {
-            for item in map.values() {
-                collect_strings(item, strings);
+            for (key, item) in map {
+                let skipped = matches!(key.as_str(), "description" | "name" | "test_name")
+                    || (top && key == "column_name");
+                if !skipped {
+                    // The test name key wraps the arguments of the
+                    // standard format, which are still top-level.
+                    let wraps_test = top
+                        && item.is_object()
+                        && !matches!(key.as_str(), "arguments" | "config" | "meta");
+                    collect_test_strings(item, wraps_test, strings);
+                }
             }
         }
         _ => {}
@@ -968,24 +1012,17 @@ fn process_yaml_snapshot_nodes(
             continue;
         };
         if let Some(relation) = &snap_def.relation {
-            let at = NodeCallSite {
-                unique_id: unique_id.clone(),
-                path: gb.display_path(yaml_path),
-                line: None,
-                expr: Some(relation.trim().to_string()),
+            // As dbt does, a relation that starts with a dependency call is
+            // an expression; anything else is SQL, possibly with Jinja, that
+            // names a relation.
+            let trimmed = relation.trim();
+            let template = if trimmed.starts_with("ref(") || trimmed.starts_with("source(") {
+                format!("{{{{ {trimmed} }}}}")
+            } else {
+                relation.clone()
             };
-            match parse_dependency_expression(relation) {
-                DependencyExpression::Ref(call) => {
-                    gb.link_ref(snap_idx, &call, at, yaml_path, EdgeType::Ref);
-                }
-                DependencyExpression::Source(call) => {
-                    gb.link_source(snap_idx, &call, at, yaml_path, EdgeType::Source);
-                }
-                DependencyExpression::Unsupported(function) => gb.add_reasons(
-                    snap_idx,
-                    [DependencyReason::UnsupportedDependencyExpression { function, at }],
-                ),
-            }
+            let deps = gb.evaluate_yaml(&template, relation, &unique_id, yaml_path);
+            gb.link_yaml(snap_idx, deps, yaml_path);
         }
     }
 }
@@ -1020,9 +1057,9 @@ pub fn build_graph_report(
     files: &DiscoveredFiles,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<GraphBuild> {
-    let mut gb = GraphBuilder::new(project_dir, project_name);
     let mut skipped = files.skipped_inputs.clone();
     let library = load_macro_library(files, &mut skipped);
+    let mut gb = GraphBuilder::new(project_dir, project_name, &library, vars);
 
     let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir, &mut skipped)?;
     let model_dependencies = process_model_files(
