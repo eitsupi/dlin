@@ -694,6 +694,25 @@ fn unknown_loop_with_a_false_filter_does_not_run_the_body() {
 }
 
 #[test]
+fn unknown_loop_with_a_false_filter_runs_else_unconditionally() {
+    let e = extract(
+        "{% set ns = namespace(name='before') %}\
+         {% for x in env_var('ITEMS') if false %}{{ ref('never') }}\
+         {% else %}{{ ref('fallback') }}{% set ns.name = 'after' %}{% endfor %}\
+         {{ ref(ns.name) }}",
+    );
+    assert_eq!(ref_names(&e), vec!["after", "fallback"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+    assert!(e.decisions.iter().any(|decision| {
+        decision
+            .reference
+            .as_ref()
+            .is_some_and(|r| r.name == "fallback")
+            && decision.outcome == DecisionOutcome::Accepted { conditional: false }
+    }));
+}
+
+#[test]
 fn config_follows_the_last_call_and_unknown_branches() {
     let e = extract(
         "{{ config(materialized='view') }}{{ config(materialized='table', tags=['a']) }}{{ config(tags=['b']) }}",

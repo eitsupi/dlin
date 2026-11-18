@@ -714,8 +714,7 @@ impl<'a> Interp<'a> {
                     Truth::Known(false) => {
                         // No item passes: only the `else` path remains.
                         self.scan_skipped(body);
-                        stable = true;
-                        break;
+                        return self.exec_block(entry, else_body);
                     }
                 }
             }
