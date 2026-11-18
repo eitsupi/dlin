@@ -651,3 +651,57 @@ fn default_filter_keeps_non_plain_values() {
     assert_eq!(ref_names(&e), vec!["a", "b", "c", "d"]);
     assert!(e.reasons.is_empty(), "{:?}", e.reasons);
 }
+
+#[test]
+fn methods_of_known_values_follow_minijinja_pycompat() {
+    let e = extract(
+        "{{ ref('aaa'.replace('a', 'b', 1)) }}{{ ref('xxyxx'.strip('x')) }}{{ ref('a,b,c'.split(',', 1)[1]) }}\
+         {{ ref({'k': 'd'}.get('k')) }}",
+    );
+    assert_eq!(ref_names(&e), vec!["b,c", "baa", "d", "y"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn unmodelled_method_arguments_make_the_value_unknown() {
+    let e = extract("{{ ref('abc'.no_such_method()) }}");
+    assert!(e.refs.is_empty());
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
+}
+
+#[test]
+fn repeated_dict_keys_keep_the_last_value() {
+    let e = extract(
+        "{% set m = {'x': 'a', 'x': 'b'} %}{{ ref(m['x']) }}{% for k in m %}{{ ref(k) }}{% endfor %}",
+    );
+    assert_eq!(ref_names(&e), vec!["b", "x"]);
+}
+
+#[test]
+fn calls_through_context_and_builtins_are_unknown_calls() {
+    let e = extract("{% do context['some_macro']() %}{% do builtins.other() %}select 1");
+    assert_eq!(codes(&e), vec!["unresolved_call"]);
+    let e =
+        extract("{% set rel = adapter.get_relation(this.database, this.schema, 't') %}select 1");
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn unknown_loop_with_a_false_filter_does_not_run_the_body() {
+    let e = extract("{% for x in env_var('ITEMS') if false %}{{ ref('never') }}{% endfor %}");
+    assert!(e.refs.is_empty());
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn config_follows_the_last_call_and_unknown_branches() {
+    let e = extract(
+        "{{ config(materialized='view') }}{{ config(materialized='table', tags=['a']) }}{{ config(tags=['b']) }}",
+    );
+    assert_eq!(e.config.materialized.as_deref(), Some("table"));
+    assert_eq!(e.config.tags, vec!["a", "b"]);
+    let e = extract(
+        "{% if target.name == 'prod' %}{{ config(materialized='table') }}{% else %}{{ config(materialized='view') }}{% endif %}",
+    );
+    assert_eq!(e.config.materialized, None);
+}

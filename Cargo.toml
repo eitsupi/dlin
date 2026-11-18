@@ -22,6 +22,7 @@ anyhow = "1"
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
 minijinja = { version = "=3.1.0", features = ["serde"] }
+minijinja-contrib = { version = "=3.1.0", features = ["pycompat"] }
 rayon = "1"
 globset = "0.4"
 # SQL parsing and AST metadata stay inside dlin-sqllineage.

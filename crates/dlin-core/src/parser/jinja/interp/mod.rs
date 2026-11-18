@@ -78,6 +78,9 @@ pub(crate) fn extract_dependencies(
         }
     }
     let mut rec = interp.rec;
+    if rec.materialized_unknown {
+        rec.config.materialized = None;
+    }
     // The two passes record the same calls again.
     let mut seen = Vec::new();
     rec.decisions.retain(|decision| {

@@ -23,6 +23,9 @@ fn environment() -> &'static Environment<'static> {
     ENV.get_or_init(|| {
         let mut env = Environment::new();
         env.set_fuel(Some(FUEL_PER_OPERATION));
+        // Python-compatible methods (`'a'.replace(...)`, `d.items()`), as
+        // dbt Fusion's environment uses.
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         env
     })
 }
@@ -155,4 +158,11 @@ pub(crate) fn call_global(name: &str, args: &[Value]) -> Result<Value, minijinja
         minijinja::Error::new(minijinja::ErrorKind::UnknownFunction, name.to_string())
     })?;
     function.call(&mut state, args)
+}
+
+/// Call a method of a known value. `None` when the method does not exist
+/// or fails for these arguments.
+pub(crate) fn call_method(value: &Value, name: &str, args: &[Value]) -> Option<Value> {
+    let mut state = environment().empty_state();
+    value.call_method(&mut state, name, args).ok()
 }

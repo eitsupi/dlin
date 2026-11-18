@@ -74,6 +74,8 @@ pub(crate) struct Recorder {
     pub(crate) decisions: Vec<Decision>,
     /// Names of the macros that were called.
     pub(crate) entered: BTreeSet<Arc<str>>,
+    /// Whether `materialized` was set to a value that is not known.
+    pub(crate) materialized_unknown: bool,
 }
 
 impl Recorder {
@@ -706,8 +708,15 @@ impl<'a> Interp<'a> {
                 // Whether an item passes is as unknown as the items; the body
                 // runs on the path of both.
                 let value = self.eval(&mut state, filter)?;
-                if let Truth::Unknown(filter_causes) = self.truth(&state, &value, filter.span) {
-                    state.path = state.path.union(&filter_causes);
+                match self.truth(&state, &value, filter.span) {
+                    Truth::Unknown(filter_causes) => state.path = state.path.union(&filter_causes),
+                    Truth::Known(true) => {}
+                    Truth::Known(false) => {
+                        // No item passes: only the `else` path remains.
+                        self.scan_skipped(body);
+                        stable = true;
+                        break;
+                    }
                 }
             }
             let mut flow = self.exec_block(state, body)?;
@@ -1077,7 +1086,12 @@ impl<'a> Interp<'a> {
                     let key_value = self.eval(st, key)?;
                     let item = self.eval(st, value)?;
                     match self.freeze(st, &key_value, key.span) {
-                        Ok(key) => entries.push((key, item)),
+                        // A repeated key keeps its first position and
+                        // takes the last value, as in a dict.
+                        Ok(key) => match entries.iter_mut().find(|(k, _)| *k == key) {
+                            Some(entry) => entry.1 = item,
+                            None => entries.push((key, item)),
+                        },
                         Err(causes) => {
                             unknown_key = Some(match unknown_key {
                                 Some(existing) => existing.union(&causes),
@@ -1746,7 +1760,22 @@ impl<'a> Interp<'a> {
                 st.clobber_reachable(args.iter().chain(kwargs.iter().map(|(_, v)| v)), &causes);
                 Ok(AValue::Unknown(causes))
             }
-            AValue::Context(object) => Ok(AValue::Unknown(self.context_causes(&object, span))),
+            AValue::Context(object) => {
+                // `context` and `builtins` give access to macros and other
+                // functions, so calling through them is an unknown call. The
+                // other context objects (adapter, modules, api, ...) only
+                // compute or query data.
+                if matches!(object.root, "context" | "builtins") {
+                    let causes = Causes::one(DependencyReason::UnresolvedCall {
+                        callee: Some(object.path.to_string()),
+                        at: self.site(span),
+                    });
+                    self.record_used(st, &causes);
+                    st.clobber_reachable(args.iter().chain(kwargs.iter().map(|(_, v)| v)), &causes);
+                    return Ok(AValue::Unknown(causes));
+                }
+                Ok(AValue::Unknown(self.context_causes(&object, span)))
+            }
             AValue::Known(_) | AValue::Heap(_) | AValue::Relation => Ok(AValue::Unknown(
                 self.unsupported("calling a non-callable value", span),
             )),
@@ -2104,23 +2133,40 @@ impl<'a> Interp<'a> {
             }
             Builtin::Config => {
                 if self.record_config {
-                    if let Some(value) = kwarg("materialized")
-                        && let Ok(Some(materialized)) = self.string_arg(st, value, span)
-                        && self.rec.config.materialized.is_none()
-                    {
-                        self.rec.config.materialized = Some(materialized);
+                    let conditional = !st.path.is_empty();
+                    if let Some(value) = kwarg("materialized") {
+                        let materialized = self.string_arg(st, value, span).ok().flatten();
+                        // A later call overrides an earlier one. A value set
+                        // on an unknown path is only kept when it is the value
+                        // already in place.
+                        if !conditional {
+                            self.rec.materialized_unknown = materialized.is_none();
+                            self.rec.config.materialized = materialized;
+                        } else if materialized.is_none()
+                            || materialized != self.rec.config.materialized
+                        {
+                            self.rec.materialized_unknown = true;
+                            self.rec.config.materialized = None;
+                        }
                     }
-                    if let Some(value) = kwarg("tags")
-                        && self.rec.config.tags.is_empty()
+                    // Tags accumulate. Tags set on an unknown path are left
+                    // out rather than claimed.
+                    if !conditional
+                        && let Some(value) = kwarg("tags")
                         && let Ok(tags) = self.freeze(st, value, span)
                     {
-                        self.rec.config.tags = match tags.as_str() {
+                        let tags: Vec<String> = match tags.as_str() {
                             Some(tag) => vec![tag.to_string()],
                             None => tags
                                 .try_iter()
                                 .map(|iter| iter.map(|tag| tag.to_string()).collect())
                                 .unwrap_or_default(),
                         };
+                        for tag in tags {
+                            if !self.rec.config.tags.contains(&tag) {
+                                self.rec.config.tags.push(tag);
+                            }
+                        }
                     }
                 }
                 Ok(AValue::Known(Value::from("")))
@@ -2269,7 +2315,7 @@ impl<'a> Interp<'a> {
                 }
             }
             AValue::Known(value) => {
-                if let Some(result) = self.known_method(st, value, name, &args, span) {
+                if let Some(result) = self.known_method(st, value, name, &args, &kwargs, span) {
                     return result;
                 }
             }
@@ -2287,9 +2333,19 @@ impl<'a> Interp<'a> {
         kwargs: &[(Arc<str>, AValue)],
         span: Span,
     ) -> Option<AValue> {
-        let _ = kwargs;
         let obj = st.heap.get(&id)?.clone();
-        match (obj, name) {
+        // Keyword arguments and unexpected argument counts are not modelled;
+        // they fall through to the unmodelled-method case below.
+        let arity_ok = kwargs.is_empty()
+            && match name {
+                "append" | "extend" | "update" => args.len() == 1,
+                "insert" => args.len() == 2,
+                "pop" | "keys" | "values" | "items" => args.is_empty(),
+                "get" => matches!(args.len(), 1 | 2),
+                _ => true,
+            };
+        let method = if arity_ok { name } else { "" };
+        match (obj, method) {
             (HeapObj::Clobbered(causes), _) => Some(AValue::Unknown(causes)),
             (HeapObj::List(mut items), "append") => {
                 items.push(args.first().cloned().unwrap_or_else(AValue::none));
@@ -2399,82 +2455,36 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// A method of a known value, evaluated by minijinja with its
+    /// Python-compatible methods. `None` when minijinja cannot evaluate it,
+    /// which makes the result unknown rather than wrong.
     fn known_method(
         &self,
         st: &State,
         value: &Value,
         name: &str,
         args: &[AValue],
+        kwargs: &[(Arc<str>, AValue)],
         span: Span,
     ) -> Option<AValue> {
-        let args = match self.freeze_all(st, args, span) {
-            Ok(args) => args,
+        let mut values = match self.freeze_all(st, args, span) {
+            Ok(values) => values,
             Err(causes) => return Some(AValue::Unknown(causes)),
         };
-        let string_arg = |i: usize| args.get(i).and_then(|v| v.as_str()).map(str::to_string);
-        if let Some(text) = value.as_str() {
-            let result = match name {
-                "lower" => Value::from(text.to_lowercase()),
-                "upper" => Value::from(text.to_uppercase()),
-                "strip" => Value::from(text.trim()),
-                "lstrip" => Value::from(text.trim_start()),
-                "rstrip" => Value::from(text.trim_end()),
-                "replace" => Value::from(text.replace(&string_arg(0)?, &string_arg(1)?)),
-                "startswith" => Value::from(text.starts_with(&string_arg(0)?)),
-                "endswith" => Value::from(text.ends_with(&string_arg(0)?)),
-                "split" => match string_arg(0) {
-                    Some(sep) => Value::from(
-                        text.split(sep.as_str())
-                            .map(Value::from)
-                            .collect::<Vec<_>>(),
-                    ),
-                    None => {
-                        Value::from(text.split_whitespace().map(Value::from).collect::<Vec<_>>())
-                    }
-                },
-                "join" => {
-                    let items: Vec<String> = args
-                        .first()?
-                        .try_iter()
-                        .ok()?
-                        .map(|v| v.to_string())
-                        .collect();
-                    Value::from(items.join(text))
+        if !kwargs.is_empty() {
+            let mut pairs = Vec::new();
+            for (key, item) in kwargs {
+                if key.as_ref() == "**" {
+                    return None;
                 }
-                _ => return None,
-            };
-            return Some(AValue::Known(result));
+                match self.freeze(st, item, span) {
+                    Ok(item) => pairs.push((key.to_string(), item)),
+                    Err(causes) => return Some(AValue::Unknown(causes)),
+                }
+            }
+            values.push(Value::from(minijinja::value::Kwargs::from_iter(pairs)));
         }
-        if value.kind() == ValueKind::Map {
-            return match name {
-                "get" => Some(AValue::Known(
-                    value
-                        .get_item(args.first()?)
-                        .ok()
-                        .filter(|v| !v.is_undefined())
-                        .unwrap_or_else(|| args.get(1).cloned().unwrap_or_else(|| Value::from(()))),
-                )),
-                "keys" => Some(AValue::Known(Value::from(
-                    value.try_iter().ok()?.collect::<Vec<_>>(),
-                ))),
-                "values" => Some(AValue::Known(Value::from(
-                    value
-                        .try_iter()
-                        .ok()?
-                        .filter_map(|k| value.get_item(&k).ok())
-                        .collect::<Vec<_>>(),
-                ))),
-                "items" => Some(AValue::Known(Value::from(
-                    value
-                        .try_iter()
-                        .ok()?
-                        .filter_map(|k| value.get_item(&k).ok().map(|v| Value::from(vec![k, v])))
-                        .collect::<Vec<_>>(),
-                ))),
-                _ => None,
-            };
-        }
-        None
+        known::call_method(value, name, &values).map(AValue::Known)
     }
 }
 
