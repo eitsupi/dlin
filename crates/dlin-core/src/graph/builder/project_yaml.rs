@@ -90,6 +90,7 @@ pub(super) fn process_yaml_files(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
+    skipped: &mut Vec<SkippedInput>,
 ) -> Result<YamlParseResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
     let mut exposures: Vec<ExposureDefinition> = Vec::new();
@@ -110,7 +111,15 @@ pub(super) fn process_yaml_files(
         let content = read_file(yaml_path)?;
         let schema = match parse_schema_file(&content, Some(yaml_path.as_path())) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                skipped.push(SkippedInput {
+                    path: yaml_path.clone(),
+                    kind: InputKind::Yaml,
+                    stage: InputStage::Parse,
+                    failure: InputFailure::ParseError,
+                });
+                continue;
+            }
         };
 
         add_source_nodes(gb, &schema, yaml_path, project_dir);

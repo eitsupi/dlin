@@ -371,6 +371,7 @@ mod tests {
             macro_paths: norm("macros"),
             analysis_paths: norm("analyses"),
             allow_jinja_file_extensions: false,
+            origins: Default::default(),
         }
     }
 

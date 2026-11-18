@@ -99,25 +99,49 @@ pub(crate) fn extract_via_jinja_with_prepared_prefix(
 /// any that fail to parse as valid minijinja templates. This ensures one
 /// bad macro file doesn't disable jinja-based extraction for all models.
 pub fn build_macro_prefix(macro_sources: &[String]) -> String {
+    let sources: Vec<&str> = macro_sources.iter().map(String::as_str).collect();
+    build_macro_prefix_report(&sources).prefix
+}
+
+/// Why a macro source was left out of the prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MacroExclusion {
+    /// The source does not parse on its own.
+    Parse,
+    /// The source parses on its own but breaks the accumulated prefix.
+    Prefix,
+}
+
+/// A macro prefix and the sources left out of it, by index.
+#[derive(Debug, Default)]
+pub(crate) struct MacroPrefixReport {
+    pub(crate) prefix: String,
+    pub(crate) excluded: Vec<(usize, MacroExclusion)>,
+}
+
+/// Like [`build_macro_prefix`], also reporting which sources were left out.
+pub(crate) fn build_macro_prefix_report(macro_sources: &[&str]) -> MacroPrefixReport {
+    let mut report = MacroPrefixReport::default();
     if macro_sources.is_empty() {
-        return String::new();
+        return report;
     }
     let env = Environment::new();
-    let mut prefix = String::new();
-    for source in macro_sources {
+    for (index, source) in macro_sources.iter().enumerate() {
         // Only include macros that minijinja can parse individually
         if env.template_from_str(source).is_err() {
+            report.excluded.push((index, MacroExclusion::Parse));
             continue;
         }
         // Verify the accumulated prefix still parses after adding this macro
-        let len = prefix.len();
-        prefix.push_str(source);
-        prefix.push('\n');
-        if env.template_from_str(&prefix).is_err() {
-            prefix.truncate(len);
+        let len = report.prefix.len();
+        report.prefix.push_str(source);
+        report.prefix.push('\n');
+        if env.template_from_str(&report.prefix).is_err() {
+            report.prefix.truncate(len);
+            report.excluded.push((index, MacroExclusion::Prefix));
         }
     }
-    prefix
+    report
 }
 
 /// Merge `other` into `base`, adding only deduplicated refs and sources

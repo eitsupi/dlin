@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::graph::dependency::{PathOrigin, PathSetting};
 use crate::input::normalize_path;
 
 use crate::error::DbtLineageError;
@@ -26,22 +27,22 @@ pub struct DbtProject {
     pub name: String,
 
     #[serde(rename = "model-paths", default = "default_model_paths")]
-    pub model_paths: Vec<String>,
+    pub model_paths: ProjectPaths,
 
     #[serde(rename = "seed-paths", default = "default_seed_paths")]
-    pub seed_paths: Vec<String>,
+    pub seed_paths: ProjectPaths,
 
     #[serde(rename = "snapshot-paths", default = "default_snapshot_paths")]
-    pub snapshot_paths: Vec<String>,
+    pub snapshot_paths: ProjectPaths,
 
     #[serde(rename = "test-paths", default = "default_test_paths")]
-    pub test_paths: Vec<String>,
+    pub test_paths: ProjectPaths,
 
     #[serde(rename = "macro-paths", default = "default_macro_paths")]
-    pub macro_paths: Vec<String>,
+    pub macro_paths: ProjectPaths,
 
     #[serde(rename = "analysis-paths", default = "default_analysis_paths")]
-    pub analysis_paths: Vec<String>,
+    pub analysis_paths: ProjectPaths,
 
     #[serde(default)]
     pub vars: HashMap<String, serde_json::Value>,
@@ -56,28 +57,75 @@ pub struct ProjectFlags {
     pub allow_jinja_file_extensions: bool,
 }
 
-fn default_model_paths() -> Vec<String> {
-    vec!["models".to_string()]
+/// The entries of one `*-paths` setting, with whether they were written in
+/// `dbt_project.yml` or filled in with dbt's default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPaths {
+    paths: Vec<String>,
+    origin: PathOrigin,
 }
 
-fn default_seed_paths() -> Vec<String> {
-    vec!["seeds".to_string()]
+impl ProjectPaths {
+    fn default_of(path: &str) -> Self {
+        Self {
+            paths: vec![path.to_string()],
+            origin: PathOrigin::Default,
+        }
+    }
+
+    pub fn origin(&self) -> PathOrigin {
+        self.origin
+    }
 }
 
-fn default_snapshot_paths() -> Vec<String> {
-    vec!["snapshots".to_string()]
+impl<'de> Deserialize<'de> for ProjectPaths {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<String>::deserialize(deserializer).map(|paths| Self {
+            paths,
+            origin: PathOrigin::Explicit,
+        })
+    }
 }
 
-fn default_test_paths() -> Vec<String> {
-    vec!["tests".to_string()]
+impl std::ops::Deref for ProjectPaths {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        &self.paths
+    }
 }
 
-fn default_macro_paths() -> Vec<String> {
-    vec!["macros".to_string()]
+impl PartialEq<Vec<&str>> for ProjectPaths {
+    fn eq(&self, other: &Vec<&str>) -> bool {
+        self.paths
+            .iter()
+            .map(String::as_str)
+            .eq(other.iter().copied())
+    }
 }
 
-fn default_analysis_paths() -> Vec<String> {
-    vec!["analyses".to_string()]
+fn default_model_paths() -> ProjectPaths {
+    ProjectPaths::default_of("models")
+}
+
+fn default_seed_paths() -> ProjectPaths {
+    ProjectPaths::default_of("seeds")
+}
+
+fn default_snapshot_paths() -> ProjectPaths {
+    ProjectPaths::default_of("snapshots")
+}
+
+fn default_test_paths() -> ProjectPaths {
+    ProjectPaths::default_of("tests")
+}
+
+fn default_macro_paths() -> ProjectPaths {
+    ProjectPaths::default_of("macros")
+}
+
+fn default_analysis_paths() -> ProjectPaths {
+    ProjectPaths::default_of("analyses")
 }
 
 // dbt recognizes the project-root vars.yml filename exactly; vars.yaml is not
@@ -195,6 +243,14 @@ impl DbtProject {
             macro_paths: resolve(&self.macro_paths),
             analysis_paths: resolve(&self.analysis_paths),
             allow_jinja_file_extensions: self.flags.allow_jinja_file_extensions,
+            origins: PathOrigins {
+                model_paths: self.model_paths.origin(),
+                seed_paths: self.seed_paths.origin(),
+                snapshot_paths: self.snapshot_paths.origin(),
+                test_paths: self.test_paths.origin(),
+                macro_paths: self.macro_paths.origin(),
+                analysis_paths: self.analysis_paths.origin(),
+            },
         }
     }
 }
@@ -366,6 +422,58 @@ pub struct ResolvedPaths {
     pub analysis_paths: Vec<PathBuf>,
     /// Whether dbt-style Jinja-suffixed SQL filenames are enabled.
     pub allow_jinja_file_extensions: bool,
+    /// Whether each setting was written in `dbt_project.yml`.
+    pub origins: PathOrigins,
+}
+
+/// The origin of each `*-paths` setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathOrigins {
+    pub model_paths: PathOrigin,
+    pub seed_paths: PathOrigin,
+    pub snapshot_paths: PathOrigin,
+    pub test_paths: PathOrigin,
+    pub macro_paths: PathOrigin,
+    pub analysis_paths: PathOrigin,
+}
+
+impl ResolvedPaths {
+    /// Every setting with its resolved directories and origin, in a fixed
+    /// order.
+    pub fn settings(&self) -> [(PathSetting, &[PathBuf], PathOrigin); 6] {
+        [
+            (
+                PathSetting::ModelPaths,
+                &self.model_paths,
+                self.origins.model_paths,
+            ),
+            (
+                PathSetting::SeedPaths,
+                &self.seed_paths,
+                self.origins.seed_paths,
+            ),
+            (
+                PathSetting::SnapshotPaths,
+                &self.snapshot_paths,
+                self.origins.snapshot_paths,
+            ),
+            (
+                PathSetting::TestPaths,
+                &self.test_paths,
+                self.origins.test_paths,
+            ),
+            (
+                PathSetting::MacroPaths,
+                &self.macro_paths,
+                self.origins.macro_paths,
+            ),
+            (
+                PathSetting::AnalysisPaths,
+                &self.analysis_paths,
+                self.origins.analysis_paths,
+            ),
+        ]
+    }
 }
 
 impl ResolvedPaths {
@@ -383,6 +491,7 @@ impl ResolvedPaths {
             macro_paths: resolve(&["macros"]),
             analysis_paths: resolve(&["analyses"]),
             allow_jinja_file_extensions: false,
+            origins: PathOrigins::default(),
         }
     }
 }
@@ -404,6 +513,32 @@ mod tests {
         assert_eq!(project.macro_paths, vec!["macros"]);
         assert_eq!(project.analysis_paths, vec!["analyses"]);
         assert!(!project.flags.allow_jinja_file_extensions);
+    }
+
+    #[test]
+    fn test_path_origins() {
+        let yaml = "name: my_project\nmodel-paths: [\"models\"]\nmacro-paths: []\n";
+        let project: DbtProject = serde_saphyr::from_str(yaml).unwrap();
+        let origins = project.resolve_paths(Path::new("/project")).origins;
+        assert_eq!(origins.model_paths, PathOrigin::Explicit);
+        assert_eq!(origins.macro_paths, PathOrigin::Explicit);
+        assert_eq!(origins.seed_paths, PathOrigin::Default);
+        assert_eq!(origins.analysis_paths, PathOrigin::Default);
+    }
+
+    #[test]
+    fn test_path_origins_after_rendering_project_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: p\ntest-paths: [\"{{ var('d', 'checks') }}\"]\n",
+        )
+        .unwrap();
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(project.test_paths, vec!["checks"]);
+        let origins = project.resolve_paths(tmp.path()).origins;
+        assert_eq!(origins.test_paths, PathOrigin::Explicit);
+        assert_eq!(origins.model_paths, PathOrigin::Default);
     }
 
     #[test]
