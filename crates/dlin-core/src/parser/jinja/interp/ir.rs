@@ -30,6 +30,19 @@ pub(crate) struct Span {
     pub(crate) end: u32,
 }
 
+impl Span {
+    /// A placeholder location in the template, for values that are not
+    /// tied to one expression.
+    pub(crate) fn default_for_template() -> Self {
+        Span {
+            source: SourceId::Template,
+            line: 0,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Expr {
     pub(crate) kind: ExprKind,
@@ -198,7 +211,7 @@ impl MacroDef {
 #[derive(Debug, Clone)]
 pub(crate) enum Stmt {
     Emit(Expr),
-    Raw,
+    Raw(Arc<str>),
     For {
         target: Target,
         iter: Expr,

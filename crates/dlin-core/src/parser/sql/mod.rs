@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-mod recovery;
+pub(crate) mod recovery;
 
 /// A reference to another dbt model via ref()
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

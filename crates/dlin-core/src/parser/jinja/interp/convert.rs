@@ -63,7 +63,7 @@ impl Converter {
                 body: self.stmts(&template.children),
             },
             ast::Stmt::EmitExpr(emit) => Stmt::Emit(self.expr(&emit.expr)),
-            ast::Stmt::EmitRaw(_) => Stmt::Raw,
+            ast::Stmt::EmitRaw(raw) => Stmt::Raw(Arc::from(raw.raw)),
             ast::Stmt::ForLoop(for_loop) => Stmt::For {
                 target: self.target(&for_loop.target),
                 iter: self.expr(&for_loop.iter),

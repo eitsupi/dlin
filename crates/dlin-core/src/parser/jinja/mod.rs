@@ -5,6 +5,7 @@ use minijinja::Environment;
 use super::sql::{RefCall, SourceCall, SqlConfig};
 
 pub(crate) mod reachability;
+pub(crate) mod interp;
 mod render;
 pub(crate) mod source;
 #[cfg(test)]
