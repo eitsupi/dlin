@@ -432,6 +432,7 @@ impl<'a> Interp<'a> {
         let mut acc = entry.clone();
         let mut exits = Flow::default();
         let mut stable = false;
+        let mut filter_effects = Causes::default();
         for round in 0..=LOOP_ROUNDS {
             let mut state = acc.clone();
             state.path = state.path.union(causes);
@@ -441,14 +442,30 @@ impl<'a> Interp<'a> {
             if let Some(filter) = filter {
                 // Whether an item passes is as unknown as the items; the body
                 // runs on the path of both.
+                let before_filter = state.clone();
                 let value = self.eval(&mut state, filter)?;
-                match self.truth(&state, &value, filter.span) {
+                let truth = if state.same(&before_filter) {
+                    self.truth(&state, &value, filter.span)
+                } else {
+                    // The filter may run zero or many times. Its first result
+                    // does not describe later calls after it changes state.
+                    let effects = self.unsupported("loop filter with side effects", filter.span);
+                    self.record_used(&state, &effects);
+                    filter_effects = filter_effects.union(&effects);
+                    state = widen(&before_filter, state, &effects);
+                    Truth::Unknown(effects)
+                };
+                match truth {
                     Truth::Unknown(filter_causes) => state.path = state.path.union(&filter_causes),
                     Truth::Known(true) => {}
                     Truth::Known(false) => {
                         // No item passes: only the `else` path remains.
                         self.scan_skipped(body);
-                        return self.exec_block(entry, else_body);
+                        if round == 0 {
+                            return self.exec_block(entry, else_body);
+                        }
+                        stable = true;
+                        break;
                     }
                 }
             }
@@ -478,8 +495,13 @@ impl<'a> Interp<'a> {
             });
             self.record_used(&acc, &reason);
         }
-        // The loop may run zero times, which is when `else` runs.
-        let mut skipped = entry;
+        // No item may pass even when the filter ran and changed state.
+        // Do not restore the original contents in the `else` path.
+        let mut skipped = if filter_effects.is_empty() {
+            entry
+        } else {
+            widen(&entry, acc.clone(), &filter_effects)
+        };
         skipped.path = skipped.path.union(causes);
         let else_flow = self.exec_block(skipped, else_body)?;
         let normal = merge_opt(Some(acc), else_flow.normal, causes);

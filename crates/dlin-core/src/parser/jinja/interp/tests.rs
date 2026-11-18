@@ -713,6 +713,38 @@ fn unknown_loop_with_a_false_filter_runs_else_unconditionally() {
 }
 
 #[test]
+fn loop_filter_side_effects_do_not_restore_known_container_contents() {
+    for iterable in ["env_var('ITEMS')", "['item']"] {
+        let sql = r#"
+{% set names = ['before'] %}
+{% set alias = names %}
+{% for x in ITERABLE if names.append('after') and false %}
+{% else %}{{ ref(alias[-1]) }}{% endfor %}
+{{ ref(names[-1]) }}
+{{ ref('independent') }}
+"#
+        .replace("ITERABLE", iterable);
+        let e = extract(&sql);
+        assert_eq!(ref_names(&e), vec!["independent"], "{iterable}: {e:?}");
+        assert!(codes(&e).contains(&"unsupported_jinja_construct"));
+    }
+}
+
+#[test]
+fn unknown_loop_filter_side_effects_can_change_later_filter_results() {
+    let e = extract(
+        r#"
+{% set flags = [true, false] %}
+{% for x in env_var('ITEMS') if flags.pop() %}
+{{ ref('body') }}
+{% else %}{{ ref('fallback') }}{% endfor %}
+"#,
+    );
+    assert_eq!(ref_names(&e), vec!["body", "fallback"]);
+    assert!(codes(&e).contains(&"unsupported_jinja_construct"));
+}
+
+#[test]
 fn config_follows_the_last_call_and_unknown_branches() {
     let e = extract(
         "{{ config(materialized='view') }}{{ config(materialized='table', tags=['a']) }}{{ config(tags=['b']) }}",
