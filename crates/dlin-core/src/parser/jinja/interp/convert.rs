@@ -153,12 +153,19 @@ impl Converter {
                 other => Arc::from(other.description()),
             })
             .collect();
+        let defaults: Vec<Expr> = def.defaults.iter().map(|e| self.expr(e)).collect();
+        let body = self.stmts(&def.body);
+        let mut names = Vec::new();
+        super::ir::collect_names(&body, &defaults, &mut names);
+        names.sort();
+        names.dedup();
         MacroDef {
             name: Arc::from(def.name),
             params,
-            defaults: def.defaults.iter().map(|e| self.expr(e)).collect(),
-            body: self.stmts(&def.body),
+            defaults,
+            body,
             span: self.span(def.span()),
+            names,
         }
     }
 

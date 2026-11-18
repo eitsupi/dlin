@@ -198,6 +198,8 @@ pub(crate) struct MacroDef {
     pub(crate) defaults: Vec<Expr>,
     pub(crate) body: Vec<Stmt>,
     pub(crate) span: Span,
+    /// Every name the macro reads, for capturing only what it can see.
+    pub(crate) names: Vec<Arc<str>>,
 }
 
 impl MacroDef {
@@ -268,4 +270,176 @@ pub(crate) enum Stmt {
 #[derive(Debug)]
 pub(crate) struct Template {
     pub(crate) body: Vec<Stmt>,
+}
+
+/// Collect the variable names read anywhere in statements.
+pub(crate) fn collect_names(stmts: &[Stmt], defaults: &[Expr], names: &mut Vec<Arc<str>>) {
+    fn expr(e: &Expr, names: &mut Vec<Arc<str>>) {
+        match &e.kind {
+            ExprKind::Var(name) => names.push(name.clone()),
+            ExprKind::Const(_) => {}
+            ExprKind::Slice {
+                expr: inner,
+                start,
+                stop,
+                step,
+            } => {
+                expr(inner, names);
+                for part in [start, stop, step].into_iter().flatten() {
+                    expr(part, names);
+                }
+            }
+            ExprKind::Unary { expr: inner, .. } | ExprKind::GetAttr { expr: inner, .. } => {
+                expr(inner, names)
+            }
+            ExprKind::Binary { left, right, .. } => {
+                expr(left, names);
+                expr(right, names);
+            }
+            ExprKind::Compare { expr: inner, ops } => {
+                expr(inner, names);
+                for (_, e) in ops {
+                    expr(e, names);
+                }
+            }
+            ExprKind::IfExpr {
+                test,
+                then,
+                otherwise,
+            } => {
+                expr(test, names);
+                expr(then, names);
+                if let Some(e) = otherwise {
+                    expr(e, names);
+                }
+            }
+            ExprKind::Filter {
+                expr: inner, args, ..
+            } => {
+                if let Some(e) = inner {
+                    expr(e, names);
+                }
+                for arg in args {
+                    expr(arg.expr(), names);
+                }
+            }
+            ExprKind::Test {
+                expr: inner, args, ..
+            } => {
+                expr(inner, names);
+                for arg in args {
+                    expr(arg.expr(), names);
+                }
+            }
+            ExprKind::GetItem {
+                expr: inner,
+                subscript,
+            } => {
+                expr(inner, names);
+                expr(subscript, names);
+            }
+            ExprKind::Call(c) => call(c, names),
+            ExprKind::List(items) | ExprKind::Tuple(items) => {
+                for e in items {
+                    expr(e, names);
+                }
+            }
+            ExprKind::Map(pairs) => {
+                for (k, v) in pairs {
+                    expr(k, names);
+                    expr(v, names);
+                }
+            }
+        }
+    }
+    fn call(c: &Call, names: &mut Vec<Arc<str>>) {
+        expr(&c.callee, names);
+        for arg in &c.args {
+            expr(arg.expr(), names);
+        }
+    }
+    fn target(t: &Target, names: &mut Vec<Arc<str>>) {
+        match t {
+            Target::Name(_) => {}
+            Target::Tuple(items) => {
+                for t in items {
+                    target(t, names);
+                }
+            }
+            Target::Attr { expr: e, .. } | Target::Unsupported(e) => expr(e, names),
+        }
+    }
+    for e in defaults {
+        expr(e, names);
+    }
+    for stmt in stmts {
+        match stmt {
+            Stmt::Emit(e) => expr(e, names),
+            Stmt::Raw(_) | Stmt::Break | Stmt::Continue => {}
+            Stmt::For {
+                target: t,
+                iter,
+                filter,
+                body,
+                else_body,
+                ..
+            } => {
+                target(t, names);
+                expr(iter, names);
+                if let Some(f) = filter {
+                    expr(f, names);
+                }
+                collect_names(body, &[], names);
+                collect_names(else_body, &[], names);
+            }
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                expr(cond, names);
+                collect_names(then, &[], names);
+                collect_names(otherwise, &[], names);
+            }
+            Stmt::With { assignments, body } => {
+                for (t, e) in assignments {
+                    target(t, names);
+                    expr(e, names);
+                }
+                collect_names(body, &[], names);
+            }
+            Stmt::Set { target: t, expr: e } => {
+                target(t, names);
+                expr(e, names);
+            }
+            Stmt::SetBlock {
+                target: t,
+                filter,
+                body,
+            } => {
+                target(t, names);
+                if let Some(f) = filter {
+                    expr(f, names);
+                }
+                collect_names(body, &[], names);
+            }
+            Stmt::FilterBlock { filter, body } => {
+                expr(filter, names);
+                collect_names(body, &[], names);
+            }
+            Stmt::AutoEscape { body } => collect_names(body, &[], names),
+            Stmt::Macro(def) => names.extend(def.names.iter().cloned()),
+            Stmt::CallBlock { call: c, caller } => {
+                call(c, names);
+                names.extend(caller.names.iter().cloned());
+            }
+            Stmt::Do(c) => call(c, names),
+            Stmt::Unsupported { exprs, body, .. } => {
+                for e in exprs {
+                    expr(e, names);
+                }
+                collect_names(body, &[], names);
+            }
+        }
+    }
 }

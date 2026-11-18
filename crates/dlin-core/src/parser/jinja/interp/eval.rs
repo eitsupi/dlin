@@ -389,14 +389,14 @@ impl<'a> Interp<'a> {
             Stmt::Macro(def) => {
                 let value = AValue::Macro(MacroRef {
                     def: def.clone(),
-                    closure: Some(Arc::new(st.scopes.clone())),
+                    closure: Some(capture(st, &def.names)),
                 });
                 st.assign(def.name.clone(), value);
             }
             Stmt::CallBlock { call, caller } => {
                 let caller = AValue::Macro(MacroRef {
                     def: caller.clone(),
-                    closure: Some(Arc::new(st.scopes.clone())),
+                    closure: Some(capture(st, &caller.names)),
                 });
                 let value = self.eval_call(st, call, Some(caller))?;
                 self.emit(st, &value, call.span);
@@ -2039,6 +2039,16 @@ impl<'a> Interp<'a> {
         }
         None
     }
+}
+
+/// The variables a macro defined here can read: only the names it uses, so
+/// that defining many macros does not copy the scope each time.
+fn capture(st: &State, names: &[Arc<str>]) -> Arc<Vec<Scope>> {
+    let scope: Scope = names
+        .iter()
+        .filter_map(|name| st.lookup(name).map(|value| (name.clone(), value.clone())))
+        .collect();
+    Arc::new(vec![scope])
 }
 
 fn pop_scope(flow: &mut Flow) {

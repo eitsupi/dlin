@@ -66,6 +66,42 @@ fn load_macro_prefix(files: &DiscoveredFiles, skipped: &mut Vec<SkippedInput>) -
     report.prefix
 }
 
+/// Extract with the abstract interpreter instead of the placeholder render.
+///
+/// Temporary switch for comparing the two extractors on real projects while
+/// the interpreter is being developed; it disables the extraction cache.
+const EXPERIMENTAL_INTERPRETER_ENV: &str = "DLIN_EXPERIMENTAL_JINJA_INTERPRETER";
+
+fn experimental_library(files: &DiscoveredFiles) -> Option<crate::parser::jinja::interp::MacroLibrary> {
+    std::env::var_os(EXPERIMENTAL_INTERPRETER_ENV)?;
+    let sources: Vec<(PathBuf, String)> = files
+        .macro_sql_files
+        .iter()
+        .filter_map(|path| Some((path.clone(), std::fs::read_to_string(path).ok()?)))
+        .collect();
+    Some(crate::parser::jinja::interp::MacroLibrary::new(&sources))
+}
+
+/// Extract one SQL file with the configured extractor.
+fn extract_sql(
+    content: &str,
+    macro_prefix: &PreparedMacroPrefix,
+    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
+    vars: &HashMap<String, serde_json::Value>,
+) -> JinjaExtraction {
+    match library {
+        Some(library) => {
+            let extraction = crate::parser::jinja::interp::extract_dependencies(content, library, vars);
+            JinjaExtraction {
+                refs: extraction.refs,
+                sources: extraction.sources,
+                config: extraction.config,
+            }
+        }
+        None => crate::parser::sql::extract_all_with_prepared_prefix(content, macro_prefix, vars),
+    }
+}
+
 use super::types::*;
 
 /// Shared state threaded through the build_graph helper functions
@@ -251,6 +287,7 @@ fn process_model_files(
     disk_cache: &mut cache::ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
+    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
 ) -> ExtractionCache {
     // Parallel phase: read files and run minijinja extraction concurrently.
     // Uses disk cache (immutable borrow) to skip rendering for unchanged files.
@@ -291,7 +328,7 @@ fn process_model_files(
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
 
             let extraction = sql_content.map(|content| {
-                crate::parser::sql::extract_all_with_prepared_prefix(content, macro_prefix, vars)
+                extract_sql(content, macro_prefix, library, vars)
             });
 
             let columns = sql_content.map(extract_select_columns).unwrap_or_default();
@@ -439,6 +476,7 @@ fn process_sql_edges(
     extraction_cache: &ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
+    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -497,11 +535,8 @@ fn process_sql_edges(
             (&cached.0, &cached.1)
         } else {
             let content = read_file(sql_path)?;
-            owned = crate::parser::sql::extract_refs_and_sources_with_prepared_prefix(
-                &content,
-                macro_prefix,
-                vars,
-            );
+            let extraction = extract_sql(&content, macro_prefix, library, vars);
+            owned = (extraction.refs, extraction.sources);
             (&owned.0, &owned.1)
         };
 
@@ -811,8 +846,14 @@ pub fn build_graph_report(
 ) -> Result<GraphBuild> {
     let mut gb = GraphBuilder::new();
     let mut skipped = files.skipped_inputs.clone();
-    let macro_prefix = load_macro_prefix(files, &mut skipped);
+    let library = experimental_library(files);
+    let macro_prefix = if library.is_some() {
+        String::new()
+    } else {
+        load_macro_prefix(files, &mut skipped)
+    };
     let prepared_macro_prefix = PreparedMacroPrefix::new(&macro_prefix);
+    let no_cache = no_cache || library.is_some();
     let mut disk_cache = if no_cache {
         cache::ExtractionCache::disabled()
     } else if refresh_cache {
@@ -831,6 +872,7 @@ pub fn build_graph_report(
         &mut disk_cache,
         vars,
         &yaml_result.stem_to_versioned,
+        library.as_ref(),
     );
     for (unversioned_id, latest_versioned_id) in &yaml_result.version_aliases {
         gb.add_alias(unversioned_id.clone(), latest_versioned_id);
@@ -858,6 +900,7 @@ pub fn build_graph_report(
         &extraction_cache,
         vars,
         &yaml_result.stem_to_versioned,
+        library.as_ref(),
     )?;
     process_exposures(&mut gb, &yaml_result.exposures);
     process_generic_tests(&mut gb, &yaml_result.schemas);
