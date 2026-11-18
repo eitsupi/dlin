@@ -89,15 +89,28 @@ struct LiteralIndex {
     body_dynamic: bool,
     /// Calls written in each macro, by macro name, and whether the macro
     /// has a call with a computed argument.
-    macros: Vec<(std::sync::Arc<str>, Vec<RefCall>, Vec<SourceCall>, bool)>,
+    macros: Vec<MacroCalls>,
+}
+
+/// The literal calls written in one macro.
+struct MacroCalls {
+    name: std::sync::Arc<str>,
+    refs: Vec<RefCall>,
+    sources: Vec<SourceCall>,
+    /// Whether the macro has a call with a computed argument.
+    dynamic: bool,
 }
 
 impl LiteralIndex {
     fn add_macro(&mut self, def: &super::ir::MacroDef) {
         let mut found = super::eval::StaticCalls::default();
         found.scan_stmts(&def.body);
-        self.macros
-            .push((def.name.clone(), found.refs, found.sources, found.dynamic));
+        self.macros.push(MacroCalls {
+            name: def.name.clone(),
+            refs: found.refs,
+            sources: found.sources,
+            dynamic: found.dynamic,
+        });
         for stmt in &def.body {
             self.add_nested(stmt);
         }
@@ -142,10 +155,10 @@ impl LiteralIndex {
         let in_body = matches(&self.body.0, &self.body.1);
         let mut found = in_body;
         let mut only_uncalled = !in_body;
-        for (name, refs, sources, _) in &self.macros {
-            if matches(refs, sources) {
+        for calls in &self.macros {
+            if matches(&calls.refs, &calls.sources) {
                 found = true;
-                if entered.contains(name) {
+                if entered.contains(&calls.name) {
                     only_uncalled = false;
                 }
             }
@@ -165,10 +178,10 @@ impl LiteralIndex {
         if self.body_dynamic {
             return false;
         }
-        for (name, _, _, dynamic) in &self.macros {
-            if *dynamic {
+        for calls in &self.macros {
+            if calls.dynamic {
                 any = true;
-                if entered.contains(name) {
+                if entered.contains(&calls.name) {
                     return false;
                 }
             }
