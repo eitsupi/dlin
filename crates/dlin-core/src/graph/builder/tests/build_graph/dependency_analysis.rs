@@ -314,7 +314,12 @@ models:
                 compare_model: ref(var('compare', 'a'))
                 fallback: var('x', ref('a'))
           - custom_check:
+              name: "ref('not_an_argument')"
+              description: "ref('not_an_argument')"
               arguments:
+                options:
+                  name: "ref('a')"
+                  description: "ref('a')"
                 relation: "{{ choose_relation() }}"
                 skipped: "{% if false %}{{ ref('never') }}{% endif %}"
           - dbt_utils.expression_is_true:
@@ -356,7 +361,15 @@ models:
     assert_eq!(analysis(&graph, "test.dbt_utils.equality.b.id"), complete());
     // A macro that is not defined may hide a dependency; a branch known to
     // be false is not followed.
+    // The test's name and description are not arguments; keys with these
+    // names inside the arguments are.
     let custom = "test.custom_check.b.id";
+    assert!(has_edge(&graph, "model.a", custom));
+    assert!(
+        graph
+            .node_indices()
+            .all(|idx| graph[idx].unique_id != "model.not_an_argument")
+    );
     assert_eq!(
         analysis(&graph, custom)["unresolved"][0]["type"],
         "unresolved_call"

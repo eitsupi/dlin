@@ -829,7 +829,7 @@ fn add_generic_test_node(
         return;
     };
     let mut strings = Vec::new();
-    collect_test_strings(value, true, &mut strings);
+    collect_test_strings(test_def, value, &mut strings);
     for text in strings {
         // dbt evaluates a string that looks like a call to one of a few
         // functions as an expression and renders any other string as a
@@ -854,27 +854,50 @@ static RENDERED_TEST_ARGUMENT: std::sync::LazyLock<regex::Regex> = std::sync::La
 });
 
 /// The strings of a generic test definition that dbt renders: its arguments
-/// and config, but not its name, description or top-level `column_name`.
-fn collect_test_strings<'v>(value: &'v serde_json::Value, top: bool, strings: &mut Vec<&'v str>) {
+/// and config. The test's own name, description and top-level `column_name`
+/// are metadata and are not read; keys with these names inside the
+/// arguments are ordinary values.
+fn collect_test_strings<'v>(
+    test_def: &TestDefinition,
+    value: &'v serde_json::Value,
+    strings: &mut Vec<&'v str>,
+) {
+    let Some(definition) = value.as_object() else {
+        return;
+    };
+    // `{test_name: {arguments, config, ...}}`, or the flat form with
+    // `test_name:` beside the arguments.
+    let body = match test_def.test_name() {
+        Some(name) if !definition.contains_key("test_name") => {
+            match definition.get(name).and_then(serde_json::Value::as_object) {
+                Some(body) => body,
+                None => return,
+            }
+        }
+        _ => definition,
+    };
+    for (key, item) in body {
+        if !matches!(
+            key.as_str(),
+            "name" | "test_name" | "description" | "column_name"
+        ) {
+            collect_strings(item, strings);
+        }
+    }
+}
+
+/// Every string in a YAML value, depth first.
+fn collect_strings<'v>(value: &'v serde_json::Value, strings: &mut Vec<&'v str>) {
     match value {
         serde_json::Value::String(text) => strings.push(text),
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_test_strings(item, false, strings);
+                collect_strings(item, strings);
             }
         }
         serde_json::Value::Object(map) => {
-            for (key, item) in map {
-                let skipped = matches!(key.as_str(), "description" | "name" | "test_name")
-                    || (top && key == "column_name");
-                if !skipped {
-                    // The test name key wraps the arguments of the
-                    // standard format, which are still top-level.
-                    let wraps_test = top
-                        && item.is_object()
-                        && !matches!(key.as_str(), "arguments" | "config" | "meta");
-                    collect_test_strings(item, wraps_test, strings);
-                }
+            for item in map.values() {
+                collect_strings(item, strings);
             }
         }
         _ => {}
