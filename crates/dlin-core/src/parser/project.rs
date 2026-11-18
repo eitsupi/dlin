@@ -341,7 +341,7 @@ fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Envi
             if let Some(default) = args
                 .get(1)
                 .cloned()
-                .or_else(|| kwargs.get::<Option<Value>>("default").ok().flatten())
+                .or_else(|| crate::parser::jinja::keyword_default(&kwargs))
             {
                 return Ok(default);
             }
@@ -657,6 +657,18 @@ analysis-paths: ["analyses", "custom_analyses"]
         let project = DbtProject::load(tmp.path()).unwrap();
         assert_eq!(project.name, "test_project");
         assert_eq!(project.model_paths, vec!["models"]);
+    }
+
+    #[test]
+    fn test_load_renders_var_default_keyword_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("dbt_project.yml"),
+            "name: \"{{ var('missing', default=none) or 'fallback' }}\"\n",
+        )
+        .unwrap();
+        let project = DbtProject::load(tmp.path()).unwrap();
+        assert_eq!(project.name, "fallback");
     }
 
     #[test]

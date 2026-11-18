@@ -1192,3 +1192,14 @@ join {{ ref(env_var('DLIN_TEST_UNSET', default='env_default')) }} using (id)
     let names: Vec<_> = ext.refs.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, vec!["from_default", "from_project", "env_default"]);
 }
+
+#[test]
+fn test_var_default_keyword_none_is_a_default() {
+    // An explicit `default=none` is a value, not a missing default, so the
+    // render stays certain.
+    let sql =
+        "{% if var('missing', default=none) is none %}select * from {{ ref('a') }}{% endif %}";
+    let outcome = extract_via_jinja_with_vars(sql, "", &HashMap::new());
+    assert!(outcome.complete && outcome.semantic_certain);
+    assert_eq!(outcome.extraction.refs.len(), 1);
+}

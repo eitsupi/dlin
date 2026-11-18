@@ -7,6 +7,7 @@ use super::sql::{RefCall, SourceCall, SqlConfig};
 pub(crate) mod reachability;
 pub(crate) mod interp;
 mod render;
+pub(crate) use render::keyword_default;
 pub(crate) mod source;
 #[cfg(test)]
 mod tests;

@@ -13,9 +13,15 @@ use super::{JinjaExtraction, JinjaOutcome, merge_extraction};
 /// The default of `var()` or `env_var()`: the second positional argument,
 /// or the `default` keyword argument as dbt also accepts.
 fn default_argument(args: &[Value], kwargs: &Kwargs) -> Option<Value> {
-    args.get(1)
-        .cloned()
-        .or_else(|| kwargs.get::<Option<Value>>("default").ok().flatten())
+    args.get(1).cloned().or_else(|| keyword_default(kwargs))
+}
+
+/// The `default=` keyword argument, including an explicit `none`.
+pub(crate) fn keyword_default(kwargs: &Kwargs) -> Option<Value> {
+    kwargs
+        .has("default")
+        .then(|| kwargs.get::<Value>("default").ok())
+        .flatten()
 }
 
 fn json_to_minijinja(v: &serde_json::Value) -> Value {
