@@ -58,15 +58,19 @@ Examples:
         #[arg(short = 'p', long = "project-dir", default_value = ".")]
         project_dir: PathBuf,
 
-        /// Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache)
+        /// Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache).
+
+        /// Has no effect with --source sql, which has no cache
         #[arg(long, env = "DLIN_CACHE_DIR")]
         cache_dir: Option<PathBuf>,
 
-        /// Disable the manifest analysis cache (always re-parse the manifest, results are not saved)
+        /// Disable the manifest analysis cache (always re-parse the manifest, results are not saved).
+        /// Has no effect with --source sql, which has no cache
         #[arg(long, env = "DLIN_NO_CACHE")]
         no_cache: bool,
 
-        /// Discard existing cache and rebuild from scratch
+        /// Discard the existing manifest analysis cache and rebuild it.
+        /// Has no effect with --source sql, which has no cache
         #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
         refresh_cache: bool,
 
