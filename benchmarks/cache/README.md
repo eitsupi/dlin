@@ -1,7 +1,10 @@
 # dlin cache benchmark
 
-This suite measures dlin's three persistent caches without changing production
-code or comparing dlin with another tool. It is intentionally separate from
+This suite measures dlin's persistent caches (manifest analysis and column
+lineage) and the SQL-mode extraction cost, without changing production code or
+comparing dlin with another tool. SQL mode has no persistent cache: it
+interprets every SQL file on each run, so its workloads are timed with
+`--no-cache` only. It is intentionally separate from
 `benchmarks/column-lineage`, whose responsibility is external-tool correctness
 and comparison.
 
@@ -34,9 +37,8 @@ python3 benchmarks/cache/scripts/generate_workload.py \
 The small profile has 64 models and one macro file containing one macro, while
 medium has 512 models with the same macro setup. The `macro-heavy` profile
 keeps 64 models but includes 16 macro files containing 128 valid macros in the
-effective project macro prefix. Use it to measure both cumulative macro-source
-validation and parsing a larger prefix per model (twice per model in the
-current implementation):
+project. Use it to measure the cost of parsing many macro files and calling a
+macro from every model:
 
 ```sh
 python3 benchmarks/cache/scripts/generate_workload.py \
@@ -49,13 +51,13 @@ Each model workload invokes the `benchmark_label` macro from `benchmark.sql`,
 so the larger profile exercises a real macro call as well as the additional
 valid macro definitions and source files.
 
-The `runtime-local-macro-heavy` profile is a dedicated probe for model-level
-runtime uncertainty and lazy local-macro reachability. It keeps the project
-macro prefix minimal and generates 64 models with 128 local macros each: only
-three are reachable through the `execute`-selected alias/higher-order path,
-while the other 125 are inert. The false branch uses a distinct
-`runtime_local_alternate_NNN` ref per model, so recovery can be checked against
-the rendered dependency. Generate and validate it with:
+The `runtime-local-macro-heavy` profile is a dedicated probe for macros
+selected by `execute` inside a model. It keeps the project macros minimal and
+generates 64 models with 128 local macros each: only three are reachable
+through the `execute`-selected alias/higher-order path, while the other 125
+are inert. The `execute` false side uses a distinct
+`runtime_local_alternate_NNN` ref per model. dbt parses with `execute` false,
+and so does dlin, so that ref is each model's only dependency. Generate and validate it with:
 
 ```sh
 python3 benchmarks/cache/scripts/generate_workload.py \
@@ -65,13 +67,12 @@ python3 benchmarks/cache/scripts/validate_workload.py \
   benchmarks/cache/workloads/runtime-local-macro-heavy
 ```
 
-This profile is for measuring the cost of that lazy reachability analysis; it
+This profile is for measuring the cost of interpreting many local macros; it
 is not a CI timing threshold or pass/fail gate.
 
 For the dense worst-case, use `runtime-local-macro-dense`. It has the same 64
-models and 128 local macros per model, but all 128 macro symbols are reachable
-from model-level free-symbol analysis while only two are selected at render
-time. The false branch again has a distinct per-model alternate ref, while the
+models and 128 local macros per model, but all 128 macro symbols are referenced
+from the model while only two are selected by `execute`. The false branch again has a distinct per-model alternate ref, while the
 125 inert definitions contain no graph calls:
 
 ```sh
@@ -94,18 +95,18 @@ python3 benchmarks/cache/scripts/validate_workload.py \
   benchmarks/cache/workloads/runtime-local-macro-heavy
 ```
 
-The validator checks summary counts and `impact -o json` results for alternate
-and runtime dependencies, including that unused prefix literals remain
-unresolved. Runtime profiles do not run the cache mutation suite or impose
-timing thresholds.
+The validator checks summary counts and `impact -o json` results: only the
+dependencies selected with `execute` false resolve, and literals in the
+`execute` true side and in unused macros stay unresolved. Runtime profiles do
+not impose timing thresholds.
 
-The `runtime-prefix-macro-heavy` profile isolates prefix-aware recovery. It
-keeps model-local macros absent and generates 64 models with 16 macro files
+The `runtime-prefix-macro-heavy` profile isolates project macros selected by
+`execute`. It keeps model-local macros absent and generates 64 models with 16 macro files
 containing 128 project macros: three are reachable through a dispatch,
-prefix-to-prefix call chain and an `execute`-selected branch, while 125 unused
-macros contain distinct `ref()`/`source()` literals. The selected and
-unselected branch literals are intentional so a recovery probe can verify
-both correctness and exclusion of unused-prefix dependencies:
+macro-to-macro call chain and an `execute`-selected branch, while 125 unused
+macros contain distinct `ref()`/`source()` literals. The literals in
+both branches and in the unused macros are intentional, so the probe verifies
+that only the `execute` false branch contributes dependencies:
 
 ```sh
 python3 benchmarks/cache/scripts/generate_workload.py \
@@ -115,7 +116,7 @@ python3 benchmarks/cache/scripts/validate_workload.py \
   benchmarks/cache/workloads/runtime-prefix-macro-heavy
 ```
 
-This is a performance probe for prefix reachability and scoped recovery, not a
+This is a performance probe for interpreting project macro call chains, not a
 CI timing threshold or pass/fail gate.
 
 Generation refuses to overwrite a non-empty directory. To replace a workload
@@ -151,12 +152,9 @@ ignored `benchmarks/cache/results/` directory:
   input sizes, commands, cache metadata, probe status, and timing paths.
 * `hyperfine/*.json` contains raw timing output.
 * `cache/<scenario>/` contains the observed persistent cache files.
-* `invalidation/` contains isolated SQL-project copies and functional
-  invalidation metadata.
 
 Each scenario uses its own cache directory and observes
-`extraction_cache.json`, `manifest_graph_cache.json`, and
-`column_lineage_cache.json` as applicable. The runner also verifies dlin's
+`manifest_graph_cache.json` and `column_lineage_cache.json` as applicable. The runner also verifies dlin's
 generated cache-directory `.gitignore` content. `persistent-cold` means a forced
 miss using `--refresh-cache`; `persistent-warm` means reuse after a preparation
 run. These labels distinguish persistent cache state only: the OS/filesystem
@@ -169,32 +167,24 @@ probe and timed warm runs. This is combined benchmark evidence, not direct
 proof of an internal cache hit; direct hit guarantees belong in production
 unit/integration tests. Timing is informational and has no pass/fail threshold.
 
-For SQL and manifest scenarios, timing uses the small-output `summary -o json`
+For the manifest scenario, timing uses the small-output `summary -o json`
 command while semantic probes use `graph -o json`. This keeps graph rendering
 out of cache timings while comparing the observable DAG. The column scenario
 uses the same compiled-SQL column query for both.
 
-The runner also performs three SQL invalidation baselines on isolated copies:
-a size-changing single-file ref edit, a macro body edit that adds a rendered
-dependency, and a `vars.yml` edit that changes the final model ref. Each must
-produce an equivalent cached/no-cache result and a changed graph/cache state;
-these are functional checks, not timing thresholds. The generated SQL project
-uses `vars.yml` without duplicating `vars` in `dbt_project.yml`.
-
-The SQL and manifest scenarios use the small-output `summary` command to
-measure model-level DAG construction without timing a large graph renderer.
-The manifest scenario does not measure column-lineage or MCP typed-`Manifest`
+The manifest scenario uses the small-output `summary` command to measure
+model-level DAG construction without timing a large graph renderer. It does
+not measure column-lineage or MCP typed-`Manifest`
 replacement. The column scenario separately exercises a compiled-SQL column
 query.
 
 ## Design context
 
-The SQL extraction workload includes macros and `ref()`/`source()` calls so
-Minijinja extraction is exercised. Existing measurements show Minijinja is the
-dominant model-lineage cost, so this suite informs cache changes without
-assuming a more elaborate incremental graph. A future semantic SQL cache must
-hash the exact effective macro-prefix bytes passed to rendering; it should not
-silently replace that input with an order-independent macro-set hash.
+The SQL workloads include macros and `ref()`/`source()` calls so Jinja
+interpretation is exercised. SQL mode parses each macro file once per run and
+interprets each model without rendering it, which made the former SQL
+extraction cache unnecessary. Time SQL mode with `summary --source sql
+--no-cache` against a previous release binary when evaluating changes.
 
 The generator is deterministic and writes no production cache. Workloads,
 results, and generated caches are ignored by git. Keep timing comparisons

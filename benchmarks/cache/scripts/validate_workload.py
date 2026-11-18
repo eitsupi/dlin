@@ -53,10 +53,12 @@ def validate_runtime_semantics(
     summary = semantic_json(binary, "summary", root, [], parser)
     if not isinstance(summary, dict):
         parser.error("summary semantic validation did not return an object")
+    # dbt parses with `execute` false, and so does dlin: only the macros and
+    # branches selected by `execute` being false contribute dependencies.
     expected_summary = {
-        "runtime-local-macro-heavy": (129, 65, 128),
-        "runtime-local-macro-dense": (129, 65, 128),
-        "runtime-prefix-macro-heavy": (69, 5, 320),
+        "runtime-local-macro-heavy": (128, 64, 64),
+        "runtime-local-macro-dense": (128, 64, 64),
+        "runtime-prefix-macro-heavy": (67, 3, 192),
     }[profile]
     node_counts = summary.get("node_counts", {})
     actual_summary = (
@@ -81,38 +83,26 @@ def validate_runtime_semantics(
         by_source = {report.get("source_model"): report for report in reports}
         if set(by_source) != set(names):
             parser.error("local alternate dependency impact set differs from fixture")
-        for index, name in enumerate(names):
+        for name in names:
             model = expected_models[name]
-            expected_labels = {
-                "orders" if suffix == 0 else f"orders_{suffix:04d}"
-                for suffix in range(index, 64)
-            }
             report = by_source[name]
-            impacted_nodes = report.get("impacted_nodes", [])
-            labels = {node.get("label") for node in impacted_nodes}
-            if report.get("affected_models") != 64 - index:
-                parser.error(
-                    f"{name} affected model count does not match expected suffix"
-                )
-            if labels != expected_labels:
-                parser.error(
-                    f"{name} impact labels do not match expected downstream suffix"
-                )
-            expected_node = next(
-                (node for node in impacted_nodes if node.get("label") == model),
-                None,
-            )
-            if expected_node is None or expected_node.get("distance") != 1:
-                parser.error(f"{name} does not directly impact expected model {model}")
+            impacted = [
+                (node.get("label"), node.get("distance"))
+                for node in report.get("impacted_nodes", [])
+            ]
+            # The `execute` true side, which chains the models together, is
+            # not followed, so each alternate reaches only its own model.
+            if report.get("affected_models") != 1 or impacted != [(model, 1)]:
+                parser.error(f"{name} does not impact exactly {model}: {impacted}")
         return
 
     reachable = {
-        "prefix_execute_true",
         "prefix_execute_false",
-        "raw.prefix_execute_true",
         "raw.prefix_execute_false",
     }
     unused = {
+        "prefix_execute_true",
+        "raw.prefix_execute_true",
         *[f"prefix_unused_ref_{index:03d}" for index in range(125)],
         *[f"raw.prefix_unused_source_{index:03d}" for index in range(125)],
     }
@@ -122,7 +112,7 @@ def validate_runtime_semantics(
     by_source = {report.get("source_model"): report for report in reports}
     if set(by_source) != reachable:
         resolved_unused = sorted(set(by_source) & unused)
-        parser.error(f"unused prefix dependencies resolved unexpectedly: {resolved_unused}")
+        parser.error(f"dependencies not selected at parse time resolved unexpectedly: {resolved_unused}")
     for name in reachable:
         if by_source[name].get("affected_models") != metadata["model_count"]:
             parser.error(f"{name} does not impact every expected model")
