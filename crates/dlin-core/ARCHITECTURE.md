@@ -404,6 +404,15 @@ A node's `DependencyAnalysis` is `complete` exactly when it has no reasons;
 reasons are authoritative, and the status is checked against them when a
 serialised analysis is read back.
 
+An empty analysis claims that the node's dependencies were assessed. A node
+that was not assessed carries a `not_assessed` reason; `DependencyAnalysis`
+has no default value, so a node cannot become `complete` merely because no
+analysis was attached to it.
+
+A reference whose target does not exist still creates a phantom node so the
+graph shows it, but the referencing node carries an `unresolved_ref` or
+`unresolved_source` reason. An edge to a phantom is not a known dependency.
+
 A reason raised by a call carries the call site in the node that uses it
 (`NodeCallSite`). While one file is extracted the owning node is not known
 yet, so the extractor records an `ExtractionSite` and the graph builder
@@ -411,6 +420,24 @@ attaches the node. `not_assessed` carries only a scope. A phantom node's scope
 (`phantom_dependencies`) cannot be turned into a project gap: the uncertainty
 of an unresolved target is reported through the reasons of the nodes that
 reference it.
+
+### Node and project completeness
+
+The two levels of completeness are kept apart:
+
+- A node is `complete` when its declared dependencies were assessed and no
+  reason was recorded for it. This covers only what the node's own analysis
+  could see.
+- A result about the project, such as an impact exploration, is complete only
+  when no node it depends on has a reason that could hide a dependency, and no
+  project gap remains: no skipped input and no unassessed scope.
+
+A project gap can affect any node. For example, when a macro file cannot be
+read, a model that calls one of its macros may have no reason of its own,
+because the call cannot even be recognised as a macro call. Unless the gap is
+proved not to affect a result, the result is reported as incomplete.
+Configuration diagnostics are not part of either level: whether the settings
+are what the user intended is for the user to judge.
 
 ### Inputs
 

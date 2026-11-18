@@ -369,13 +369,21 @@ pub enum DependencyAnalysisStatus {
 /// The reasons are authoritative: the status is `complete` exactly when
 /// there are none. The reasons are deduplicated and sorted, so equal
 /// analyses serialise identically.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// An empty analysis claims that the node's declared dependencies were
+/// assessed. A node whose dependencies were not assessed must carry a
+/// [`DependencyReason::NotAssessed`] reason instead. This type deliberately
+/// has no `Default`, so that a node cannot become `complete` merely because
+/// no analysis was attached to it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "DependencyAnalysisRepr", try_from = "DependencyAnalysisRepr")]
 pub struct DependencyAnalysis {
     unresolved: Vec<NodeDependencyReason>,
 }
 
 impl DependencyAnalysis {
+    /// The result of an analysis that was performed, with the reasons it
+    /// recorded.
     pub fn new(unresolved: impl IntoIterator<Item = NodeDependencyReason>) -> Self {
         let mut unresolved: Vec<_> = unresolved.into_iter().collect();
         unresolved.sort();
@@ -655,14 +663,8 @@ pub fn relative_display_path(path: &Path, base: &Path) -> String {
 }
 
 fn to_slash(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::RootDir => Some(String::new()),
-            Component::CurDir => None,
-            other => Some(other.as_os_str().to_string_lossy().into_owned()),
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    use path_slash::PathExt as _;
+    path.to_slash_lossy().into_owned()
 }
 
 #[cfg(test)]

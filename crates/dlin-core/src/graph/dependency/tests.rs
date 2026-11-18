@@ -180,7 +180,7 @@ fn phantom_scope_is_never_a_project_scope() {
 
 #[test]
 fn analysis_status_follows_reasons() {
-    let complete = DependencyAnalysis::default();
+    let complete = DependencyAnalysis::new([]);
     assert_eq!(complete.status(), DependencyAnalysisStatus::Complete);
     assert_eq!(
         serde_json::to_value(&complete).unwrap(),
@@ -320,5 +320,28 @@ fn relative_display_path_inside_and_outside_base() {
     assert_eq!(
         relative_display_path(Path::new("/other"), base),
         "../../other"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn relative_display_path_on_windows() {
+    let base = Path::new(r"C:\work\project");
+    assert_eq!(
+        relative_display_path(Path::new(r"C:\work\project\models\a.sql"), base),
+        "models/a.sql"
+    );
+    assert_eq!(
+        relative_display_path(Path::new(r"C:\work\shared\models"), base),
+        "../shared/models"
+    );
+    // Another drive or a UNC share has no relative form.
+    assert_eq!(
+        relative_display_path(Path::new(r"D:\shared\models"), base),
+        "D:/shared/models"
+    );
+    assert_eq!(
+        relative_display_path(Path::new(r"\\server\share\models"), base),
+        "//server/share/models"
     );
 }
