@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use minijinja::machinery::ast;
+use minijinja::machinery::{Token, ast};
 use minijinja::syntax::SyntaxConfig;
 
 use super::ir::{
@@ -24,12 +24,39 @@ pub(crate) struct ParseFailure {
 
 /// Parse a template and convert it to IR.
 pub(crate) fn parse_template(source: &str, id: SourceId) -> Result<Template, ParseFailure> {
+    parse_with_offsets(source, id, OffsetMap::default())
+}
+
+/// Parse a macro file and convert it to IR.
+///
+/// A macro file may also define generic tests with dbt's
+/// `{% test name(args) %}...{% endtest %}` block, which defines the macro
+/// `test_name`, as dbt Fusion parses it. minijinja does not know the block,
+/// so its tags are rewritten to `{% macro test_name(args) %}` and
+/// `{% endmacro %}` before parsing. Only the tags the tokenizer reads are
+/// rewritten, not text in comments, raw blocks or strings. Spans are mapped
+/// back to the file as written.
+pub(crate) fn parse_macro_file(source: &str, id: SourceId) -> Result<Template, ParseFailure> {
+    match rewrite_test_blocks(source) {
+        Some((rewritten, offsets)) => parse_with_offsets(&rewritten, id, offsets),
+        None => parse_template(source, id),
+    }
+}
+
+fn parse_with_offsets(
+    source: &str,
+    id: SourceId,
+    offsets: OffsetMap,
+) -> Result<Template, ParseFailure> {
     let stmt = minijinja::machinery::parse(source, "<template>", SyntaxConfig::default()).map_err(
         |error| ParseFailure {
             line: error.line().and_then(|line| u32::try_from(line).ok()),
         },
     )?;
-    let converter = Converter { source: id };
+    let converter = Converter {
+        source: id,
+        offsets,
+    };
     let body = match &stmt {
         ast::Stmt::Template(template) => converter.stmts(&template.children),
         other => vec![converter.stmt(other)],
@@ -37,8 +64,95 @@ pub(crate) fn parse_template(source: &str, id: SourceId) -> Result<Template, Par
     Ok(Template { body })
 }
 
+/// Rewrite the tags of dbt's `test` blocks to those of macros, returning the
+/// rewritten source and how to map its offsets back. `None` when the source
+/// has no such tag or cannot be tokenized; parsing it as written then
+/// reports any error.
+fn rewrite_test_blocks(source: &str) -> Option<(String, OffsetMap)> {
+    let tokens = minijinja::machinery::tokenize(source, false, SyntaxConfig::default())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut replacements: Vec<(minijinja::machinery::Span, String)> = Vec::new();
+    for (index, (token, _)) in tokens.iter().enumerate() {
+        if !matches!(token, Token::BlockStart) {
+            continue;
+        }
+        match tokens.get(index + 1) {
+            Some((Token::Ident("test"), keyword)) => {
+                if let Some((Token::Ident(name), name_span)) = tokens.get(index + 2) {
+                    replacements.push((*keyword, "macro".to_string()));
+                    replacements.push((*name_span, format!("test_{name}")));
+                }
+            }
+            Some((Token::Ident("endtest"), keyword)) => {
+                replacements.push((*keyword, "endmacro".to_string()));
+            }
+            _ => {}
+        }
+    }
+    if replacements.is_empty() {
+        return None;
+    }
+
+    let mut rewritten = String::with_capacity(source.len() + 16 * replacements.len());
+    let mut offsets = OffsetMap::default();
+    let mut copied = 0;
+    for (span, replacement) in replacements {
+        let (start, end) = (span.start_offset as usize, span.end_offset as usize);
+        rewritten.push_str(&source[copied..start]);
+        let rewritten_start = rewritten.len();
+        rewritten.push_str(&replacement);
+        offsets.edits.push(Edit {
+            rewritten: to_u32(rewritten_start)..to_u32(rewritten.len()),
+            original: span.start_offset..span.end_offset,
+        });
+        copied = end;
+    }
+    rewritten.push_str(&source[copied..]);
+    Some((rewritten, offsets))
+}
+
+fn to_u32(offset: usize) -> u32 {
+    u32::try_from(offset).unwrap_or(u32::MAX)
+}
+
+/// Maps byte offsets in a rewritten source back to the source as written.
+/// Rewriting replaces identifiers only, so lines do not move.
+#[derive(Debug, Default)]
+struct OffsetMap {
+    /// The replaced ranges, in order.
+    edits: Vec<Edit>,
+}
+
+#[derive(Debug)]
+struct Edit {
+    rewritten: std::ops::Range<u32>,
+    original: std::ops::Range<u32>,
+}
+
+impl OffsetMap {
+    /// The offset in the source as written. An offset inside a replacement
+    /// maps into the text it replaced.
+    fn original(&self, offset: u32) -> u32 {
+        let mut shifted = offset;
+        for edit in &self.edits {
+            if offset >= edit.rewritten.end {
+                shifted = offset - edit.rewritten.end + edit.original.end;
+            } else {
+                if offset > edit.rewritten.start {
+                    let within = offset - edit.rewritten.start;
+                    return (edit.original.start + within).min(edit.original.end);
+                }
+                break;
+            }
+        }
+        shifted
+    }
+}
+
 struct Converter {
     source: SourceId,
+    offsets: OffsetMap,
 }
 
 impl Converter {
@@ -46,8 +160,8 @@ impl Converter {
         Span {
             source: self.source,
             line: u32::from(span.start_line),
-            start: span.start_offset,
-            end: span.end_offset,
+            start: self.offsets.original(span.start_offset),
+            end: self.offsets.original(span.end_offset),
         }
     }
 

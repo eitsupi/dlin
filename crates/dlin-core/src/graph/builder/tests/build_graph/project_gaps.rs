@@ -272,3 +272,64 @@ fn macro_library_reports_unreadable_and_unparseable_macros() {
         ]
     );
 }
+
+/// A generic test definition under `tests/generic/` is a macro, as in dbt:
+/// it is not a singular test node, and its `{% test %}` block is not a gap.
+/// The generic tests declared in YAML are still nodes, and a broken
+/// definition is still a gap.
+#[test]
+fn generic_test_definitions_are_macros_not_singular_tests() {
+    let (_tmp, build) = build_project(&[
+        ("models/orders.sql", b"select 1 as amount"),
+        (
+            "models/schema.yml",
+            br#"
+models:
+  - name: orders
+    columns:
+      - name: amount
+        data_tests:
+          - is_positive
+"#,
+        ),
+        (
+            "tests/generic/test_is_positive.sql",
+            br#"{% test is_positive(model, column_name) %}select * from {{ model }} where {{ column_name }} <= 0{% endtest %}"#,
+        ),
+        (
+            "tests/generic/test_broken.sql",
+            br#"{% test broken(model) %}select 1"#,
+        ),
+        (
+            "tests/assert_orders.sql",
+            br#"select * from {{ ref('orders') }} where amount < 0"#,
+        ),
+        (
+            "macros/test_in_macros.sql",
+            br#"{% test in_macros(model) %}select 1{% endtest %}"#,
+        ),
+    ]);
+    let mut ids: Vec<&str> = build
+        .graph
+        .node_indices()
+        .map(|i| build.graph[i].unique_id.as_str())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            "model.orders",
+            "test.assert_orders",
+            "test.is_positive.orders.amount"
+        ]
+    );
+    assert_eq!(
+        build.project_gaps,
+        vec![skipped(
+            "tests/generic/test_broken.sql",
+            InputKind::Macro,
+            InputStage::Parse,
+            InputFailure::ParseError
+        )]
+    );
+}

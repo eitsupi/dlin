@@ -779,3 +779,95 @@ fn config_follows_the_last_call_and_unknown_branches() {
     );
     assert_eq!(e.config.materialized, None);
 }
+
+// ----- generic test definitions in macro files ------------------------
+
+/// A `{% test %}` block in a macro file defines the macro `test_<name>`,
+/// alongside the file's other macros, whatever its whitespace control,
+/// layout and defaults.
+#[test]
+fn test_block_defines_a_test_macro() {
+    let macros = library(&[r#"
+{% macro threshold_model() %}{{ ref('thresholds') }}{% endmacro %}
+
+{%- test is_positive(model, column_name) -%}
+select * from {{ model }} where {{ column_name }} <= 0
+{%- endtest %}
+
+{%+ test
+    is_below(model, column_name, max_value=100)
+%}
+select * from {{ model }} join {{ threshold_model() }} on {{ column_name }} > {{ max_value }}
+{% endtest +%}
+"#]);
+    assert!(macros.unparsed.is_empty());
+    for name in ["threshold_model", "test_is_positive", "test_is_below"] {
+        assert!(macros.get(name).is_some(), "{name} is defined");
+    }
+    assert_eq!(macros.get("test_is_below").unwrap().defaults.len(), 1);
+
+    let extraction = extract_dependencies(
+        r#"{{ test_is_below(ref('orders'), 'amount') }}"#,
+        &macros,
+        &HashMap::new(),
+    );
+    assert_eq!(ref_names(&extraction), ["orders", "thresholds"]);
+    assert!(extraction.reasons.is_empty());
+}
+
+/// Only the tags the tokenizer reads are rewritten: text that looks like a
+/// `test` tag in a comment, a raw block or a string stays as written.
+#[test]
+fn test_tag_text_outside_tags_is_not_rewritten() {
+    let macros = library(&[r#"
+{# {% test in_comment(model) %}{% endtest %} #}
+{% raw %}{% test in_raw(model) %}{% endtest %}{% endraw %}
+{% macro quoted() %}{{ "{% test in_string(model) %}" }}{% endmacro %}
+"#]);
+    assert!(macros.unparsed.is_empty());
+    assert!(macros.get("quoted").is_some());
+    for name in ["test_in_comment", "test_in_raw", "test_in_string"] {
+        assert!(macros.get(name).is_none(), "{name} is not defined");
+    }
+
+    let extraction = extract_dependencies(
+        r#"select '{{ quoted() }}' as text"#,
+        &macros,
+        &HashMap::new(),
+    );
+    assert!(extraction.reasons.is_empty());
+}
+
+/// A malformed `test` block is still a file that cannot be parsed.
+#[test]
+fn unclosed_test_block_is_unparsed() {
+    let macros = library(&[r#"{% test is_positive(model) %}select 1"#]);
+    assert_eq!(macros.unparsed, [PathBuf::from("macros/m0.sql")]);
+}
+
+/// Spans inside a rewritten file point into the file as written.
+#[test]
+fn test_block_spans_point_into_the_file_as_written() {
+    let source = r#"{% test is_positive(model) %}select * from {{ ref('thresholds') }}{% endtest %}
+{% test is_even(model) %}{{ source('raw', 'numbers') }}{% endtest %}"#;
+    let macros = library(&[source]);
+    let call_text = |name: &str| {
+        let def = macros.get(name).unwrap();
+        let expr = def
+            .body
+            .iter()
+            .find_map(|stmt| match stmt {
+                ir::Stmt::Emit(expr) => Some(expr),
+                _ => None,
+            })
+            .unwrap();
+        let span = expr.span;
+        assert_eq!(
+            span.line,
+            u32::try_from(source[..span.start as usize].lines().count().max(1)).unwrap()
+        );
+        &source[span.start as usize..span.end as usize]
+    };
+    assert_eq!(call_text("test_is_positive"), "ref('thresholds')");
+    assert_eq!(call_text("test_is_even"), "source('raw', 'numbers')");
+}
