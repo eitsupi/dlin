@@ -68,8 +68,12 @@ struct WalkedFiles {
 /// `missing_paths` and treated as empty, as dbt does. A configured path that
 /// cannot be inspected, is not a directory, or cannot be fully listed is
 /// recorded in `skipped_inputs`.
+///
+/// SQL files under `generic/` in a test path define generic tests, so they
+/// are macro files, as in dbt. They come after the files of `macro-paths`.
 pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
     let mut discovered = DiscoveredFiles::default();
+    let mut generic_test_sql_files = Vec::new();
 
     for (setting, dirs, origin) in paths.settings() {
         for dir in dirs {
@@ -98,7 +102,12 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
                     discovered.yaml_files.extend(walked.yaml);
                 }
                 PathSetting::TestPaths => {
-                    discovered.test_sql_files.extend(walked.sql);
+                    let (generic, singular): (Vec<_>, Vec<_>) = walked
+                        .sql
+                        .into_iter()
+                        .partition(|path| is_generic_test_definition(dir, path));
+                    generic_test_sql_files.extend(generic);
+                    discovered.test_sql_files.extend(singular);
                     discovered.yaml_files.extend(walked.yaml);
                 }
                 PathSetting::MacroPaths => {
@@ -108,11 +117,33 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
         }
     }
 
+    discovered.macro_sql_files.extend(generic_test_sql_files);
+    // A file is one macro file even when it is under both a macro path and
+    // a test path's `generic/`. The first occurrence keeps its precedence.
+    let mut seen = std::collections::HashSet::new();
+    discovered
+        .macro_sql_files
+        .retain(|path| seen.insert(path.clone()));
+
     discovered.skipped_inputs.sort();
     discovered.skipped_inputs.dedup();
     discovered.missing_paths.sort();
     discovered.missing_paths.dedup();
     Ok(discovered)
+}
+
+/// Whether a SQL file in a test path is under the `generic/` directory at
+/// the root of that test path, where dbt reads generic test definitions.
+/// `tests/unit/generic/x.sql` is not: only the first component counts.
+fn is_generic_test_definition(test_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(test_root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    components
+        .next()
+        .is_some_and(|first| first.as_os_str() == "generic")
+        && components.next().is_some()
 }
 
 /// Inspect one configured root and walk it. Returns `None` when the root is
@@ -461,6 +492,74 @@ mod tests {
 
         let discovered = discover_files(&paths).unwrap();
         assert_eq!(discovered.model_sql_files.len(), 1);
+    }
+
+    /// SQL files under `generic/` at the root of a test path define generic
+    /// tests: they are macro files after those of `macro-paths`, not singular
+    /// tests. YAML there is still read.
+    #[test]
+    fn test_discover_files_generic_test_definitions_are_macros() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for path in [
+            "macros/helpers.sql",
+            "tests/assert_positive.sql",
+            "tests/generic/test_is_positive.sql",
+            "tests/generic/nested/test_is_even.sql",
+            "tests/generic/schema.yml",
+            "tests/unit/generic/assert_unit.sql",
+            "tests/generic_checks/assert_generic.sql",
+            "custom/checks/generic/test_is_odd.sql",
+            "custom/checks/assert_custom.sql",
+        ] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "select 1").unwrap();
+        }
+        let paths = ResolvedPaths {
+            model_paths: vec![],
+            seed_paths: vec![],
+            snapshot_paths: vec![],
+            test_paths: vec![root.join("tests"), root.join("custom/checks")],
+            // A macro path that is also a test path's `generic/` lists its
+            // files once.
+            macro_paths: vec![root.join("macros"), root.join("tests/generic")],
+            analysis_paths: vec![],
+            allow_jinja_file_extensions: false,
+            origins: Default::default(),
+        };
+
+        let discovered = discover_files(&paths).unwrap();
+        let relative = |files: &[PathBuf]| -> Vec<PathBuf> {
+            files
+                .iter()
+                .map(|path| path.strip_prefix(root).unwrap().to_path_buf())
+                .collect()
+        };
+        assert_eq!(
+            relative(&discovered.test_sql_files),
+            [
+                "tests/assert_positive.sql",
+                "tests/generic_checks/assert_generic.sql",
+                "tests/unit/generic/assert_unit.sql",
+                "custom/checks/assert_custom.sql",
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            relative(&discovered.macro_sql_files),
+            [
+                "macros/helpers.sql",
+                "tests/generic/nested/test_is_even.sql",
+                "tests/generic/test_is_positive.sql",
+                "custom/checks/generic/test_is_odd.sql",
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            relative(&discovered.yaml_files),
+            [PathBuf::from("tests/generic/schema.yml")]
+        );
     }
 
     #[test]

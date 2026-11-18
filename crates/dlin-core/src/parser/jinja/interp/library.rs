@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::convert::parse_template;
+use super::convert::parse_macro_file;
 use super::ir::{MacroDef, SourceId, Stmt};
 
 /// The macros defined in the project's macro files.
@@ -25,7 +25,7 @@ impl MacroLibrary {
         let mut library = MacroLibrary::default();
         for (index, (path, source)) in files.iter().enumerate() {
             let id = SourceId::MacroFile(u32::try_from(index).unwrap_or(u32::MAX));
-            match parse_template(source, id) {
+            match parse_macro_file(source, id) {
                 Ok(template) => {
                     super::eval::collect_set_literals(&template.body, &mut library.set_literals);
                     for stmt in template.body {
