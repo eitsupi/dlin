@@ -27,7 +27,7 @@ colored = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { workspace = true }
-minijinja = { workspace = true }
+minijinja = { workspace = true, features = ["unstable_machinery"] }
 rayon = { workspace = true }
 globset = { workspace = true }
 path-slash = { workspace = true }
