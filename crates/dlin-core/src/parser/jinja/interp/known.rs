@@ -13,9 +13,18 @@ use minijinja::{Environment, Expression};
 
 use super::ir::BinOp;
 
+/// Work allowed for one delegated operation (minijinja's fuel also counts
+/// memory and the work inside filters). An operation that runs out fails,
+/// and the interpreter treats its result as unknown.
+const FUEL_PER_OPERATION: u64 = 100_000;
+
 fn environment() -> &'static Environment<'static> {
     static ENV: OnceLock<Environment<'static>> = OnceLock::new();
-    ENV.get_or_init(Environment::new)
+    ENV.get_or_init(|| {
+        let mut env = Environment::new();
+        env.set_fuel(Some(FUEL_PER_OPERATION));
+        env
+    })
 }
 
 const SOURCES: &[&str] = &[

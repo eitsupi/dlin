@@ -478,3 +478,122 @@ fn set_block_captures_known_output() {
     let e = extract("{% set name %}stg_{{ 'a' }}{% endset %}{{ ref(name | trim) }}");
     assert_eq!(ref_names(&e), vec!["stg_a"]);
 }
+
+// ----- regressions from review --------------------------------------------
+
+#[test]
+fn conditional_expression_keeps_each_side_on_its_own_state() {
+    let e = extract(
+        "{% set xs = [] %}{% set ignored = xs.append('A') if var('flag') else xs.append('B') %}{{ ref(xs[-1]) }}",
+    );
+    assert!(e.refs.is_empty(), "{:?}", e.refs);
+    assert_eq!(codes(&e), vec!["unresolved_var"]);
+}
+
+#[test]
+fn short_circuit_right_side_may_not_run() {
+    let e = extract(
+        "{% set xs = ['A'] %}{% set ignored = var('flag') and xs.append('B') %}{{ ref(xs[-1]) }}",
+    );
+    assert!(e.refs.is_empty(), "{:?}", e.refs);
+    assert_eq!(codes(&e), vec!["unresolved_var"]);
+}
+
+#[test]
+fn template_macro_reads_variables_when_called() {
+    let e = extract(
+        "{% set x = 'A' %}{% macro pick() %}{{ return(x) }}{% endmacro %}{% set x = 'B' %}{{ ref(pick()) }}",
+    );
+    assert_eq!(ref_names(&e), vec!["B"]);
+}
+
+#[test]
+fn template_macro_calling_another_sees_the_template_variables() {
+    let e = extract(
+        "{% macro inner() %}{{ return(name) }}{% endmacro %}{% macro outer() %}{{ ref(inner()) }}{% endmacro %}\
+         {% set name = 'A' %}{{ outer() }}",
+    );
+    assert_eq!(ref_names(&e), vec!["A"]);
+}
+
+#[test]
+fn macro_stored_in_a_namespace_is_called() {
+    let e = extract(
+        "{% macro m() %}{{ ref('A') }}{% endmacro %}{% set ns = namespace(f=m) %}{{ ns.f() }}",
+    );
+    assert_eq!(ref_names(&e), vec!["A"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn method_on_a_possibly_callable_value_is_a_reason_even_if_unused() {
+    let e = extract_with(
+        "{% do pick().method() %}select 1",
+        &["{% macro pick() %}{{ return(adapter.dispatch('pick')()) }}{% endmacro %}"],
+        &[],
+    );
+    assert_eq!(codes(&e), vec!["unsupported_dispatch"]);
+}
+
+#[test]
+fn methods_of_unknown_data_are_not_reasons() {
+    let e = extract(
+        "{% set name = (ref('t') | string) | lower %}{% do var('obj').method() %}\
+         {% if name.endswith('traces') %}x{% endif %}{{ ref('a') }}",
+    );
+    assert_eq!(ref_names(&e), vec!["a", "t"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn unknown_keyword_splat_rejects_the_ref() {
+    let e = extract("{{ ref('A', **var('opts')) }}");
+    assert!(e.refs.is_empty());
+    assert_eq!(codes(&e), vec!["unresolved_var"]);
+    let e = extract("{{ ref('A', unexpected=1) }}{{ source('s', 't', x=1) }}");
+    assert!(e.refs.is_empty() && e.sources.is_empty());
+    assert_eq!(codes(&e), vec!["invalid_dependency_call"]);
+}
+
+#[test]
+fn minijinja_functions_receive_keyword_arguments() {
+    let e = extract("{% set d = dict(name='A') %}{{ ref(d.name) }}");
+    assert_eq!(ref_names(&e), vec!["A"]);
+}
+
+#[test]
+fn default_filter_follows_minijinja() {
+    let e = extract(
+        "{{ ref('' | default('A', true)) }}{{ ref(undefined_name | default('B')) }}{{ ref('C' | default('X')) }}",
+    );
+    assert_eq!(ref_names(&e), vec!["A", "B", "C"]);
+}
+
+#[test]
+fn cyclic_containers_do_not_hang() {
+    let e = extract("{% set xs = [] %}{% do xs.append(xs) %}{{ ref(xs | string) }}");
+    assert!(e.refs.is_empty());
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
+}
+
+#[test]
+fn delegated_operations_have_a_budget() {
+    let e = extract("{{ ref('a' * 100000000) }}");
+    assert!(e.refs.is_empty());
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
+}
+
+#[test]
+fn loop_filter_decides_else_and_loop_info() {
+    let e = extract("{% for x in [1] if false %}{% else %}{{ ref('A') }}{% endfor %}");
+    assert_eq!(ref_names(&e), vec!["A"]);
+    let e = extract(
+        "{% for x in ['a', 'skip', 'b'] if x != 'skip' %}{% if loop.last %}{{ ref(x) }}{% endif %}{% endfor %}",
+    );
+    assert_eq!(ref_names(&e), vec!["b"]);
+    let e = extract(
+        "{% for x in ['a'] if var('f') %}{{ ref(x) }}{% else %}{{ ref('none') }}{% endfor %}",
+    );
+    assert_eq!(ref_names(&e), vec!["a", "none"]);
+    assert_eq!(codes(&e), vec!["unresolved_var"]);
+}

@@ -62,9 +62,20 @@ pub(crate) type HeapId = u32;
 #[derive(Debug, Clone)]
 pub(crate) struct MacroRef {
     pub(crate) def: Arc<MacroDef>,
-    /// Variables visible where a template-local macro or a call block's
-    /// caller was defined. Project macros only see the project macros.
-    pub(crate) closure: Option<Arc<Vec<Scope>>>,
+    pub(crate) closure: Closure,
+}
+
+/// What a macro's body can see besides its arguments.
+#[derive(Debug, Clone)]
+pub(crate) enum Closure {
+    /// A project macro: only the project macros and the dbt context.
+    Project,
+    /// Defined at the top level of the template: it reads the template's
+    /// variables as they are when it is called.
+    TemplateRoot,
+    /// Defined inside a macro, loop or block: the variables it reads, as
+    /// they were where it was defined.
+    Captured(Arc<Scope>),
 }
 
 /// A function provided by the interpreter rather than by the project.
@@ -132,8 +143,9 @@ impl AValue {
             (AValue::Macro(a), AValue::Macro(b)) => {
                 Arc::ptr_eq(&a.def, &b.def)
                     && match (&a.closure, &b.closure) {
-                        (None, None) => true,
-                        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                        (Closure::Project, Closure::Project) => true,
+                        (Closure::TemplateRoot, Closure::TemplateRoot) => true,
+                        (Closure::Captured(x), Closure::Captured(y)) => Arc::ptr_eq(x, y),
                         _ => false,
                     }
             }

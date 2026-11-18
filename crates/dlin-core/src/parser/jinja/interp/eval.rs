@@ -16,8 +16,8 @@ use super::ir::{Arg, BinOp, Call, Expr, ExprKind, SourceId, Span, Stmt, Target, 
 use super::known;
 use super::library::MacroLibrary;
 use super::value::{
-    AValue, Builtin, Causes, ContextObject, HeapId, HeapObj, MacroRef, Output, Reason, Scope,
-    State, merge_states, merge_value, path_difference,
+    AValue, Builtin, Causes, Closure, ContextObject, HeapId, HeapObj, MacroRef, Output, Reason,
+    Scope, State, merge_states, merge_value, path_difference,
 };
 use crate::graph::dependency::{
     AnalysisLimit, DependencyFunction, DependencyReason, ExtractionSite, RuntimeValueSource,
@@ -163,6 +163,11 @@ pub(crate) struct Interp<'a> {
     /// The last expression evaluated, for reporting where the budget ran out.
     pub(crate) current: Option<Span>,
     next_heap: HeapId,
+    /// The template body, for explaining rejected computed names.
+    pub(crate) template: Option<&'a [Stmt]>,
+    template_literals: Option<HashMap<Arc<str>, Vec<String>>>,
+    /// The template's scopes when the current call chain was entered.
+    root_scopes: Vec<Scope>,
     pub(crate) rec: Recorder,
     /// Whether `config()` may still set values (only on the first pass).
     pub(crate) record_config: bool,
@@ -184,6 +189,9 @@ impl<'a> Interp<'a> {
             root_call: None,
             current: None,
             next_heap: 0,
+            template: None,
+            template_literals: None,
+            root_scopes: Vec::new(),
             rec: Recorder::default(),
             record_config: true,
         }
@@ -271,7 +279,8 @@ impl<'a> Interp<'a> {
 
     // ----- statements -----------------------------------------------------
 
-    pub(crate) fn run_template(&mut self, body: &[Stmt]) -> Ev<()> {
+    pub(crate) fn run_template(&mut self, body: &'a [Stmt]) -> Ev<()> {
+        self.template = Some(body);
         let state = State::new(
             vec![Scope::new()],
             BTreeMap::new(),
@@ -415,14 +424,14 @@ impl<'a> Interp<'a> {
             Stmt::Macro(def) => {
                 let value = AValue::Macro(MacroRef {
                     def: def.clone(),
-                    closure: Some(capture(st, &def.names)),
+                    closure: self.closure_here(st, &def.names),
                 });
                 st.assign(def.name.clone(), value);
             }
             Stmt::CallBlock { call, caller } => {
                 let caller = AValue::Macro(MacroRef {
                     def: caller.clone(),
-                    closure: Some(capture(st, &caller.names)),
+                    closure: self.closure_here(st, &caller.names),
                 });
                 let value = self.eval_call(st, call, Some(caller))?;
                 self.emit(st, &value, call.span);
@@ -464,6 +473,15 @@ impl<'a> Interp<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// The closure of a macro or caller defined in the current frame.
+    fn closure_here(&self, st: &State, names: &[Arc<str>]) -> Closure {
+        if self.depth == 0 && st.scopes.len() == 1 {
+            Closure::TemplateRoot
+        } else {
+            Closure::Captured(capture(st, names))
+        }
     }
 
     fn branch(&mut self, state: State, causes: &Causes, a: &[Stmt], b: &[Stmt]) -> Ev<Flow> {
@@ -582,37 +600,66 @@ impl<'a> Interp<'a> {
         body: &[Stmt],
         else_body: &[Stmt],
     ) -> Ev<Flow> {
-        if items.is_empty() {
+        // Apply the loop filter first: `else` and `loop` describe the items
+        // that pass it. An item whose filter result is unknown may or may
+        // not be iterated.
+        let mut passing: Vec<(AValue, Option<Causes>)> = Vec::new();
+        for item in items {
+            let Some(filter) = filter else {
+                passing.push((item, None));
+                continue;
+            };
+            let mut probe = st.clone();
+            probe.scopes.push(Scope::new());
+            self.assign(&mut probe, target, item.clone())?;
+            let value = self.eval(&mut probe, filter)?;
+            match self.truth(&probe, &value, filter.span) {
+                Truth::Known(true) => passing.push((item, None)),
+                Truth::Known(false) => {}
+                Truth::Unknown(causes) => passing.push((item, Some(causes))),
+            }
+        }
+        let uncertain: Option<Causes> = passing
+            .iter()
+            .filter_map(|(_, c)| c.clone())
+            .reduce(|a, b| a.union(&b));
+        if passing.is_empty() {
             return self.exec_block(st, else_body);
         }
         let fallback = Causes::default();
-        let length = items.len();
-        let mut current = Some(st);
+        let length = passing.len();
+        let mut current = Some(st.clone());
         let mut exits = Flow::default();
-        for (index, item) in items.into_iter().enumerate() {
+        for (index, (item, maybe)) in passing.into_iter().enumerate() {
             let Some(mut state) = current.take() else {
                 break;
             };
             state.scopes.push(Scope::new());
             self.assign(&mut state, target, item)?;
-            state.assign(Arc::from("loop"), Self::loop_object(index, length));
-            let mut flow = match filter {
+            let loop_info = match &uncertain {
+                None => Self::loop_object(index, length),
+                Some(causes) => AValue::Unknown(causes.clone()),
+            };
+            state.assign(Arc::from("loop"), loop_info);
+            let mut flow = match maybe {
                 None => self.exec_block(state, body)?,
-                Some(filter) => {
-                    let value = self.eval(&mut state, filter)?;
-                    match self.truth(&state, &value, filter.span) {
-                        Truth::Known(true) => self.exec_block(state, body)?,
-                        Truth::Known(false) => Flow::normal(state),
-                        Truth::Unknown(causes) => self.branch(state, &causes, body, &[])?,
-                    }
-                }
+                Some(causes) => self.branch(state, &causes, body, &[])?,
             };
             pop_scope(&mut flow);
             current = merge_opt(flow.normal, flow.cont, &fallback);
             exits.brk = merge_opt(exits.brk, flow.brk, &fallback);
             exits.ret = merge_ret(exits.ret, flow.ret, &fallback);
         }
-        exits.normal = merge_opt(current, exits.brk.take(), &fallback);
+        let mut normal = merge_opt(current, exits.brk.take(), &fallback);
+        if let Some(causes) = &uncertain {
+            // If no item passes the filter, `else` runs.
+            let mut skipped = st;
+            skipped.path = skipped.path.union(causes);
+            let else_flow = self.exec_block(skipped, else_body)?;
+            normal = merge_opt(normal, else_flow.normal, causes);
+            exits.ret = merge_ret(exits.ret, else_flow.ret, causes);
+        }
+        exits.normal = normal;
         Ok(exits)
     }
 
@@ -640,9 +687,12 @@ impl<'a> Interp<'a> {
             self.assign(&mut state, target, AValue::Unknown(causes.clone()))?;
             state.assign(Arc::from("loop"), AValue::Unknown(causes.clone()));
             if let Some(filter) = filter {
-                // Whether an item passes the filter is as unknown as the
-                // items; evaluate it for its own dependencies only.
-                self.eval(&mut state, filter)?;
+                // Whether an item passes is as unknown as the items; the body
+                // runs on the path of both.
+                let value = self.eval(&mut state, filter)?;
+                if let Truth::Unknown(filter_causes) = self.truth(&state, &value, filter.span) {
+                    state.path = state.path.union(&filter_causes);
+                }
             }
             let mut flow = self.exec_block(state, body)?;
             pop_scope(&mut flow);
@@ -771,26 +821,38 @@ impl<'a> Interp<'a> {
 
     /// Convert a value to a minijinja value, or explain why it is unknown.
     fn freeze(&self, st: &State, value: &AValue, span: Span) -> Result<Value, Causes> {
+        self.freeze_at(st, value, span, 0)
+    }
+
+    fn freeze_at(
+        &self,
+        st: &State,
+        value: &AValue,
+        span: Span,
+        depth: usize,
+    ) -> Result<Value, Causes> {
+        // Containers can hold themselves; such values are not modelled.
+        if depth > MAX_DEPTH {
+            return Err(self.unsupported("deeply nested or cyclic container", span));
+        }
+        let freeze = |item: &AValue| self.freeze_at(st, item, span, depth + 1);
         match value {
             AValue::Known(value) => Ok(value.clone()),
             AValue::Unknown(causes) => Err(causes.clone()),
             AValue::Heap(id) => match st.heap.get(id) {
                 Some(HeapObj::List(items)) => items
                     .iter()
-                    .map(|item| self.freeze(st, item, span))
+                    .map(freeze)
                     .collect::<Result<Vec<_>, _>>()
                     .map(Value::from),
                 Some(HeapObj::Map(entries)) => entries
                     .iter()
-                    .map(|(key, item)| self.freeze(st, item, span).map(|v| (key.clone(), v)))
+                    .map(|(key, item)| freeze(item).map(|v| (key.clone(), v)))
                     .collect::<Result<Vec<_>, _>>()
                     .map(Value::from_pairs),
                 Some(HeapObj::Namespace(attrs)) => attrs
                     .iter()
-                    .map(|(key, item)| {
-                        self.freeze(st, item, span)
-                            .map(|v| (Value::from(key.as_ref()), v))
-                    })
+                    .map(|(key, item)| freeze(item).map(|v| (Value::from(key.as_ref()), v)))
                     .collect::<Result<Vec<_>, _>>()
                     .map(Value::from_pairs),
                 Some(HeapObj::Clobbered(causes)) => Err(causes.clone()),
@@ -887,11 +949,15 @@ impl<'a> Interp<'a> {
                             }
                         }
                         Truth::Unknown(causes) => {
-                            let saved = st.path.clone();
-                            st.path = st.path.union(&causes);
-                            let right_value = self.eval(st, right);
-                            st.path = saved;
-                            merge_value(&left_value, &right_value?, &causes)
+                            // Either the right side is not evaluated and the
+                            // result is the left value, or it is evaluated.
+                            self.eval_alternatives(
+                                st,
+                                &causes,
+                                Some(left_value),
+                                None,
+                                Some(right),
+                            )?
                         }
                     }
                 }
@@ -945,15 +1011,14 @@ impl<'a> Interp<'a> {
                         None => AValue::undefined(),
                     },
                     Truth::Unknown(causes) => {
-                        let saved = st.path.clone();
-                        st.path = st.path.union(&causes);
-                        let a = self.eval(st, then);
-                        let b = match otherwise {
-                            Some(e) => self.eval(st, e),
-                            None => Ok(AValue::undefined()),
-                        };
-                        st.path = saved;
-                        merge_value(&a?, &b?, &causes)
+                        let otherwise_value = otherwise.is_none().then(AValue::undefined);
+                        self.eval_alternatives(
+                            st,
+                            &causes,
+                            otherwise_value,
+                            Some(then),
+                            otherwise.as_deref(),
+                        )?
                     }
                 }
             }
@@ -1013,6 +1078,61 @@ impl<'a> Interp<'a> {
         })
     }
 
+    /// Evaluate two alternatives selected by an unknown condition, each on
+    /// its own copy of the state, and merge the states and the values. An
+    /// alternative is either an expression or an already known value.
+    fn eval_alternatives(
+        &mut self,
+        st: &mut State,
+        causes: &Causes,
+        mut value: Option<AValue>,
+        first: Option<&Expr>,
+        second: Option<&Expr>,
+    ) -> Ev<AValue> {
+        let original = st.path.clone();
+        let mut results: Vec<(State, AValue)> = Vec::new();
+        let mut exits: Vec<Signal> = Vec::new();
+        for alternative in [first, second] {
+            let mut state = st.clone();
+            state.path = state.path.union(causes);
+            let result = match alternative {
+                Some(expr) => self.eval(&mut state, expr),
+                None => Ok(value.take().unwrap_or_else(AValue::undefined)),
+            };
+            match result {
+                Ok(v) => results.push((state, v)),
+                Err(Signal::Budget) => return Err(Signal::Budget),
+                Err(signal) => exits.push(signal),
+            }
+        }
+        if !exits.is_empty() {
+            // A `return` or compiler error inside a conditional expression
+            // is not modelled precisely.
+            let reason = self.unsupported(
+                "return in a conditional expression",
+                Span::default_for_template(),
+            );
+            self.record_used(st, &reason.union(causes));
+            if results.is_empty() {
+                return Err(exits.remove(0));
+            }
+        }
+        let mut merged: Option<(State, AValue)> = None;
+        for (state, v) in results {
+            merged = Some(match merged {
+                None => (state, v),
+                Some((other, other_value)) => {
+                    let value = merge_value(&other_value, &v, causes);
+                    (merge_states(other, state, causes), value)
+                }
+            });
+        }
+        let (mut state, v) = merged.expect("at least one alternative");
+        state.path = original;
+        *st = state;
+        Ok(v)
+    }
+
     fn freeze_all(&self, st: &State, values: &[AValue], span: Span) -> Result<Vec<Value>, Causes> {
         let mut out = Vec::with_capacity(values.len());
         let mut unknown: Option<Causes> = None;
@@ -1057,7 +1177,7 @@ impl<'a> Interp<'a> {
         if let Some(def) = self.library.get(name) {
             return Some(AValue::Macro(MacroRef {
                 def: def.clone(),
-                closure: None,
+                closure: Closure::Project,
             }));
         }
         let builtin = match name {
@@ -1337,20 +1457,22 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        if name == "default" || name == "d" {
-            // Keep a known default for an undefined value even when the
-            // value has a non-known form.
-            if let AValue::Known(value) = &values[0]
-                && !value.is_undefined()
-            {
-                return Ok(values[0].clone());
-            }
-            if let AValue::Known(_) = &values[0] {
-                return Ok(values
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| AValue::Known(Value::from(""))));
-            }
+        if (name == "default" || name == "d")
+            && args.len() == 1
+            && matches!(args[0], Arg::Pos(_))
+            && !matches!(values[0], AValue::Known(_) | AValue::Unknown(_))
+        {
+            // A defined value that is not a plain value (a container, a
+            // relation) is kept; known inputs go to minijinja below.
+            return Ok(values[0].clone());
+        }
+        if (name == "default" || name == "d")
+            && args.len() == 1
+            && let AValue::Known(value) = &values[0]
+            && value.is_undefined()
+        {
+            // Keep the default's own form (it may be a container).
+            return Ok(values[1].clone());
         }
         let mut frozen = match self.freeze_all(st, &values, span) {
             Ok(frozen) => frozen,
@@ -1432,6 +1554,28 @@ impl<'a> Interp<'a> {
                     }
                     _ => {
                         let (args, kwargs) = self.eval_args(st, &call.args, span)?;
+                        // A macro stored in a namespace or a map is called,
+                        // not treated as a method.
+                        if let AValue::Heap(_) = &receiver {
+                            let attribute = self.get_attr(st, &receiver, name, span);
+                            if matches!(attribute, AValue::Macro(_) | AValue::Builtin(_)) {
+                                return self.call_value(st, attribute, args, kwargs, caller, call);
+                            }
+                        }
+                        // A method of a value that may be a callable the
+                        // analysis could not follow is an unknown callee.
+                        // Unknown data (vars, target, query results) has only
+                        // data methods.
+                        if let AValue::Unknown(causes) = &receiver
+                            && may_be_callable(causes)
+                        {
+                            self.record_used(st, causes);
+                            st.clobber_reachable(
+                                args.iter().chain(kwargs.iter().map(|(_, v)| v)),
+                                causes,
+                            );
+                            return Ok(AValue::Unknown(causes.clone()));
+                        }
                         return Ok(self.method(st, receiver, name, args, kwargs, span));
                     }
                 }
@@ -1489,11 +1633,17 @@ impl<'a> Interp<'a> {
                                     }
                                 }
                             }
+                            Some(HeapObj::Clobbered(causes)) => {
+                                keyword.push((Arc::from("**"), AValue::Unknown(causes.clone())))
+                            }
                             _ => keyword.push((
                                 Arc::from("**"),
                                 AValue::Unknown(self.unsupported("**kwargs", span)),
                             )),
                         },
+                        AValue::Unknown(causes) => {
+                            keyword.push((Arc::from("**"), AValue::Unknown(causes.clone())))
+                        }
                         AValue::Known(map) if map.kind() == ValueKind::Map => {
                             if let Ok(keys) = map.try_iter() {
                                 for key in keys {
@@ -1579,6 +1729,9 @@ impl<'a> Interp<'a> {
         let entering = self.depth == 0;
         if entering {
             self.root_call = Some(span);
+            // The template's variables cannot change until this call
+            // returns, so its macros read them from here.
+            self.root_scopes = st.scopes.clone();
         }
         self.depth += 1;
         let result = self.invoke_inner(st, &target, args, kwargs, caller);
@@ -1599,22 +1752,41 @@ impl<'a> Interp<'a> {
     ) -> Ev<AValue> {
         let def = &target.def;
         self.rec.entered.insert(def.name.clone());
-        let mut scopes: Vec<Scope> = match &target.closure {
-            Some(closure) => closure.as_ref().clone(),
-            None => Vec::new(),
+        let base = match &target.closure {
+            Closure::Project => Scope::new(),
+            Closure::TemplateRoot => def
+                .names
+                .iter()
+                .filter_map(|name| {
+                    self.root_scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(name))
+                        .map(|value| (name.clone(), value.clone()))
+                })
+                .collect(),
+            Closure::Captured(scope) => scope.as_ref().clone(),
         };
         let mut params = Scope::new();
-        if target.closure.is_some() {
+        if !matches!(target.closure, Closure::Project) {
             params.insert(def.name.clone(), AValue::Macro(target.clone()));
         }
-        scopes.push(params);
+        let scopes = vec![base, params];
         let heap = std::mem::take(&mut st.heap);
         let mut frame = State::new(scopes, heap, Output::Known(String::new()), st.path.clone());
         let mut positional = args.into_iter();
         let mut bind_error = None;
+        // An unknown `**kwargs` may supply any parameter that is not given
+        // positionally.
+        let unknown_kwargs = kwargs
+            .iter()
+            .find(|(name, _)| name.as_ref() == "**")
+            .and_then(|(_, value)| value.causes().cloned());
         for (index, param) in def.params.iter().enumerate() {
             let value = if let Some(value) = positional.next() {
                 value
+            } else if let Some(causes) = &unknown_kwargs {
+                AValue::Unknown(causes.clone())
             } else if let Some(pos) = kwargs.iter().position(|(name, _)| name == param) {
                 kwargs.remove(pos).1
             } else if let Some(default) = def.default_for(index) {
@@ -1676,8 +1848,30 @@ impl<'a> Interp<'a> {
     fn reject(&mut self, st: &State, function: DependencyFunction, causes: Causes, call: &Call) {
         self.record_used(st, &causes);
         let mut found = StaticCalls::default();
+        let mut names = Vec::new();
         for arg in &call.args {
             found.literals(arg.expr());
+        }
+        super::ir::collect_names(
+            &[],
+            &call
+                .args
+                .iter()
+                .map(|a| a.expr().clone())
+                .collect::<Vec<_>>(),
+            &mut names,
+        );
+        if !names.is_empty() {
+            let library = self.library;
+            let template_literals = self.template_set_literals();
+            for name in &names {
+                if let Some(literals) = template_literals.get(name.as_ref()) {
+                    found.strings.extend(literals.iter().cloned());
+                }
+                if let Some(literals) = library.set_literals.get(name.as_ref()) {
+                    found.strings.extend(literals.iter().cloned());
+                }
+            }
         }
         self.rec.decisions.push(Decision {
             function,
@@ -1687,6 +1881,19 @@ impl<'a> Interp<'a> {
             line: call.span.line,
             outcome: DecisionOutcome::Rejected,
         });
+    }
+
+    /// String literals assigned to each variable in the template, computed
+    /// on the first rejection.
+    fn template_set_literals(&mut self) -> &HashMap<Arc<str>, Vec<String>> {
+        if self.template_literals.is_none() {
+            let mut literals = HashMap::new();
+            if let Some(body) = self.template {
+                collect_set_literals(body, &mut literals);
+            }
+            self.template_literals = Some(literals);
+        }
+        self.template_literals.as_ref().expect("initialised above")
     }
 
     fn invalid(&self, function: DependencyFunction, span: Span) -> Causes {
@@ -1731,6 +1938,18 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
+                for (key, value) in &kwargs {
+                    match self.freeze(st, value, span) {
+                        // An unknown `**kwargs` may supply any keyword.
+                        Err(causes)
+                            if key.as_ref() == "**" || matches!(value, AValue::Unknown(_)) =>
+                        {
+                            unknown = Some(unknown.map_or(causes.clone(), |c| c.union(&causes)))
+                        }
+                        _ if !matches!(key.as_ref(), "version" | "v") => invalid = true,
+                        _ => {}
+                    }
+                }
                 let version = match kwarg("version").or_else(|| kwarg("v")) {
                     None => None,
                     Some(value) => match self.freeze(st, value, span) {
@@ -1773,8 +1992,12 @@ impl<'a> Interp<'a> {
             }
             Builtin::Source => {
                 let function = DependencyFunction::Source;
-                if args.len() != 2 {
-                    let causes = self.invalid(function, span);
+                if args.len() != 2 || !kwargs.is_empty() {
+                    let causes = kwargs
+                        .iter()
+                        .filter_map(|(_, value)| value.causes().cloned())
+                        .reduce(|a, b| a.union(&b))
+                        .unwrap_or_else(|| self.invalid(function, span));
                     self.reject(st, function, causes, call);
                     return Ok(AValue::Relation);
                 }
@@ -1899,9 +2122,26 @@ impl<'a> Interp<'a> {
                 Ok(self.alloc(st, HeapObj::Namespace(attrs)))
             }
             Builtin::Minijinja(name) => {
-                let mut values = args;
-                values.extend(kwargs.into_iter().map(|(_, v)| v));
-                match self.freeze_all(st, &values, span) {
+                let mut values = match self.freeze_all(st, &args, span) {
+                    Ok(values) => values,
+                    Err(causes) => return Ok(AValue::Unknown(causes)),
+                };
+                if !kwargs.is_empty() {
+                    let mut pairs = Vec::new();
+                    for (key, value) in &kwargs {
+                        match self.freeze(st, value, span) {
+                            Ok(value) if key.as_ref() != "**" => {
+                                pairs.push((key.to_string(), value))
+                            }
+                            Ok(_) => {
+                                return Ok(AValue::Unknown(self.unsupported("**kwargs", span)));
+                            }
+                            Err(causes) => return Ok(AValue::Unknown(causes)),
+                        }
+                    }
+                    values.push(Value::from(minijinja::value::Kwargs::from_iter(pairs)));
+                }
+                match Ok::<_, Causes>(values) {
                     Ok(values) => Ok(known::call_global(name, &values)
                         .map(AValue::Known)
                         .unwrap_or_else(|_| {
@@ -2193,14 +2433,30 @@ impl<'a> Interp<'a> {
     }
 }
 
+/// Whether an unknown value may be a macro or another callable, rather
+/// than data.
+fn may_be_callable(causes: &Causes) -> bool {
+    causes.iter().any(|reason| {
+        !matches!(
+            reason,
+            DependencyReason::RuntimeValueUnknown { .. }
+                | DependencyReason::UnresolvedVar { .. }
+                | DependencyReason::UnresolvedRef { .. }
+                | DependencyReason::UnresolvedSource { .. }
+                | DependencyReason::InvalidDependencyCall { .. }
+        )
+    })
+}
+
 /// The variables a macro defined here can read: only the names it uses, so
 /// that defining many macros does not copy the scope each time.
-fn capture(st: &State, names: &[Arc<str>]) -> Arc<Vec<Scope>> {
-    let scope: Scope = names
-        .iter()
-        .filter_map(|name| st.lookup(name).map(|value| (name.clone(), value.clone())))
-        .collect();
-    Arc::new(vec![scope])
+fn capture(st: &State, names: &[Arc<str>]) -> Arc<Scope> {
+    Arc::new(
+        names
+            .iter()
+            .filter_map(|name| st.lookup(name).map(|value| (name.clone(), value.clone())))
+            .collect(),
+    )
 }
 
 fn pop_scope(flow: &mut Flow) {
@@ -2251,6 +2507,42 @@ fn widen(entry: &State, state: State, causes: &Causes) -> State {
         state.out = Output::Unknown(causes.clone());
     }
     state
+}
+
+/// Record the string literals of the expressions assigned to each name.
+pub(crate) fn collect_set_literals(stmts: &[Stmt], out: &mut HashMap<Arc<str>, Vec<String>>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Set {
+                target: Target::Name(name),
+                expr,
+            } => {
+                let mut found = StaticCalls::default();
+                found.literals(expr);
+                out.entry(name.clone()).or_default().extend(found.strings);
+            }
+            Stmt::For {
+                body, else_body, ..
+            } => {
+                collect_set_literals(body, out);
+                collect_set_literals(else_body, out);
+            }
+            Stmt::If {
+                then, otherwise, ..
+            } => {
+                collect_set_literals(then, out);
+                collect_set_literals(otherwise, out);
+            }
+            Stmt::With { body, .. }
+            | Stmt::SetBlock { body, .. }
+            | Stmt::FilterBlock { body, .. }
+            | Stmt::AutoEscape { body }
+            | Stmt::Unsupported { body, .. } => collect_set_literals(body, out),
+            Stmt::Macro(def) => collect_set_literals(&def.body, out),
+            Stmt::CallBlock { caller, .. } => collect_set_literals(&caller.body, out),
+            _ => {}
+        }
+    }
 }
 
 /// Literal dependency calls found without executing.

@@ -35,7 +35,8 @@ pub enum DifferenceKind {
     /// Only the interpreter has it, under an unknown condition.
     UnknownCondition,
     /// Only the interpreter has it, from known values (a loop over a known
-    /// list, a macro the render could not run).
+    /// list, a macro the render could not run). Not an explanation: review
+    /// each one.
     ResolvedByInterpreter,
     /// No basis was found. Needs a closer look.
     Unexplained,
@@ -55,10 +56,15 @@ pub struct ComparisonReport {
     pub files: usize,
     pub identical_files: usize,
     pub counts: BTreeMap<String, usize>,
+    /// Differences without a basis (`unexplained` and
+    /// `resolved_by_interpreter`), which need review.
+    pub needs_review: usize,
     /// Number of files whose interpreter result has at least one reason.
     pub partial_files: usize,
     /// Number of reasons by type, over all files.
     pub reason_counts: BTreeMap<String, usize>,
+    /// The reasons of each partial file.
+    pub partial: BTreeMap<String, Vec<serde_json::Value>>,
     pub config_differences: Vec<String>,
     pub differences: Vec<Difference>,
 }
@@ -206,10 +212,20 @@ fn classify_missing(
     if only_uncalled {
         return DifferenceKind::MacroNotCalled;
     }
+    // The render substituted a placeholder, or the interpreter rejected a
+    // call whose string literals (also through the variables it reads) are
+    // part of the name.
     let placeholder = names
         .iter()
         .any(|name| name.contains("__dbt_") || name.is_empty());
-    let rejected = decisions().any(|d| d.outcome == DecisionOutcome::Rejected);
+    let literals_match = |d: &super::Decision| {
+        let literals: Vec<&String> = d.literals.iter().filter(|l| l.len() >= 3).collect();
+        !literals.is_empty()
+            && literals
+                .iter()
+                .all(|literal| names.iter().any(|name| name.contains(literal.as_str())))
+    };
+    let rejected = decisions().any(|d| d.outcome == DecisionOutcome::Rejected && literals_match(d));
     if placeholder || (!written && rejected) {
         return DifferenceKind::RejectedUnknownArgument;
     }
@@ -272,6 +288,13 @@ pub fn compare_project(project_dir: &Path) -> Result<ComparisonReport> {
         let index = LiteralIndex::for_template(&sql, &library);
         if !new.reasons.is_empty() {
             report.partial_files += 1;
+            report.partial.insert(
+                file.clone(),
+                new.reasons
+                    .iter()
+                    .filter_map(|reason| serde_json::to_value(reason).ok())
+                    .collect(),
+            );
         }
         for reason in &new.reasons {
             *report
@@ -348,6 +371,16 @@ pub fn compare_project(project_dir: &Path) -> Result<ComparisonReport> {
             report.identical_files += 1;
         }
     }
+    report.needs_review = report
+        .differences
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                DifferenceKind::Unexplained | DifferenceKind::ResolvedByInterpreter
+            )
+        })
+        .count();
     for difference in &report.differences {
         let key = serde_json::to_value(difference.kind)
             .ok()

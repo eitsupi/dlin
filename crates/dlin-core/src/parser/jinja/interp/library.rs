@@ -11,6 +11,9 @@ use super::ir::{MacroDef, SourceId, Stmt};
 #[derive(Debug, Default)]
 pub(crate) struct MacroLibrary {
     macros: HashMap<Arc<str>, Arc<MacroDef>>,
+    /// String literals of the expressions assigned to each variable name in
+    /// macro bodies, for explaining rejected computed names.
+    pub(crate) set_literals: HashMap<Arc<str>, Vec<String>>,
     /// Files that could not be parsed. Their macros are unknown.
     pub(crate) unparsed: Vec<PathBuf>,
 }
@@ -24,6 +27,7 @@ impl MacroLibrary {
             let id = SourceId::MacroFile(u32::try_from(index).unwrap_or(u32::MAX));
             match parse_template(source, id) {
                 Ok(template) => {
+                    super::eval::collect_set_literals(&template.body, &mut library.set_literals);
                     for stmt in template.body {
                         if let Stmt::Macro(def) = stmt {
                             library.macros.entry(def.name.clone()).or_insert(def);
