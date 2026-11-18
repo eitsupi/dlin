@@ -375,3 +375,94 @@ replaced by three counts:
 Whether the total number of columns is known is read from the shape of the
 output, not from these counts. The counts must not be used as a measure of how
 completely tracing reached the end, nor of impact exploration.
+
+## Model dependency analysis
+
+This section describes how `dlin-core` reports how completely it analysed the
+model-level dependencies (`ref`, `source`, exposure `depends_on`) of a project
+in SQL mode. It is the target design; parts of it are not implemented yet.
+The vocabulary lives in `src/graph/dependency.rs`.
+
+### Kinds of records
+
+Three kinds of records are kept apart, because they mean different things to
+a caller deciding whether a result can be trusted:
+
+| Record | Belongs to | Meaning |
+| --- | --- | --- |
+| `DependencyReason` | one node | Part of the node's declared dependencies could not be analysed |
+| `ProjectGap` | the project | An input was skipped, or a whole scope was not assessed, and the analysis carried on |
+| `ConfigDiagnostic` | the project | The configuration may not mean what the user intended |
+
+A reason states that something was not analysed. It does not assert that a
+dependency is missing. Reasons are typed: a caller decides which ones to
+accept from their `type` and fields, never from message text. The `type` tag
+is also the diagnostic code.
+
+A node's `DependencyAnalysis` is `complete` exactly when it has no reasons;
+`partial` means at least one reason, not a fraction of the dependencies. The
+reasons are authoritative, and the status is checked against them when a
+serialised analysis is read back.
+
+An empty analysis claims that the node's dependencies were assessed. A node
+that was not assessed carries a `not_assessed` reason; `DependencyAnalysis`
+has no default value, so a node cannot become `complete` merely because no
+analysis was attached to it.
+
+A reference whose target does not exist still creates a phantom node so the
+graph shows it, but the referencing node carries an `unresolved_ref` or
+`unresolved_source` reason. An edge to a phantom is not a known dependency.
+
+A reason raised by a call carries the call site in the node that uses it
+(`NodeCallSite`). While one file is extracted the owning node is not known
+yet, so the extractor records an `ExtractionSite` and the graph builder
+attaches the node. `not_assessed` carries only a scope. A phantom node's scope
+(`phantom_dependencies`) cannot be turned into a project gap: the uncertainty
+of an unresolved target is reported through the reasons of the nodes that
+reference it.
+
+### Node and project completeness
+
+The two levels of completeness are kept apart:
+
+- A node is `complete` when its declared dependencies were assessed and no
+  reason was recorded for it. This covers only what the node's own analysis
+  could see.
+- A result about the project, such as an impact exploration, is complete only
+  when no node it depends on has a reason that could hide a dependency, and no
+  project gap remains: no skipped input and no unassessed scope.
+
+A project gap can affect any node. For example, when a macro file cannot be
+read, a model that calls one of its macros may have no reason of its own,
+because the call cannot even be recognised as a macro call. Unless the gap is
+proved not to affect a result, the result is reported as incomplete.
+Configuration diagnostics are not part of either level: whether the settings
+are what the user intended is for the user to judge.
+
+### Inputs
+
+dbt treats a search directory that does not exist as empty, whether the path
+is the default or written in `dbt_project.yml`. dlin keeps that behaviour and
+separates two situations:
+
+- A path that does not exist holds no input to miss. It is a
+  `ConfigDiagnostic`, not a gap. At most one warning is raised per project,
+  in this order: paths written in `dbt_project.yml` that do not exist
+  (`configured_input_path_missing`), default `model-paths` that do not exist
+  (`model_paths_missing`), no file found in any searched path
+  (`project_inputs_empty`). A default path that does not exist is an info
+  diagnostic (`default_input_path_missing`); optional directories are often
+  absent.
+- An input that exists but could not be inspected, listed, read or parsed,
+  while the analysis carried on, is a `ProjectGap` (`input_skipped`, with the
+  stage and failure). `project_inputs_empty` is not raised when such a gap
+  exists, since the project may not be empty.
+
+Whether a path does not exist or cannot be inspected is decided from its
+metadata, not from `exists()`. Directory walks are sorted by file name, so the
+macro prefix, and which macro is left out of it, do not depend on the
+filesystem. Inputs that are fatal today (a YAML file or a model, snapshot or
+test SQL file that cannot be read) stay fatal.
+
+A complete result is relative to the project and the search settings given.
+It does not prove that the settings are what the user intended.

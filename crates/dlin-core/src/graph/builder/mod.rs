@@ -6,12 +6,15 @@ use std::path::Path;
 
 use std::path::PathBuf;
 
+use crate::graph::dependency::{
+    InputFailure, InputKind, InputLocation, InputStage, ProjectGap, relative_display_path,
+};
 use crate::graph::types::{ExposureInfo, OwnerInfo};
 use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
-use crate::parser::discovery::DiscoveredFiles;
-use crate::parser::jinja::JinjaExtraction;
+use crate::parser::discovery::{DiscoveredFiles, SkippedInput};
 use crate::parser::jinja::reachability::PreparedMacroPrefix;
+use crate::parser::jinja::{JinjaExtraction, MacroExclusion};
 use crate::parser::project::sql_file_stem;
 use crate::parser::sql::{RefCall, SourceCall, extract_sources};
 use crate::parser::yaml_schema::{
@@ -20,20 +23,47 @@ use crate::parser::yaml_schema::{
 };
 
 /// Read all macro SQL files, filter out unparseable ones, and return a
-/// pre-built prefix string for prepending to model templates.
-fn load_macro_prefix(files: &DiscoveredFiles) -> String {
-    let sources: Vec<String> = files
-        .macro_sql_files
-        .iter()
-        .filter_map(|path| match std::fs::read_to_string(path) {
-            Ok(content) => Some(content),
-            Err(e) => {
-                crate::warn!("could not read macro file {}: {}", path.display(), e);
-                None
+/// pre-built prefix string for prepending to model templates. Macro files
+/// left out of the prefix are appended to `skipped`.
+fn load_macro_prefix(files: &DiscoveredFiles, skipped: &mut Vec<SkippedInput>) -> String {
+    let mut paths = Vec::new();
+    let mut sources = Vec::new();
+    for path in &files.macro_sql_files {
+        let content = std::fs::read(path)
+            .map_err(|e| (e.to_string(), InputFailure::from_io_error(&e)))
+            .and_then(|bytes| {
+                String::from_utf8(bytes).map_err(|e| (e.to_string(), InputFailure::InvalidUtf8))
+            });
+        match content {
+            Ok(content) => {
+                paths.push(path);
+                sources.push(content);
             }
-        })
-        .collect();
-    crate::parser::jinja::build_macro_prefix(&sources)
+            Err((message, failure)) => {
+                crate::warn!("could not read macro file {}: {}", path.display(), message);
+                skipped.push(SkippedInput {
+                    path: path.clone(),
+                    kind: InputKind::Macro,
+                    stage: InputStage::Read,
+                    failure,
+                });
+            }
+        }
+    }
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let report = crate::parser::jinja::build_macro_prefix_report(&sources);
+    for (index, exclusion) in report.excluded {
+        skipped.push(SkippedInput {
+            path: paths[index].clone(),
+            kind: InputKind::Macro,
+            stage: match exclusion {
+                MacroExclusion::Parse => InputStage::Parse,
+                MacroExclusion::Prefix => InputStage::MacroPrefix,
+            },
+            failure: InputFailure::ParseError,
+        });
+    }
+    report.prefix
 }
 
 use super::types::*;
@@ -744,6 +774,14 @@ fn process_yaml_snapshot_nodes(
 
 mod semantic_layer;
 
+/// The result of building a lineage graph from SQL files.
+#[derive(Debug)]
+pub struct GraphBuild {
+    pub graph: LineageGraph,
+    /// Gaps that cannot be attributed to a node, sorted and deduplicated.
+    pub project_gaps: Vec<ProjectGap>,
+}
+
 /// Build the lineage graph from discovered files.
 /// If `cache_dir` is provided, it is used as the cache directory;
 /// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
@@ -758,8 +796,22 @@ pub fn build_graph(
     refresh_cache: bool,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<LineageGraph> {
+    build_graph_report(project_dir, files, cache_dir, no_cache, refresh_cache, vars)
+        .map(|build| build.graph)
+}
+
+/// Like [`build_graph`], also returning the gaps found while building.
+pub fn build_graph_report(
+    project_dir: &Path,
+    files: &DiscoveredFiles,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
+    vars: &HashMap<String, serde_json::Value>,
+) -> Result<GraphBuild> {
     let mut gb = GraphBuilder::new();
-    let macro_prefix = load_macro_prefix(files);
+    let mut skipped = files.skipped_inputs.clone();
+    let macro_prefix = load_macro_prefix(files, &mut skipped);
     let prepared_macro_prefix = PreparedMacroPrefix::new(&macro_prefix);
     let mut disk_cache = if no_cache {
         cache::ExtractionCache::disabled()
@@ -769,7 +821,7 @@ pub fn build_graph(
         cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
     };
 
-    let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir)?;
+    let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir, &mut skipped)?;
     let extraction_cache = process_model_files(
         &mut gb,
         files,
@@ -817,7 +869,30 @@ pub fn build_graph(
     );
 
     disk_cache.save();
-    Ok(gb.graph)
+    Ok(GraphBuild {
+        graph: gb.graph,
+        project_gaps: project_gaps(skipped, project_dir),
+    })
+}
+
+/// Turn skipped inputs into project gaps with project-relative paths.
+fn project_gaps(skipped: Vec<SkippedInput>, project_dir: &Path) -> Vec<ProjectGap> {
+    let base = crate::input::normalize_path(project_dir);
+    let mut gaps: Vec<ProjectGap> = skipped
+        .into_iter()
+        .map(|input| ProjectGap::InputSkipped {
+            location: InputLocation {
+                path: relative_display_path(&input.path, &base),
+                line: None,
+            },
+            kind: input.kind,
+            stage: input.stage,
+            failure: input.failure,
+        })
+        .collect();
+    gaps.sort();
+    gaps.dedup();
+    gaps
 }
 
 /// Try to resolve a ref name to a node unique_id
