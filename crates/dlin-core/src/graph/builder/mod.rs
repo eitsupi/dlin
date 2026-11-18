@@ -70,8 +70,10 @@ struct GraphBuilder {
     node_map: HashMap<String, NodeIndex>,
     /// The project's name, which a `ref()` may name as its package.
     project_name: String,
-    /// The project directory that reported paths are relative to.
-    project_dir: PathBuf,
+    /// The project directory that reported paths are relative to, as
+    /// given and normalised. Discovered paths are normalised, while the
+    /// directory may be given as is.
+    project_dirs: [PathBuf; 2],
 }
 
 impl GraphBuilder {
@@ -80,14 +82,19 @@ impl GraphBuilder {
             graph: LineageGraph::new(),
             node_map: HashMap::new(),
             project_name: project_name.to_string(),
-            project_dir: project_dir.to_path_buf(),
+            project_dirs: [
+                project_dir.to_path_buf(),
+                crate::input::normalize_path(project_dir),
+            ],
         }
     }
 
     /// `path` relative to the project directory, with `/` separators, as in
     /// the nodes' `file_path`. A path that is already relative is kept.
     fn display_path(&self, path: &Path) -> String {
-        path.strip_prefix(&self.project_dir)
+        self.project_dirs
+            .iter()
+            .find_map(|dir| path.strip_prefix(dir).ok())
             .unwrap_or(path)
             .to_slash_lossy()
             .into_owned()

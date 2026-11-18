@@ -12,9 +12,12 @@ fn build_project(files: &[(&str, &str)]) -> (tempfile::TempDir, LineageGraph) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
     }
-    let project = DbtProject::load(tmp.path()).unwrap();
-    let discovered = discover_files(&project.resolve_paths(tmp.path())).unwrap();
-    let graph = build_graph(tmp.path(), &project.name, &discovered, &project.vars).unwrap();
+    // The CLI canonicalises the project directory, as discovery does with
+    // the paths it finds.
+    let project_dir = tmp.path().canonicalize().unwrap();
+    let project = DbtProject::load(&project_dir).unwrap();
+    let discovered = discover_files(&project.resolve_paths(&project_dir)).unwrap();
+    let graph = build_graph(&project_dir, &project.name, &discovered, &project.vars).unwrap();
     (tmp, graph)
 }
 
@@ -374,5 +377,24 @@ semantic_models:
             "status": "partial",
             "unresolved": [{"type": "not_assessed", "scope": "semantic_dependencies"}]
         })
+    );
+}
+
+#[test]
+fn reason_paths_are_relative_when_the_directory_is_not_canonical() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("dbt_project.yml"), "name: p\n").unwrap();
+    fs::create_dir_all(tmp.path().join("models")).unwrap();
+    fs::write(
+        tmp.path().join("models/a.sql"),
+        r#"select * from {{ ref('missing') }}"#,
+    )
+    .unwrap();
+    let project = DbtProject::load(tmp.path()).unwrap();
+    let discovered = discover_files(&project.resolve_paths(tmp.path())).unwrap();
+    let graph = build_graph(tmp.path(), &project.name, &discovered, &project.vars).unwrap();
+    assert_eq!(
+        analysis(&graph, "model.a")["unresolved"][0]["at"]["path"],
+        "models/a.sql"
     );
 }
