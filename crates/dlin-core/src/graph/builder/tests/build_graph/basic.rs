@@ -547,3 +547,124 @@ fn test_build_graph_file_paths_are_relative() {
         Some(std::path::Path::new("models/stg_orders.sql"))
     );
 }
+
+/// Every resource defined in YAML takes the YAML file that defines it, as a
+/// project-relative path, as its file. Each kind is defined in its own file
+/// so that a node taking another file's path is caught.
+#[test]
+fn test_build_graph_yaml_resources_take_their_defining_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path().to_path_buf();
+    let write = |path: &str, content: &str| {
+        let path = project_dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("models/orders.sql", "select 1 as id");
+    write(
+        "models/sources.yml",
+        r#"
+sources:
+  - name: raw
+    tables:
+      - name: orders
+"#,
+    );
+    write(
+        "models/properties.yml",
+        r#"
+models:
+  - name: orders
+    columns:
+      - name: id
+        tests:
+          - not_null
+"#,
+    );
+    write(
+        "models/exposures.yml",
+        r#"
+exposures:
+  - name: dashboard
+    type: dashboard
+    owner:
+      name: owner
+    depends_on:
+      - ref('orders')
+"#,
+    );
+    write(
+        "models/semantic_models.yml",
+        r#"
+semantic_models:
+  - name: orders_sm
+    model: ref('orders')
+    measures:
+      - name: order_count
+"#,
+    );
+    write(
+        "models/metrics.yml",
+        r#"
+metrics:
+  - name: order_count
+    type: simple
+    type_params:
+      measure: order_count
+"#,
+    );
+    write(
+        "models/saved_queries.yml",
+        r#"
+saved_queries:
+  - name: order_kpis
+    query_params:
+      metrics:
+        - order_count
+"#,
+    );
+    write(
+        "snapshots/snapshots.yml",
+        r#"
+snapshots:
+  - name: orders_snapshot
+    relation: ref('orders')
+"#,
+    );
+
+    let files = DiscoveredFiles {
+        model_sql_files: vec![project_dir.join("models/orders.sql")],
+        yaml_files: [
+            "models/sources.yml",
+            "models/properties.yml",
+            "models/exposures.yml",
+            "models/semantic_models.yml",
+            "models/metrics.yml",
+            "models/saved_queries.yml",
+            "snapshots/snapshots.yml",
+        ]
+        .iter()
+        .map(|path| project_dir.join(path))
+        .collect(),
+        ..Default::default()
+    };
+
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
+    let mut actual: Vec<(String, Option<std::path::PathBuf>)> = graph
+        .node_indices()
+        .map(|i| (graph[i].unique_id.clone(), graph[i].file_path.clone()))
+        .collect();
+    actual.sort();
+    let expected = [
+        ("exposure.dashboard", "models/exposures.yml"),
+        ("metric.order_count", "models/metrics.yml"),
+        ("model.orders", "models/orders.sql"),
+        ("saved_query.order_kpis", "models/saved_queries.yml"),
+        ("semantic_model.orders_sm", "models/semantic_models.yml"),
+        ("snapshot.orders_snapshot", "snapshots/snapshots.yml"),
+        ("source.raw.orders", "models/sources.yml"),
+        ("test.not_null.orders.id", "models/properties.yml"),
+    ]
+    .map(|(id, path)| (id.to_string(), Some(std::path::PathBuf::from(path))));
+    assert_eq!(actual, expected);
+}

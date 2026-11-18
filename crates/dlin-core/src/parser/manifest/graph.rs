@@ -269,7 +269,7 @@ fn add_exposure_nodes(
             unique_id: identity.canonical_id,
             label: exposure.name.clone(),
             node_type: NodeType::Exposure,
-            file_path: None,
+            file_path: exposure.original_file_path.as_ref().map(|p| p.into()),
             description: non_empty_string(&exposure.description),
             materialization: None,
             tags: vec![],
