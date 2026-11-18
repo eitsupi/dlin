@@ -328,13 +328,15 @@ fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Envi
     let mut environment = Environment::new();
     environment.add_function(
         "var",
-        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |args: minijinja::value::Rest<Value>,
+              _kwargs: minijinja::value::Kwargs|
+              -> Result<Value, minijinja::Error> {
             let name = args.first().ok_or_else(|| {
                 minijinja::Error::new(ErrorKind::MissingArgument, "var() requires a variable name")
             })?;
             let name = name.to_string();
             if let Some(value) = values.get(&name) {
-                return Ok(Value::from_serialize(value));
+                return Ok(Value::from(minijinja::value::Serde(value)));
             }
             if let Some(default) = args.get(1) {
                 return Ok(default.clone());

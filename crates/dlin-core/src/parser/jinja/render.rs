@@ -4,14 +4,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use minijinja::value::{Kwargs, Object, Value, from_args};
+use minijinja::value::{Kwargs, Object, Rest, Serde, Value};
 use minijinja::{Environment, ErrorKind};
 
 use super::super::sql::{RefCall, SourceCall, normalize_version_str};
 use super::{JinjaExtraction, JinjaOutcome, merge_extraction};
 
 fn json_to_minijinja(v: &serde_json::Value) -> Value {
-    Value::from_serialize(v)
+    Value::from(Serde(v))
 }
 
 /// Compile a dbt SQL template once and render it for both values of
@@ -128,10 +128,8 @@ fn render_with_incremental_passes_with_analysis(
     let state = render_state.clone();
     env.add_function(
         "ref",
-        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |positional: Rest<Value>, kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             let mut extraction = state.extraction.lock().unwrap();
-            let (positional, kwargs): (&[Value], Kwargs) = from_args(args)
-                .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e.to_string()))?;
             // dbt accepts both `version=N` and `v=N` as shorthand.
             // The value may be an integer (version=2) or a quoted string (version='alpha'),
             // matching dbt-core which uses StringOrInteger for version kwargs.
@@ -184,7 +182,7 @@ fn render_with_incremental_passes_with_analysis(
     let state = render_state.clone();
     env.add_function(
         "source",
-        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             if args.len() >= 2 {
                 let source_name = args[0].to_string();
                 let table_name = args[1].to_string();
@@ -240,7 +238,7 @@ fn render_with_incremental_passes_with_analysis(
         .collect();
     env.add_function("var", {
         let state = render_state.clone();
-        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             if let Some(key) = args.first()
                 && let Some(key_str) = key.as_str()
                 && let Some(val) = vars_map.get(key_str)
@@ -260,7 +258,7 @@ fn render_with_incremental_passes_with_analysis(
     // env_var() → returns default or empty string
     env.add_function("env_var", {
         let state = render_state.clone();
-        move |args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             // The placeholder value below cannot determine which branch
             // dbt will render. Mark uncertainty only when the stub is
             // actually called; merely registering it must not make every
@@ -277,7 +275,7 @@ fn render_with_incremental_passes_with_analysis(
     // return() → pass through
     env.add_function(
         "return",
-        |args: &[Value]| -> Result<Value, minijinja::Error> {
+        |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             Ok(args.first().cloned().unwrap_or(Value::from("")))
         },
     );
@@ -285,13 +283,15 @@ fn render_with_incremental_passes_with_analysis(
     // log() → no-op
     env.add_function(
         "log",
-        |_args: &[Value]| -> Result<Value, minijinja::Error> { Ok(Value::from("")) },
+        |_args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
+            Ok(Value::from(""))
+        },
     );
 
     // run_query → no-op
     env.add_function("run_query", {
         let state = render_state.clone();
-        move |_args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |_args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             state.mark_uncertain();
             Ok(Value::from(""))
         }
@@ -300,7 +300,7 @@ fn render_with_incremental_passes_with_analysis(
     // statement → no-op
     env.add_function("statement", {
         let state = render_state.clone();
-        move |_args: &[Value]| -> Result<Value, minijinja::Error> {
+        move |_args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             state.mark_uncertain();
             Ok(Value::from(""))
         }
@@ -477,7 +477,7 @@ impl Object for RuntimeGlobal {
 
     fn call(
         self: &Arc<Self>,
-        _state: &minijinja::State<'_, '_>,
+        _state: &mut minijinja::State<'_, '_>,
         _args: &[Value],
     ) -> Result<Value, minijinja::Error> {
         self.state.mark_uncertain();
@@ -486,7 +486,7 @@ impl Object for RuntimeGlobal {
 
     fn call_method(
         self: &Arc<Self>,
-        _state: &minijinja::State<'_, '_>,
+        _state: &mut minijinja::State<'_, '_>,
         _method: &str,
         _args: &[Value],
     ) -> Result<Value, minijinja::Error> {
