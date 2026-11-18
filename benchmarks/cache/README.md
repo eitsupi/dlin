@@ -1,10 +1,11 @@
 # dlin cache benchmark
 
 This suite measures dlin's persistent caches (manifest analysis and column
-lineage) and the SQL-mode extraction cost, without changing production code or
-comparing dlin with another tool. SQL mode has no persistent cache: it
-interprets every SQL file on each run, so its workloads are timed with
-`--no-cache` only. It is intentionally separate from
+lineage) without changing production code or comparing dlin with another tool.
+SQL mode has no persistent cache: it interprets every SQL file on each run, so
+the runner does not time SQL workloads. The generated SQL projects are used by
+the semantic checks of the runtime profiles and for manual SQL-mode timing (see
+[Design context](#design-context)). It is intentionally separate from
 `benchmarks/column-lineage`, whose responsibility is external-tool correctness
 and comparison.
 
