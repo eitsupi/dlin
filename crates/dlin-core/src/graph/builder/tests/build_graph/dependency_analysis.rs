@@ -289,6 +289,15 @@ models:
           - accepted_values:
               arguments:
                 values: ["ref(", "x"]
+      - name: id
+        tests:
+          - relationships:
+              arguments:
+                to: ref ('a')
+                field: id
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "{{ ref('a') }} {{ ref(var('other')) }}"
 "#,
         ),
     ]);
@@ -296,11 +305,26 @@ models:
     assert!(has_edge(&graph, "model.b", relationships));
     assert!(has_edge(&graph, "model.a", relationships));
     assert_eq!(analysis(&graph, relationships), complete());
-    // Text that mentions a dependency function without a literal call.
-    assert_eq!(
-        analysis(&graph, "test.accepted_values.b.a_id")["unresolved"][0]["type"],
-        "unsupported_dependency_expression"
-    );
+    // Whitespace before the parenthesis is still a call.
+    assert!(has_edge(&graph, "model.a", "test.relationships.b.id"));
+    assert_eq!(analysis(&graph, "test.relationships.b.id"), complete());
+    // Text that mentions a dependency function without a literal call, alone
+    // or next to a literal one.
+    for unique_id in [
+        "test.accepted_values.b.a_id",
+        "test.dbt_utils.expression_is_true.b.id",
+    ] {
+        assert_eq!(
+            analysis(&graph, unique_id)["unresolved"][0]["type"],
+            "unsupported_dependency_expression",
+            "{unique_id}"
+        );
+    }
+    assert!(has_edge(
+        &graph,
+        "model.a",
+        "test.dbt_utils.expression_is_true.b.id"
+    ));
 }
 
 #[test]

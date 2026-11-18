@@ -776,7 +776,8 @@ fn add_generic_test_node(
     collect_strings(value, &mut strings);
     let path = gb.display_path(yaml_path);
     for text in strings {
-        if !text.contains("ref(") && !text.contains("source(") {
+        let mentions = DEPENDENCY_CALL.find_iter(text).count();
+        if mentions == 0 {
             continue;
         }
         let at = NodeCallSite {
@@ -791,14 +792,16 @@ fn add_generic_test_node(
             format!("{{{{ {text} }}}}")
         };
         let (refs, sources) = literal_calls(&template);
-        if refs.is_empty() && sources.is_empty() {
+        if refs.len() + sources.len() < mentions {
             // The text mentions a dependency function that is not a call
-            // with literal arguments.
+            // with literal arguments, alone or next to literal calls.
             gb.add_reasons(
                 idx,
-                [DependencyReason::UnsupportedDependencyExpression { function: None, at }],
+                [DependencyReason::UnsupportedDependencyExpression {
+                    function: None,
+                    at: at.clone(),
+                }],
             );
-            continue;
         }
         for call in &refs {
             gb.link_ref(idx, call, at.clone(), yaml_path, EdgeType::Test);
@@ -808,6 +811,10 @@ fn add_generic_test_node(
         }
     }
 }
+
+/// A mention of `ref(` or `source(`, as [`literal_calls`] recognises a call.
+static DEPENDENCY_CALL: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\b(?:ref|source)\s*\(").unwrap());
 
 /// Every string in a YAML value, depth first.
 fn collect_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
