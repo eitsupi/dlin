@@ -640,3 +640,14 @@ fn loop_filter_with_side_effects_is_not_followed_precisely() {
     assert!(e.refs.is_empty(), "{:?}", e.refs);
     assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
 }
+
+#[test]
+fn default_filter_keeps_non_plain_values() {
+    let e = extract(
+        "{% set r = ref('a') | default(default_value='x', boolean=true) %}{% set l = [] | default(['b'], true) %}\
+         {% set m = ['c'] | default('y') %}{{ ref(l[0]) }}{{ ref(m[0]) }}{% if r %}{{ ref('d') }}{% endif %}",
+    );
+    // The empty list is falsy, so `boolean` replaces it.
+    assert_eq!(ref_names(&e), vec!["a", "b", "c", "d"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}

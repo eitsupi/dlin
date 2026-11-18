@@ -1488,12 +1488,28 @@ impl<'a> Interp<'a> {
         }
         let positional_count = values.len() - 1;
         if (name == "default" || name == "d")
-            && positional_count == 1
             && !matches!(values[0], AValue::Known(_) | AValue::Unknown(_))
         {
-            // A defined value that is not a plain value (a container, a
-            // relation) is kept; known inputs go to minijinja below.
-            return Ok(values[0].clone());
+            // A value that is not a plain value (a container, a relation) is
+            // defined. With `boolean`, a falsy one is replaced. Known inputs
+            // go to minijinja below.
+            let fallback = values
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| AValue::Known(Value::from("")));
+            let boolean = match values.get(2) {
+                None => Truth::Known(false),
+                Some(flag) => self.truth(st, flag, span),
+            };
+            return Ok(match boolean {
+                Truth::Known(false) => values[0].clone(),
+                Truth::Known(true) => match self.truth(st, &values[0], span) {
+                    Truth::Known(true) => values[0].clone(),
+                    Truth::Known(false) => fallback,
+                    Truth::Unknown(causes) => merge_value(&values[0], &fallback, &causes),
+                },
+                Truth::Unknown(causes) => merge_value(&values[0], &fallback, &causes),
+            });
         }
         if (name == "default" || name == "d")
             && positional_count == 1
