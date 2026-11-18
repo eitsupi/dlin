@@ -172,14 +172,15 @@ impl HeapObj {
             }
             (HeapObj::Map(a), HeapObj::Map(b)) => {
                 a.len() == b.len()
-                    && a
-                        .iter()
+                    && a.iter()
                         .zip(b)
                         .all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
             }
             (HeapObj::Namespace(a), HeapObj::Namespace(b)) => {
                 a.len() == b.len()
-                    && a.iter().zip(b).all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
+                    && a.iter()
+                        .zip(b)
+                        .all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
             }
             (HeapObj::Clobbered(a), HeapObj::Clobbered(b)) => a == b,
             _ => false,
@@ -253,7 +254,12 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn new(scopes: Vec<Scope>, heap: BTreeMap<HeapId, HeapObj>, out: Output, path: Causes) -> Self {
+    pub(crate) fn new(
+        scopes: Vec<Scope>,
+        heap: BTreeMap<HeapId, HeapObj>,
+        out: Output,
+        path: Causes,
+    ) -> Self {
         Self {
             scopes,
             heap,
@@ -277,7 +283,10 @@ impl State {
             && self.out.same(&other.out)
             && self.scopes.len() == other.scopes.len()
             && self.scopes.iter().zip(&other.scopes).all(|(a, b)| {
-                a.len() == b.len() && a.iter().zip(b).all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b)
+                        .all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
             })
             && self.heap.len() == other.heap.len()
             && self
@@ -289,7 +298,11 @@ impl State {
 
     /// Make every container reachable from `values` unknown, because an
     /// unknown call may have changed it.
-    pub(crate) fn clobber_reachable<'a>(&mut self, values: impl IntoIterator<Item = &'a AValue>, causes: &Causes) {
+    pub(crate) fn clobber_reachable<'a>(
+        &mut self,
+        values: impl IntoIterator<Item = &'a AValue>,
+        causes: &Causes,
+    ) {
         let mut pending: Vec<HeapId> = values
             .into_iter()
             .filter_map(|value| match value {
@@ -356,10 +369,12 @@ pub(crate) fn path_difference(a: &Causes, b: &Causes, fallback: &Causes) -> Caus
 /// A merge whose paths could not be told apart. This should not happen; it
 /// keeps an unknown value from having no reason.
 fn unexplained_merge() -> Causes {
-    Causes::one(crate::graph::dependency::DependencyReason::UnsupportedJinjaConstruct {
-        construct: "path merge".to_string(),
-        at: crate::graph::dependency::ExtractionSite::default(),
-    })
+    Causes::one(
+        crate::graph::dependency::DependencyReason::UnsupportedJinjaConstruct {
+            construct: "path merge".to_string(),
+            at: crate::graph::dependency::ExtractionSite::default(),
+        },
+    )
 }
 
 fn merge_heap_obj(a: &HeapObj, b: &HeapObj, causes: &Causes) -> HeapObj {
@@ -368,7 +383,10 @@ fn merge_heap_obj(a: &HeapObj, b: &HeapObj, causes: &Causes) -> HeapObj {
     }
     match (a, b) {
         (HeapObj::List(x), HeapObj::List(y)) if x.len() == y.len() => HeapObj::List(
-            x.iter().zip(y).map(|(p, q)| merge_value(p, q, causes)).collect(),
+            x.iter()
+                .zip(y)
+                .map(|(p, q)| merge_value(p, q, causes))
+                .collect(),
         ),
         (HeapObj::Map(x), HeapObj::Map(y))
             if x.len() == y.len() && x.iter().zip(y).all(|((kx, _), (ky, _))| kx == ky) =>
@@ -394,8 +412,12 @@ fn merge_heap_obj(a: &HeapObj, b: &HeapObj, causes: &Causes) -> HeapObj {
                     .collect(),
             )
         }
-        (HeapObj::Clobbered(x), HeapObj::Clobbered(y)) => HeapObj::Clobbered(x.union(y).union(causes)),
-        (HeapObj::Clobbered(x), _) | (_, HeapObj::Clobbered(x)) => HeapObj::Clobbered(x.union(causes)),
+        (HeapObj::Clobbered(x), HeapObj::Clobbered(y)) => {
+            HeapObj::Clobbered(x.union(y).union(causes))
+        }
+        (HeapObj::Clobbered(x), _) | (_, HeapObj::Clobbered(x)) => {
+            HeapObj::Clobbered(x.union(causes))
+        }
         _ => HeapObj::Clobbered(causes.clone()),
     }
 }

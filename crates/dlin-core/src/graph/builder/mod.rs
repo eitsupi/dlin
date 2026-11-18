@@ -72,14 +72,43 @@ fn load_macro_prefix(files: &DiscoveredFiles, skipped: &mut Vec<SkippedInput>) -
 /// the interpreter is being developed; it disables the extraction cache.
 const EXPERIMENTAL_INTERPRETER_ENV: &str = "DLIN_EXPERIMENTAL_JINJA_INTERPRETER";
 
-fn experimental_library(files: &DiscoveredFiles) -> Option<crate::parser::jinja::interp::MacroLibrary> {
+fn experimental_library(
+    files: &DiscoveredFiles,
+    skipped: &mut Vec<SkippedInput>,
+) -> Option<crate::parser::jinja::interp::MacroLibrary> {
     std::env::var_os(EXPERIMENTAL_INTERPRETER_ENV)?;
-    let sources: Vec<(PathBuf, String)> = files
-        .macro_sql_files
-        .iter()
-        .filter_map(|path| Some((path.clone(), std::fs::read_to_string(path).ok()?)))
-        .collect();
-    Some(crate::parser::jinja::interp::MacroLibrary::new(&sources))
+    Some(interpreter_library(files, skipped))
+}
+
+/// Parse the project's macro files for the interpreter, recording the files
+/// that cannot be read or parsed.
+fn interpreter_library(
+    files: &DiscoveredFiles,
+    skipped: &mut Vec<SkippedInput>,
+) -> crate::parser::jinja::interp::MacroLibrary {
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    for path in &files.macro_sql_files {
+        let content = std::fs::read(path)
+            .map_err(|e| InputFailure::from_io_error(&e))
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|_| InputFailure::InvalidUtf8));
+        match content {
+            Ok(content) => sources.push((path.clone(), content)),
+            Err(failure) => skipped.push(SkippedInput {
+                path: path.clone(),
+                kind: InputKind::Macro,
+                stage: InputStage::Read,
+                failure,
+            }),
+        }
+    }
+    let library = crate::parser::jinja::interp::MacroLibrary::new(&sources);
+    skipped.extend(library.unparsed.iter().map(|path| SkippedInput {
+        path: path.clone(),
+        kind: InputKind::Macro,
+        stage: InputStage::Parse,
+        failure: InputFailure::ParseError,
+    }));
+    library
 }
 
 /// Extract one SQL file with the configured extractor.
@@ -91,7 +120,8 @@ fn extract_sql(
 ) -> JinjaExtraction {
     match library {
         Some(library) => {
-            let extraction = crate::parser::jinja::interp::extract_dependencies(content, library, vars);
+            let extraction =
+                crate::parser::jinja::interp::extract_dependencies(content, library, vars);
             JinjaExtraction {
                 refs: extraction.refs,
                 sources: extraction.sources,
@@ -327,9 +357,8 @@ fn process_model_files(
                 .as_deref()
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
 
-            let extraction = sql_content.map(|content| {
-                extract_sql(content, macro_prefix, library, vars)
-            });
+            let extraction =
+                sql_content.map(|content| extract_sql(content, macro_prefix, library, vars));
 
             let columns = sql_content.map(extract_select_columns).unwrap_or_default();
 
@@ -468,6 +497,7 @@ fn process_simple_nodes(
 /// `stem_to_versioned` is used to locate versioned model nodes by SQL file
 /// stem without relying on node_map aliases (which may point to a different
 /// version when `defined_in` uses a base-model name).
+#[allow(clippy::too_many_arguments)]
 fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
@@ -846,7 +876,7 @@ pub fn build_graph_report(
 ) -> Result<GraphBuild> {
     let mut gb = GraphBuilder::new();
     let mut skipped = files.skipped_inputs.clone();
-    let library = experimental_library(files);
+    let library = experimental_library(files, &mut skipped);
     let macro_prefix = if library.is_some() {
         String::new()
     } else {

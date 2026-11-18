@@ -8,14 +8,25 @@ fn library(macros: &[&str]) -> MacroLibrary {
     let files: Vec<(PathBuf, String)> = macros
         .iter()
         .enumerate()
-        .map(|(i, source)| (PathBuf::from(format!("macros/m{i}.sql")), source.to_string()))
+        .map(|(i, source)| {
+            (
+                PathBuf::from(format!("macros/m{i}.sql")),
+                source.to_string(),
+            )
+        })
         .collect();
     MacroLibrary::new(&files)
 }
 
-fn extract_with(sql: &str, macros: &[&str], vars: &[(&str, serde_json::Value)]) -> DependencyExtraction {
-    let vars: HashMap<String, serde_json::Value> =
-        vars.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+fn extract_with(
+    sql: &str,
+    macros: &[&str],
+    vars: &[(&str, serde_json::Value)],
+) -> DependencyExtraction {
+    let vars: HashMap<String, serde_json::Value> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
     extract_dependencies(sql, &library(macros), &vars)
 }
 
@@ -136,15 +147,28 @@ fn list_with_an_unknown_element_keeps_the_known_ones() {
 fn unknown_arguments_are_not_dependencies() {
     for (sql, code) in [
         ("{{ ref('stg_kind_' ~ var('kind')) }}", "unresolved_var"),
-        ("{{ ref('stg_kind_' ~ target.name) }}", "runtime_value_unknown"),
+        (
+            "{{ ref('stg_kind_' ~ target.name) }}",
+            "runtime_value_unknown",
+        ),
         ("{{ ref(env_var('M')) }}", "runtime_value_unknown"),
         ("{{ ref('a', version=var('v')) }}", "unresolved_var"),
         ("{{ source(var('s'), 't') }}", "unresolved_var"),
-        ("{{ source('s', target.name | lower) }}", "runtime_value_unknown"),
-        ("{% set k = target.name %}{{ ref(k | string) }}", "runtime_value_unknown"),
+        (
+            "{{ source('s', target.name | lower) }}",
+            "runtime_value_unknown",
+        ),
+        (
+            "{% set k = target.name %}{{ ref(k | string) }}",
+            "runtime_value_unknown",
+        ),
     ] {
         let e = extract(sql);
-        assert!(e.refs.is_empty() && e.sources.is_empty(), "{sql}: {:?}", e.refs);
+        assert!(
+            e.refs.is_empty() && e.sources.is_empty(),
+            "{sql}: {:?}",
+            e.refs
+        );
         assert_eq!(codes(&e), vec![code], "{sql}");
         assert!(
             e.decisions
@@ -163,7 +187,11 @@ fn placeholder_from_a_macro_return_is_not_a_dependency() {
         &[],
     );
     assert!(e.refs.is_empty());
-    let reason = e.reasons.iter().find(|r| r.code() == "runtime_value_unknown").unwrap();
+    let reason = e
+        .reasons
+        .iter()
+        .find(|r| r.code() == "runtime_value_unknown")
+        .unwrap();
     let DependencyReason::RuntimeValueUnknown { source, name, at } = reason else {
         unreachable!()
     };
@@ -181,7 +209,9 @@ fn literal_ref_with_the_same_name_as_a_placeholder_still_resolves() {
 
 #[test]
 fn shadowed_ref_is_not_a_dependency() {
-    let e = extract("{% set ref = target.name %}{{ ref }}{% macro m(ref) %}{{ ref }}{% endmacro %}{{ m('x') }}");
+    let e = extract(
+        "{% set ref = target.name %}{{ ref }}{% macro m(ref) %}{{ ref }}{% endmacro %}{{ m('x') }}",
+    );
     assert!(e.refs.is_empty());
 }
 
@@ -250,7 +280,9 @@ fn alias_sees_updates_merged_from_unknown_branches() {
 fn return_on_one_branch_does_not_run_the_rest() {
     let e = extract_with(
         "{{ ref(pick()) }}",
-        &["{% macro pick() %}{% if target.name == 'x' %}{{ return('a') }}{% endif %}{{ return('b') }}{% endmacro %}"],
+        &[
+            "{% macro pick() %}{% if target.name == 'x' %}{{ return('a') }}{% endif %}{{ return('b') }}{% endmacro %}",
+        ],
         &[],
     );
     assert!(e.refs.is_empty());
@@ -258,7 +290,9 @@ fn return_on_one_branch_does_not_run_the_rest() {
 
     let e = extract_with(
         "{{ ref(pick()) }}",
-        &["{% macro pick() %}{% if true %}{{ return('a') }}{% endif %}{{ return('b') }}{% endmacro %}"],
+        &[
+            "{% macro pick() %}{% if true %}{{ return('a') }}{% endif %}{{ return('b') }}{% endmacro %}",
+        ],
         &[],
     );
     assert_eq!(ref_names(&e), vec!["a"]);
@@ -340,7 +374,11 @@ fn unused_macros_are_not_executed() {
 
 #[test]
 fn recursion_is_bounded() {
-    let e = extract_with("{{ loop_forever() }}", &["{% macro loop_forever() %}{{ loop_forever() }}{% endmacro %}"], &[]);
+    let e = extract_with(
+        "{{ loop_forever() }}",
+        &["{% macro loop_forever() %}{{ loop_forever() }}{% endmacro %}"],
+        &[],
+    );
     assert_eq!(codes(&e), vec!["analysis_limit_reached"]);
 }
 
@@ -362,7 +400,11 @@ fn dispatch_namespace_and_unknown_calls() {
     assert_eq!(ref_names(&e), vec!["arg"]);
     assert_eq!(
         codes(&e),
-        vec!["unresolved_call", "unsupported_dispatch", "unsupported_macro_namespace"]
+        vec![
+            "unresolved_call",
+            "unsupported_dispatch",
+            "unsupported_macro_namespace"
+        ]
     );
     // The dispatch inside the wrapper is reported at the wrapper call.
     let at_wrapper = e.reasons.iter().any(|r| {
@@ -411,5 +453,28 @@ fn reasons_carry_the_model_call_site() {
     assert_eq!(name.as_deref(), Some("m"));
     assert_eq!(at.line, Some(2));
     assert_eq!(at.expr.as_deref(), Some("var('m')"));
-    assert!(e.decisions.iter().any(|d| d.function == DependencyFunction::Ref));
+    assert!(
+        e.decisions
+            .iter()
+            .any(|d| d.function == DependencyFunction::Ref)
+    );
+}
+
+#[test]
+fn return_inside_a_set_block_returns_from_the_macro() {
+    let e = extract_with(
+        "{{ ref(pick()) }}{{ ref('after') }}",
+        &[
+            "{% macro pick() %}{% set ignored %}{{ return('a') }}{% endset %}{{ return('b') }}{% endmacro %}",
+        ],
+        &[],
+    );
+    assert_eq!(ref_names(&e), vec!["a", "after"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn set_block_captures_known_output() {
+    let e = extract("{% set name %}stg_{{ 'a' }}{% endset %}{{ ref(name | trim) }}");
+    assert_eq!(ref_names(&e), vec!["stg_a"]);
 }

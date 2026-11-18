@@ -19,9 +19,27 @@ fn environment() -> &'static Environment<'static> {
 }
 
 const SOURCES: &[&str] = &[
-    "a == b", "a != b", "a < b", "a <= b", "a > b", "a >= b", "a and b", "a or b", "a + b",
-    "a - b", "a * b", "a / b", "a // b", "a % b", "a ** b", "a ~ b", "a in b", "a not in b",
-    "-a", "v[a:b:c]", "v[k]",
+    "a == b",
+    "a != b",
+    "a < b",
+    "a <= b",
+    "a > b",
+    "a >= b",
+    "a and b",
+    "a or b",
+    "a + b",
+    "a - b",
+    "a * b",
+    "a / b",
+    "a // b",
+    "a % b",
+    "a ** b",
+    "a ~ b",
+    "a in b",
+    "a not in b",
+    "-a",
+    "v[a:b:c]",
+    "v[k]",
 ];
 
 /// The fixed expressions, compiled once.
@@ -65,7 +83,10 @@ pub(crate) fn binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, mi
         BinOp::In => "a in b",
         BinOp::NotIn => "a not in b",
     };
-    expression(source).eval(Value::from_pairs([("a", left.clone()), ("b", right.clone())]))
+    expression(source).eval(Value::from_pairs([
+        ("a", left.clone()),
+        ("b", right.clone()),
+    ]))
 }
 
 pub(crate) fn negate(value: &Value) -> Result<Value, minijinja::Error> {
@@ -87,7 +108,10 @@ pub(crate) fn slice(
 }
 
 pub(crate) fn get_item(value: &Value, key: &Value) -> Result<Value, minijinja::Error> {
-    expression("v[k]").eval(Value::from_pairs([("v", value.clone()), ("k", key.clone())]))
+    expression("v[k]").eval(Value::from_pairs([
+        ("v", value.clone()),
+        ("k", key.clone()),
+    ]))
 }
 
 pub(crate) fn render(value: &Value) -> String {

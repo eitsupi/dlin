@@ -10,14 +10,16 @@
 
 use std::collections::HashMap;
 
+#[doc(hidden)]
+pub mod compare;
 mod convert;
 mod eval;
 mod ir;
 mod known;
 pub(crate) mod library;
-mod value;
 #[cfg(test)]
 mod tests;
+mod value;
 
 #[allow(unused_imports)]
 pub(crate) use eval::{Decision, DecisionOutcome};
@@ -40,6 +42,8 @@ pub(crate) struct DependencyExtraction {
     pub(crate) reasons: Vec<ExtractedDependencyReason>,
     /// How each ref/source call was treated, for comparing extractors.
     pub(crate) decisions: Vec<Decision>,
+    /// Names of the macros that were called.
+    pub(crate) entered: std::collections::BTreeSet<std::sync::Arc<str>>,
 }
 
 /// Extract the dependencies of a SQL file.
@@ -63,10 +67,13 @@ pub(crate) fn extract_dependencies(
                 .current
                 .map(|span| interp.site(span))
                 .unwrap_or_default();
-            interp.rec.reasons.insert(DependencyReason::AnalysisLimitReached {
-                limit: AnalysisLimit::WorkBudget,
-                at,
-            });
+            interp
+                .rec
+                .reasons
+                .insert(DependencyReason::AnalysisLimitReached {
+                    limit: AnalysisLimit::WorkBudget,
+                    at,
+                });
             break;
         }
     }
@@ -86,6 +93,7 @@ pub(crate) fn extract_dependencies(
         config: rec.config,
         reasons: rec.reasons.into_iter().collect(),
         decisions: rec.decisions,
+        entered: rec.entered,
     }
 }
 
@@ -101,5 +109,6 @@ fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
             at: ExtractionSite { line, expr: None },
         }],
         decisions: Vec::new(),
+        entered: Default::default(),
     }
 }

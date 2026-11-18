@@ -329,15 +329,6 @@ pub fn extract_refs_and_sources_with_vars(
     (ext.refs, ext.sources)
 }
 
-pub(crate) fn extract_refs_and_sources_with_prepared_prefix(
-    sql: &str,
-    macro_prefix: &super::jinja::reachability::PreparedMacroPrefix,
-    vars: &std::collections::HashMap<String, serde_json::Value>,
-) -> (Vec<RefCall>, Vec<SourceCall>) {
-    let ext = extract_all_with_prepared_prefix(sql, macro_prefix, vars);
-    (ext.refs, ext.sources)
-}
-
 /// Extract all ref() calls from SQL content.
 pub fn extract_refs(sql: &str) -> Vec<RefCall> {
     extract_refs_and_sources(sql, "").0

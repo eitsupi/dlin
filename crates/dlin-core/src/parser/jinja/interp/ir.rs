@@ -185,7 +185,10 @@ pub(crate) enum Target {
     Name(Arc<str>),
     Tuple(Vec<Target>),
     /// `ns.attr` on a namespace.
-    Attr { expr: Expr, name: Arc<str> },
+    Attr {
+        expr: Expr,
+        name: Arc<str>,
+    },
     /// Any other expression, which Jinja rejects at runtime.
     Unsupported(Expr),
 }
@@ -197,7 +200,6 @@ pub(crate) struct MacroDef {
     /// Defaults for the last `defaults.len()` parameters.
     pub(crate) defaults: Vec<Expr>,
     pub(crate) body: Vec<Stmt>,
-    pub(crate) span: Span,
     /// Every name the macro reads, for capturing only what it can see.
     pub(crate) names: Vec<Arc<str>>,
 }

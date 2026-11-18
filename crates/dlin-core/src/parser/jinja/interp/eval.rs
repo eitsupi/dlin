@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use minijinja::value::{Value, ValueKind};
 
-use super::ir::{Arg, BinOp, Call, Expr, ExprKind, Span, SourceId, Stmt, Target, UnaryOp};
+use super::ir::{Arg, BinOp, Call, Expr, ExprKind, SourceId, Span, Stmt, Target, UnaryOp};
 use super::known;
 use super::library::MacroLibrary;
 use super::value::{
@@ -72,6 +72,8 @@ pub(crate) struct Recorder {
     pub(crate) config: SqlConfig,
     pub(crate) reasons: BTreeSet<Reason>,
     pub(crate) decisions: Vec<Decision>,
+    /// Names of the macros that were called.
+    pub(crate) entered: BTreeSet<Arc<str>>,
 }
 
 impl Recorder {
@@ -270,7 +272,12 @@ impl<'a> Interp<'a> {
     // ----- statements -----------------------------------------------------
 
     pub(crate) fn run_template(&mut self, body: &[Stmt]) -> Ev<()> {
-        let state = State::new(vec![Scope::new()], BTreeMap::new(), Output::Discard, Causes::default());
+        let state = State::new(
+            vec![Scope::new()],
+            BTreeMap::new(),
+            Output::Discard,
+            Causes::default(),
+        );
         match self.exec_block(state, body) {
             Ok(_) | Err(Signal::Abort) | Err(Signal::Return(_)) => Ok(()),
             Err(Signal::Budget) => Err(Signal::Budget),
@@ -332,7 +339,9 @@ impl<'a> Interp<'a> {
                         self.scan_skipped(then);
                         self.exec_block(state, otherwise).map(Some)
                     }
-                    Truth::Unknown(causes) => self.branch(state, &causes, then, otherwise).map(Some),
+                    Truth::Unknown(causes) => {
+                        self.branch(state, &causes, then, otherwise).map(Some)
+                    }
                 };
             }
             Stmt::For {
@@ -347,7 +356,16 @@ impl<'a> Interp<'a> {
                 let iterable = self.eval(st, iter)?;
                 let state = st.clone();
                 return self
-                    .exec_for(state, target, iterable, filter.as_ref(), *recursive, body, else_body, *span)
+                    .exec_for(
+                        state,
+                        target,
+                        iterable,
+                        filter.as_ref(),
+                        *recursive,
+                        body,
+                        else_body,
+                        *span,
+                    )
                     .map(Some);
             }
             Stmt::With { assignments, body } => {
@@ -370,17 +388,25 @@ impl<'a> Interp<'a> {
                 filter,
                 body,
             } => {
-                let value = self.capture(st, body)?;
-                let value = match filter {
-                    Some(filter) => self.apply_filter_expr(st, filter, value)?,
-                    None => value,
-                };
-                self.assign(st, target, value)?;
+                let (captured, mut flow) = self.capture(st, body)?;
+                if let Some((mut state, value)) = captured {
+                    let value = match filter {
+                        Some(filter) => self.apply_filter_expr(&mut state, filter, value)?,
+                        None => value,
+                    };
+                    self.assign(&mut state, target, value)?;
+                    flow.normal = Some(state);
+                }
+                return Ok(Some(flow));
             }
             Stmt::FilterBlock { filter, body } => {
-                let value = self.capture(st, body)?;
-                let value = self.apply_filter_expr(st, filter, value)?;
-                self.emit(st, &value, filter.span);
+                let (captured, mut flow) = self.capture(st, body)?;
+                if let Some((mut state, value)) = captured {
+                    let value = self.apply_filter_expr(&mut state, filter, value)?;
+                    self.emit(&mut state, &value, filter.span);
+                    flow.normal = Some(state);
+                }
+                return Ok(Some(flow));
             }
             Stmt::AutoEscape { body } => {
                 let state = st.clone();
@@ -470,19 +496,31 @@ impl<'a> Interp<'a> {
         Ok(flow)
     }
 
-    /// Execute a block capturing its output as a value.
-    fn capture(&mut self, st: &mut State, body: &[Stmt]) -> Ev<AValue> {
+    /// Execute a block capturing its output as a value. Returns the state
+    /// that continues normally with the captured value, and the other exits
+    /// of the block (a `return` in the block returns from the enclosing
+    /// macro), each with the enclosing output restored.
+    fn capture(&mut self, st: &State, body: &[Stmt]) -> Ev<(Option<(State, AValue)>, Flow)> {
         let mut inner = st.clone();
         inner.out = Output::Known(String::new());
-        let flow = self.exec_block(inner, body)?;
-        let fallback = Causes::default();
-        let Some(mut done) = merge_opt(flow.normal, flow.brk, &fallback) else {
-            return Err(Signal::Abort);
-        };
-        let value = std::mem::replace(&mut done.out, Output::Discard).into_value();
-        done.out = std::mem::replace(&mut st.out, Output::Discard);
-        *st = done;
-        Ok(value)
+        let mut flow = self.exec_block(inner, body)?;
+        let restore = |state: &mut State| state.out = st.out.clone();
+        let captured = flow.normal.take().map(|mut state| {
+            let value = std::mem::replace(&mut state.out, Output::Discard).into_value();
+            restore(&mut state);
+            (state, value)
+        });
+        for state in [
+            flow.brk.as_mut(),
+            flow.cont.as_mut(),
+            flow.ret.as_mut().map(|(s, _)| s),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            restore(state);
+        }
+        Ok((captured, flow))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -517,7 +555,9 @@ impl<'a> Interp<'a> {
         };
         match items {
             Ok(items) => self.exec_known_loop(st, target, items, filter, body, else_body),
-            Err(causes) => self.exec_unknown_loop(st, target, &causes, filter, body, else_body, span),
+            Err(causes) => {
+                self.exec_unknown_loop(st, target, &causes, filter, body, else_body, span)
+            }
         }
     }
 
@@ -758,7 +798,9 @@ impl<'a> Interp<'a> {
             },
             AValue::Relation => Err(self.relation_causes(None, span)),
             AValue::Context(object) => Err(self.context_causes(object, span)),
-            AValue::Macro(def) => Err(self.unsupported(format!("macro value {}", def.def.name), span)),
+            AValue::Macro(def) => {
+                Err(self.unsupported(format!("macro value {}", def.def.name), span))
+            }
             AValue::Builtin(_) => Err(self.unsupported("function value", span)),
         }
     }
@@ -768,9 +810,10 @@ impl<'a> Interp<'a> {
         match value {
             AValue::Heap(id) => match st.heap.get(id) {
                 Some(HeapObj::List(items)) => Ok(items.clone()),
-                Some(HeapObj::Map(entries)) => {
-                    Ok(entries.iter().map(|(key, _)| AValue::Known(key.clone())).collect())
-                }
+                Some(HeapObj::Map(entries)) => Ok(entries
+                    .iter()
+                    .map(|(key, _)| AValue::Known(key.clone()))
+                    .collect()),
                 Some(HeapObj::Namespace(_)) => Err(self.unsupported("iterating a namespace", span)),
                 Some(HeapObj::Clobbered(causes)) => Err(causes.clone()),
                 None => Ok(Vec::new()),
@@ -994,7 +1037,9 @@ impl<'a> Interp<'a> {
         match self.freeze_all(st, &[left.clone(), right.clone()], span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
                 Ok(value) => AValue::Known(value),
-                Err(_) => AValue::Unknown(self.unsupported(format!("operator {}", op.symbol()), span)),
+                Err(_) => {
+                    AValue::Unknown(self.unsupported(format!("operator {}", op.symbol()), span))
+                }
             },
             Err(causes) => AValue::Unknown(causes),
         }
@@ -1030,9 +1075,20 @@ impl<'a> Interp<'a> {
             "namespace" => Builtin::Namespace,
             "range" => Builtin::Minijinja("range"),
             "dict" => Builtin::Minijinja("dict"),
-            "zip" | "tojson" | "fromjson" | "toyaml" | "fromyaml" | "local_md5" | "set"
-            | "set_strict" | "as_bool" | "as_number" | "as_text" | "as_native"
-            | "diff_of_two_dicts" | "try_or_compiler_error" => Builtin::Unmodelled(
+            "zip"
+            | "tojson"
+            | "fromjson"
+            | "toyaml"
+            | "fromyaml"
+            | "local_md5"
+            | "set"
+            | "set_strict"
+            | "as_bool"
+            | "as_number"
+            | "as_text"
+            | "as_native"
+            | "diff_of_two_dicts"
+            | "try_or_compiler_error" => Builtin::Unmodelled(
                 // Leak-free: the names above are static.
                 match name {
                     "zip" => "zip",
@@ -1074,9 +1130,22 @@ impl<'a> Interp<'a> {
                     span,
                 )));
             }
-            "target" | "adapter" | "this" | "model" | "graph" | "flags" | "api" | "modules"
-            | "exceptions" | "builtins" | "context" | "database" | "schema" | "selected_resources"
-            | "invocation_args_dict" | "project_name" => {
+            "target"
+            | "adapter"
+            | "this"
+            | "model"
+            | "graph"
+            | "flags"
+            | "api"
+            | "modules"
+            | "exceptions"
+            | "builtins"
+            | "context"
+            | "database"
+            | "schema"
+            | "selected_resources"
+            | "invocation_args_dict"
+            | "project_name" => {
                 let root: &'static str = match name {
                     "target" => "target",
                     "adapter" => "adapter",
@@ -1125,32 +1194,36 @@ impl<'a> Interp<'a> {
                 _ => AValue::undefined(),
             },
             AValue::Relation => AValue::Unknown(self.relation_causes(Some(name), span)),
-            AValue::Context(object) => match (object.root, object.path.as_ref() == object.root, name) {
-                ("adapter", true, "dispatch") => AValue::Builtin(Builtin::Dispatch),
-                ("exceptions", true, "raise_compiler_error" | "raise_not_implemented") => {
-                    AValue::Builtin(Builtin::RaiseCompilerError)
-                }
-                ("exceptions", true, "warn") => AValue::Builtin(Builtin::Noop),
-                ("builtins", true, "ref") => AValue::Builtin(Builtin::Ref),
-                ("builtins", true, "source") => AValue::Builtin(Builtin::Source),
-                ("builtins", true, "config") => AValue::Builtin(Builtin::Config),
-                // Objects whose methods are called keep their path; the
-                // attributes of the others are data, unknown where they are
-                // read.
-                ("adapter" | "modules" | "api" | "exceptions" | "builtins" | "context", _, _) => {
-                    AValue::Context(ContextObject {
+            AValue::Context(object) => {
+                match (object.root, object.path.as_ref() == object.root, name) {
+                    ("adapter", true, "dispatch") => AValue::Builtin(Builtin::Dispatch),
+                    ("exceptions", true, "raise_compiler_error" | "raise_not_implemented") => {
+                        AValue::Builtin(Builtin::RaiseCompilerError)
+                    }
+                    ("exceptions", true, "warn") => AValue::Builtin(Builtin::Noop),
+                    ("builtins", true, "ref") => AValue::Builtin(Builtin::Ref),
+                    ("builtins", true, "source") => AValue::Builtin(Builtin::Source),
+                    ("builtins", true, "config") => AValue::Builtin(Builtin::Config),
+                    // Objects whose methods are called keep their path; the
+                    // attributes of the others are data, unknown where they are
+                    // read.
+                    (
+                        "adapter" | "modules" | "api" | "exceptions" | "builtins" | "context",
+                        _,
+                        _,
+                    ) => AValue::Context(ContextObject {
                         root: object.root,
                         path: Arc::from(format!("{}.{}", object.path, name)),
-                    })
+                    }),
+                    _ => AValue::Unknown(self.context_causes(
+                        &ContextObject {
+                            root: object.root,
+                            path: Arc::from(format!("{}.{}", object.path, name)),
+                        },
+                        span,
+                    )),
                 }
-                _ => AValue::Unknown(self.context_causes(
-                    &ContextObject {
-                        root: object.root,
-                        path: Arc::from(format!("{}.{}", object.path, name)),
-                    },
-                    span,
-                )),
-            },
+            }
             AValue::Builtin(Builtin::Config) if matches!(name, "get" | "require") => {
                 AValue::Builtin(Builtin::ConfigGet)
             }
@@ -1221,7 +1294,9 @@ impl<'a> Interp<'a> {
         match self.freeze_all(st, values, span) {
             Ok(values) => match known::test(name, &values) {
                 Some(Ok(result)) => AValue::Known(Value::from(result)),
-                Some(Err(_)) | None => AValue::Unknown(self.unsupported(format!("test:{name}"), span)),
+                Some(Err(_)) | None => {
+                    AValue::Unknown(self.unsupported(format!("test:{name}"), span))
+                }
             },
             Err(causes) => AValue::Unknown(causes),
         }
@@ -1236,7 +1311,9 @@ impl<'a> Interp<'a> {
                 };
                 self.apply_filter(st, name, input, args, filter.span)
             }
-            _ => Ok(AValue::Unknown(self.unsupported("filter block", filter.span))),
+            _ => Ok(AValue::Unknown(
+                self.unsupported("filter block", filter.span),
+            )),
         }
     }
 
@@ -1269,7 +1346,10 @@ impl<'a> Interp<'a> {
                 return Ok(values[0].clone());
             }
             if let AValue::Known(_) = &values[0] {
-                return Ok(values.get(1).cloned().unwrap_or_else(|| AValue::Known(Value::from(""))));
+                return Ok(values
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| AValue::Known(Value::from(""))));
             }
         }
         let mut frozen = match self.freeze_all(st, &values, span) {
@@ -1285,12 +1365,16 @@ impl<'a> Interp<'a> {
                 }
             }
             frozen.push(Value::from(minijinja::value::Kwargs::from_iter(
-                pairs.into_iter().map(|(k, v)| (k.as_str().unwrap_or_default().to_string(), v)),
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k.as_str().unwrap_or_default().to_string(), v)),
             )));
         }
         Ok(match known::filter(name, &frozen) {
             Some(Ok(value)) => AValue::Known(value),
-            Some(Err(_)) | None => AValue::Unknown(self.unsupported(format!("filter:{name}"), span)),
+            Some(Err(_)) | None => {
+                AValue::Unknown(self.unsupported(format!("filter:{name}"), span))
+            }
         })
     }
 
@@ -1299,7 +1383,10 @@ impl<'a> Interp<'a> {
     /// The source text of an expression, for naming a callee.
     fn text(&self, expr: &Expr) -> Option<String> {
         (expr.span.source == SourceId::Template)
-            .then(|| self.source.get(expr.span.start as usize..expr.span.end as usize))
+            .then(|| {
+                self.source
+                    .get(expr.span.start as usize..expr.span.end as usize)
+            })
             .flatten()
             .map(str::to_string)
     }
@@ -1308,7 +1395,12 @@ impl<'a> Interp<'a> {
         st.lookup(name).is_some() || self.global(name, Span::default_for_template()).is_some()
     }
 
-    pub(crate) fn eval_call(&mut self, st: &mut State, call: &Call, caller: Option<AValue>) -> Ev<AValue> {
+    pub(crate) fn eval_call(
+        &mut self,
+        st: &mut State,
+        call: &Call,
+        caller: Option<AValue>,
+    ) -> Ev<AValue> {
         let span = call.span;
         // A call to a name that does not exist, or through a namespace that
         // is not a variable, hides whatever the callee does.
@@ -1397,18 +1489,26 @@ impl<'a> Interp<'a> {
                                     }
                                 }
                             }
-                            _ => keyword.push((Arc::from("**"), AValue::Unknown(self.unsupported("**kwargs", span)))),
+                            _ => keyword.push((
+                                Arc::from("**"),
+                                AValue::Unknown(self.unsupported("**kwargs", span)),
+                            )),
                         },
                         AValue::Known(map) if map.kind() == ValueKind::Map => {
                             if let Ok(keys) = map.try_iter() {
                                 for key in keys {
-                                    if let (Some(name), Ok(item)) = (key.as_str(), map.get_item(&key)) {
+                                    if let (Some(name), Ok(item)) =
+                                        (key.as_str(), map.get_item(&key))
+                                    {
                                         keyword.push((Arc::from(name), AValue::Known(item)));
                                     }
                                 }
                             }
                         }
-                        _ => keyword.push((Arc::from("**"), AValue::Unknown(self.unsupported("**kwargs", span)))),
+                        _ => keyword.push((
+                            Arc::from("**"),
+                            AValue::Unknown(self.unsupported("**kwargs", span)),
+                        )),
                     }
                 }
             }
@@ -1452,9 +1552,9 @@ impl<'a> Interp<'a> {
                 Ok(AValue::Unknown(causes))
             }
             AValue::Context(object) => Ok(AValue::Unknown(self.context_causes(&object, span))),
-            AValue::Known(_) | AValue::Heap(_) | AValue::Relation => {
-                Ok(AValue::Unknown(self.unsupported("calling a non-callable value", span)))
-            }
+            AValue::Known(_) | AValue::Heap(_) | AValue::Relation => Ok(AValue::Unknown(
+                self.unsupported("calling a non-callable value", span),
+            )),
         }
     }
 
@@ -1498,6 +1598,7 @@ impl<'a> Interp<'a> {
         caller: Option<AValue>,
     ) -> Ev<AValue> {
         let def = &target.def;
+        self.rec.entered.insert(def.name.clone());
         let mut scopes: Vec<Scope> = match &target.closure {
             Some(closure) => closure.as_ref().clone(),
             None => Vec::new(),
@@ -1545,16 +1646,17 @@ impl<'a> Interp<'a> {
         if let Some(caller) = caller {
             frame.assign(Arc::from("caller"), caller);
         }
-        let flow = match self.exec_block(frame, &def.body) {
-            Ok(flow) => flow,
-            Err(signal) => return Err(signal),
-        };
+        let flow = self.exec_block(frame, &def.body)?;
         let fallback = Causes::default();
-        let normal = merge_opt(flow.normal, merge_opt(flow.brk, flow.cont, &fallback), &fallback)
-            .map(|mut state| {
-                let value = std::mem::replace(&mut state.out, Output::Discard).into_value();
-                (state, value)
-            });
+        let normal = merge_opt(
+            flow.normal,
+            merge_opt(flow.brk, flow.cont, &fallback),
+            &fallback,
+        )
+        .map(|mut state| {
+            let value = std::mem::replace(&mut state.out, Output::Discard).into_value();
+            (state, value)
+        });
         match merge_ret(normal, flow.ret, &fallback) {
             Some((state, value)) => {
                 st.heap = state.heap;
@@ -1603,7 +1705,12 @@ impl<'a> Interp<'a> {
         call: &Call,
     ) -> Ev<AValue> {
         let span = call.span;
-        let kwarg = |name: &str| kwargs.iter().find(|(k, _)| k.as_ref() == name).map(|(_, v)| v);
+        let kwarg = |name: &str| {
+            kwargs
+                .iter()
+                .find(|(k, _)| k.as_ref() == name)
+                .map(|(_, v)| v)
+        };
         match builtin {
             Builtin::Ref => {
                 let function = DependencyFunction::Ref;
@@ -1671,7 +1778,10 @@ impl<'a> Interp<'a> {
                     self.reject(st, function, causes, call);
                     return Ok(AValue::Relation);
                 }
-                match (self.string_arg(st, &args[0], span), self.string_arg(st, &args[1], span)) {
+                match (
+                    self.string_arg(st, &args[0], span),
+                    self.string_arg(st, &args[1], span),
+                ) {
                     (Ok(Some(source_name)), Ok(Some(table_name))) => {
                         self.accept(
                             st,
@@ -1707,16 +1817,22 @@ impl<'a> Interp<'a> {
                 if let Some(default) = args.get(1).or_else(|| kwarg("default")) {
                     return Ok(default.clone());
                 }
-                Ok(AValue::Unknown(Causes::one(DependencyReason::UnresolvedVar {
-                    name: Some(name),
-                    at: self.site(span),
-                })))
+                Ok(AValue::Unknown(Causes::one(
+                    DependencyReason::UnresolvedVar {
+                        name: Some(name),
+                        at: self.site(span),
+                    },
+                )))
             }
             Builtin::EnvVar => {
                 let name = args
                     .first()
                     .and_then(|value| self.string_arg(st, value, span).ok().flatten());
-                Ok(AValue::Unknown(self.runtime(RuntimeValueSource::EnvVar, name, span)))
+                Ok(AValue::Unknown(self.runtime(
+                    RuntimeValueSource::EnvVar,
+                    name,
+                    span,
+                )))
             }
             Builtin::Config => {
                 if self.record_config {
@@ -1745,15 +1861,27 @@ impl<'a> Interp<'a> {
                 let name = args
                     .first()
                     .and_then(|value| self.string_arg(st, value, span).ok().flatten());
-                Ok(AValue::Unknown(self.runtime(RuntimeValueSource::ConfigValue, name, span)))
+                Ok(AValue::Unknown(self.runtime(
+                    RuntimeValueSource::ConfigValue,
+                    name,
+                    span,
+                )))
             }
             Builtin::IsIncremental => Ok(AValue::Known(Value::from(self.incremental))),
-            Builtin::Return => Err(Signal::Return(args.into_iter().next().unwrap_or_else(AValue::none))),
+            Builtin::Return => Err(Signal::Return(
+                args.into_iter().next().unwrap_or_else(AValue::none),
+            )),
             Builtin::Noop | Builtin::Statement => Ok(AValue::Known(Value::from(""))),
-            Builtin::RunQuery => Ok(AValue::Unknown(self.runtime(RuntimeValueSource::RunQuery, None, span))),
-            Builtin::LoadResult => {
-                Ok(AValue::Unknown(self.runtime(RuntimeValueSource::Statement, None, span)))
-            }
+            Builtin::RunQuery => Ok(AValue::Unknown(self.runtime(
+                RuntimeValueSource::RunQuery,
+                None,
+                span,
+            ))),
+            Builtin::LoadResult => Ok(AValue::Unknown(self.runtime(
+                RuntimeValueSource::Statement,
+                None,
+                span,
+            ))),
             Builtin::Namespace => {
                 let mut attrs = BTreeMap::new();
                 if let Some(AValue::Heap(id)) = args.first()
@@ -1776,13 +1904,15 @@ impl<'a> Interp<'a> {
                 match self.freeze_all(st, &values, span) {
                     Ok(values) => Ok(known::call_global(name, &values)
                         .map(AValue::Known)
-                        .unwrap_or_else(|_| AValue::Unknown(self.unsupported(format!("function:{name}"), span)))),
+                        .unwrap_or_else(|_| {
+                            AValue::Unknown(self.unsupported(format!("function:{name}"), span))
+                        })),
                     Err(causes) => Ok(AValue::Unknown(causes)),
                 }
             }
-            Builtin::Unmodelled(name) => {
-                Ok(AValue::Unknown(self.unsupported(format!("function:{name}"), span)))
-            }
+            Builtin::Unmodelled(name) => Ok(AValue::Unknown(
+                self.unsupported(format!("function:{name}"), span),
+            )),
             Builtin::Dispatch => {
                 let name = args
                     .first()
@@ -1802,7 +1932,13 @@ impl<'a> Interp<'a> {
         }
     }
 
-    fn accept(&mut self, st: &State, reference: Option<RefCall>, source: Option<SourceCall>, span: Span) {
+    fn accept(
+        &mut self,
+        st: &State,
+        reference: Option<RefCall>,
+        source: Option<SourceCall>,
+        span: Span,
+    ) {
         let conditional = !st.path.is_empty();
         self.rec.add_causes(&st.path);
         let (function, literals) = match (&reference, &source) {
@@ -1925,7 +2061,10 @@ impl<'a> Interp<'a> {
                 }
             }
             (HeapObj::Map(entries), "keys") => {
-                let keys = entries.iter().map(|(k, _)| AValue::Known(k.clone())).collect();
+                let keys = entries
+                    .iter()
+                    .map(|(k, _)| AValue::Known(k.clone()))
+                    .collect();
                 Some(self.alloc(st, HeapObj::List(keys)))
             }
             (HeapObj::Map(entries), "values") => {
@@ -1999,11 +2138,22 @@ impl<'a> Interp<'a> {
                 "startswith" => Value::from(text.starts_with(&string_arg(0)?)),
                 "endswith" => Value::from(text.ends_with(&string_arg(0)?)),
                 "split" => match string_arg(0) {
-                    Some(sep) => Value::from(text.split(sep.as_str()).map(Value::from).collect::<Vec<_>>()),
-                    None => Value::from(text.split_whitespace().map(Value::from).collect::<Vec<_>>()),
+                    Some(sep) => Value::from(
+                        text.split(sep.as_str())
+                            .map(Value::from)
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => {
+                        Value::from(text.split_whitespace().map(Value::from).collect::<Vec<_>>())
+                    }
                 },
                 "join" => {
-                    let items: Vec<String> = args.first()?.try_iter().ok()?.map(|v| v.to_string()).collect();
+                    let items: Vec<String> = args
+                        .first()?
+                        .try_iter()
+                        .ok()?
+                        .map(|v| v.to_string())
+                        .collect();
                     Value::from(items.join(text))
                 }
                 _ => return None,
@@ -2019,7 +2169,9 @@ impl<'a> Interp<'a> {
                         .filter(|v| !v.is_undefined())
                         .unwrap_or_else(|| args.get(1).cloned().unwrap_or_else(|| Value::from(()))),
                 )),
-                "keys" => Some(AValue::Known(Value::from(value.try_iter().ok()?.collect::<Vec<_>>()))),
+                "keys" => Some(AValue::Known(Value::from(
+                    value.try_iter().ok()?.collect::<Vec<_>>(),
+                ))),
                 "values" => Some(AValue::Known(Value::from(
                     value
                         .try_iter()
@@ -2085,8 +2237,10 @@ fn widen(entry: &State, state: State, causes: &Causes) -> State {
     let ids: Vec<HeapId> = state.heap.keys().copied().collect();
     for id in ids {
         let changed = match (entry.heap.get(&id), state.heap.get(&id)) {
-            (Some(before), Some(after)) => !matches!((before, after), (HeapObj::Clobbered(a), HeapObj::Clobbered(b)) if a == b)
-                && format!("{before:?}") != format!("{after:?}"),
+            (Some(before), Some(after)) => {
+                !matches!((before, after), (HeapObj::Clobbered(a), HeapObj::Clobbered(b)) if a == b)
+                    && format!("{before:?}") != format!("{after:?}")
+            }
             _ => true,
         };
         if changed {
@@ -2105,6 +2259,8 @@ pub(crate) struct StaticCalls {
     pub(crate) refs: Vec<RefCall>,
     pub(crate) sources: Vec<SourceCall>,
     pub(crate) strings: Vec<String>,
+    /// Whether a ref/source call with a non-literal argument was found.
+    pub(crate) dynamic: bool,
 }
 
 impl StaticCalls {
@@ -2186,6 +2342,7 @@ impl StaticCalls {
                     source_name: parts[0].clone(),
                     table_name: parts[1].clone(),
                 }),
+                ("ref" | "source", _) => self.dynamic = true,
                 _ => {}
             }
         }
@@ -2281,7 +2438,9 @@ impl StaticCalls {
                     self.literals(arg.expr());
                 }
             }
-            ExprKind::Filter { expr: Some(e), .. } | ExprKind::Unary { expr: e, .. } => self.literals(e),
+            ExprKind::Filter { expr: Some(e), .. } | ExprKind::Unary { expr: e, .. } => {
+                self.literals(e)
+            }
             _ => {}
         }
     }

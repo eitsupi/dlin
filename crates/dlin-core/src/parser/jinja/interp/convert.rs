@@ -24,10 +24,11 @@ pub(crate) struct ParseFailure {
 
 /// Parse a template and convert it to IR.
 pub(crate) fn parse_template(source: &str, id: SourceId) -> Result<Template, ParseFailure> {
-    let stmt = minijinja::machinery::parse(source, "<template>", SyntaxConfig::default())
-        .map_err(|error| ParseFailure {
+    let stmt = minijinja::machinery::parse(source, "<template>", SyntaxConfig::default()).map_err(
+        |error| ParseFailure {
             line: error.line().and_then(|line| u32::try_from(line).ok()),
-        })?;
+        },
+    )?;
     let converter = Converter { source: id };
     let body = match &stmt {
         ast::Stmt::Template(template) => converter.stmts(&template.children),
@@ -164,7 +165,6 @@ impl Converter {
             params,
             defaults,
             body,
-            span: self.span(def.span()),
             names,
         }
     }
@@ -191,7 +191,9 @@ impl Converter {
     fn target(&self, expr: &ast::Expr<'_>) -> Target {
         match expr {
             ast::Expr::Var(var) => Target::Name(Arc::from(var.id)),
-            ast::Expr::List(list) => Target::Tuple(list.items.iter().map(|e| self.target(e)).collect()),
+            ast::Expr::List(list) => {
+                Target::Tuple(list.items.iter().map(|e| self.target(e)).collect())
+            }
             ast::Expr::Tuple(tuple) => {
                 Target::Tuple(tuple.items.iter().map(|e| self.target(e)).collect())
             }
@@ -262,7 +264,9 @@ impl Converter {
                 subscript: self.boxed(&item.subscript_expr),
             },
             ast::Expr::Call(call) => ExprKind::Call(self.call(call)),
-            ast::Expr::List(list) => ExprKind::List(list.items.iter().map(|e| self.expr(e)).collect()),
+            ast::Expr::List(list) => {
+                ExprKind::List(list.items.iter().map(|e| self.expr(e)).collect())
+            }
             ast::Expr::Tuple(tuple) => {
                 ExprKind::Tuple(tuple.items.iter().map(|e| self.expr(e)).collect())
             }
