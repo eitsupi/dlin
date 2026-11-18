@@ -204,6 +204,11 @@ pub struct ManifestExposure {
     pub url: Option<String>,
     pub maturity: Option<String>,
     pub owner: Option<ManifestExposureOwner>,
+    /// The YAML file that defines the exposure, relative to the project.
+    /// Unlike other resources, `path` is not read: dbt-core writes it
+    /// relative to the directory the file was found in, so it is not a
+    /// project path.
+    pub original_file_path: Option<String>,
 }
 
 /// Owner information in a manifest exposure entry
@@ -436,7 +441,8 @@ impl Manifest {
         map
     }
 
-    /// Collect all unique file paths referenced by nodes and sources.
+    /// Collect all unique file paths that define the manifest's nodes, sources,
+    /// semantic layer resources and exposures.
     /// Returns relative paths as stored in the manifest (e.g. "models/staging/stg_orders.sql").
     pub fn collect_file_paths(&self) -> BTreeSet<String> {
         let mut paths = BTreeSet::new();
@@ -467,6 +473,11 @@ impl Manifest {
         for sq in self.saved_queries.values() {
             let p = sq.original_file_path.as_ref().or(sq.path.as_ref());
             if let Some(p) = p {
+                paths.insert(p.clone());
+            }
+        }
+        for exposure in self.exposures.values() {
+            if let Some(p) = &exposure.original_file_path {
                 paths.insert(p.clone());
             }
         }

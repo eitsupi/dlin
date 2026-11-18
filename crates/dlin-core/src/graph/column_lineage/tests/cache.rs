@@ -468,6 +468,7 @@ fn test_semantic_digest_ignores_unrelated_manifest_changes() {
             url: None,
             maturity: None,
             owner: None,
+            original_file_path: None,
         },
     );
     let changed_downstream = super::super::find_model_by_name(&changed, "orders").unwrap();
@@ -510,6 +511,7 @@ fn test_unrelated_manifest_change_reuses_cached_lineage() {
             url: None,
             maturity: None,
             owner: None,
+            original_file_path: None,
         },
     );
     let mut cache = ColumnLineageCache::load(tmp.path(), None);

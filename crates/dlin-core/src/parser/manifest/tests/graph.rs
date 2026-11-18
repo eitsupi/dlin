@@ -205,6 +205,7 @@ fn test_build_graph_with_exposures() {
                 url: None,
                 maturity: None,
                 owner: None,
+                original_file_path: None,
             },
         )]),
         ..Default::default()
@@ -222,6 +223,49 @@ fn test_build_graph_with_exposures() {
     assert_eq!(
         graph[exposure].description.as_deref(),
         Some("Weekly dashboard")
+    );
+}
+
+/// An exposure's file is the YAML that defines it, relative to the project.
+/// dbt-core writes `path` relative to the directory the YAML was found in,
+/// so `path` is not a project path and is not used.
+#[test]
+fn test_exposure_file_path_is_original_file_path() {
+    let manifest: Manifest = serde_json::from_str(
+        r#"{
+            "exposures": {
+                "exposure.proj.weekly_report": {
+                    "unique_id": "exposure.proj.weekly_report",
+                    "name": "weekly_report",
+                    "path": "marts/exposures.yml",
+                    "original_file_path": "models/marts/exposures.yml"
+                },
+                "exposure.proj.path_only": {
+                    "unique_id": "exposure.proj.path_only",
+                    "name": "path_only",
+                    "path": "marts/exposures.yml"
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let graph = build_graph_from_parsed_manifest(&manifest).unwrap();
+    let file_path = |label: &str| {
+        graph
+            .node_indices()
+            .find(|&i| graph[i].label == label)
+            .and_then(|i| graph[i].file_path.clone())
+    };
+    assert_eq!(
+        file_path("weekly_report"),
+        Some(std::path::PathBuf::from("models/marts/exposures.yml"))
+    );
+    assert_eq!(file_path("path_only"), None);
+
+    assert_eq!(
+        manifest.collect_file_paths(),
+        BTreeSet::from(["models/marts/exposures.yml".to_string()])
     );
 }
 
@@ -245,6 +289,7 @@ fn test_exposure_metadata_parsed() {
                     name: Some("Data Team".to_string()),
                     email: Some("data@example.com".to_string()),
                 }),
+                original_file_path: None,
             },
         )]),
         ..Default::default()
