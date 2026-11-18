@@ -298,6 +298,9 @@ models:
           - dbt_utils.expression_is_true:
               arguments:
                 expression: "{{ ref('a') }} {{ ref(var('other')) }}"
+          - unique:
+              config:
+                where: "{{ ref('a') }} {# ref(var('x')) #} 'ref(x)'"
 "#,
         ),
     ]);
@@ -308,6 +311,9 @@ models:
     // Whitespace before the parenthesis is still a call.
     assert!(has_edge(&graph, "model.a", "test.relationships.b.id"));
     assert_eq!(analysis(&graph, "test.relationships.b.id"), complete());
+    // Calls in comments and string literals are not counted.
+    assert!(has_edge(&graph, "model.a", "test.unique.b.id"));
+    assert_eq!(analysis(&graph, "test.unique.b.id"), complete());
     // Text that mentions a dependency function without a literal call, alone
     // or next to a literal one.
     for unique_id in [

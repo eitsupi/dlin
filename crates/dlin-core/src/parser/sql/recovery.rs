@@ -141,6 +141,28 @@ pub(crate) fn literal_calls(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
     (refs, sources)
 }
 
+// Matches the start of a `ref(` or `source(` call, whatever its arguments.
+static DEPENDENCY_CALL_START: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:ref|source)\s*\(").unwrap());
+
+/// How many `ref()`/`source()` calls the text holds, whatever their
+/// arguments, counted where [`literal_calls`] looks for them. A count above
+/// the number of literal calls means some call has arguments that are not
+/// literals.
+pub(crate) fn dependency_call_count(sql: &str) -> usize {
+    let cleaned = strip_inert_jinja(sql);
+    JINJA_BLOCK
+        .find_iter(&cleaned)
+        .map(|block| {
+            let literal_spans = string_literal_spans(block.as_str());
+            DEPENDENCY_CALL_START
+                .find_iter(block.as_str())
+                .filter(|call| !inside_string_literal(&literal_spans, call.start()))
+                .count()
+        })
+        .sum()
+}
+
 // Matches {{ config(...) }} blocks — captures the inner arguments.
 static CONFIG_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(

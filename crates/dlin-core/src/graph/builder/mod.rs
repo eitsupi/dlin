@@ -18,7 +18,7 @@ use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::{DiscoveredFiles, SkippedInput};
 use crate::parser::jinja::interp::{DependencyExtraction, MacroLibrary};
 use crate::parser::project::sql_file_stem;
-use crate::parser::sql::recovery::literal_calls;
+use crate::parser::sql::recovery::{dependency_call_count, literal_calls};
 use crate::parser::sql::{RefCall, SourceCall};
 use crate::parser::yaml_schema::{
     ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
@@ -776,8 +776,13 @@ fn add_generic_test_node(
     collect_strings(value, &mut strings);
     let path = gb.display_path(yaml_path);
     for text in strings {
-        let mentions = DEPENDENCY_CALL.find_iter(text).count();
-        if mentions == 0 {
+        let template = if text.contains("{{") || text.contains("{%") {
+            text.to_string()
+        } else {
+            format!("{{{{ {text} }}}}")
+        };
+        let calls = dependency_call_count(&template);
+        if calls == 0 {
             continue;
         }
         let at = NodeCallSite {
@@ -786,13 +791,8 @@ fn add_generic_test_node(
             line: None,
             expr: Some(text.trim().to_string()),
         };
-        let template = if text.contains("{{") || text.contains("{%") {
-            text.to_string()
-        } else {
-            format!("{{{{ {text} }}}}")
-        };
         let (refs, sources) = literal_calls(&template);
-        if refs.len() + sources.len() < mentions {
+        if refs.len() + sources.len() < calls {
             // The text mentions a dependency function that is not a call
             // with literal arguments, alone or next to literal calls.
             gb.add_reasons(
@@ -811,10 +811,6 @@ fn add_generic_test_node(
         }
     }
 }
-
-/// A mention of `ref(` or `source(`, as [`literal_calls`] recognises a call.
-static DEPENDENCY_CALL: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"\b(?:ref|source)\s*\(").unwrap());
 
 /// Every string in a YAML value, depth first.
 fn collect_strings<'a>(value: &'a serde_json::Value, strings: &mut Vec<&'a str>) {
