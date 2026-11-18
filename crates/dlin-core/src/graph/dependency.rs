@@ -80,6 +80,22 @@ pub enum RuntimeValueSource {
     RunQuery,
     /// The result of a `statement` block or `load_result()`.
     Statement,
+    /// An attribute or the rendered name of a relation returned by `ref()`
+    /// or `source()`, which depends on the target and the model config.
+    RelationAttribute,
+    /// `dbt_version`.
+    DbtVersion,
+    /// `invocation_id`.
+    InvocationId,
+    /// `run_started_at`.
+    RunStartedAt,
+    /// A method of `adapter`, which queries the warehouse or the adapter.
+    AdapterCall,
+    /// A value read from the node's configuration, such as `config.get()`.
+    ConfigValue,
+    /// Another object of the dbt context, such as `this`, `model`, `graph`
+    /// or `flags`.
+    ContextObject,
 }
 
 /// A bound the analysis stopped at.

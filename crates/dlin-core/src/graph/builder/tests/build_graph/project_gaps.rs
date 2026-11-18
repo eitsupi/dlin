@@ -289,3 +289,41 @@ fn project_gaps_are_the_same_on_cache_miss_and_hit() {
     assert_eq!(miss.project_gaps.len(), 2);
     assert_eq!(miss.project_gaps, hit.project_gaps);
 }
+
+#[test]
+fn interpreter_library_reports_unreadable_and_unparseable_macros() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("macros");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("good.sql"), "{% macro good() %}1{% endmacro %}").unwrap();
+    fs::write(dir.join("bad.sql"), "{% macro broken( %}").unwrap();
+    fs::write(dir.join("latin1.sql"), b"\xff").unwrap();
+    let files = DiscoveredFiles {
+        macro_sql_files: vec![
+            dir.join("good.sql"),
+            dir.join("bad.sql"),
+            dir.join("latin1.sql"),
+        ],
+        ..Default::default()
+    };
+    let mut skipped = Vec::new();
+    let library = super::super::super::interpreter_library(&files, &mut skipped);
+    assert!(library.get("good").is_some());
+    let found: Vec<_> = skipped
+        .iter()
+        .map(|s| {
+            (
+                s.path.file_name().unwrap().to_str().unwrap(),
+                s.stage,
+                s.failure,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("latin1.sql", InputStage::Read, InputFailure::InvalidUtf8),
+            ("bad.sql", InputStage::Parse, InputFailure::ParseError),
+        ]
+    );
+}

@@ -10,6 +10,20 @@ use minijinja::{Environment, ErrorKind};
 use super::super::sql::{RefCall, SourceCall, normalize_version_str};
 use super::{JinjaExtraction, JinjaOutcome, merge_extraction};
 
+/// The default of `var()` or `env_var()`: the second positional argument,
+/// or the `default` keyword argument as dbt also accepts.
+fn default_argument(args: &[Value], kwargs: &Kwargs) -> Option<Value> {
+    args.get(1).cloned().or_else(|| keyword_default(kwargs))
+}
+
+/// The `default=` keyword argument, including an explicit `none`.
+pub(crate) fn keyword_default(kwargs: &Kwargs) -> Option<Value> {
+    kwargs
+        .has("default")
+        .then(|| kwargs.get::<Value>("default").ok())
+        .flatten()
+}
+
 fn json_to_minijinja(v: &serde_json::Value) -> Value {
     Value::from(Serde(v))
 }
@@ -238,16 +252,17 @@ fn render_with_incremental_passes_with_analysis(
         .collect();
     env.add_function("var", {
         let state = render_state.clone();
-        move |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
+        move |args: Rest<Value>, kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             if let Some(key) = args.first()
                 && let Some(key_str) = key.as_str()
                 && let Some(val) = vars_map.get(key_str)
             {
                 return Ok(val.clone());
             }
-            // Fall back to default argument (2nd arg) or truthy sentinel
-            if args.len() >= 2 {
-                Ok(args[1].clone())
+            // Fall back to the default (2nd positional or `default=`) or a
+            // truthy sentinel.
+            if let Some(default) = default_argument(&args, &kwargs) {
+                Ok(default)
             } else {
                 state.mark_uncertain();
                 Ok(Value::from("__dbt_var_unknown__"))
@@ -258,17 +273,13 @@ fn render_with_incremental_passes_with_analysis(
     // env_var() → returns default or empty string
     env.add_function("env_var", {
         let state = render_state.clone();
-        move |args: Rest<Value>, _kwargs: Kwargs| -> Result<Value, minijinja::Error> {
+        move |args: Rest<Value>, kwargs: Kwargs| -> Result<Value, minijinja::Error> {
             // The placeholder value below cannot determine which branch
             // dbt will render. Mark uncertainty only when the stub is
             // actually called; merely registering it must not make every
             // template fall back to regex extraction.
             state.mark_uncertain();
-            if args.len() >= 2 {
-                Ok(args[1].clone())
-            } else {
-                Ok(Value::from(""))
-            }
+            Ok(default_argument(&args, &kwargs).unwrap_or_else(|| Value::from("")))
         }
     });
 

@@ -4,7 +4,7 @@ default-members = ["crates/dlin"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.6"
+version = "0.3.0-alpha.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/eitsupi/dlin"
@@ -22,6 +22,7 @@ anyhow = "1"
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
 minijinja = { version = "=3.1.0", features = ["serde"] }
+minijinja-contrib = { version = "=3.1.0", features = ["pycompat"] }
 rayon = "1"
 globset = "0.4"
 # SQL parsing and AST metadata stay inside dlin-sqllineage.
@@ -37,8 +38,8 @@ insta = "1"
 serial_test = "4.0.1"
 
 # internal
-dlin-core = { version = "0.2.6", path = "crates/dlin-core" }
-sqllineage = { package = "dlin-sqllineage", version = "0.2.6", path = "crates/dlin-sqllineage" }
+dlin-core = { version = "0.3.0-alpha.1", path = "crates/dlin-core" }
+sqllineage = { package = "dlin-sqllineage", version = "0.3.0-alpha.1", path = "crates/dlin-sqllineage" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }

@@ -4,8 +4,11 @@ use minijinja::Environment;
 
 use super::sql::{RefCall, SourceCall, SqlConfig};
 
+#[doc(hidden)]
+pub mod interp;
 pub(crate) mod reachability;
 mod render;
+pub(crate) use render::keyword_default;
 pub(crate) mod source;
 #[cfg(test)]
 mod tests;

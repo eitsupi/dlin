@@ -76,7 +76,7 @@ static SOURCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// {% set %} statements are found too, mirroring dbt which registers a
 /// ref() wherever it is evaluated.
 #[cfg(test)]
-pub(super) fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
+pub(crate) fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
     extract_refs_regex_scoped(sql, None)
 }
 
@@ -92,7 +92,7 @@ pub(super) fn extract_refs_regex_scoped(
 /// Keeping the two result vectors separate preserves the public extraction
 /// shape while avoiding duplicate parsing and string-literal scans in the
 /// fallback path.
-pub(super) fn extract_refs_and_sources_regex_scoped(
+pub(crate) fn extract_refs_and_sources_regex_scoped(
     sql: &str,
     macro_scopes: Option<&HashSet<String>>,
 ) -> (Vec<RefCall>, Vec<SourceCall>) {
@@ -187,7 +187,7 @@ pub(super) fn extract_refs_and_sources_regex_spans(
 /// Regex fallback for extracting source() calls.
 /// Scans inside every jinja block, like [`extract_refs_regex`].
 #[cfg(test)]
-pub(super) fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
+pub(crate) fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
     extract_sources_regex_scoped(sql, None)
 }
 
@@ -225,7 +225,7 @@ static TAGS_PATTERN: LazyLock<Regex> =
 static TAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"['"]([^'"]+)['"]"#).unwrap());
 
 /// Regex fallback for extracting config() settings.
-pub(super) fn extract_config_regex(sql: &str) -> SqlConfig {
+pub(crate) fn extract_config_regex(sql: &str) -> SqlConfig {
     let cleaned = super::super::jinja::source::strip_jinja_comments(sql);
     let mut config = SqlConfig::default();
 
