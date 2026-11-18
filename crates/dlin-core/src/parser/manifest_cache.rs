@@ -216,11 +216,29 @@ fn hash_manifest_bytes(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::dependency::{DependencyAnalysis, NotAssessedScope};
+    use crate::graph::types::{NodeData, NodeType};
     use crate::parser::manifest::{ManifestDiagnosticKind, ManifestDiagnosticSeverity};
 
     fn analysis() -> ManifestAnalysis {
+        let mut graph = LineageGraph::new();
+        graph.add_node(NodeData {
+            unique_id: "model.project.orders".to_string(),
+            label: "orders".to_string(),
+            node_type: NodeType::Model,
+            file_path: None,
+            description: None,
+            materialization: None,
+            tags: vec![],
+            columns: vec![],
+            exposure: None,
+            aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::ManifestDependencies,
+            ),
+        });
         ManifestAnalysis::new(
-            LineageGraph::new(),
+            graph,
             vec![ManifestDiagnostic {
                 kind: ManifestDiagnosticKind::MissingSchemaVersion,
                 severity: ManifestDiagnosticSeverity::Warning,
@@ -260,7 +278,16 @@ mod tests {
 
         let mut loaded = ManifestAnalysisCache::load(temp.path(), None);
         let restored = loaded.take_for_manifest(b"manifest").unwrap();
-        let (_, diagnostics, project_name, paths) = restored.into_parts();
+        let (graph, diagnostics, project_name, paths) = restored.into_parts();
+        let (original, ..) = analysis().into_parts();
+        // A cache hit reports the same dependency analysis as a miss.
+        let analyses = |graph: &LineageGraph| {
+            graph
+                .node_indices()
+                .map(|idx| graph[idx].dependency_analysis.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(analyses(&graph), analyses(&original));
         assert_eq!(project_name.as_deref(), Some("project"));
         assert_eq!(paths, ["models/orders.sql"]);
         assert_eq!(diagnostics.len(), 1);

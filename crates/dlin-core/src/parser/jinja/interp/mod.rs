@@ -33,14 +33,16 @@ use ir::SourceId;
 /// The dependencies of one SQL file and why they may be incomplete.
 #[derive(Debug, Default)]
 pub(crate) struct DependencyExtraction {
+    /// Deduplicated, in the order first called.
     pub(crate) refs: Vec<RefCall>,
+    /// Where each of `refs` was first called, by index.
+    pub(crate) ref_sites: Vec<ExtractionSite>,
+    /// Deduplicated, in the order first called.
     pub(crate) sources: Vec<SourceCall>,
+    /// Where each of `sources` was first called, by index.
+    pub(crate) source_sites: Vec<ExtractionSite>,
     pub(crate) config: SqlConfig,
     /// Sorted and deduplicated.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "attached to graph nodes in a follow-up change")
-    )]
     pub(crate) reasons: Vec<ExtractedDependencyReason>,
     /// How each ref/source call was treated, checked by the tests.
     #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read it"))]
@@ -93,7 +95,9 @@ pub(crate) fn extract_dependencies(
     });
     DependencyExtraction {
         refs: rec.refs,
+        ref_sites: rec.ref_sites,
         sources: rec.sources,
+        source_sites: rec.source_sites,
         config: rec.config,
         reasons: rec.reasons.into_iter().collect(),
         decisions: rec.decisions,
@@ -103,8 +107,12 @@ pub(crate) fn extract_dependencies(
 /// A template that cannot be parsed: keep only calls whose arguments are
 /// all literals.
 fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
-    let (refs, sources) = recovery::literal_calls(sql);
+    let (mut refs, mut sources) = recovery::literal_calls(sql);
+    dedup_in_order(&mut refs);
+    dedup_in_order(&mut sources);
     DependencyExtraction {
+        ref_sites: vec![ExtractionSite::default(); refs.len()],
+        source_sites: vec![ExtractionSite::default(); sources.len()],
         refs,
         sources,
         config: recovery::extract_config_regex(sql),
@@ -113,4 +121,15 @@ fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
         }],
         decisions: Vec::new(),
     }
+}
+
+/// Remove repeated items, keeping the first of each.
+fn dedup_in_order<T: PartialEq>(items: &mut Vec<T>) {
+    let mut kept: Vec<T> = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        if !kept.contains(&item) {
+            kept.push(item);
+        }
+    }
+    *items = kept;
 }

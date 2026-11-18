@@ -2,20 +2,14 @@ use std::path::PathBuf;
 
 use super::recovery::literal_calls;
 use super::*;
-use crate::parser::jinja::JinjaExtraction;
-use crate::parser::jinja::interp::{MacroLibrary, extract_dependencies};
+use crate::parser::jinja::interp::{DependencyExtraction, MacroLibrary, extract_dependencies};
 
-fn extract_with_macros(sql: &str, macros: &str) -> JinjaExtraction {
+fn extract_with_macros(sql: &str, macros: &str) -> DependencyExtraction {
     let library = MacroLibrary::new(&[(PathBuf::from("macros.sql"), macros.to_string())]);
-    let extraction = extract_dependencies(sql, &library, &Default::default());
-    JinjaExtraction {
-        refs: extraction.refs,
-        sources: extraction.sources,
-        config: extraction.config,
-    }
+    extract_dependencies(sql, &library, &Default::default())
 }
 
-fn extract_all(sql: &str, macros: &str) -> JinjaExtraction {
+fn extract_all(sql: &str, macros: &str) -> DependencyExtraction {
     extract_with_macros(sql, macros)
 }
 

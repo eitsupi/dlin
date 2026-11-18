@@ -199,6 +199,7 @@ mod tests {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
         let mut buf = Vec::new();
         render_list_json(&graph, &all_fields(), None, &mut buf, false).unwrap();

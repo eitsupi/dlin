@@ -102,30 +102,7 @@ pub(crate) fn literal_calls(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
                 continue;
             }
-            if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
-                // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
-                refs.push(RefCall {
-                    package: Some(pkg.as_str().to_string()),
-                    name: name.as_str().to_string(),
-                    version: cap
-                        .get(3)
-                        .map(|v| normalize_version_str(&strip_version_quotes(v.as_str()))),
-                });
-            } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
-                // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
-                refs.push(RefCall {
-                    package: None,
-                    name: name.as_str().to_string(),
-                    version: Some(normalize_version_str(&strip_version_quotes(ver.as_str()))),
-                });
-            } else if let Some(name) = cap.get(6) {
-                // Single-arg form: ref('name')
-                refs.push(RefCall {
-                    package: None,
-                    name: name.as_str().to_string(),
-                    version: None,
-                });
-            }
+            refs.extend(ref_from_captures(&cap));
         }
         for cap in SOURCE_PATTERN.captures_iter(block.as_str()) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
@@ -139,6 +116,34 @@ pub(crate) fn literal_calls(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
     }
 
     (refs, sources)
+}
+
+/// The `ref()` call matched by [`REF_PATTERN`].
+fn ref_from_captures(cap: &regex::Captures<'_>) -> Option<RefCall> {
+    if let (Some(pkg), Some(name)) = (cap.get(1), cap.get(2)) {
+        // Two-positional-arg form: ref('pkg', 'name') or ref('pkg', 'name', version=N)
+        Some(RefCall {
+            package: Some(pkg.as_str().to_string()),
+            name: name.as_str().to_string(),
+            version: cap
+                .get(3)
+                .map(|v| normalize_version_str(&strip_version_quotes(v.as_str()))),
+        })
+    } else if let (Some(name), Some(ver)) = (cap.get(4), cap.get(5)) {
+        // Single-arg + version kwarg: ref('name', version=N) or ref('name', version='str')
+        Some(RefCall {
+            package: None,
+            name: name.as_str().to_string(),
+            version: Some(normalize_version_str(&strip_version_quotes(ver.as_str()))),
+        })
+    } else {
+        // Single-arg form: ref('name')
+        cap.get(6).map(|name| RefCall {
+            package: None,
+            name: name.as_str().to_string(),
+            version: None,
+        })
+    }
 }
 
 // Matches {{ config(...) }} blocks — captures the inner arguments.

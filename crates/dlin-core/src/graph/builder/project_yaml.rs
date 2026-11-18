@@ -27,6 +27,8 @@ fn add_source_nodes(
                 columns: vec![],
                 exposure: None,
                 aliases: vec![],
+                // A source has no dependencies.
+                dependency_analysis: DependencyAnalysis::new([]),
             });
         }
     }
@@ -44,7 +46,8 @@ pub(super) struct YamlModelMeta {
 /// Result of parsing YAML schema files.
 pub(super) struct YamlParseResult {
     pub(super) model_meta: HashMap<String, YamlModelMeta>,
-    pub(super) exposures: Vec<ExposureDefinition>,
+    /// Exposures with the relative path of the YAML file defining them.
+    pub(super) exposures: Vec<(ExposureDefinition, PathBuf)>,
     /// Each SchemaFile paired with its YAML file relative path (for test node file_path).
     pub(super) schemas: Vec<(SchemaFile, PathBuf)>,
     /// Maps SQL file stems to (versioned_unique_id, base_model_name).
@@ -93,7 +96,7 @@ pub(super) fn process_yaml_files(
     skipped: &mut Vec<SkippedInput>,
 ) -> Result<YamlParseResult> {
     let mut model_meta: HashMap<String, YamlModelMeta> = HashMap::new();
-    let mut exposures: Vec<ExposureDefinition> = Vec::new();
+    let mut exposures: Vec<(ExposureDefinition, PathBuf)> = Vec::new();
     let mut schemas: Vec<(SchemaFile, PathBuf)> = Vec::new();
     let mut stem_to_versioned: HashMap<String, (String, String)> = HashMap::new();
     let mut version_aliases: HashMap<String, String> = HashMap::new();
@@ -153,12 +156,18 @@ pub(super) fn process_yaml_files(
             }
         }
 
-        exposures.extend(schema.exposures.iter().cloned());
-
         let relative_path = yaml_path
             .strip_prefix(project_dir)
             .unwrap_or(yaml_path)
             .to_path_buf();
+
+        exposures.extend(
+            schema
+                .exposures
+                .iter()
+                .cloned()
+                .map(|exposure| (exposure, relative_path.clone())),
+        );
 
         semantic_models.extend(
             schema

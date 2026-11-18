@@ -547,6 +547,13 @@ fn test_build_graph_from_manifest_file() {
     let graph = build_graph_from_manifest(&manifest_path).unwrap();
     assert_eq!(graph.node_count(), 2);
     assert_eq!(graph.edge_count(), 1);
+    // The manifest's dependencies are not checked yet.
+    let not_assessed = crate::graph::dependency::DependencyAnalysis::not_assessed(
+        crate::graph::dependency::NotAssessedScope::ManifestDependencies,
+    );
+    for idx in graph.node_indices() {
+        assert_eq!(graph[idx].dependency_analysis, not_assessed);
+    }
 }
 
 #[test]

@@ -36,6 +36,9 @@ pub(super) fn process_semantic_layer(
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::SemanticDependencies,
+            ),
         });
     }
 
@@ -89,6 +92,9 @@ pub(super) fn process_semantic_layer(
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::SemanticDependencies,
+            ),
         });
     }
 
@@ -143,6 +149,9 @@ pub(super) fn process_semantic_layer(
                     columns: vec![],
                     exposure: None,
                     aliases: vec![],
+                    dependency_analysis: DependencyAnalysis::not_assessed(
+                        NotAssessedScope::SemanticDependencies,
+                    ),
                 })
             };
             gb.graph
@@ -167,6 +176,9 @@ pub(super) fn process_semantic_layer(
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::SemanticDependencies,
+            ),
         });
         if let Some(qp) = &sq.query_params {
             for metric_name in &qp.metrics {
@@ -190,6 +202,9 @@ pub(super) fn process_semantic_layer(
                         columns: vec![],
                         exposure: None,
                         aliases: vec![],
+                        dependency_analysis: DependencyAnalysis::not_assessed(
+                            NotAssessedScope::SemanticDependencies,
+                        ),
                     })
                 };
                 gb.graph

@@ -57,7 +57,7 @@ saved_queries:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     // Node type counts
     let counts: HashMap<NodeType, usize> =
@@ -196,7 +196,7 @@ metrics:
         ..Default::default()
     };
 
-    let graph = build_graph(&project_dir, &files, &HashMap::new()).unwrap();
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
 
     let sem_idx = graph
         .node_indices()

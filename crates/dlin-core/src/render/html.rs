@@ -303,6 +303,7 @@ mod tests {
             columns: vec!["order_id".into(), "customer_id".into(), "amount".into()],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: crate::graph::dependency::DependencyAnalysis::new([]),
         });
 
         let json = build_html_json(&graph);

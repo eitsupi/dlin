@@ -6,20 +6,23 @@ use std::path::Path;
 
 use std::path::PathBuf;
 
+use path_slash::PathExt as _;
+
 use crate::graph::dependency::{
-    InputFailure, InputKind, InputLocation, InputStage, ProjectGap, relative_display_path,
+    DependencyAnalysis, DependencyReason, ExtractionSite, InputFailure, InputKind, InputLocation,
+    InputStage, NodeCallSite, NodeDependencyReason, NotAssessedScope, ProjectGap,
+    relative_display_path,
 };
 use crate::graph::types::{ExposureInfo, OwnerInfo};
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::{DiscoveredFiles, SkippedInput};
-use crate::parser::jinja::JinjaExtraction;
-use crate::parser::jinja::interp::MacroLibrary;
+use crate::parser::jinja::interp::{DependencyExtraction, MacroLibrary};
 use crate::parser::project::sql_file_stem;
 use crate::parser::sql::recovery::literal_calls;
 use crate::parser::sql::{RefCall, SourceCall};
 use crate::parser::yaml_schema::{
     ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
-    SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
+    SemanticModelDefinition, SnapshotDefinition, TestDefinition, parse_schema_file,
 };
 
 /// Parse the project's macro files, recording the files
@@ -55,29 +58,191 @@ fn extract_sql(
     content: &str,
     library: &MacroLibrary,
     vars: &HashMap<String, serde_json::Value>,
-) -> JinjaExtraction {
-    let extraction = crate::parser::jinja::interp::extract_dependencies(content, library, vars);
-    JinjaExtraction {
-        refs: extraction.refs,
-        sources: extraction.sources,
-        config: extraction.config,
-    }
+) -> DependencyExtraction {
+    crate::parser::jinja::interp::extract_dependencies(content, library, vars)
 }
 
 use super::types::*;
 
 /// Shared state threaded through the build_graph helper functions
-struct GraphBuilder {
+struct GraphBuilder<'a> {
     graph: LineageGraph,
     node_map: HashMap<String, NodeIndex>,
+    /// The project's name, which a `ref()` may name as its package.
+    project_name: String,
+    /// The project directory that reported paths are relative to, as
+    /// given and normalised. Discovered paths are normalised, while the
+    /// directory may be given as is.
+    project_dirs: [PathBuf; 2],
+    /// The project's macros and vars, for the Jinja written in YAML.
+    library: &'a MacroLibrary,
+    vars: &'a HashMap<String, serde_json::Value>,
 }
 
-impl GraphBuilder {
-    fn new() -> Self {
+impl<'a> GraphBuilder<'a> {
+    fn new(
+        project_dir: &Path,
+        project_name: &str,
+        library: &'a MacroLibrary,
+        vars: &'a HashMap<String, serde_json::Value>,
+    ) -> Self {
         Self {
+            library,
+            vars,
             graph: LineageGraph::new(),
             node_map: HashMap::new(),
+            project_name: project_name.to_string(),
+            project_dirs: [
+                project_dir.to_path_buf(),
+                crate::input::normalize_path(project_dir),
+            ],
         }
+    }
+
+    /// `path` relative to the project directory, with `/` separators, as in
+    /// the nodes' `file_path`. A path that is already relative is kept.
+    fn display_path(&self, path: &Path) -> String {
+        self.project_dirs
+            .iter()
+            .find_map(|dir| path.strip_prefix(dir).ok())
+            .unwrap_or(path)
+            .to_slash_lossy()
+            .into_owned()
+    }
+
+    /// Interpret Jinja written in YAML for the node `unique_id` defined in
+    /// `yaml_path`, as SQL is interpreted. The returned reasons and call
+    /// sites are located at `text`, the YAML value, since YAML values have no
+    /// line of their own here.
+    fn evaluate_yaml(
+        &self,
+        template: &str,
+        text: &str,
+        unique_id: &str,
+        yaml_path: &Path,
+    ) -> YamlDependencies {
+        let extraction = extract_sql(template, self.library, self.vars);
+        let path = self.display_path(yaml_path);
+        let at = |site: &ExtractionSite| NodeCallSite {
+            unique_id: unique_id.to_string(),
+            path: path.clone(),
+            line: None,
+            expr: site.expr.clone().or_else(|| Some(text.trim().to_string())),
+        };
+        YamlDependencies {
+            refs: extraction
+                .refs
+                .into_iter()
+                .zip(extraction.ref_sites.iter().map(&at))
+                .collect(),
+            sources: extraction
+                .sources
+                .into_iter()
+                .zip(extraction.source_sites.iter().map(&at))
+                .collect(),
+            reasons: extraction
+                .reasons
+                .into_iter()
+                .map(|reason| reason.map_site(|site| at(&site)))
+                .collect(),
+            fallback_site: at(&ExtractionSite::default()),
+        }
+    }
+
+    /// Add the dependencies interpreted from YAML to the node at `owner`,
+    /// creating phantoms for missing targets as for SQL.
+    fn link_yaml(&mut self, owner: NodeIndex, deps: YamlDependencies, origin: &Path) {
+        let (ref_edge, source_edge) = match self.graph[owner].node_type {
+            NodeType::Test => (EdgeType::Test, EdgeType::Test),
+            _ => (EdgeType::Ref, EdgeType::Source),
+        };
+        for (call, at) in &deps.refs {
+            self.link_ref(owner, call, at.clone(), origin, ref_edge);
+        }
+        for (call, at) in &deps.sources {
+            self.link_source(owner, call, at.clone(), origin, source_edge);
+        }
+        self.add_reasons(owner, deps.reasons);
+    }
+
+    /// Add reasons to a node's dependency analysis.
+    fn add_reasons(
+        &mut self,
+        idx: NodeIndex,
+        reasons: impl IntoIterator<Item = NodeDependencyReason>,
+    ) {
+        self.graph[idx].dependency_analysis.extend(reasons);
+    }
+
+    /// Resolve a `ref()` of the node at `owner` and add its edge, recording
+    /// why the target is uncertain. A target that does not exist becomes a
+    /// phantom node, as before.
+    fn link_ref(
+        &mut self,
+        owner: NodeIndex,
+        call: &RefCall,
+        at: NodeCallSite,
+        origin: &Path,
+        edge_type: EdgeType,
+    ) {
+        let mut reasons = Vec::new();
+        if let Some(package) = &call.package
+            && *package != self.project_name
+        {
+            reasons.push(DependencyReason::UnsupportedRefPackage {
+                package: package.clone(),
+                name: call.name.clone(),
+                at: at.clone(),
+            });
+        }
+        if call.version.is_none() {
+            let candidates = ref_candidates(&call.name, &self.node_map, &self.graph);
+            if candidates.len() > 1 {
+                reasons.push(DependencyReason::AmbiguousRef {
+                    name: call.name.clone(),
+                    candidates,
+                    at: at.clone(),
+                });
+            }
+        }
+        let dep_idx = self.get_or_create_phantom_ref(&call.name, call.version.clone(), origin);
+        if self.graph[dep_idx].node_type == NodeType::Phantom {
+            reasons.push(DependencyReason::UnresolvedRef {
+                name: call.name.clone(),
+                package: call.package.clone(),
+                version: call.version.clone(),
+                at,
+            });
+        }
+        self.graph
+            .add_edge(dep_idx, owner, EdgeData::direct(edge_type));
+        self.add_reasons(owner, reasons);
+    }
+
+    /// Resolve a `source()` of the node at `owner` and add its edge, like
+    /// [`Self::link_ref`].
+    fn link_source(
+        &mut self,
+        owner: NodeIndex,
+        call: &SourceCall,
+        at: NodeCallSite,
+        origin: &Path,
+        edge_type: EdgeType,
+    ) {
+        let dep_idx =
+            self.get_or_create_phantom_source(&call.source_name, &call.table_name, origin);
+        if self.graph[dep_idx].node_type == NodeType::Phantom {
+            self.add_reasons(
+                owner,
+                [DependencyReason::UnresolvedSource {
+                    source: call.source_name.clone(),
+                    table: call.table_name.clone(),
+                    at,
+                }],
+            );
+        }
+        self.graph
+            .add_edge(dep_idx, owner, EdgeData::direct(edge_type));
     }
 
     /// Add a node and register it in the node map
@@ -110,6 +275,9 @@ impl GraphBuilder {
                 columns: vec![],
                 exposure: None,
                 aliases: vec![],
+                dependency_analysis: DependencyAnalysis::not_assessed(
+                    NotAssessedScope::PhantomDependencies,
+                ),
             })
         };
         if let std::collections::hash_map::Entry::Vacant(e) = self.node_map.entry(from.clone()) {
@@ -160,6 +328,9 @@ impl GraphBuilder {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::PhantomDependencies,
+            ),
         })
     }
 
@@ -192,6 +363,9 @@ impl GraphBuilder {
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            dependency_analysis: DependencyAnalysis::not_assessed(
+                NotAssessedScope::PhantomDependencies,
+            ),
         })
     }
 }
@@ -214,15 +388,15 @@ fn file_stem_str(path: &Path) -> String {
     sql_file_stem(path)
 }
 
-/// Refs and sources already extracted from model SQL files, so that
+/// Dependencies already extracted from model SQL files, so that
 /// `process_sql_edges` does not extract them again.
-type ModelDependencies = HashMap<PathBuf, (Vec<RefCall>, Vec<SourceCall>)>;
+type ModelDependencies = HashMap<PathBuf, DependencyExtraction>;
 
 /// Result of parallel extraction for a single model SQL file
 struct ModelExtraction {
     sql_path: PathBuf,
     model_name: String,
-    extraction: Option<JinjaExtraction>,
+    extraction: Option<DependencyExtraction>,
     columns: Vec<String>,
 }
 
@@ -278,8 +452,9 @@ fn process_model_files(
 
         let sql_config = match me.extraction {
             Some(ext) => {
-                dependencies.insert(me.sql_path.clone(), (ext.refs, ext.sources));
-                ext.config
+                let config = ext.config.clone();
+                dependencies.insert(me.sql_path.clone(), ext);
+                config
             }
             None => Default::default(),
         };
@@ -337,6 +512,9 @@ fn process_model_files(
             columns,
             exposure: None,
             aliases: vec![],
+            // Filled in by `process_sql_edges` once its dependencies are
+            // resolved.
+            dependency_analysis: DependencyAnalysis::new([]),
         });
     }
 
@@ -367,6 +545,9 @@ fn process_simple_nodes(
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            // A seed has no dependencies. A snapshot's are added by
+            // `process_sql_edges`.
+            dependency_analysis: DependencyAnalysis::new([]),
         });
     }
 }
@@ -416,6 +597,8 @@ fn process_sql_edges(
                 columns: vec![],
                 exposure: None,
                 aliases: vec![],
+                // Filled in below once its dependencies are resolved.
+                dependency_analysis: DependencyAnalysis::new([]),
             });
         }
 
@@ -440,59 +623,64 @@ fn process_sql_edges(
 
         // Model files were extracted already; extract the others here.
         let owned;
-        let (refs, sources) = if let Some(extracted) = model_dependencies.get(*sql_path) {
-            (&extracted.0, &extracted.1)
-        } else {
-            let content = read_file(sql_path)?;
-            let extraction = extract_sql(&content, library, vars);
-            owned = (extraction.refs, extraction.sources);
-            (&owned.0, &owned.1)
+        let extraction = match model_dependencies.get(*sql_path) {
+            Some(extraction) => extraction,
+            None => {
+                let content = read_file(sql_path)?;
+                owned = extract_sql(&content, library, vars);
+                &owned
+            }
         };
+
+        let owner_id = gb.graph[current_idx].unique_id.clone();
+        let path = gb.display_path(sql_path);
+        let at = |site: &ExtractionSite| site.clone().at_node(owner_id.clone(), path.clone());
+        let reasons: Vec<_> = extraction
+            .reasons
+            .iter()
+            .map(|reason| reason.clone().map_site(|site| at(&site)))
+            .collect();
+        gb.add_reasons(current_idx, reasons);
 
         // Use EdgeType::Test when the target node is a test, so all test
         // relationships render with consistent edge labels/styles.
         let is_test = *file_type == "test";
-
-        for ref_call in refs {
-            let dep_idx =
-                gb.get_or_create_phantom_ref(&ref_call.name, ref_call.version.clone(), sql_path);
-            let edge_type = if is_test {
-                EdgeType::Test
-            } else {
-                EdgeType::Ref
-            };
-            gb.graph
-                .add_edge(dep_idx, current_idx, EdgeData::direct(edge_type));
+        let (ref_edge, source_edge) = if is_test {
+            (EdgeType::Test, EdgeType::Test)
+        } else {
+            (EdgeType::Ref, EdgeType::Source)
+        };
+        for (call, site) in extraction.refs.iter().zip(&extraction.ref_sites) {
+            gb.link_ref(current_idx, call, at(site), sql_path, ref_edge);
         }
-
-        for source_call in sources {
-            let source_idx = gb.get_or_create_phantom_source(
-                &source_call.source_name,
-                &source_call.table_name,
-                sql_path,
-            );
-            let edge_type = if is_test {
-                EdgeType::Test
-            } else {
-                EdgeType::Source
-            };
-            gb.graph
-                .add_edge(source_idx, current_idx, EdgeData::direct(edge_type));
+        for (call, site) in extraction.sources.iter().zip(&extraction.source_sites) {
+            gb.link_source(current_idx, call, at(site), sql_path, source_edge);
         }
     }
 
     Ok(())
 }
 
-/// Create exposure nodes and edges to their dependencies
-fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
-    for exposure in exposures {
+/// The dependencies interpreted from a Jinja value written in YAML.
+struct YamlDependencies {
+    refs: Vec<(RefCall, NodeCallSite)>,
+    sources: Vec<(SourceCall, NodeCallSite)>,
+    reasons: Vec<NodeDependencyReason>,
+    /// The YAML value itself, for reasons about the value as a whole.
+    fallback_site: NodeCallSite,
+}
+
+/// Create exposure nodes and edges to their dependencies. Each `depends_on`
+/// entry is a Jinja expression, as dbt evaluates it. An exposure does not
+/// create phantom nodes: a target that does not exist is a reason.
+fn process_exposures(gb: &mut GraphBuilder, exposures: &[(ExposureDefinition, PathBuf)]) {
+    for (exposure, yaml_path) in exposures {
         let unique_id = format!("exposure.{}", exposure.name);
         let idx = gb.add_node(NodeData {
-            unique_id,
+            unique_id: unique_id.clone(),
             label: exposure.name.clone(),
             node_type: NodeType::Exposure,
-            file_path: None,
+            file_path: Some(yaml_path.clone()),
             description: exposure.description.clone(),
             materialization: None,
             tags: vec![],
@@ -508,20 +696,78 @@ fn process_exposures(gb: &mut GraphBuilder, exposures: &[ExposureDefinition]) {
                 }),
             }),
             aliases: vec![],
+            // Filled in below once its dependencies are resolved.
+            dependency_analysis: DependencyAnalysis::new([]),
         });
 
         for dep in &exposure.depends_on {
-            if let Some((model_name, version)) = parse_exposure_ref(dep) {
-                let dep_id = if let Some(ref v) = version {
-                    format!("model.{}.v{}", model_name, v)
-                } else {
-                    resolve_ref(&model_name, &gb.node_map)
-                };
-                if let Some(&dep_idx) = gb.node_map.get(&dep_id) {
-                    gb.graph
-                        .add_edge(dep_idx, idx, EdgeData::direct(EdgeType::Exposure));
+            let deps = gb.evaluate_yaml(&format!("{{{{ {dep} }}}}"), dep, &unique_id, yaml_path);
+            let mut reasons = deps.reasons;
+            if deps.refs.is_empty() && deps.sources.is_empty() && reasons.is_empty() {
+                // Nothing a dependency can come from, such as `metric(...)`
+                // or a bare name.
+                let function = dep
+                    .trim()
+                    .split_once('(')
+                    .map(|(name, _)| name.trim().to_string())
+                    .filter(|name| !name.is_empty());
+                reasons.push(DependencyReason::UnsupportedDependencyExpression {
+                    function,
+                    at: deps.fallback_site.clone(),
+                });
+            }
+            let mut targets = Vec::new();
+            for (call, at) in deps.refs {
+                if let Some(package) = &call.package
+                    && *package != gb.project_name
+                {
+                    reasons.push(DependencyReason::UnsupportedRefPackage {
+                        package: package.clone(),
+                        name: call.name.clone(),
+                        at: at.clone(),
+                    });
+                }
+                match &call.version {
+                    Some(v) => targets.push((
+                        format!("model.{}.v{}", call.name, v),
+                        format!("{}.v{}", call.name, v),
+                        at,
+                    )),
+                    None => {
+                        let candidates = ref_candidates(&call.name, &gb.node_map, &gb.graph);
+                        if candidates.len() > 1 {
+                            reasons.push(DependencyReason::AmbiguousRef {
+                                name: call.name.clone(),
+                                candidates,
+                                at: at.clone(),
+                            });
+                        }
+                        targets.push((resolve_ref(&call.name, &gb.node_map), call.name, at));
+                    }
                 }
             }
+            for (call, at) in deps.sources {
+                targets.push((
+                    format!("source.{}.{}", call.source_name, call.table_name),
+                    format!("{}.{}", call.source_name, call.table_name),
+                    at,
+                ));
+            }
+            for (dep_id, name, at) in targets {
+                match gb.node_map.get(&dep_id).copied() {
+                    Some(dep_idx) => {
+                        // An edge to a phantom node is kept, as for SQL
+                        // references, but it is not a known dependency.
+                        if gb.graph[dep_idx].node_type == NodeType::Phantom {
+                            reasons.push(DependencyReason::DependencyTargetMissing { name, at });
+                        }
+                        gb.graph
+                            .add_edge(dep_idx, idx, EdgeData::direct(EdgeType::Exposure));
+                    }
+                    None => reasons.push(DependencyReason::DependencyTargetMissing { name, at }),
+                }
+            }
+            gb.add_reasons(idx, reasons);
         }
     }
 }
@@ -548,36 +794,120 @@ fn dedup_unique_id(
     }
 }
 
-/// Add a generic test node to the graph and connect it to the parent.
+/// Add a generic test node to the graph and connect it to the parent and to
+/// the `ref()`/`source()` calls in its arguments, such as the `to` of a
+/// `relationships` test. Arguments are read as dbt evaluates them: a string
+/// that looks like a call to `ref`, `source`, `var`, `env_var` or `doc` is
+/// an expression, one holding Jinja is a template, and any other string is
+/// data. Both are interpreted like SQL.
 fn add_generic_test_node(
     gb: &mut GraphBuilder,
     parent_idx: NodeIndex,
     unique_id: String,
     label: String,
-    file_path: Option<PathBuf>,
+    yaml_path: &Path,
+    test_def: &TestDefinition,
 ) {
     let idx = gb.add_node(NodeData {
-        unique_id,
+        unique_id: unique_id.clone(),
         label,
         node_type: NodeType::Test,
-        file_path,
+        file_path: Some(yaml_path.to_path_buf()),
         description: None,
         materialization: None,
         tags: vec![],
         columns: vec![],
         exposure: None,
         aliases: vec![],
+        // Filled in below once its dependencies are resolved.
+        dependency_analysis: DependencyAnalysis::new([]),
     });
     gb.graph
         .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
+
+    let TestDefinition::Complex(value) = test_def else {
+        return;
+    };
+    let mut strings = Vec::new();
+    collect_test_strings(test_def, value, &mut strings);
+    for text in strings {
+        // dbt evaluates a string that looks like a call to one of a few
+        // functions as an expression and renders any other string as a
+        // template; a string without Jinja renders as itself.
+        let template = if RENDERED_TEST_ARGUMENT.is_match(text) {
+            format!("{{{{ {text} }}}}")
+        } else if text.contains("{{") || text.contains("{%") {
+            text.to_string()
+        } else {
+            continue;
+        };
+        let deps = gb.evaluate_yaml(&template, text, &unique_id, yaml_path);
+        gb.link_yaml(idx, deps, yaml_path);
+    }
+}
+
+/// A generic test argument string that dbt evaluates as an expression rather
+/// than as a template, as in dbt's `looks_like_func`. It does not check that
+/// the string is a single call: the expression is interpreted.
+static RENDERED_TEST_ARGUMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\s*(env_var|ref|var|source|doc)\s*\(.+\)\s*$").unwrap()
+});
+
+/// The strings of a generic test definition that dbt renders: its arguments
+/// and config. The test's own name, description and top-level `column_name`
+/// are metadata and are not read; keys with these names inside the
+/// arguments are ordinary values.
+fn collect_test_strings<'v>(
+    test_def: &TestDefinition,
+    value: &'v serde_json::Value,
+    strings: &mut Vec<&'v str>,
+) {
+    let Some(definition) = value.as_object() else {
+        return;
+    };
+    // `{test_name: {arguments, config, ...}}`, or the flat form with
+    // `test_name:` beside the arguments.
+    let body = match test_def.test_name() {
+        Some(name) if !definition.contains_key("test_name") => {
+            match definition.get(name).and_then(serde_json::Value::as_object) {
+                Some(body) => body,
+                None => return,
+            }
+        }
+        _ => definition,
+    };
+    for (key, item) in body {
+        if !matches!(
+            key.as_str(),
+            "name" | "test_name" | "description" | "column_name"
+        ) {
+            collect_strings(item, strings);
+        }
+    }
+}
+
+/// Every string in a YAML value, depth first.
+fn collect_strings<'v>(value: &'v serde_json::Value, strings: &mut Vec<&'v str>) {
+    match value {
+        serde_json::Value::String(text) => strings.push(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_strings(item, strings);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                collect_strings(item, strings);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Create test nodes for YAML-declared generic tests (not_null, unique, etc.)
 /// and connect them to their parent model/source nodes.
 fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)]) {
     for (schema, yaml_path) in schemas {
-        let file_path = Some(yaml_path.clone());
-
         // Model-level generic tests.
         // For versioned models, `model.{name}` is an alias to the latest version node,
         // so the lookup still works without special-casing.
@@ -600,7 +930,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                 if let Some(s) = suffix {
                     label.push_str(&s);
                 }
-                add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+                add_generic_test_node(gb, parent_idx, unique_id, label, yaml_path, test_def);
             }
 
             // Column-level tests
@@ -616,7 +946,7 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                     if let Some(s) = suffix {
                         label.push_str(&s);
                     }
-                    add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+                    add_generic_test_node(gb, parent_idx, unique_id, label, yaml_path, test_def);
                 }
             }
         }
@@ -647,7 +977,9 @@ fn process_generic_tests(gb: &mut GraphBuilder, schemas: &[(SchemaFile, PathBuf)
                         if let Some(s) = suffix {
                             label.push_str(&s);
                         }
-                        add_generic_test_node(gb, parent_idx, unique_id, label, file_path.clone());
+                        add_generic_test_node(
+                            gb, parent_idx, unique_id, label, yaml_path, test_def,
+                        );
                     }
                 }
             }
@@ -687,6 +1019,8 @@ fn process_yaml_snapshot_nodes(
             columns: vec![],
             exposure: None,
             aliases: vec![],
+            // Filled in by pass 2 once its dependencies are resolved.
+            dependency_analysis: DependencyAnalysis::new([]),
         });
         yaml_registered.insert(unique_id);
     }
@@ -701,17 +1035,17 @@ fn process_yaml_snapshot_nodes(
             continue;
         };
         if let Some(relation) = &snap_def.relation {
-            if let Some((source_name, table_name)) = parse_relation_source(relation) {
-                let dep_idx =
-                    gb.get_or_create_phantom_source(&source_name, &table_name, yaml_path.as_path());
-                gb.graph
-                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Source));
-            } else if let Some((model_name, version)) = parse_exposure_ref(relation) {
-                let dep_idx =
-                    gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
-                gb.graph
-                    .add_edge(dep_idx, snap_idx, EdgeData::direct(EdgeType::Ref));
-            }
+            // As dbt does, a relation that starts with a dependency call is
+            // an expression; anything else is SQL, possibly with Jinja, that
+            // names a relation.
+            let trimmed = relation.trim();
+            let template = if trimmed.starts_with("ref(") || trimmed.starts_with("source(") {
+                format!("{{{{ {trimmed} }}}}")
+            } else {
+                relation.clone()
+            };
+            let deps = gb.evaluate_yaml(&template, relation, &unique_id, yaml_path);
+            gb.link_yaml(snap_idx, deps, yaml_path);
         }
     }
 }
@@ -727,23 +1061,28 @@ pub struct GraphBuild {
 }
 
 /// Build the lineage graph from discovered files.
+///
+/// `project_name` is the `name` in `dbt_project.yml`; a `ref()` naming it as
+/// its package refers to the project itself.
 pub fn build_graph(
     project_dir: &Path,
+    project_name: &str,
     files: &DiscoveredFiles,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<LineageGraph> {
-    build_graph_report(project_dir, files, vars).map(|build| build.graph)
+    build_graph_report(project_dir, project_name, files, vars).map(|build| build.graph)
 }
 
 /// Like [`build_graph`], also returning the gaps found while building.
 pub fn build_graph_report(
     project_dir: &Path,
+    project_name: &str,
     files: &DiscoveredFiles,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<GraphBuild> {
-    let mut gb = GraphBuilder::new();
     let mut skipped = files.skipped_inputs.clone();
     let library = load_macro_library(files, &mut skipped);
+    let mut gb = GraphBuilder::new(project_dir, project_name, &library, vars);
 
     let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir, &mut skipped)?;
     let model_dependencies = process_model_files(
@@ -818,6 +1157,25 @@ fn project_gaps(skipped: Vec<SkippedInput>, project_dir: &Path) -> Vec<ProjectGa
 }
 
 /// Try to resolve a ref name to a node unique_id
+/// The distinct nodes an unversioned `ref(name)` can mean, in the order
+/// [`resolve_ref`] prefers them.
+fn ref_candidates(
+    name: &str,
+    node_map: &HashMap<String, NodeIndex>,
+    graph: &LineageGraph,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for prefix in ["model", "seed", "snapshot"] {
+        if let Some(&idx) = node_map.get(&format!("{prefix}.{name}")) {
+            let node = &graph[idx];
+            if node.node_type != NodeType::Phantom && !candidates.contains(&node.unique_id) {
+                candidates.push(node.unique_id.clone());
+            }
+        }
+    }
+    candidates
+}
+
 fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
     let model_id = format!("model.{}", name);
     if node_map.contains_key(&model_id) {
@@ -832,15 +1190,6 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
         return snapshot_id;
     }
     model_id
-}
-
-fn parse_relation_source(relation: &str) -> Option<(String, String)> {
-    let wrapped = format!("{{{{ {} }}}}", relation.trim());
-    literal_calls(&wrapped)
-        .1
-        .into_iter()
-        .next()
-        .map(|s| (s.source_name, s.table_name))
 }
 
 fn parse_exposure_ref(dep: &str) -> Option<(String, Option<String>)> {
