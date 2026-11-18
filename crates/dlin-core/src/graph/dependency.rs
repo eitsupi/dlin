@@ -73,8 +73,9 @@ pub enum DependencyFunction {
 pub enum RuntimeValueSource {
     /// An attribute of `target`, such as `target.name`.
     TargetAttribute,
-    /// `env_var()`. Its value is unknown even when a default is given,
-    /// because the analysis does not read the environment.
+    /// `env_var()` without a default, or naming a secret variable. The
+    /// analysis never reads the environment: a default is taken as the
+    /// value, like `var()`'s.
     EnvVar,
     /// The result of `run_query()`.
     RunQuery,
