@@ -597,3 +597,46 @@ fn loop_filter_decides_else_and_loop_info() {
     assert_eq!(ref_names(&e), vec!["a", "none"]);
     assert_eq!(codes(&e), vec!["unresolved_var"]);
 }
+
+#[test]
+fn comparison_reports_config_only_differences_and_unreadable_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let models = tmp.path().join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::write(tmp.path().join("dbt_project.yml"), "name: p\n").unwrap();
+    // The render fails on the unknown namespace and recovers the config by
+    // regex, including the one in the branch known to be false.
+    std::fs::write(
+        models.join("a.sql"),
+        "{% if var('flag', false) %}{{ config(materialized='table') }}{% endif %}{{ pkg.m() }}select 1",
+    )
+    .unwrap();
+    std::fs::write(models.join("b.sql"), b"select '\xff'").unwrap();
+    let report = super::compare::compare_project(tmp.path()).unwrap();
+    assert_eq!(report.files, 1);
+    assert_eq!(report.unreadable, vec!["models/b.sql"]);
+    assert_eq!(
+        report.config_differences.len(),
+        1,
+        "{:?}",
+        report.config_differences
+    );
+    assert_eq!(report.identical_files, 0);
+}
+
+#[test]
+fn default_filter_with_a_keyword_fallback() {
+    let e = extract(
+        "{{ ref(undefined_name | default(default_value='B')) }}{{ ref('' | default('C', boolean=true)) }}",
+    );
+    assert_eq!(ref_names(&e), vec!["B", "C"]);
+}
+
+#[test]
+fn loop_filter_with_side_effects_is_not_followed_precisely() {
+    let e = extract(
+        "{% set xs = [] %}{% for x in ['a'] if xs.append('A') or true %}{% endfor %}{{ ref(xs[0]) }}",
+    );
+    assert!(e.refs.is_empty(), "{:?}", e.refs);
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
+}

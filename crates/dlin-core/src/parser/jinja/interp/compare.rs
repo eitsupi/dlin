@@ -53,7 +53,10 @@ pub struct Difference {
 
 #[derive(Debug, Default, Serialize)]
 pub struct ComparisonReport {
+    /// SQL files compared.
     pub files: usize,
+    /// SQL files that could not be read, so were not compared.
+    pub unreadable: Vec<String>,
     pub identical_files: usize,
     pub counts: BTreeMap<String, usize>,
     /// Differences without a basis (`unexplained` and
@@ -277,11 +280,12 @@ pub fn compare_project(project_dir: &Path) -> Result<ComparisonReport> {
         .chain(&files.snapshot_sql_files)
         .chain(&files.test_sql_files);
     for path in sql_files {
-        let Ok(sql) = std::fs::read_to_string(path) else {
-            continue;
-        };
         let base = crate::input::normalize_path(project_dir);
         let file = crate::graph::dependency::relative_display_path(path, &base);
+        let Ok(sql) = std::fs::read_to_string(path) else {
+            report.unreadable.push(file);
+            continue;
+        };
         report.files += 1;
         let old = extract_all_with_prepared_prefix(&sql, &prefix, vars);
         let new = extract_dependencies(&sql, &library, vars);
@@ -360,14 +364,15 @@ pub fn compare_project(project_dir: &Path) -> Result<ComparisonReport> {
                 call: describe_source(call),
             });
         }
-        if old.config.materialized != new.config.materialized || old.config.tags != new.config.tags
-        {
+        let config_differs = old.config.materialized != new.config.materialized
+            || old.config.tags != new.config.tags;
+        if config_differs {
             report.config_differences.push(format!(
                 "{file}: render {:?} {:?}, interpreter {:?} {:?}",
                 old.config.materialized, old.config.tags, new.config.materialized, new.config.tags
             ));
         }
-        if report.differences.len() == before {
+        if report.differences.len() == before && !config_differs {
             report.identical_files += 1;
         }
     }

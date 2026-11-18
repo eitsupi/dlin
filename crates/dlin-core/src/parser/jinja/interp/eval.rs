@@ -604,19 +604,35 @@ impl<'a> Interp<'a> {
         // that pass it. An item whose filter result is unknown may or may
         // not be iterated.
         let mut passing: Vec<(AValue, Option<Causes>)> = Vec::new();
-        for item in items {
+        for item in &items {
             let Some(filter) = filter else {
-                passing.push((item, None));
+                passing.push((item.clone(), None));
                 continue;
             };
             let mut probe = st.clone();
             probe.scopes.push(Scope::new());
             self.assign(&mut probe, target, item.clone())?;
             let value = self.eval(&mut probe, filter)?;
+            probe.scopes.pop();
+            if !probe.same(&st) {
+                // A filter that changes state interleaves with the body in
+                // ways the interpreter does not follow.
+                let causes = self.unsupported("loop filter with side effects", filter.span);
+                self.record_used(&st, &causes);
+                return self.exec_unknown_loop(
+                    st,
+                    target,
+                    &causes,
+                    Some(filter),
+                    body,
+                    else_body,
+                    filter.span,
+                );
+            }
             match self.truth(&probe, &value, filter.span) {
-                Truth::Known(true) => passing.push((item, None)),
+                Truth::Known(true) => passing.push((item.clone(), None)),
                 Truth::Known(false) => {}
-                Truth::Unknown(causes) => passing.push((item, Some(causes))),
+                Truth::Unknown(causes) => passing.push((item.clone(), Some(causes))),
             }
         }
         let uncertain: Option<Causes> = passing
@@ -1457,9 +1473,22 @@ impl<'a> Interp<'a> {
                 }
             }
         }
+        if name == "default" || name == "d" {
+            // Jinja2 also accepts `default_value=` and `boolean=`; minijinja
+            // takes them positionally.
+            for (index, keyword) in [(1, "default_value"), (2, "boolean")] {
+                if let Some(pos) = kwargs.iter().position(|(k, _)| k.as_ref() == keyword) {
+                    let value = kwargs.remove(pos).1;
+                    while values.len() < index {
+                        values.push(AValue::Known(Value::from("")));
+                    }
+                    values.insert(index.min(values.len()), value);
+                }
+            }
+        }
+        let positional_count = values.len() - 1;
         if (name == "default" || name == "d")
-            && args.len() == 1
-            && matches!(args[0], Arg::Pos(_))
+            && positional_count == 1
             && !matches!(values[0], AValue::Known(_) | AValue::Unknown(_))
         {
             // A defined value that is not a plain value (a container, a
@@ -1467,7 +1496,7 @@ impl<'a> Interp<'a> {
             return Ok(values[0].clone());
         }
         if (name == "default" || name == "d")
-            && args.len() == 1
+            && positional_count == 1
             && let AValue::Known(value) = &values[0]
             && value.is_undefined()
         {
