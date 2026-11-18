@@ -459,8 +459,8 @@ separates two situations:
   exists, since the project may not be empty.
 
 Whether a path does not exist or cannot be inspected is decided from its
-metadata, not from `exists()`. Directory walks are sorted by file name, so the
-macro prefix, and which macro is left out of it, do not depend on the
+metadata, not from `exists()`. Directory walks are sorted by file name, so
+which of two macros with the same name is used does not depend on the
 filesystem. Inputs that are fatal today (a YAML file or a model, snapshot or
 test SQL file that cannot be read) stay fatal.
 

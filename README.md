@@ -16,7 +16,7 @@ When I edited dbt models in VS Code, [dbt Power User](https://marketplace.visual
 
 dlin is designed to fill that gap: a CLI tool that lets AI agents understand a dbt project's structure without falling back to `grep`. It is equally useful for humans, and its stdin/stdout interface makes it easy to combine with `jq`, `git diff`, and other CLI tools.
 
-To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, evaluates common Jinja patterns without Python, parallelizes file I/O, and caches aggressively.
+To replace `grep`, speed and size matter. dlin is a small, self-contained binary with no runtime dependencies. It parses SQL directly, interprets the Jinja that selects dependencies without Python, parallelizes file I/O, and caches manifest and column-lineage analysis.
 
 The key idea behind dlin is that finding the right models fast is what matters most. The hard part for agents is knowing which models to look at in the first place. dlin focuses on making model-level lineage fast and provides column-level lineage for deeper analysis.
 
@@ -89,9 +89,9 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 
 ### Limitations of SQL parse mode
 
-- `var()` resolves from `vars.yml` or `dbt_project.yml` (`--vars` CLI overrides not supported)
-- Runtime context (`target.type`, `env_var()`) is not evaluated
-- Conditional Jinja branches use default values; non-default paths may be missed
+- `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported)
+- `env_var()` uses its default and never reads the environment. A different value at run time can select a different dependency or branch than the one shown
+- Values known only at run time (`target`, `env_var()` without a default, `run_query()` results) do not select dependencies; `execute` is false, as when dbt parses the project
 - Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
 
 When these limitations matter, use `--source manifest`.

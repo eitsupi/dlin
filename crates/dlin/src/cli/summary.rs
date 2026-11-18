@@ -8,15 +8,19 @@ pub struct SummaryArgs {
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
 
-    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+    /// Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache).
+
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable extraction cache (always re-parse all files, results are not saved)
+    /// Disable the manifest analysis cache (always re-parse the manifest, results are not saved).
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_NO_CACHE")]
     pub no_cache: bool,
 
-    /// Discard existing cache and rebuild from scratch
+    /// Discard the existing manifest analysis cache and rebuild it.
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
     pub refresh_cache: bool,
 
@@ -132,15 +136,19 @@ pub struct ListArgs {
     #[arg(short = 'p', long = "project-dir", default_value = ".")]
     pub project_dir: PathBuf,
 
-    /// Directory for caching extraction results (default: <project-dir>/.dlin_cache)
+    /// Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache).
+
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
 
-    /// Disable extraction cache (always re-parse all files, results are not saved)
+    /// Disable the manifest analysis cache (always re-parse the manifest, results are not saved).
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_NO_CACHE")]
     pub no_cache: bool,
 
-    /// Discard existing cache and rebuild from scratch
+    /// Discard the existing manifest analysis cache and rebuild it.
+    /// Has no effect with --source sql, which has no cache
     #[arg(long, env = "DLIN_REFRESH_CACHE", conflicts_with = "no_cache")]
     pub refresh_cache: bool,
 

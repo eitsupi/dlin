@@ -10,82 +10,21 @@ use crate::graph::dependency::{
     InputFailure, InputKind, InputLocation, InputStage, ProjectGap, relative_display_path,
 };
 use crate::graph::types::{ExposureInfo, OwnerInfo};
-use crate::parser::cache;
 use crate::parser::columns::extract_select_columns;
 use crate::parser::discovery::{DiscoveredFiles, SkippedInput};
-use crate::parser::jinja::reachability::PreparedMacroPrefix;
-use crate::parser::jinja::{JinjaExtraction, MacroExclusion};
+use crate::parser::jinja::JinjaExtraction;
+use crate::parser::jinja::interp::MacroLibrary;
 use crate::parser::project::sql_file_stem;
-use crate::parser::sql::{RefCall, SourceCall, extract_sources};
+use crate::parser::sql::recovery::literal_calls;
+use crate::parser::sql::{RefCall, SourceCall};
 use crate::parser::yaml_schema::{
     ExposureDefinition, MetricDefinition, ModelDefinition, SavedQueryDefinition, SchemaFile,
     SemanticModelDefinition, SnapshotDefinition, parse_schema_file,
 };
 
-/// Read all macro SQL files, filter out unparseable ones, and return a
-/// pre-built prefix string for prepending to model templates. Macro files
-/// left out of the prefix are appended to `skipped`.
-fn load_macro_prefix(files: &DiscoveredFiles, skipped: &mut Vec<SkippedInput>) -> String {
-    let mut paths = Vec::new();
-    let mut sources = Vec::new();
-    for path in &files.macro_sql_files {
-        let content = std::fs::read(path)
-            .map_err(|e| (e.to_string(), InputFailure::from_io_error(&e)))
-            .and_then(|bytes| {
-                String::from_utf8(bytes).map_err(|e| (e.to_string(), InputFailure::InvalidUtf8))
-            });
-        match content {
-            Ok(content) => {
-                paths.push(path);
-                sources.push(content);
-            }
-            Err((message, failure)) => {
-                crate::warn!("could not read macro file {}: {}", path.display(), message);
-                skipped.push(SkippedInput {
-                    path: path.clone(),
-                    kind: InputKind::Macro,
-                    stage: InputStage::Read,
-                    failure,
-                });
-            }
-        }
-    }
-    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-    let report = crate::parser::jinja::build_macro_prefix_report(&sources);
-    for (index, exclusion) in report.excluded {
-        skipped.push(SkippedInput {
-            path: paths[index].clone(),
-            kind: InputKind::Macro,
-            stage: match exclusion {
-                MacroExclusion::Parse => InputStage::Parse,
-                MacroExclusion::Prefix => InputStage::MacroPrefix,
-            },
-            failure: InputFailure::ParseError,
-        });
-    }
-    report.prefix
-}
-
-/// Extract with the abstract interpreter instead of the placeholder render.
-///
-/// Temporary switch for comparing the two extractors on real projects while
-/// the interpreter is being developed; it disables the extraction cache.
-const EXPERIMENTAL_INTERPRETER_ENV: &str = "DLIN_EXPERIMENTAL_JINJA_INTERPRETER";
-
-fn experimental_library(
-    files: &DiscoveredFiles,
-    skipped: &mut Vec<SkippedInput>,
-) -> Option<crate::parser::jinja::interp::MacroLibrary> {
-    std::env::var_os(EXPERIMENTAL_INTERPRETER_ENV)?;
-    Some(interpreter_library(files, skipped))
-}
-
-/// Parse the project's macro files for the interpreter, recording the files
+/// Parse the project's macro files, recording the files
 /// that cannot be read or parsed.
-fn interpreter_library(
-    files: &DiscoveredFiles,
-    skipped: &mut Vec<SkippedInput>,
-) -> crate::parser::jinja::interp::MacroLibrary {
+fn load_macro_library(files: &DiscoveredFiles, skipped: &mut Vec<SkippedInput>) -> MacroLibrary {
     let mut sources: Vec<(PathBuf, String)> = Vec::new();
     for path in &files.macro_sql_files {
         let content = std::fs::read(path)
@@ -101,7 +40,7 @@ fn interpreter_library(
             }),
         }
     }
-    let library = crate::parser::jinja::interp::MacroLibrary::new(&sources);
+    let library = MacroLibrary::new(&sources);
     skipped.extend(library.unparsed.iter().map(|path| SkippedInput {
         path: path.clone(),
         kind: InputKind::Macro,
@@ -111,24 +50,17 @@ fn interpreter_library(
     library
 }
 
-/// Extract one SQL file with the configured extractor.
+/// Extract the dependencies and config of one SQL file.
 fn extract_sql(
     content: &str,
-    macro_prefix: &PreparedMacroPrefix,
-    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
+    library: &MacroLibrary,
     vars: &HashMap<String, serde_json::Value>,
 ) -> JinjaExtraction {
-    match library {
-        Some(library) => {
-            let extraction =
-                crate::parser::jinja::interp::extract_dependencies(content, library, vars);
-            JinjaExtraction {
-                refs: extraction.refs,
-                sources: extraction.sources,
-                config: extraction.config,
-            }
-        }
-        None => crate::parser::sql::extract_all_with_prepared_prefix(content, macro_prefix, vars),
+    let extraction = crate::parser::jinja::interp::extract_dependencies(content, library, vars);
+    JinjaExtraction {
+        refs: extraction.refs,
+        sources: extraction.sources,
+        config: extraction.config,
     }
 }
 
@@ -282,9 +214,9 @@ fn file_stem_str(path: &Path) -> String {
     sql_file_stem(path)
 }
 
-/// Cached extraction result for a model SQL file (refs and sources).
-/// Avoids re-running minijinja in `process_sql_edges`.
-type ExtractionCache = HashMap<PathBuf, (Vec<RefCall>, Vec<SourceCall>)>;
+/// Refs and sources already extracted from model SQL files, so that
+/// `process_sql_edges` does not extract them again.
+type ModelDependencies = HashMap<PathBuf, (Vec<RefCall>, Vec<SourceCall>)>;
 
 /// Result of parallel extraction for a single model SQL file
 struct ModelExtraction {
@@ -292,16 +224,10 @@ struct ModelExtraction {
     model_name: String,
     extraction: Option<JinjaExtraction>,
     columns: Vec<String>,
-    /// Semantic identity computed from the bytes used for this extraction.
-    /// Keeping only this token avoids retaining the full SQL corpus.
-    input_hash: Option<cache::ExtractionInputHash>,
-    /// Whether this extraction came from the disk cache (no need to re-save)
-    from_cache: bool,
 }
 
 /// Create nodes for model SQL files (with duplicate detection).
-/// Returns an in-memory cache of refs/sources (for `process_sql_edges`)
-/// and updates the disk cache with newly extracted results.
+/// Returns the extracted refs/sources (for `process_sql_edges`).
 ///
 /// `stem_to_versioned` maps SQL file stems to `(versioned_unique_id, base_model_name)`.
 /// When a file stem is present in this map, the node is registered under the
@@ -313,69 +239,31 @@ fn process_model_files(
     files: &DiscoveredFiles,
     project_dir: &Path,
     model_meta: &HashMap<String, project_yaml::YamlModelMeta>,
-    macro_prefix: &PreparedMacroPrefix,
-    disk_cache: &mut cache::ExtractionCache,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
-    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
-) -> ExtractionCache {
-    // Parallel phase: read files and run minijinja extraction concurrently.
-    // Uses disk cache (immutable borrow) to skip rendering for unchanged files.
-    let cache_ref = &*disk_cache;
+    library: &MacroLibrary,
+) -> ModelDependencies {
+    // Parallel phase: read and extract the files concurrently.
     let extractions: Vec<ModelExtraction> = files
         .model_sql_files
         .par_iter()
         .map(|sql_path| {
-            let model_name = file_stem_str(sql_path);
-
             let sql_bytes = std::fs::read(sql_path).ok();
-            let input_hash = sql_bytes
-                .as_deref()
-                .map(|bytes| cache_ref.input_hash(bytes));
-
-            // Check disk cache first. The bytes are read once and shared with
-            // the miss path so cache validation cannot observe a different
-            // file from the one that is rendered.
-            if let Some(cached) =
-                input_hash.and_then(|hash| cache_ref.get(sql_path, project_dir, hash))
-            {
-                let sql_content = sql_bytes
-                    .as_deref()
-                    .and_then(|bytes| std::str::from_utf8(bytes).ok());
-                let columns = sql_content.map(extract_select_columns).unwrap_or_default();
-                return ModelExtraction {
-                    sql_path: sql_path.clone(),
-                    model_name,
-                    extraction: Some(cached.clone()),
-                    columns,
-                    input_hash: None,
-                    from_cache: true,
-                };
-            }
-
             let sql_content = sql_bytes
                 .as_deref()
                 .and_then(|bytes| std::str::from_utf8(bytes).ok());
-
-            let extraction =
-                sql_content.map(|content| extract_sql(content, macro_prefix, library, vars));
-
-            let columns = sql_content.map(extract_select_columns).unwrap_or_default();
-
             ModelExtraction {
                 sql_path: sql_path.clone(),
-                model_name,
-                extraction,
-                columns,
-                input_hash,
-                from_cache: false,
+                model_name: file_stem_str(sql_path),
+                extraction: sql_content.map(|content| extract_sql(content, library, vars)),
+                columns: sql_content.map(extract_select_columns).unwrap_or_default(),
             }
         })
         .collect();
 
-    // Sequential phase: insert nodes into the graph and update disk cache
+    // Sequential phase: insert nodes into the graph
     let mut model_name_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
-    let mut mem_cache: ExtractionCache = HashMap::new();
+    let mut dependencies: ModelDependencies = HashMap::new();
 
     for me in extractions {
         if let Some(existing_path) = model_name_paths.get(&me.model_name) {
@@ -388,21 +276,13 @@ fn process_model_files(
         }
         model_name_paths.insert(me.model_name.clone(), me.sql_path.clone());
 
-        let from_cache = me.from_cache;
-        let (sql_config, cached_refs_sources) = match me.extraction {
+        let sql_config = match me.extraction {
             Some(ext) => {
-                // Save newly extracted results to disk cache
-                if !from_cache && let Some(input_hash) = me.input_hash {
-                    disk_cache.insert(&me.sql_path, project_dir, input_hash, &ext);
-                }
-                (ext.config, Some((ext.refs, ext.sources)))
+                dependencies.insert(me.sql_path.clone(), (ext.refs, ext.sources));
+                ext.config
             }
-            None => (Default::default(), None),
+            None => Default::default(),
         };
-
-        if let Some(rs) = cached_refs_sources {
-            mem_cache.insert(me.sql_path.clone(), rs);
-        }
 
         // Resolve versioned unique_id and base model name for YAML metadata lookup.
         let (unique_id, label, meta_key) =
@@ -460,7 +340,7 @@ fn process_model_files(
         });
     }
 
-    mem_cache
+    dependencies
 }
 
 /// Create nodes for simple file-based resources (seeds, snapshots)
@@ -492,8 +372,8 @@ fn process_simple_nodes(
 }
 
 /// Parse SQL files for ref()/source() calls and add edges.
-/// `extraction_cache` contains pre-extracted refs/sources for model files
-/// (from `process_model_files`) to avoid redundant minijinja renders.
+/// `model_dependencies` contains the refs/sources already extracted from
+/// model files (by `process_model_files`).
 /// `stem_to_versioned` is used to locate versioned model nodes by SQL file
 /// stem without relying on node_map aliases (which may point to a different
 /// version when `defined_in` uses a base-model name).
@@ -502,11 +382,10 @@ fn process_sql_edges(
     gb: &mut GraphBuilder,
     files: &DiscoveredFiles,
     project_dir: &Path,
-    macro_prefix: &PreparedMacroPrefix,
-    extraction_cache: &ExtractionCache,
+    model_dependencies: &ModelDependencies,
     vars: &HashMap<String, serde_json::Value>,
     stem_to_versioned: &HashMap<String, (String, String)>,
-    library: Option<&crate::parser::jinja::interp::MacroLibrary>,
+    library: &MacroLibrary,
 ) -> Result<()> {
     let all_sql_files: Vec<(&std::path::PathBuf, &str)> = files
         .model_sql_files
@@ -559,13 +438,13 @@ fn process_sql_edges(
             }
         };
 
-        // Use cached extraction for model files; extract fresh for others
+        // Model files were extracted already; extract the others here.
         let owned;
-        let (refs, sources) = if let Some(cached) = extraction_cache.get(*sql_path) {
-            (&cached.0, &cached.1)
+        let (refs, sources) = if let Some(extracted) = model_dependencies.get(*sql_path) {
+            (&extracted.0, &extracted.1)
         } else {
             let content = read_file(sql_path)?;
-            let extraction = extract_sql(&content, macro_prefix, library, vars);
+            let extraction = extract_sql(&content, library, vars);
             owned = (extraction.refs, extraction.sources);
             (&owned.0, &owned.1)
         };
@@ -848,61 +727,33 @@ pub struct GraphBuild {
 }
 
 /// Build the lineage graph from discovered files.
-/// If `cache_dir` is provided, it is used as the cache directory;
-/// otherwise the cache is stored under `<project_dir>/.dlin_cache/`.
-/// If `no_cache` is true, the extraction cache is completely disabled.
-/// If `refresh_cache` is true, the existing cache is ignored but new results
-/// are written to disk.
 pub fn build_graph(
     project_dir: &Path,
     files: &DiscoveredFiles,
-    cache_dir: Option<&Path>,
-    no_cache: bool,
-    refresh_cache: bool,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<LineageGraph> {
-    build_graph_report(project_dir, files, cache_dir, no_cache, refresh_cache, vars)
-        .map(|build| build.graph)
+    build_graph_report(project_dir, files, vars).map(|build| build.graph)
 }
 
 /// Like [`build_graph`], also returning the gaps found while building.
 pub fn build_graph_report(
     project_dir: &Path,
     files: &DiscoveredFiles,
-    cache_dir: Option<&Path>,
-    no_cache: bool,
-    refresh_cache: bool,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<GraphBuild> {
     let mut gb = GraphBuilder::new();
     let mut skipped = files.skipped_inputs.clone();
-    let library = experimental_library(files, &mut skipped);
-    let macro_prefix = if library.is_some() {
-        String::new()
-    } else {
-        load_macro_prefix(files, &mut skipped)
-    };
-    let prepared_macro_prefix = PreparedMacroPrefix::new(&macro_prefix);
-    let no_cache = no_cache || library.is_some();
-    let mut disk_cache = if no_cache {
-        cache::ExtractionCache::disabled()
-    } else if refresh_cache {
-        cache::ExtractionCache::fresh(project_dir, &macro_prefix, vars, cache_dir)
-    } else {
-        cache::ExtractionCache::load(project_dir, &macro_prefix, vars, cache_dir)
-    };
+    let library = load_macro_library(files, &mut skipped);
 
     let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir, &mut skipped)?;
-    let extraction_cache = process_model_files(
+    let model_dependencies = process_model_files(
         &mut gb,
         files,
         project_dir,
         &yaml_result.model_meta,
-        &prepared_macro_prefix,
-        &mut disk_cache,
         vars,
         &yaml_result.stem_to_versioned,
-        library.as_ref(),
+        &library,
     );
     for (unversioned_id, latest_versioned_id) in &yaml_result.version_aliases {
         gb.add_alias(unversioned_id.clone(), latest_versioned_id);
@@ -926,11 +777,10 @@ pub fn build_graph_report(
         &mut gb,
         files,
         project_dir,
-        &prepared_macro_prefix,
-        &extraction_cache,
+        &model_dependencies,
         vars,
         &yaml_result.stem_to_versioned,
-        library.as_ref(),
+        &library,
     )?;
     process_exposures(&mut gb, &yaml_result.exposures);
     process_generic_tests(&mut gb, &yaml_result.schemas);
@@ -941,7 +791,6 @@ pub fn build_graph_report(
         &yaml_result.saved_queries,
     );
 
-    disk_cache.save();
     Ok(GraphBuild {
         graph: gb.graph,
         project_gaps: project_gaps(skipped, project_dir),
@@ -987,7 +836,8 @@ fn resolve_ref(name: &str, node_map: &HashMap<String, NodeIndex>) -> String {
 
 fn parse_relation_source(relation: &str) -> Option<(String, String)> {
     let wrapped = format!("{{{{ {} }}}}", relation.trim());
-    extract_sources(&wrapped)
+    literal_calls(&wrapped)
+        .1
         .into_iter()
         .next()
         .map(|s| (s.source_name, s.table_name))
@@ -997,8 +847,9 @@ fn parse_exposure_ref(dep: &str) -> Option<(String, Option<String>)> {
     let dep = dep.trim();
     if dep.starts_with("ref(") {
         let wrapped = format!("{{{{ {} }}}}", dep);
-        let refs = crate::parser::sql::extract_refs(&wrapped);
-        refs.into_iter()
+        literal_calls(&wrapped)
+            .0
+            .into_iter()
             .next()
             .filter(|r| r.package.is_none())
             .map(|r| (r.name, r.version))

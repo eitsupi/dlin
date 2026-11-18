@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Probe and benchmark dlin's three persistent cache workloads."""
+"""Probe and benchmark dlin's persistent cache workloads (manifest and column).
+
+SQL mode has no persistent cache: it interprets every SQL file on each run.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +21,6 @@ from shlex import join as shell_join
 SUITE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = SUITE_ROOT.parents[1]
 CACHE_FILES = (
-    "extraction_cache.json",
     "manifest_graph_cache.json",
     "column_lineage_cache.json",
 )
@@ -213,92 +215,6 @@ def scenario(
     }
 
 
-def sql_invalidation_baselines(
-    workload: Path, binary: Path, results: Path
-) -> dict[str, object]:
-    source_project = workload / "sql_project"
-    model_files = sorted((source_project / "models").glob("*.sql"))
-    if len(model_files) < 3 or not (source_project / "models/orders_0002.sql").is_file():
-        raise RuntimeError(
-            "SQL workload must contain at least 3 models including "
-            "models/orders_0002.sql for invalidation baselines"
-        )
-    mutations = {
-        "single_sql_file": lambda project: mutate_single_sql_file(project),
-        "macro": lambda project: mutate_macro(project),
-        "vars": lambda project: mutate_vars(project),
-    }
-    baselines: dict[str, object] = {}
-    for name, mutate in mutations.items():
-        invalidation_root = results / "invalidation" / name
-        if invalidation_root.exists():
-            shutil.rmtree(invalidation_root)
-        isolated = invalidation_root / "sql_project"
-        isolated.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_project, isolated)
-        cache_dir = isolated.parent / "cache"
-        base_command = [
-            str(binary),
-            "graph",
-            "-p",
-            str(isolated),
-            "-o",
-            "json",
-            "--quiet",
-            "--cache-dir",
-            str(cache_dir),
-        ]
-        base_no_cache, base_no_cache_hash = json_probe(
-            [*base_command, "--no-cache"], f"{name}/base-no-cache"
-        )
-        if cache_dir.exists():
-            raise RuntimeError(f"{name}: base --no-cache created persistent state")
-        base_cached, base_cached_hash = json_probe(
-            [*base_command, "--refresh-cache"], f"{name}/base-persistent-cold"
-        )
-        if base_no_cache != base_cached:
-            raise RuntimeError(f"{name}: base no-cache and cold output differ")
-        before = cache_snapshot(cache_dir)
-        mutate(isolated)
-        mutated_no_cache, mutated_no_cache_hash = json_probe(
-            [*base_command, "--no-cache"], f"{name}/mutated-no-cache"
-        )
-        mutated_cached, mutated_cached_hash = json_probe(
-            base_command, f"{name}/mutated-persistent-warm"
-        )
-        after = cache_snapshot(cache_dir)
-        if mutated_cached != mutated_no_cache:
-            raise RuntimeError(f"{name}: cached mutation differs from no-cache mutation")
-        if mutated_cached == base_cached:
-            raise RuntimeError(f"{name}: mutation did not change graph output")
-        if after == before:
-            raise RuntimeError(f"{name}: mutation did not change cache state")
-        baselines[name] = {
-            "commands": {
-                "base_no_cache": shell_join([*base_command, "--no-cache"]),
-                "base_persistent_cold": shell_join(
-                    [*base_command, "--refresh-cache"]
-                ),
-                "mutated_no_cache": shell_join([*base_command, "--no-cache"]),
-                "mutated_persistent_warm": shell_join(base_command),
-            },
-            "output_hashes": {
-                "base_no_cache": base_no_cache_hash,
-                "base_persistent_cold": base_cached_hash,
-                "mutated_no_cache": mutated_no_cache_hash,
-                "mutated_persistent_warm": mutated_cached_hash,
-            },
-            "cache_before_mutation": before,
-            "cache_after_mutation": after,
-            "base_equivalent": base_no_cache == base_cached,
-            "mutation_equivalent": mutated_no_cache == mutated_cached,
-            "equivalent": base_no_cache == base_cached
-            and mutated_no_cache == mutated_cached,
-            "changed": mutated_cached != base_cached and after != before,
-        }
-    return baselines
-
-
 def validation_summary(metadata: dict[str, object]) -> str:
     workload_metadata = json.loads(
         (Path(metadata["workload"]) / "workload_metadata.json").read_text(
@@ -323,45 +239,8 @@ def validation_summary(metadata: dict[str, object]) -> str:
         result = "PASS" if probe["equivalent"] else "FAIL"
         cache_result = "unchanged after warm" if result == "PASS" else "check failure"
         lines.append(f"| {scenario['name']} | {result} (no-cache/cold/warm) | {cache_result} |")
-    lines.extend(["", "### SQL invalidation baselines", ""])
-    lines.append("| Mutation | Base equivalence | Mutation equivalence | Graph/cache changed |")
-    lines.append("| --- | --- | --- | --- |")
-    for name, baseline in metadata["sql_invalidation_baselines"].items():
-        base = "PASS" if baseline["base_equivalent"] else "FAIL"
-        mutation = "PASS" if baseline["mutation_equivalent"] else "FAIL"
-        changed = "PASS" if baseline["changed"] else "FAIL"
-        lines.append(f"| {name} | {base} | {mutation} | {changed} |")
     lines.extend(["", "Performance values are intentionally omitted from this summary.", ""])
     return "\n".join(lines)
-
-
-def mutate_single_sql_file(project: Path) -> None:
-    path = project / "models/orders_0002.sql"
-    content = path.read_text(encoding="utf-8")
-    updated = content.replace("ref('orders_0001')", "ref('orders')") + "-- mutation\n"
-    if updated == content or len(updated) == len(content):
-        raise RuntimeError("single SQL mutation did not change content and size")
-    path.write_text(updated, encoding="utf-8")
-
-
-def mutate_macro(project: Path) -> None:
-    path = project / "macros/benchmark.sql"
-    content = path.read_text(encoding="utf-8")
-    updated = content.replace(
-        "{{ value }}", "{{ value }}{% set _benchmark_dependency = ref('orders') %}"
-    )
-    if updated == content:
-        raise RuntimeError("macro mutation did not change content")
-    path.write_text(updated, encoding="utf-8")
-
-
-def mutate_vars(project: Path) -> None:
-    path = project / "vars.yml"
-    content = path.read_text(encoding="utf-8")
-    updated = content.replace("benchmark_parent: orders_", "benchmark_parent: orders\n# ")
-    if updated == content:
-        raise RuntimeError("vars mutation did not change content")
-    path.write_text(updated, encoding="utf-8")
 
 
 def main() -> int:
@@ -400,11 +279,6 @@ def main() -> int:
     model_count = workload_info["model_count"]
     final_model = "orders" if model_count == 1 else f"orders_{model_count - 1:04d}"
     scenarios = [
-        (
-            "sql",
-            [str(binary), "summary", "-p", str(workload / "sql_project"), "-o", "json", "--quiet"],
-            [str(binary), "graph", "-p", str(workload / "sql_project"), "-o", "json", "--quiet"],
-        ),
         (
             "manifest",
             [
@@ -510,8 +384,6 @@ def main() -> int:
                 not args.skip_timing,
             )
         )
-    invalidations = sql_invalidation_baselines(workload, binary, results)
-    metadata["sql_invalidation_baselines"] = invalidations
     if tree_digest(workload) != original_workload_digest:
         raise RuntimeError("benchmark runner modified the generated workload")
     metadata["finished_at_epoch"] = time.time()

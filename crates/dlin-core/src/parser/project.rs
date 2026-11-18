@@ -323,6 +323,14 @@ fn render_project_fields(
     Ok(())
 }
 
+/// The `default=` keyword argument, including an explicit `none`.
+fn keyword_default(kwargs: &minijinja::value::Kwargs) -> Option<Value> {
+    kwargs
+        .has("default")
+        .then(|| kwargs.get::<Value>("default").ok())
+        .flatten()
+}
+
 fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Environment<'static> {
     let values = vars.clone();
     let mut environment = Environment::new();
@@ -338,11 +346,7 @@ fn project_render_environment(vars: &HashMap<String, serde_json::Value>) -> Envi
             if let Some(value) = values.get(&name) {
                 return Ok(Value::from(minijinja::value::Serde(value)));
             }
-            if let Some(default) = args
-                .get(1)
-                .cloned()
-                .or_else(|| crate::parser::jinja::keyword_default(&kwargs))
-            {
+            if let Some(default) = args.get(1).cloned().or_else(|| keyword_default(&kwargs)) {
                 return Ok(default);
             }
             Err(minijinja::Error::new(

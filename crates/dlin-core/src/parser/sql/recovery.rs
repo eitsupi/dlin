@@ -1,13 +1,31 @@
-use std::collections::HashSet;
+//! Literal `ref()`/`source()`/`config()` calls found by pattern matching,
+//! for text the Jinja parser cannot handle: templates that do not parse and
+//! the dependency expressions written in YAML.
+
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::super::jinja::source::{
-    ModelMacroSpan, inside_string_literal, model_macro_definition_spans, string_literal_spans,
-    strip_inert_jinja,
-};
 use super::{RefCall, SourceCall, SqlConfig, normalize_version_str};
+
+static JINJA_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{#[\s\S]*?#\}").unwrap());
+
+// Matches {% raw %}...{% endraw %} sections, whose content jinja treats as literal text
+static JINJA_RAW_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{%[+-]?\s*raw\s*[+-]?%\}[\s\S]*?\{%[+-]?\s*endraw\s*[+-]?%\}").unwrap()
+});
+
+/// Strip Jinja comments from SQL content
+fn strip_jinja_comments(sql: &str) -> String {
+    JINJA_COMMENT.replace_all(sql, "").to_string()
+}
+
+/// Strip jinja constructs whose content is never evaluated ({# #} comments
+/// and {% raw %} sections), leaving only renderable template text.
+fn strip_inert_jinja(sql: &str) -> String {
+    let no_comments = strip_jinja_comments(sql);
+    JINJA_RAW_BLOCK.replace_all(&no_comments, "").to_string()
+}
 
 fn strip_version_quotes(s: &str) -> String {
     let s = s.trim();
@@ -71,47 +89,14 @@ static SOURCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Regex fallback for extracting ref() calls.
-/// Scans inside every jinja block so calls nested in macro arguments or
-/// {% set %} statements are found too, mirroring dbt which registers a
-/// ref() wherever it is evaluated.
-#[cfg(test)]
-pub(crate) fn extract_refs_regex(sql: &str) -> Vec<RefCall> {
-    extract_refs_regex_scoped(sql, None)
-}
-
-#[cfg(test)]
-pub(super) fn extract_refs_regex_scoped(
-    sql: &str,
-    macro_scopes: Option<&HashSet<String>>,
-) -> Vec<RefCall> {
-    extract_refs_and_sources_regex_scoped(sql, macro_scopes).0
-}
-
-/// Extract refs and sources in one cleaned-source/Jinja-block traversal.
-/// Keeping the two result vectors separate preserves the public extraction
-/// shape while avoiding duplicate parsing and string-literal scans in the
-/// fallback path.
-pub(crate) fn extract_refs_and_sources_regex_scoped(
-    sql: &str,
-    macro_scopes: Option<&HashSet<String>>,
-) -> (Vec<RefCall>, Vec<SourceCall>) {
+/// The `ref()` and `source()` calls whose arguments are all literals, inside
+/// any Jinja block outside comments and raw sections.
+pub(crate) fn literal_calls(sql: &str) -> (Vec<RefCall>, Vec<SourceCall>) {
     let cleaned = strip_inert_jinja(sql);
-    let definitions = macro_scopes.map(|_| model_macro_definition_spans(&cleaned));
     let mut refs = Vec::new();
     let mut sources = Vec::new();
 
     for block in JINJA_BLOCK.find_iter(&cleaned) {
-        if let Some(scopes) = macro_scopes {
-            let owner = definitions.as_ref().and_then(|definitions| {
-                definitions.iter().find(|definition| {
-                    definition.start <= block.start() && block.start() < definition.end
-                })
-            });
-            if owner.is_some_and(|definition| !scopes.contains(&definition.name)) {
-                continue;
-            }
-        }
         let literal_spans = string_literal_spans(block.as_str());
         for cap in REF_PATTERN.captures_iter(block.as_str()) {
             if inside_string_literal(&literal_spans, cap.get(0).unwrap().start()) {
@@ -156,49 +141,6 @@ pub(crate) fn extract_refs_and_sources_regex_scoped(
     (refs, sources)
 }
 
-/// Extract refs from already-selected macro definition slices. Reachability
-/// supplies spans from the original prefix, so successful scoped recovery can
-/// avoid rescanning every unrelated prefix definition and its owner lookup.
-#[cfg(test)]
-pub(super) fn extract_refs_regex_spans(source: &str, spans: &[ModelMacroSpan]) -> Vec<RefCall> {
-    extract_refs_and_sources_regex_spans(source, spans).0
-}
-
-/// Extract refs and sources from selected macro definition slices, cleaning
-/// and scanning each slice only once.
-pub(super) fn extract_refs_and_sources_regex_spans(
-    source: &str,
-    spans: &[ModelMacroSpan],
-) -> (Vec<RefCall>, Vec<SourceCall>) {
-    let mut refs = Vec::new();
-    let mut sources = Vec::new();
-    for span in spans {
-        let Some(definition) = source.get(span.start..span.end) else {
-            continue;
-        };
-        let (definition_refs, definition_sources) =
-            extract_refs_and_sources_regex_scoped(definition, None);
-        refs.extend(definition_refs);
-        sources.extend(definition_sources);
-    }
-    (refs, sources)
-}
-
-/// Regex fallback for extracting source() calls.
-/// Scans inside every jinja block, like [`extract_refs_regex`].
-#[cfg(test)]
-pub(crate) fn extract_sources_regex(sql: &str) -> Vec<SourceCall> {
-    extract_sources_regex_scoped(sql, None)
-}
-
-#[cfg(test)]
-pub(super) fn extract_sources_regex_scoped(
-    sql: &str,
-    macro_scopes: Option<&HashSet<String>>,
-) -> Vec<SourceCall> {
-    extract_refs_and_sources_regex_scoped(sql, macro_scopes).1
-}
-
 // Matches {{ config(...) }} blocks — captures the inner arguments.
 static CONFIG_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -224,9 +166,9 @@ static TAGS_PATTERN: LazyLock<Regex> =
 // Matches individual tag values inside the tags list.
 static TAG_VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"['"]([^'"]+)['"]"#).unwrap());
 
-/// Regex fallback for extracting config() settings.
+/// The literal settings of the first `config()` call.
 pub(crate) fn extract_config_regex(sql: &str) -> SqlConfig {
-    let cleaned = super::super::jinja::source::strip_jinja_comments(sql);
+    let cleaned = strip_jinja_comments(sql);
     let mut config = SqlConfig::default();
 
     if let Some(cap) = CONFIG_PATTERN.captures(&cleaned) {
@@ -243,4 +185,35 @@ pub(crate) fn extract_config_regex(sql: &str) -> SqlConfig {
     }
 
     config
+}
+
+/// Byte spans of quoted string literals inside a jinja block, honoring
+/// backslash escapes. Used to reject ref()/source() text that appears
+/// inside a string literal (e.g. a log message) rather than as a call.
+fn string_literal_spans(block: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut chars = block.char_indices();
+    while let Some((start, c)) = chars.next() {
+        if c != '\'' && c != '"' {
+            continue;
+        }
+        let mut end = block.len();
+        while let Some((i, d)) = chars.next() {
+            if d == '\\' {
+                chars.next();
+            } else if d == c {
+                end = i + d.len_utf8();
+                break;
+            }
+        }
+        spans.push((start, end));
+    }
+    spans
+}
+
+/// Whether `pos` falls strictly inside any of the given string literal spans
+/// (a call whose own arguments are quoted starts at the identifier, which is
+/// outside every span).
+fn inside_string_literal(spans: &[(usize, usize)], pos: usize) -> bool {
+    spans.iter().any(|&(start, end)| pos > start && pos < end)
 }
