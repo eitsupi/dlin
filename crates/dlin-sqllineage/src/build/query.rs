@@ -237,6 +237,7 @@ impl LineageBuilder {
                 let table_ref = crate::types::TableRef {
                     catalog: None,
                     schema: table.schema_name.as_ref().map(crate::Ident::from_ast),
+                    namespace: None,
                     table: crate::Ident::from_ast(table_name),
                 };
                 let range = table_ref.table.clone();

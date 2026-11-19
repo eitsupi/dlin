@@ -2,7 +2,7 @@ use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, Windo
 
 use crate::Ident;
 use crate::build::LineageBuilder;
-use crate::build::function_semantics::{self, ArgumentSemantic};
+use crate::build::function_semantics;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
 use crate::graph::scope::{Binding, ScopeKind};
@@ -303,15 +303,7 @@ impl LineageBuilder {
                         };
                         let is_static_syntax = semantics
                             .and_then(|semantics| semantics.get(index))
-                            .is_some_and(|semantic| {
-                                matches!(
-                                    semantic,
-                                    ArgumentSemantic::DatePart(grammar)
-                                        if function_semantics::expression_is_static_date_part(
-                                            expr, *grammar
-                                        )
-                                )
-                            });
+                            .is_some_and(|semantic| semantic.is_static_syntax(expr));
                         if !is_static_syntax {
                             ancestors.extend(self.collect_ancestors(expr));
                         }
@@ -546,16 +538,19 @@ impl LineageBuilder {
                 [table] => Some(Binding::Table(TableRef {
                     catalog: None,
                     schema: None,
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 [schema, table] => Some(Binding::Table(TableRef {
                     catalog: None,
                     schema: Some(Ident::from_ast(schema)),
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 [catalog, schema, table] => Some(Binding::Table(TableRef {
                     catalog: Some(Ident::from_ast(catalog)),
                     schema: Some(Ident::from_ast(schema)),
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 // Keep the legacy display-only fallback for an unsupported

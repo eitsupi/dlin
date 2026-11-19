@@ -388,6 +388,7 @@ impl Evaluator<'_, '_, '_> {
                                 Candidate::Relation(relation) => Some(crate::types::TableRef {
                                     catalog: relation.catalog,
                                     schema: relation.schema,
+                                    namespace: relation.namespace,
                                     table: relation.name,
                                 }),
                                 _ => None,
@@ -401,7 +402,69 @@ impl Evaluator<'_, '_, '_> {
                 }
                 Some((sources, false, transform))
             }
+            InputLookup::Unverified {
+                present,
+                possible,
+                values,
+            } => {
+                let mut transform = TransformKind::Direct;
+                let mut reasons = Vec::new();
+                for value in &values {
+                    let (sources, _, listed) = self.read_value(value, name);
+                    unsupported_reasons(&sources.origins, &mut reasons);
+                    transform = merge_transform(&transform, &listed);
+                }
+                let mut sources = Sources::one(ColumnOrigin::Unresolved(Unresolved::Unverified {
+                    column: name.clone(),
+                    present_candidates: self.with_array_sources(present),
+                    possible_candidates: self.with_array_sources(possible),
+                }));
+                for what in reasons {
+                    sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
+                }
+                Some((sources, false, transform))
+            }
         }
+    }
+
+    /// Fill in the columns each array element candidate's array reads.
+    fn with_array_sources(&mut self, mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+        for candidate in &mut candidates {
+            let Candidate::ArrayElement(element) = candidate else {
+                continue;
+            };
+            let Some(source) = element.source else {
+                continue;
+            };
+            let graph = self.cx.graph;
+            let dependencies = graph
+                .scopes
+                .virtual_source(source)
+                .open_element
+                .clone()
+                .unwrap_or_default();
+            for dependency in dependencies {
+                let (origins, _, _) =
+                    collect_leaf_origins(dependency, self.cx, &mut HashSet::new());
+                for origin in origins.origins {
+                    if let ColumnOrigin::Concrete { table, column } = origin.kind {
+                        let catalog = self.cx.catalog;
+                        element.array_sources.push(crate::SourceColumn {
+                            relation: catalog
+                                .and_then(|catalog| catalog.entry(&table))
+                                .map_or_else(
+                                    || super::analysis::plain_relation(&table),
+                                    |entry| entry.relation,
+                                ),
+                            column: catalog
+                                .and_then(|catalog| catalog.column(&table, &column))
+                                .unwrap_or(column),
+                        });
+                    }
+                }
+            }
+        }
+        candidates
     }
 
     /// The origins of the column a CTE or derived table publishes under

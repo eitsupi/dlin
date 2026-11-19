@@ -245,6 +245,74 @@ fn bigquery_date_trunc_week_modifier_is_syntax_only() {
 }
 
 #[test]
+fn bigquery_normalization_mode_is_syntax_only() {
+    let result = analyze_with_dialect(
+        r#"SELECT
+  NORMALIZE(name_col, nfkc) AS norm_lower,
+  NORMALIZE(name_col, NFKC) AS norm_upper,
+  NORMALIZE_AND_CASEFOLD(name_col, NFD) AS folded,
+  NORMALIZE(name_col) AS norm_default
+FROM events"#,
+        Dialect::BigQuery,
+    );
+    for name in ["norm_lower", "norm_upper", "folded", "norm_default"] {
+        assert_eq!(
+            concrete_sources(find_mapping(&result.output.columns, name)),
+            vec![("events".into(), "name_col".into())],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn postgres_and_trino_normalization_forms_are_syntax_only() {
+    for dialect in [Dialect::PostgreSql, Dialect::Trino] {
+        let result = analyze_with_dialect(
+            r#"SELECT normalize(name_col, NFKC) AS norm, normalize(name_col) AS norm_default FROM events"#,
+            dialect,
+        );
+        for name in ["norm", "norm_default"] {
+            assert_eq!(
+                concrete_sources(find_mapping(&result.output.columns, name)),
+                vec![("events".into(), "name_col".into())],
+                "{dialect:?} {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn normalization_mode_position_keeps_columns_outside_the_grammar() {
+    // A quoted identifier, a column in another function, and the mode
+    // keyword under a dialect without the grammar are all real values.
+    let result = analyze_with_dialect(
+        r#"SELECT
+  NORMALIZE(name_col, `nfkc`) AS quoted_mode,
+  CONCAT(name_col, nfkc) AS other_function
+FROM events"#,
+        Dialect::BigQuery,
+    );
+    for name in ["quoted_mode", "other_function"] {
+        assert_eq!(
+            concrete_sources(find_mapping(&result.output.columns, name)),
+            vec![
+                ("events".into(), "name_col".into()),
+                ("events".into(), "nfkc".into()),
+            ],
+            "{name}"
+        );
+    }
+    let generic = analyze_one(r#"SELECT NORMALIZE(name_col, nfkc) AS norm FROM events"#);
+    assert_eq!(
+        concrete_sources(find_mapping(&generic.output.columns, "norm")),
+        vec![
+            ("events".into(), "name_col".into()),
+            ("events".into(), "nfkc".into()),
+        ]
+    );
+}
+
+#[test]
 fn unqualified_struct_field_access_uses_top_level_column() {
     let result = analyze_with_dialect(
         "SELECT event.bare_field AS field FROM upstream_model",

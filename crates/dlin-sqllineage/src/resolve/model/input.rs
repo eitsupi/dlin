@@ -14,7 +14,9 @@ use super::build::{CacheKey, OutputModels};
 use super::join::fold_join_columns;
 use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
 use crate::catalog::ColumnPresence;
-use crate::graph::scope::{Binding, BindingEnv, JoinOperand, MergedColumns, ScopeId};
+use crate::graph::scope::{
+    AnonymousRange, Binding, BindingEnv, JoinOperand, MergedColumns, ScopeId,
+};
 use crate::keys::table_key;
 use crate::types::{Evidence, TableRef};
 use crate::{Candidate, Dialect, Ident, Relation};
@@ -39,12 +41,20 @@ pub(in crate::resolve) struct RangeRef {
 
 impl RangeRef {
     /// The typed candidate a range stands for in an ambiguity. A virtual
-    /// source is not a relation and is never a candidate.
+    /// source with a range variable publishes the columns it lists and is
+    /// never a candidate; one without stands for the element of an array.
     pub(in crate::resolve) fn candidate(&self) -> Option<Candidate> {
         match &self.binding {
+            Binding::VirtualSource(source) if self.anonymous => {
+                Some(Candidate::ArrayElement(crate::ArrayElement {
+                    array_sources: Vec::new(),
+                    source: Some(*source),
+                }))
+            }
             Binding::Table(table) => Some(Candidate::Relation(Relation {
                 catalog: table.catalog.clone(),
                 schema: table.schema.clone(),
+                namespace: table.namespace,
                 name: table.table.clone(),
             })),
             Binding::Cte(_) => Some(Candidate::Cte(self.name.clone())),
@@ -134,6 +144,31 @@ pub(in crate::resolve) enum InputLookup {
         typed: bool,
         values: Vec<ValueId>,
     },
+    /// Several relations may carry the name, and the element of an array
+    /// whose fields are not known is one of them, so the name stays open
+    /// until the element's type is known. `present` are the candidates known
+    /// to publish the name, `possible` those that may.
+    Unverified {
+        present: Vec<Candidate>,
+        possible: Vec<Candidate>,
+        values: Vec<ValueId>,
+    },
+}
+
+/// Keep the first of each candidate, in order.
+fn dedup_candidates(candidates: &mut Vec<Candidate>) {
+    let mut seen = Vec::new();
+    candidates.retain(|candidate| {
+        let new = !seen.contains(candidate);
+        if new {
+            seen.push(candidate.clone());
+        }
+        new
+    });
+}
+
+fn is_array_element(candidate: &Candidate) -> bool {
+    matches!(candidate, Candidate::ArrayElement(_))
 }
 
 impl InputLookup {
@@ -192,35 +227,85 @@ impl InputModel {
                         candidates: candidates_of(segment.ranges.iter()),
                     })
             }
-            Choice::Ambiguous(ambiguity) => Standing::Present(InputLookup::Ambiguous {
-                typed: !ambiguity.refinable,
-                values: ambiguity
-                    .listed
-                    .iter()
-                    .filter_map(|&index| match &elements[index] {
-                        OutputElement::Column(slot) => Some(slot.value.clone()),
-                        _ => None,
-                    })
-                    .chain(
-                        self.model
-                            .matches(name)
-                            .unknown
+            // The offset of an expansion is a column it lists. A field of the
+            // element under the same name would leave no valid reading of the
+            // reference, so the listed column is what the name denotes.
+            Choice::Ambiguous(ambiguity)
+                if ambiguity.candidates.first().is_some_and(|first| {
+                    is_array_element(first)
+                        && ambiguity
+                            .candidates
                             .iter()
-                            .filter_map(|&index| {
-                                let OutputElement::Unknown(segment) = &elements[index] else {
-                                    return None;
-                                };
-                                // Evaluated only for the reasons it cannot
-                                // be known; an ambiguity claims no source.
-                                Some(ValueId::Named {
-                                    providers: vec![segment.provider.clone()],
-                                    column: name.clone(),
-                                })
-                            }),
-                    )
-                    .collect(),
-                candidates: ambiguity.candidates,
-            }),
+                            .all(|candidate| candidate == first)
+                }) && let [index] = ambiguity.listed.as_slice()
+                    && let OutputElement::Column(slot) = &elements[*index] =>
+            {
+                Standing::Present(InputLookup::Column {
+                    value: slot.value.clone(),
+                    contributing: slot.candidate_ranges.clone(),
+                })
+            }
+            Choice::Ambiguous(ambiguity) => {
+                // The candidates of the listed columns publish the name; the
+                // others, an element of an array among them, only may. Two
+                // listed columns leave the name ambiguous whatever the others
+                // carry, even two of one relation read twice; one or none
+                // leaves it to what the others publish. A column that a join
+                // merges is listed once.
+                let mut present = candidates_of(ambiguity.listed.iter().flat_map(|&index| {
+                    match &elements[index] {
+                        OutputElement::Column(slot) => slot.candidate_ranges.iter(),
+                        OutputElement::Unknown(_) => [].iter(),
+                    }
+                }));
+                dedup_candidates(&mut present);
+                let mut possible: Vec<Candidate> = ambiguity
+                    .candidates
+                    .iter()
+                    .filter(|candidate| !present.contains(candidate))
+                    .cloned()
+                    .collect();
+                dedup_candidates(&mut possible);
+                let listed_values = || {
+                    ambiguity
+                        .listed
+                        .iter()
+                        .filter_map(|&index| match &elements[index] {
+                            OutputElement::Column(slot) => Some(slot.value.clone()),
+                            OutputElement::Unknown(_) => None,
+                        })
+                };
+                if ambiguity.listed.len() < 2 && possible.iter().any(is_array_element) {
+                    return Standing::Present(InputLookup::Unverified {
+                        present,
+                        possible,
+                        values: listed_values().collect(),
+                    });
+                }
+                Standing::Present(InputLookup::Ambiguous {
+                    typed: !ambiguity.refinable,
+                    values: listed_values()
+                        .chain(
+                            self.model
+                                .matches(name)
+                                .unknown
+                                .iter()
+                                .filter_map(|&index| {
+                                    let OutputElement::Unknown(segment) = &elements[index] else {
+                                        return None;
+                                    };
+                                    // Evaluated only for the reasons it cannot be
+                                    // known; an ambiguity claims no source.
+                                    Some(ValueId::Named {
+                                        providers: vec![segment.provider.clone()],
+                                        column: name.clone(),
+                                    })
+                                }),
+                        )
+                        .collect(),
+                    candidates: ambiguity.candidates,
+                })
+            }
         }
     }
 }
@@ -251,10 +336,12 @@ enum Walk {
         candidates: Vec<Candidate>,
     },
     /// Relations of different clauses may each carry the name, and the
-    /// nearer ones cannot be shown to hide the farther ones.
+    /// nearer ones cannot be shown to hide the farther ones. `present` are
+    /// the candidates among them known to publish the name.
     Several {
         answer: InputLookup,
         candidates: Vec<Candidate>,
+        present: Vec<Candidate>,
         values: Vec<ValueId>,
     },
 }
@@ -264,10 +351,15 @@ impl Walk {
     /// farther clauses answered.
     fn behind(answer: InputLookup, mut candidates: Vec<Candidate>, farther: Self) -> Self {
         let mut values = Vec::new();
+        let mut present = Vec::new();
         match farther {
             Self::Absent => return Self::Possible { answer, candidates },
             Self::Present(lookup) => {
                 let (more, listed) = providers_of(&lookup);
+                match lookup {
+                    InputLookup::Unverified { present: known, .. } => present.extend(known),
+                    _ => present.extend(more.iter().cloned()),
+                }
                 candidates.extend(more);
                 values.extend(listed);
             }
@@ -276,16 +368,19 @@ impl Walk {
             } => candidates.extend(more),
             Self::Several {
                 candidates: more,
+                present: known,
                 values: listed,
                 ..
             } => {
                 candidates.extend(more);
+                present.extend(known);
                 values.extend(listed);
             }
         }
         Self::Several {
             answer,
             candidates,
+            present,
             values,
         }
     }
@@ -293,20 +388,37 @@ impl Walk {
     fn into_lookup(self) -> Option<InputLookup> {
         match self {
             Self::Absent => None,
+            // The element of an array is never the answer on its own: its
+            // fields are not known, so nothing shows it carries the name.
+            Self::Possible { candidates, .. } if candidates.iter().any(is_array_element) => {
+                Some(InputLookup::Unverified {
+                    present: Vec::new(),
+                    possible: candidates,
+                    values: Vec::new(),
+                })
+            }
             Self::Present(lookup) | Self::Possible { answer: lookup, .. } => Some(lookup),
             Self::Several {
                 answer,
                 mut candidates,
+                mut present,
                 values,
             } => {
-                let mut seen = Vec::new();
-                candidates.retain(|candidate| {
-                    let new = !seen.contains(candidate);
-                    if new {
-                        seen.push(candidate.clone());
-                    }
-                    new
-                });
+                dedup_candidates(&mut candidates);
+                // A nearer element of an array may hide what the farther
+                // clauses provide, a confirmed ambiguity among them included.
+                if candidates.iter().any(is_array_element) {
+                    dedup_candidates(&mut present);
+                    let possible = candidates
+                        .into_iter()
+                        .filter(|candidate| !present.contains(candidate))
+                        .collect();
+                    return Some(InputLookup::Unverified {
+                        present,
+                        possible,
+                        values,
+                    });
+                }
                 // The same physical relation at both levels supplies the
                 // same column either way.
                 if values.is_empty()
@@ -330,6 +442,7 @@ fn table_candidate(table: &TableRef) -> Candidate {
     Candidate::Relation(Relation {
         catalog: table.catalog.clone(),
         schema: table.schema.clone(),
+        namespace: table.namespace,
         name: table.table.clone(),
     })
 }
@@ -348,6 +461,14 @@ fn providers_of(lookup: &InputLookup) -> (Vec<Candidate>, Vec<ValueId>) {
         InputLookup::Ambiguous {
             candidates, values, ..
         } => (candidates.clone(), values.clone()),
+        InputLookup::Unverified {
+            present,
+            possible,
+            values,
+        } => (
+            present.iter().chain(possible).cloned().collect(),
+            values.clone(),
+        ),
     }
 }
 
@@ -443,7 +564,7 @@ impl OutputModels<'_, '_, '_> {
         evidence: &mut Evidence,
     ) -> (Standing, InputLookup) {
         let bindings = effective_bindings(env, self.graph);
-        let anonymous = !self.graph.scopes.anonymous_derived(env).is_empty();
+        let anonymous = !self.graph.scopes.anonymous(env).is_empty();
         match bindings.as_slice() {
             [] if !anonymous => (Standing::Absent, InputLookup::Absent),
             [(range_name, binding)] if !anonymous => {
@@ -556,54 +677,52 @@ impl OutputModels<'_, '_, '_> {
             })
             .collect();
         let positions = graph.scopes.clause_binding_positions(env);
-        // A derived table without a range variable is a relation of the
-        // clause like any other: it takes its place among the others in the
-        // order the clause lists them, and an unqualified name may be one of
-        // its columns.
+        // A FROM item without a range variable is a relation of the clause
+        // like any other: it takes its place among the others in the order
+        // the clause lists them, and an unqualified name may be one of its
+        // columns.
         let mut anonymous = graph
             .scopes
-            .anonymous_derived(env)
+            .anonymous(env)
             .into_iter()
             .enumerate()
-            .map(|(offset, (at, child))| {
+            .map(|(offset, (at, item))| {
                 let range = RangeRef {
                     index: ranges.len() + offset,
                     name: Ident::unquoted(""),
-                    binding: Binding::DerivedTable(child),
+                    binding: item.binding(),
                     anonymous: true,
                 };
-                (at, range)
+                (at, (range, item))
             })
             .peekable();
         let mut invalid = Vec::new();
         let mut reads = Vec::new();
         let mut groups = Vec::new();
         let mut schema = Evidence::default();
-        let mut push_group = |this: &mut Self, range: &RangeRef| {
+        let mut push_group = |this: &mut Self, range: &RangeRef, item: Option<AnonymousRange>| {
             if let Some(model) = this.binding_model(&range.binding) {
                 reads.push((range.index, model));
             }
             let group_schema = this.binding_schema(&range.binding);
             schema.extend(&group_schema);
             groups.push(Group {
-                members: vec![match &range.binding {
-                    Binding::DerivedTable(child) if range.anonymous => {
-                        JoinOperand::Anonymous(*child)
-                    }
-                    _ => JoinOperand::Named(range.name.clone()),
-                }],
+                members: vec![item.map_or_else(
+                    || JoinOperand::Named(range.name.clone()),
+                    JoinOperand::Anonymous,
+                )],
                 elements: this.binding_part(range),
                 schema: group_schema,
             });
         };
         for (range, &position) in ranges.iter().zip(&positions) {
-            while let Some((_, earlier)) = anonymous.next_if(|(at, _)| *at < position) {
-                push_group(self, &earlier);
+            while let Some((_, (earlier, item))) = anonymous.next_if(|(at, _)| *at < position) {
+                push_group(self, &earlier, Some(item));
             }
-            push_group(self, range);
+            push_group(self, range, None);
         }
-        for (_, range) in anonymous {
-            push_group(self, &range);
+        for (_, (range, item)) in anonymous {
+            push_group(self, &range, Some(item));
         }
         let merges = graph.scopes.join_merges(env);
         let mut seen = HashSet::new();

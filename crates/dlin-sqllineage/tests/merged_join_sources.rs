@@ -113,6 +113,7 @@ fn show_lineage(column: &OutputColumn) -> Vec<String> {
                             Candidate::Relation(r) => r.name.value.as_str(),
                             Candidate::Cte(id) | Candidate::Derived(Some(id)) => id.value.as_str(),
                             Candidate::Derived(None) => "?",
+                            Candidate::ArrayElement(_) => "<array element>",
                         })
                         .collect();
                     format!("?{}({})", column.value, names.join(","))
@@ -419,6 +420,7 @@ fn natural_join_keeps_schema_dependent_contributions_when_a_side_is_unknown() {
     let relation = |name: &str| Relation {
         catalog: None,
         schema: None,
+        namespace: None,
         name: Ident::unquoted(name),
     };
     let expected = |known: &str, unknown: &str| Lineage::Partial {

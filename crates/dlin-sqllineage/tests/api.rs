@@ -187,6 +187,7 @@ fn nested_star_does_not_open_final_output() {
                                 && candidates.contains(&Candidate::Relation(Relation {
                                     catalog: None,
                                     schema: None,
+                                    namespace: None,
                                     name: Ident::unquoted("some_table"),
                                 }))
                                 && candidates.contains(&Candidate::Derived(Some(Ident::unquoted("src"))))
@@ -300,6 +301,7 @@ impl Catalog for BorrowedCatalog {
             relation: Relation {
                 catalog: None,
                 schema: Some(Ident::quoted("Physical", Quote::Double)),
+                namespace: None,
                 name: Ident::quoted("Raw", Quote::Double),
             },
             columns: Cow::Borrowed(&self.columns),

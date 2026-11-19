@@ -110,7 +110,36 @@ fn needs_quoting(value: &str) -> bool {
 pub struct RelationRef {
     catalog: Option<Identifier>,
     schema: Option<Identifier>,
+    /// A system namespace between the schema and the name, such as `BigQuery`
+    /// `INFORMATION_SCHEMA`, whose scope (a region or a dataset) is `schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<RelationNamespace>,
     name: Identifier,
+}
+
+/// A system namespace that qualifies a relation name beyond its schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationNamespace {
+    /// `BigQuery` `INFORMATION_SCHEMA` views.
+    InformationSchema,
+}
+
+impl RelationNamespace {
+    /// How the namespace is written in SQL.
+    fn sql_name(self) -> &'static str {
+        match self {
+            Self::InformationSchema => "INFORMATION_SCHEMA",
+        }
+    }
+
+    /// The namespace as relation names are displayed, with unquoted
+    /// identifiers in lower case.
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::InformationSchema => "information_schema",
+        }
+    }
 }
 
 impl RelationRef {
@@ -122,6 +151,7 @@ impl RelationRef {
         Self {
             catalog,
             schema,
+            namespace: None,
             name,
         }
     }
@@ -130,8 +160,31 @@ impl RelationRef {
         Self {
             catalog: catalog.map(Identifier::manifest),
             schema: schema.map(Identifier::manifest),
+            namespace: None,
             name: Identifier::manifest(name),
         }
+        .with_scoped_namespace()
+    }
+
+    /// Read a schema written as `scope.INFORMATION_SCHEMA` as the scope in
+    /// that namespace. dbt sources declare `BigQuery` region and dataset
+    /// views this way (`schema: region-us.INFORMATION_SCHEMA`), and render
+    /// the schema as one quoted part. No other adapter names a schema with a
+    /// dotted `INFORMATION_SCHEMA` suffix.
+    fn with_scoped_namespace(mut self) -> Self {
+        if self.namespace.is_none()
+            && let Some(schema) = &self.schema
+            && let Some((scope, namespace)) = schema.value.rsplit_once('.')
+            && !scope.is_empty()
+            && namespace.eq_ignore_ascii_case(RelationNamespace::InformationSchema.sql_name())
+        {
+            self.schema = Some(Identifier {
+                value: scope.to_owned(),
+                quote_style: schema.quote_style,
+            });
+            self.namespace = Some(RelationNamespace::InformationSchema);
+        }
+        self
     }
 
     /// The relation of a manifest resource. dbt records it as the adapter
@@ -155,7 +208,7 @@ impl RelationRef {
             .filter(|relation| relation.name.value == name)
             .map_or_else(
                 || Self::from_manifest(catalog, schema, name),
-                |relation| relation.as_manifest(),
+                |relation| relation.as_manifest().with_scoped_namespace(),
             )
     }
 
@@ -166,6 +219,7 @@ impl RelationRef {
         Self {
             catalog: catalog.map(Identifier::unquoted),
             schema: schema.map(Identifier::unquoted),
+            namespace: None,
             name: Identifier::unquoted(name),
         }
     }
@@ -179,6 +233,7 @@ impl RelationRef {
         Self {
             catalog: catalog.map(|value| Identifier::unquoted(value.to_lowercase())),
             schema: schema.map(|value| Identifier::unquoted(value.to_lowercase())),
+            namespace: None,
             name: Identifier::unquoted(name.to_lowercase()),
         }
     }
@@ -187,6 +242,7 @@ impl RelationRef {
         Self {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Identifier::unquoted(name),
         }
     }
@@ -201,6 +257,7 @@ impl RelationRef {
                 .schema
                 .as_ref()
                 .map(|component| Identifier::manifest(component.value.clone())),
+            namespace: self.namespace,
             name: Identifier::manifest(self.name.value.clone()),
         }
     }
@@ -219,20 +276,48 @@ impl RelationRef {
             [name] => Ok(Self {
                 catalog: None,
                 schema: None,
+                namespace: None,
                 name: name.clone(),
             }),
             [schema, name] => Ok(Self {
                 catalog: None,
                 schema: Some(schema.clone()),
+                namespace: None,
                 name: name.clone(),
             }),
             [catalog, schema, name] => Ok(Self {
                 catalog: Some(catalog.clone()),
                 schema: Some(schema.clone()),
+                namespace: None,
                 name: name.clone(),
             }),
+            // `project.scope.INFORMATION_SCHEMA.view`, as dbt renders a
+            // `BigQuery` source whose schema names the namespace.
+            [catalog, schema, namespace, name]
+                if namespace
+                    .value
+                    .eq_ignore_ascii_case(RelationNamespace::InformationSchema.sql_name()) =>
+            {
+                Ok(Self {
+                    catalog: Some(catalog.clone()),
+                    schema: Some(schema.clone()),
+                    namespace: Some(RelationNamespace::InformationSchema),
+                    name: name.clone(),
+                })
+            }
             _ => Err(RelationParseError::TooManyComponents),
         }
+    }
+
+    /// The same relation, read in `namespace`.
+    #[must_use]
+    pub(crate) fn in_namespace(mut self, namespace: Option<RelationNamespace>) -> Self {
+        self.namespace = namespace;
+        self
+    }
+
+    pub(crate) fn namespace(&self) -> Option<RelationNamespace> {
+        self.namespace
     }
 
     pub(crate) fn catalog(&self) -> Option<&Identifier> {
@@ -256,6 +341,9 @@ impl RelationRef {
     /// only form that can match a qualified relation by name; callers that
     /// have multiple candidates must use [`resolve_unique`] instead.
     pub(crate) fn matches(&self, other: &Self, dialect: DlinDialect) -> bool {
+        if self.namespace != other.namespace {
+            return false;
+        }
         if self.qualification_len() > 1
             && other.qualification_len() > 1
             && self.qualification_len() != other.qualification_len()
@@ -282,7 +370,9 @@ impl RelationRef {
     /// sqllineage catalog-provider boundary is allowed to use this
     /// case-insensitive fallback for Generic and BigQuery.
     pub(crate) fn matches_case_insensitive(&self, other: &Self) -> bool {
-        if self.qualification_len() != other.qualification_len() {
+        if self.qualification_len() != other.qualification_len()
+            || self.namespace != other.namespace
+        {
             return false;
         }
         self.components()
@@ -310,6 +400,9 @@ impl RelationRef {
         }
         if let Some(schema) = &self.schema {
             parts.push(schema.render());
+        }
+        if let Some(namespace) = self.namespace {
+            parts.push(namespace.display_name().to_owned());
         }
         parts.push(self.name.render());
         parts.join(".")
@@ -564,6 +657,65 @@ mod tests {
             !parsed("\"foo.bar\".\"orders\"")
                 .matches(&parsed("\"foo\".\"bar\".\"orders\""), DlinDialect::Generic)
         );
+    }
+
+    #[test]
+    fn manifest_information_schema_paths_take_the_namespace() {
+        let view = RelationRef::from_backend(Some("p"), Some("region-us"), "JOBS_BY_PROJECT")
+            .in_namespace(Some(RelationNamespace::InformationSchema));
+        for relation in [
+            RelationRef::from_manifest_resource(
+                Some("`p`.`region-us.INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`"),
+                Some("p"),
+                Some("region-us.INFORMATION_SCHEMA"),
+                "JOBS_BY_PROJECT",
+            ),
+            RelationRef::from_manifest_resource(
+                Some("`p`.`region-us`.`INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`"),
+                Some("p"),
+                Some("region-us.INFORMATION_SCHEMA"),
+                "JOBS_BY_PROJECT",
+            ),
+            RelationRef::from_manifest(
+                Some("p"),
+                Some("region-us.information_schema"),
+                "JOBS_BY_PROJECT",
+            ),
+        ] {
+            assert_eq!(
+                relation.namespace(),
+                Some(RelationNamespace::InformationSchema),
+                "{relation:?}"
+            );
+            assert_eq!(relation.schema().unwrap().value(), "region-us");
+            assert!(
+                relation.matches(&view, DlinDialect::BigQuery),
+                "{relation:?}"
+            );
+        }
+        // A schema named INFORMATION_SCHEMA without a scope stays a schema.
+        let snowflake =
+            RelationRef::from_manifest(Some("db"), Some("INFORMATION_SCHEMA"), "TABLES");
+        assert_eq!(snowflake.namespace(), None);
+    }
+
+    #[test]
+    fn a_namespace_is_rendered_and_must_match() {
+        let view = RelationRef::from_backend(Some("p"), Some("region-us"), "jobs_by_project")
+            .in_namespace(Some(RelationNamespace::InformationSchema));
+        assert_eq!(
+            view.render(),
+            "p.region-us.information_schema.jobs_by_project"
+        );
+        let same = RelationRef::from_manifest(Some("p"), Some("region-us"), "jobs_by_project")
+            .in_namespace(Some(RelationNamespace::InformationSchema));
+        assert!(view.matches(&same, DlinDialect::BigQuery));
+        // The same parts outside the namespace are another relation, and so
+        // is a bare name.
+        let plain = RelationRef::from_backend(Some("p"), Some("region-us"), "jobs_by_project");
+        assert!(!view.matches(&plain, DlinDialect::BigQuery));
+        assert!(!view.matches_case_insensitive(&plain));
+        assert!(!view.matches(&RelationRef::bare("jobs_by_project"), DlinDialect::BigQuery));
     }
 
     #[test]

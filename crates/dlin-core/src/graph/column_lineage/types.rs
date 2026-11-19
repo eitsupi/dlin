@@ -985,6 +985,18 @@ pub enum UnresolvedReason {
         column: Ident,
         candidates: Vec<UnresolvedCandidate>,
     },
+    /// A column could come from more than one candidate, and the columns of
+    /// at least one of them are not known. A valid query can still bind the
+    /// name; the unknown columns decide which candidate it is.
+    Unverified {
+        column: Ident,
+        /// Candidates known to publish a column of this name. This says
+        /// nothing about the value: a possible candidate can still be the one
+        /// the query binds.
+        present_candidates: Vec<UnresolvedCandidate>,
+        /// Candidates whose columns are not known and may carry the name.
+        possible_candidates: Vec<UnresolvedCandidate>,
+    },
     /// A column read from another model matches more than one of that model's
     /// output columns, so none of them is chosen.
     AmbiguousOutput {
@@ -1052,22 +1064,33 @@ impl std::fmt::Display for UnresolvedReason {
                 )
             }
             Self::Ambiguous { column, candidates } => {
-                let candidates: Vec<String> = candidates
-                    .iter()
-                    .map(|candidate| match candidate {
-                        UnresolvedCandidate::Relation { relation } => relation.to_string(),
-                        UnresolvedCandidate::Cte { name } => format!("cte {name}"),
-                        UnresolvedCandidate::Derived { name: Some(name) } => {
-                            format!("derived table {name}")
-                        }
-                        UnresolvedCandidate::Derived { name: None } => "derived table".to_string(),
-                    })
-                    .collect();
+                let candidates: Vec<String> = candidates.iter().map(ToString::to_string).collect();
                 write!(
                     f,
                     "'{column}' is ambiguous between {}",
                     candidates.join(", ")
                 )
+            }
+            Self::Unverified {
+                column,
+                present_candidates,
+                possible_candidates,
+            } => {
+                let possible: Vec<String> = possible_candidates
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                write!(
+                    f,
+                    "'{column}' may come from {}, whose columns are not known",
+                    possible.join(" or ")
+                )?;
+                if !present_candidates.is_empty() {
+                    let present: Vec<String> =
+                        present_candidates.iter().map(ToString::to_string).collect();
+                    write!(f, ", or from {}", present.join(" or "))?;
+                }
+                Ok(())
             }
             Self::AmbiguousOutput {
                 relation,
@@ -1103,9 +1126,44 @@ pub struct UnresolvedSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UnresolvedCandidate {
-    Relation { relation: RelationRef },
-    Cte { name: String },
-    Derived { name: Option<String> },
+    Relation {
+        relation: RelationRef,
+    },
+    Cte {
+        name: String,
+    },
+    Derived {
+        name: Option<String>,
+    },
+    /// The element of an array expanded without a range variable, such as
+    /// BigQuery `UNNEST(params)`, whose fields are not known.
+    ArrayElement {
+        /// The columns the array expression reads, as far as the statement
+        /// shows them. Empty does not prove that the array reads no column.
+        array_sources: Vec<UnresolvedSource>,
+    },
+}
+
+impl std::fmt::Display for UnresolvedCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Relation { relation } => write!(f, "{relation}"),
+            Self::Cte { name } => write!(f, "cte {name}"),
+            Self::Derived { name: Some(name) } => write!(f, "derived table {name}"),
+            Self::Derived { name: None } => f.write_str("derived table"),
+            Self::ArrayElement { array_sources } => {
+                let sources: Vec<String> = array_sources
+                    .iter()
+                    .map(|source| format!("{}.{}", source.relation, source.column))
+                    .collect();
+                if sources.is_empty() {
+                    f.write_str("the element of an array")
+                } else {
+                    write!(f, "the element of UNNEST({})", sources.join(", "))
+                }
+            }
+        }
+    }
 }
 
 /// The kind of a set operation, as reported by an unresolved reason.

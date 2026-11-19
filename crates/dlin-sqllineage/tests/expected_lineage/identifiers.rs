@@ -382,6 +382,7 @@ pub fn cases() -> Vec<Case> {
                 Relation {
                     catalog: Some(u("C")),
                     schema: Some(u("S")),
+                    namespace: None,
                     name: u("T"),
                 },
                 u("Id"),
@@ -393,6 +394,7 @@ pub fn cases() -> Vec<Case> {
                 Relation {
                     catalog: None,
                     schema: None,
+                    namespace: None,
                     name: q("T"),
                 },
                 u("id"),
@@ -809,6 +811,7 @@ fn schema_table(schema: Ident, name: Ident) -> Relation {
     Relation {
         catalog: None,
         schema: Some(schema),
+        namespace: None,
         name,
     }
 }

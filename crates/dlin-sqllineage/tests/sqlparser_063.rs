@@ -186,6 +186,7 @@ fn postgres_unqualified_column_over_nested_join_is_ambiguous_without_catalog() {
                         Candidate::Derived(name) => name
                             .as_ref()
                             .map_or("<derived>", |name| name.value.as_str()),
+                        Candidate::ArrayElement(_) => "<array element>",
                     })
                     .collect();
                 names.sort_unstable();

@@ -16,6 +16,7 @@ fn relation(name: &str) -> Relation {
     Relation {
         catalog: None,
         schema: None,
+        namespace: None,
         name: Ident::unquoted(name),
     }
 }

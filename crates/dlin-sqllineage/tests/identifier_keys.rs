@@ -14,6 +14,7 @@ fn relation(catalog: Option<Ident>, schema: Option<Ident>, name: Ident) -> Relat
     Relation {
         catalog,
         schema,
+        namespace: None,
         name,
     }
 }

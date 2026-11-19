@@ -10,8 +10,8 @@ use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
-    Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn, ScopeKind,
-    VirtualColumn, VirtualColumnState,
+    AnonymousRange, Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn,
+    ScopeKind, VirtualColumn, VirtualColumnState,
 };
 use crate::types::SemanticError;
 use crate::{Ident, OutputName};
@@ -387,7 +387,7 @@ impl LineageBuilder {
                     });
                     return;
                 }
-                let table_ref = Self::table_ref_from_object_name(name);
+                let table_ref = self.table_ref_from_object_name(name);
                 let bindings = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
                     .as_ref()
@@ -425,7 +425,7 @@ impl LineageBuilder {
                 } else {
                     self.graph
                         .scopes
-                        .add_anonymous_derived(self.current_scope, derived_scope);
+                        .add_anonymous(self.current_scope, AnonymousRange::Derived(derived_scope));
                 }
             }
 
@@ -451,6 +451,13 @@ impl LineageBuilder {
                 with_offset_alias,
                 with_ordinality,
             } => {
+                if alias.is_none()
+                    && self.dialect == crate::Dialect::BigQuery
+                    && let [array] = array_exprs.as_slice()
+                {
+                    self.add_anonymous_unnest(array, *with_offset, with_offset_alias.as_ref());
+                    return;
+                }
                 let dependencies = array_exprs
                     .iter()
                     .map(|expr| self.collect_ancestors(expr))
@@ -559,7 +566,7 @@ impl LineageBuilder {
                 alias,
                 ..
             } => {
-                let table_ref = Self::table_ref_from_object_name(name);
+                let table_ref = self.table_ref_from_object_name(name);
                 let default_name = table_ref.table.clone();
                 self.bind_unmodelled_factor(
                     "semantic view",
@@ -678,7 +685,7 @@ impl LineageBuilder {
             None => self
                 .graph
                 .scopes
-                .add_anonymous_derived(self.current_scope, scope),
+                .add_anonymous(self.current_scope, AnonymousRange::Derived(scope)),
         }
     }
 
@@ -842,9 +849,233 @@ impl LineageBuilder {
         let virtual_id = self
             .graph
             .scopes
-            .add_virtual_source(self.current_scope, columns);
+            .add_virtual_source(self.current_scope, columns, None);
         self.add_binding(alias_name, Binding::VirtualSource(virtual_id));
     }
+
+    /// A `BigQuery` `UNNEST` without a range variable. The element of an
+    /// array of STRUCTs publishes its fields as columns of the FROM clause,
+    /// each taking its value from the array, and the element of any other
+    /// array is one column without a name; no name qualifies a reference to
+    /// them. `WITH OFFSET` adds a column named by its alias, `offset` by
+    /// default.
+    fn add_anonymous_unnest(
+        &mut self,
+        array: &Expr,
+        with_offset: bool,
+        with_offset_alias: Option<&sqlparser::ast::Ident>,
+    ) {
+        let (mut columns, open_element) = match element_shape(array, self.dialect) {
+            ElementShape::Scalar => {
+                // A scalar element is one column without a name: a star
+                // reads it, but no name refers to it.
+                let dependencies = self.collect_ancestors(array);
+                let element = VirtualColumn {
+                    name: Ident::unquoted(""),
+                    state: if dependencies.is_empty() {
+                        VirtualColumnState::KnownEmpty
+                    } else {
+                        VirtualColumnState::Unknown
+                    },
+                    dependencies,
+                };
+                (vec![element], None)
+            }
+            ElementShape::Fields(fields) => {
+                // A field of STRUCT literals takes its value from its own
+                // expressions; a field of a cast array from the whole array.
+                let whole = fields
+                    .iter()
+                    .any(|(_, values)| values.is_none())
+                    .then(|| self.collect_ancestors(array));
+                let columns = fields
+                    .into_iter()
+                    .map(|(name, values)| {
+                        let dependencies: Vec<_> = match values {
+                            Some(values) => values
+                                .into_iter()
+                                .flat_map(|value| self.collect_ancestors(value))
+                                .collect(),
+                            None => whole.clone().unwrap_or_default(),
+                        };
+                        VirtualColumn {
+                            name,
+                            state: if dependencies.is_empty() {
+                                VirtualColumnState::KnownEmpty
+                            } else {
+                                VirtualColumnState::Unknown
+                            },
+                            dependencies,
+                        }
+                    })
+                    .collect();
+                (columns, None)
+            }
+            ElementShape::Unknown => (Vec::new(), Some(self.collect_ancestors(array))),
+        };
+        columns.extend(with_offset.then(|| VirtualColumn {
+            name: with_offset_alias.map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
+            state: VirtualColumnState::KnownEmpty,
+            dependencies: Vec::new(),
+        }));
+        let source =
+            self.graph
+                .scopes
+                .add_virtual_source(self.current_scope, columns, open_element);
+        self.graph
+            .scopes
+            .add_anonymous(self.current_scope, AnonymousRange::Virtual(source));
+    }
+}
+
+/// What the element of a `BigQuery` array is known to be from the array
+/// expression alone.
+enum ElementShape<'a> {
+    /// Not a STRUCT, so it publishes no field names.
+    Scalar,
+    /// A STRUCT with these fields, each with the expressions that supply its
+    /// value, or `None` when only the whole array is known to.
+    Fields(Vec<(Ident, Option<Vec<&'a Expr>>)>),
+    Unknown,
+}
+
+/// The shape of the element of `expr`, read from an explicit type or a
+/// literal: a cast to an array type, an array of literal values, an array of
+/// STRUCT literals whose fields are named alike, or a function that
+/// generates a series. Anything else, an empty literal and STRUCTs with
+/// unnamed or repeated fields included, is unknown.
+fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
+    match expr {
+        Expr::Nested(inner) => element_shape(inner, dialect),
+        Expr::Array(array) => {
+            if !array.elem.is_empty()
+                && array.elem.iter().all(|elem| matches!(elem, Expr::Value(_)))
+            {
+                return ElementShape::Scalar;
+            }
+            let Some(literals) = array
+                .elem
+                .iter()
+                .map(|elem| struct_literal_fields(elem, dialect))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return ElementShape::Unknown;
+            };
+            let Some((first, rest)) = literals.split_first() else {
+                return ElementShape::Unknown;
+            };
+            let names: Vec<Ident> = first.iter().map(|(name, _)| name.clone()).collect();
+            let consistent = rest.iter().all(|other| {
+                other.len() == names.len()
+                    && other
+                        .iter()
+                        .zip(&names)
+                        .all(|((other, _), name)| same_name(other, name, dialect))
+            });
+            if !consistent {
+                return ElementShape::Unknown;
+            }
+            ElementShape::Fields(
+                names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        let values = literals.iter().map(|literal| literal[index].1).collect();
+                        (name, Some(values))
+                    })
+                    .collect(),
+            )
+        }
+        Expr::Cast {
+            data_type:
+                sqlparser::ast::DataType::Array(
+                    sqlparser::ast::ArrayElemTypeDef::AngleBracket(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::SquareBracket(elem, _)
+                    | sqlparser::ast::ArrayElemTypeDef::Parenthesis(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::ParenthesisNotNull(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::Qualified(elem, _),
+                ),
+            ..
+        } => match &**elem {
+            sqlparser::ast::DataType::Struct(fields, _) => distinct_names(
+                fields.iter().map(|field| field.field_name.as_ref()),
+                dialect,
+            )
+            .map_or(ElementShape::Unknown, |names| {
+                ElementShape::Fields(names.into_iter().map(|name| (name, None)).collect())
+            }),
+            _ => ElementShape::Scalar,
+        },
+        Expr::Function(function) if is_series_generator(function) => ElementShape::Scalar,
+        _ => ElementShape::Unknown,
+    }
+}
+
+/// The fields of a STRUCT literal with the expression of each: named by its
+/// type when it has one (`STRUCT<a INT64>(1)`), otherwise by its values
+/// (`STRUCT(1 AS a)`).
+fn struct_literal_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Ident, &Expr)>> {
+    let Expr::Struct { values, fields } = expr else {
+        return None;
+    };
+    if fields.is_empty() {
+        let pairs: Vec<(&sqlparser::ast::Ident, &Expr)> = values
+            .iter()
+            .map(|value| match value {
+                Expr::Named { name, expr } => Some((name, &**expr)),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let names = distinct_names(pairs.iter().map(|(name, _)| Some(*name)), dialect)?;
+        Some(
+            names
+                .into_iter()
+                .zip(pairs.into_iter().map(|(_, expr)| expr))
+                .collect(),
+        )
+    } else {
+        let names = distinct_names(
+            fields.iter().map(|field| field.field_name.as_ref()),
+            dialect,
+        )?;
+        (names.len() == values.len()).then(|| names.into_iter().zip(values).collect())
+    }
+}
+
+/// The names, when there is at least one, every one is present and none
+/// repeats another.
+fn distinct_names<'a>(
+    names: impl Iterator<Item = Option<&'a sqlparser::ast::Ident>>,
+    dialect: crate::Dialect,
+) -> Option<Vec<Ident>> {
+    let names: Vec<Ident> = names
+        .map(|name| name.map(Ident::from_ast))
+        .collect::<Option<_>>()?;
+    let mut keys = std::collections::HashSet::new();
+    let distinct = names
+        .iter()
+        .all(|name| keys.insert(name.column_key(dialect).into_owned()));
+    (!names.is_empty() && distinct).then_some(names)
+}
+
+fn same_name(left: &Ident, right: &Ident, dialect: crate::Dialect) -> bool {
+    left.column_key(dialect) == right.column_key(dialect)
+}
+
+/// Whether `function` is a `BigQuery` function that generates a series of
+/// scalars.
+fn is_series_generator(function: &sqlparser::ast::Function) -> bool {
+    let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return false;
+    };
+    name.quote_style.is_none()
+        && [
+            "GENERATE_ARRAY",
+            "GENERATE_DATE_ARRAY",
+            "GENERATE_TIMESTAMP_ARRAY",
+        ]
+        .iter()
+        .any(|generator| generator.eq_ignore_ascii_case(&name.value))
 }
 
 /// The last part of a function name: the range variable PostgreSQL gives a

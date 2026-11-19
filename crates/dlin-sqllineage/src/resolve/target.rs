@@ -109,16 +109,19 @@ fn table_ref_from_parts(parts: &[Ident]) -> TableRef {
         [table] => TableRef {
             catalog: None,
             schema: None,
+            namespace: None,
             table: table.clone(),
         },
         [schema, table] => TableRef {
             catalog: None,
             schema: Some(schema.clone()),
+            namespace: None,
             table: table.clone(),
         },
         [catalog, schema, table] => TableRef {
             catalog: Some(catalog.clone()),
             schema: Some(schema.clone()),
+            namespace: None,
             table: table.clone(),
         },
         _ => TableRef::new(

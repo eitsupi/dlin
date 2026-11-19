@@ -382,6 +382,35 @@ fn normalize_unresolved(unresolved: &mut Unresolved, read_order: &[Relation], di
             }
             sort_dedup_by_key(candidates, |candidate| candidate_key(candidate, dialect));
         }
+        Unresolved::Unverified {
+            present_candidates,
+            possible_candidates,
+            ..
+        } => {
+            for candidates in [&mut *present_candidates, &mut *possible_candidates] {
+                for candidate in candidates.iter_mut() {
+                    match candidate {
+                        crate::Candidate::Relation(relation) => {
+                            retain_first_relation_spelling(relation, read_order, dialect);
+                        }
+                        crate::Candidate::ArrayElement(element) => {
+                            for source in &mut element.array_sources {
+                                retain_first_relation_spelling(
+                                    &mut source.relation,
+                                    read_order,
+                                    dialect,
+                                );
+                            }
+                            sort_dedup_by_key(&mut element.array_sources, |source| {
+                                source_key(source, dialect)
+                            });
+                        }
+                        crate::Candidate::Cte(_) | crate::Candidate::Derived(_) => {}
+                    }
+                }
+                sort_dedup_by_key(candidates, |candidate| candidate_key(candidate, dialect));
+            }
+        }
         _ => {}
     }
 }
@@ -465,6 +494,7 @@ pub(crate) fn plain_relation(table: &TableRef) -> Relation {
     Relation {
         catalog: table.catalog.clone(),
         schema: table.schema.clone(),
+        namespace: table.namespace,
         name: table.table.clone(),
     }
 }
@@ -481,6 +511,7 @@ mod tests {
         let relation = |name| Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Ident::unquoted(name),
         };
         let candidate = |table, column| SourceColumn {

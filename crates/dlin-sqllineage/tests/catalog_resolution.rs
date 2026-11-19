@@ -17,6 +17,7 @@ impl Catalog for CanonicalCatalog {
             relation: Relation {
                 catalog: Some(Ident::quoted("Warehouse", Quote::Backtick)),
                 schema: Some(Ident::quoted("Analytics", Quote::Backtick)),
+                namespace: None,
                 name: Ident::quoted("EventLog", Quote::Backtick),
             },
             columns: Cow::Owned(vec![CatalogColumn {
@@ -43,6 +44,7 @@ fn canonical_source(column: Ident) -> SourceColumn {
         relation: Relation {
             catalog: Some(Ident::quoted("Warehouse", Quote::Backtick)),
             schema: Some(Ident::quoted("Analytics", Quote::Backtick)),
+            namespace: None,
             name: Ident::quoted("EventLog", Quote::Backtick),
         },
         column,
@@ -177,6 +179,7 @@ fn canonical_source_for_items(column: Ident) -> SourceColumn {
         relation: Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Ident::unquoted("items"),
         },
         column,
@@ -230,6 +233,7 @@ fn generic_natural_join_membership_uses_identifier_keys() {
             relation: Relation {
                 catalog: None,
                 schema: None,
+                namespace: None,
                 name: Ident::unquoted("b"),
             },
             column: Ident::unquoted("ID"),

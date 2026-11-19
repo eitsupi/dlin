@@ -2,20 +2,28 @@
 
 use crate::types::TableRef;
 use crate::{
-    Candidate, Dialect, Ident, Relation, SetOperand, SetOperationKind, SourceColumn, Unresolved,
+    Candidate, Dialect, Ident, Relation, RelationNamespace, SetOperand, SetOperationKind,
+    SourceColumn, Unresolved,
 };
 
-pub(crate) type RelationKey = (Option<String>, Option<String>, String);
+pub(crate) type RelationKey = (
+    Option<String>,
+    Option<String>,
+    Option<RelationNamespace>,
+    String,
+);
 
 fn parts_key(
     catalog: Option<&Ident>,
     schema: Option<&Ident>,
+    namespace: Option<RelationNamespace>,
     name: &Ident,
     dialect: Dialect,
 ) -> RelationKey {
     (
         catalog.map(|id| id.relation_key(dialect).into_owned()),
         schema.map(|id| id.relation_key(dialect).into_owned()),
+        namespace,
         name.relation_key(dialect).into_owned(),
     )
 }
@@ -24,6 +32,7 @@ pub(crate) fn relation_key(relation: &Relation, dialect: Dialect) -> RelationKey
     parts_key(
         relation.catalog.as_ref(),
         relation.schema.as_ref(),
+        relation.namespace,
         &relation.name,
         dialect,
     )
@@ -33,6 +42,7 @@ pub(crate) fn table_key(table: &TableRef, dialect: Dialect) -> RelationKey {
     parts_key(
         table.catalog.as_ref(),
         table.schema.as_ref(),
+        table.namespace,
         &table.table,
         dialect,
     )
@@ -50,6 +60,12 @@ pub(crate) enum CandidateKey {
     Relation(RelationKey),
     Cte(String),
     Derived(Option<String>),
+    /// The columns the array reads, then the expansion, which keeps two
+    /// expansions of the same array apart.
+    ArrayElement(
+        Vec<(RelationKey, String)>,
+        Option<crate::graph::scope::VirtualSourceId>,
+    ),
 }
 
 pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> CandidateKey {
@@ -58,6 +74,16 @@ pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> Candidat
         Candidate::Cte(name) => CandidateKey::Cte(name.column_key(dialect).into_owned()),
         Candidate::Derived(name) => {
             CandidateKey::Derived(name.as_ref().map(|id| id.column_key(dialect).into_owned()))
+        }
+        Candidate::ArrayElement(element) => {
+            let mut sources: Vec<_> = element
+                .array_sources
+                .iter()
+                .map(|source| source_key(source, dialect))
+                .collect();
+            sources.sort();
+            sources.dedup();
+            CandidateKey::ArrayElement(sources, element.source)
         }
     }
 }
@@ -81,6 +107,7 @@ pub(crate) enum UnresolvedKey {
     BehindStar(RelationKey),
     NamedBehindStar(RelationKey, String),
     Ambiguous(String, Vec<CandidateKey>),
+    Unverified(String, Vec<CandidateKey>, Vec<CandidateKey>),
     Unbound(String),
     Recursive,
     RowValue(String),
@@ -128,6 +155,21 @@ pub(crate) fn unresolved_key(unresolved: &Unresolved, dialect: Dialect) -> Unres
         Unresolved::Ambiguous { column, candidates } => UnresolvedKey::Ambiguous(
             column.column_key(dialect).into_owned(),
             candidates
+                .iter()
+                .map(|candidate| candidate_key(candidate, dialect))
+                .collect(),
+        ),
+        Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => UnresolvedKey::Unverified(
+            column.column_key(dialect).into_owned(),
+            present_candidates
+                .iter()
+                .map(|candidate| candidate_key(candidate, dialect))
+                .collect(),
+            possible_candidates
                 .iter()
                 .map(|candidate| candidate_key(candidate, dialect))
                 .collect(),

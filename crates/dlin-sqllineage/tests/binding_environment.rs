@@ -245,6 +245,7 @@ fn schema_qualified_relation_is_not_a_cte() {
     let relation = dlin_sqllineage::Relation {
         catalog: None,
         schema: Some(Ident::unquoted("public")),
+        namespace: None,
         name: Ident::unquoted("c"),
     };
     assert_eq!(
