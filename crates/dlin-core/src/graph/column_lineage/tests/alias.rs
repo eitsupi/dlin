@@ -396,6 +396,71 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
     );
 }
 
+/// A source without a schema whose `relation_name` puts it in another schema
+/// than the source name. SQL that reads the source name's schema refers to a
+/// different table and must not resolve to the source.
+#[test]
+fn a_rendered_source_relation_is_not_aliased_under_the_default_schema() {
+    let source_id = "source.pkg.raw.orders";
+    let lineage_of = |sql: &str| {
+        let model_id = "model.pkg.reader";
+        let manifest = Manifest {
+            nodes: HashMap::from([(
+                model_id.to_string(),
+                node(
+                    model_id,
+                    "reader",
+                    None,
+                    None,
+                    vec![source_id],
+                    &["id"],
+                    Some(sql),
+                    None,
+                    None,
+                ),
+            )]),
+            sources: HashMap::from([(
+                source_id.to_string(),
+                crate::parser::manifest::ManifestSource {
+                    identifier: Some("orders_v2".to_string()),
+                    relation_name: Some(r#""landing"."orders_v2""#.to_string()),
+                    ..source("orders", source_id)
+                },
+            )]),
+            ..Default::default()
+        };
+        let result = super::super::compute_cross_model_column_lineage(
+            &manifest,
+            "reader",
+            DlinDialect::Generic,
+            &mut ColumnLineageCache::disabled(),
+        );
+        let id = result
+            .slots()
+            .iter()
+            .find(|column| column.column() == "id")
+            .unwrap();
+        id.lineage
+            .known()
+            .iter()
+            .map(|source| source.table.clone())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        lineage_of("select id from landing.orders_v2"),
+        ["landing.orders_v2"]
+    );
+    assert_eq!(
+        lineage_of("select id from raw.orders"),
+        ["landing.orders_v2"]
+    );
+    assert_eq!(
+        lineage_of("select id from raw.orders_v2"),
+        ["raw.orders_v2"]
+    );
+}
+
 fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSource {
     crate::parser::manifest::ManifestSource {
         package_name: None,

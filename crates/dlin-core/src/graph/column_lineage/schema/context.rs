@@ -13,7 +13,7 @@ use super::seed_files::SeedSchemas;
 use super::sql_output::SqlOutputSchema;
 use crate::graph::column_lineage::backend::sqllineage::{analyze_sql, single_lineage_statement};
 use crate::graph::column_lineage::backend::{DlinDialect, catalog::CatalogSnapshot};
-use crate::graph::column_lineage::relation::{RelationRef, source_schema};
+use crate::graph::column_lineage::relation::RelationRef;
 use crate::parser::manifest::{Manifest, ManifestNode};
 
 /// The outcome of inferring a node's output columns from its SQL.
@@ -440,14 +440,32 @@ fn register_source_relation(
     let was_present = schema.contains_relation(&physical);
     schema.add_relation(physical.clone(), physical.render(), evidence);
 
-    let schema_name = Some(source_schema(schema_name, source_name));
+    // dbt's default schema names the physical relation only when the relation
+    // was built with it. A `relation_name` in another schema means a table of
+    // the default schema with this identifier is a different relation.
+    let schema_name = schema_name.or_else(|| {
+        (physical
+            == RelationRef::from_manifest_source(
+                None,
+                database,
+                None,
+                physical_identifier,
+                source_name,
+            ))
+        .then_some(source_name)
+    });
     let aliases = [
-        RelationRef::from_manifest(None, schema_name, physical_identifier),
-        RelationRef::from_manifest(None, None, physical_identifier),
-        RelationRef::from_manifest(None, None, logical_name),
-        RelationRef::from_manifest(None, Some(source_name), logical_name),
+        schema_name
+            .map(|schema| RelationRef::from_manifest(None, Some(schema), physical_identifier)),
+        Some(RelationRef::from_manifest(None, None, physical_identifier)),
+        Some(RelationRef::from_manifest(None, None, logical_name)),
+        Some(RelationRef::from_manifest(
+            None,
+            Some(source_name),
+            logical_name,
+        )),
     ];
-    for alias in aliases {
+    for alias in aliases.into_iter().flatten() {
         if alias != physical {
             schema.add_alias(alias, physical.clone());
         }
