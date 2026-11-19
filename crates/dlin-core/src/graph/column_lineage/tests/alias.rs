@@ -389,7 +389,7 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
         .find(|column| column.column() == "id")
         .unwrap();
 
-    assert_eq!(id.lineage.known()[0].table, "raw_b");
+    assert_eq!(id.lineage.known()[0].table, "raw.raw_b");
     assert_eq!(
         id.lineage.known()[0].model_path[0].output.model,
         "shared_model"

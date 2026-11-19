@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Bug Fixes
+
+- Keep the schema of sources declared without one in column lineage output, defaulting it to the source name as dbt does, so a column from `raw.orders` is no longer shown as `orders` in plain, Mermaid and DOT output or in JSON `known[].table`
+
 ## [0.3.0-alpha.2] - 2026-11-19
 
 ### Breaking Changes

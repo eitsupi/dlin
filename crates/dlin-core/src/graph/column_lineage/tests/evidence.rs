@@ -149,7 +149,7 @@ fn a_cross_model_trace_keeps_the_evidence_of_every_hop() {
     let result = cross_model(&d2(), "d");
     let id_slot = slot(&result, "id");
     let source = &id_slot.lineage.known()[0];
-    assert_eq!(source.table, "raw_orders");
+    assert_eq!(source.table, "raw.raw_orders");
     assert_eq!(source.evidence, ids(&[SQL_M, YAML_SOURCE]));
     assert_eq!(id_slot.evidence.lineage, ids(&[SQL_M, YAML_SOURCE]));
     let described: Vec<&str> = result

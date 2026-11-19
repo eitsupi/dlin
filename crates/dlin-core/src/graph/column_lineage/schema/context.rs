@@ -13,7 +13,7 @@ use super::seed_files::SeedSchemas;
 use super::sql_output::SqlOutputSchema;
 use crate::graph::column_lineage::backend::sqllineage::{analyze_sql, single_lineage_statement};
 use crate::graph::column_lineage::backend::{DlinDialect, catalog::CatalogSnapshot};
-use crate::graph::column_lineage::relation::RelationRef;
+use crate::graph::column_lineage::relation::{RelationRef, source_schema};
 use crate::parser::manifest::{Manifest, ManifestNode};
 
 /// The outcome of inferring a node's output columns from its SQL.
@@ -430,11 +430,17 @@ fn register_source_relation(
     logical_name: &str,
     evidence: SchemaEvidence,
 ) -> bool {
-    let physical =
-        RelationRef::from_manifest_resource(rendered, database, schema_name, physical_identifier);
+    let physical = RelationRef::from_manifest_source(
+        rendered,
+        database,
+        schema_name,
+        physical_identifier,
+        source_name,
+    );
     let was_present = schema.contains_relation(&physical);
     schema.add_relation(physical.clone(), physical.render(), evidence);
 
+    let schema_name = Some(source_schema(schema_name, source_name));
     let aliases = [
         RelationRef::from_manifest(None, schema_name, physical_identifier),
         RelationRef::from_manifest(None, None, physical_identifier),

@@ -520,7 +520,10 @@ impl<S> OutputSlots<S> {
 /// A source column reference
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ColumnSource {
-    /// Source table/model name as it appears in SQL (e.g. "stg_orders", "`raw`.`orders`")
+    /// The name of the relation the value comes from. When the relation is
+    /// resolved, this is its normalized name, keeping the qualifiers that are
+    /// available (it may include qualifiers omitted in SQL; original quoting
+    /// and aliases are not reproduced).
     pub table: String,
     /// Source column name, with the quote style it was written with.
     pub column: Ident,

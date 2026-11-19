@@ -991,7 +991,7 @@ fn test_nested_cte_name_does_not_shadow_outer_sibling_scope() {
         &["outer_id"],
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    assert_sources_for(&result, "outer_id", &[("orders", "id")]);
+    assert_sources_for(&result, "outer_id", &[("raw.orders", "id")]);
 }
 
 #[test]
@@ -1016,7 +1016,7 @@ fn test_real_underscore_one_column_is_not_synthetic_ordinal() {
     let result = compute_star_shape("SELECT id AS _1 FROM raw.orders", &["_1"]);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert_eq!(result.value_complete_columns, 1);
-    assert_sources_for(&result, "_1", &[("orders", "id")]);
+    assert_sources_for(&result, "_1", &[("raw.orders", "id")]);
 }
 
 #[test]

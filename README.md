@@ -315,9 +315,9 @@ dlin column upstream customers --column order_count --column lifetime_value -o p
 
 ```
 customers (2 columns listed: 2 complete, 0 partial)
-  order_count     →  orders.id → stg_orders.order_id → orders.order_id (aggregation)
+  order_count     →  raw.orders.id → stg_orders.order_id → orders.order_id (aggregation)
                        boundary: external relation at stg_orders.order_id for customers.order_count: raw.orders (source, policy: snapshot unsupported; seed external)
-  lifetime_value  →  payments.amount → stg_payments.amount → orders.total_amount (aggregation)
+  lifetime_value  →  raw.payments.amount → stg_payments.amount → orders.total_amount (aggregation)
                        boundary: external relation at stg_payments.amount for customers.lifetime_value: raw.payments (source, policy: snapshot unsupported; seed external)
   assumes yaml:source.clp.raw.orders (YAML columns taken as exhaustive): order_count
   assumes yaml:source.clp.raw.payments (YAML columns taken as exhaustive): lifetime_value
