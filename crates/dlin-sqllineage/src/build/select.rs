@@ -285,7 +285,10 @@ impl LineageBuilder {
             | JoinOperator::InnerArrayJoin => return,
         };
         let columns = match constraint {
-            JoinConstraint::Using(columns) => {
+            // `USING (...) AS alias` merges the listed columns as `USING`
+            // does. The alias is not bound, so a column qualified by it is
+            // left unresolved.
+            JoinConstraint::Using(columns) | JoinConstraint::UsingAlias(columns, _) => {
                 MergedColumns::Using(columns.iter().flat_map(Self::object_name_parts).collect())
             }
             JoinConstraint::Natural => MergedColumns::Natural,

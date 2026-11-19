@@ -76,8 +76,7 @@ pub(super) fn assemble(
             structure: structure
                 .columns
                 .get(index)
-                .map(|evidence| references(evidence, catalog))
-                .unwrap_or_default(),
+                .map_or_default(|evidence| references(evidence, catalog)),
             lineage: references(&mapping.sources.all_evidence(), catalog),
             known: known
                 .into_iter()
@@ -407,9 +406,6 @@ pub(crate) fn semantic_failure(
         },
         SemanticError::UnpivotExpression => DiagnosticKind::UnsupportedSyntax {
             what: "UNPIVOT on an expression",
-        },
-        SemanticError::QuotingDependentTableName => DiagnosticKind::UnsupportedSyntax {
-            what: "TABLE with a name whose meaning depends on quoting",
         },
         SemanticError::ValuesRowArityMismatch { first, row } => {
             DiagnosticKind::ValuesRowArityMismatch {

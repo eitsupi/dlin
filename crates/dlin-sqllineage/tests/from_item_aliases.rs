@@ -228,3 +228,33 @@ fn ordinary_derived_table_inside_an_aliased_join_does_not_see_earlier_items() {
     // DuckDB lets an ordinary derived table see the items before it.
     expect_rendered_with(sql, Dialect::DuckDb, &Catalog, &["w#0 C[t.x]", "Closed"]);
 }
+
+/// `USING (...) AS alias` merges the listed columns as `USING` does.
+#[test]
+fn joins_with_a_using_alias_merge_columns() {
+    expect_rendered_with(
+        r#"SELECT * FROM t JOIN u AS d(x, q) USING (x) AS j"#,
+        Dialect::PostgreSql,
+        &Catalog,
+        &["x#0 C[t.x, u.p]", "y#1 C[t.y]", "q#2 C[u.q]", "Closed"],
+    );
+}
+
+/// The alias of `USING (...) AS alias` is not bound, so a column qualified by
+/// it has no complete lineage.
+#[test]
+fn a_column_qualified_by_a_using_alias_is_not_resolved() {
+    let analysis = common::analyze_one_with(
+        r#"SELECT j.x FROM t JOIN u AS d(x, q) USING (x) AS j"#,
+        Dialect::PostgreSql,
+        Some(&Catalog),
+    );
+    let [column] = analysis.output.columns.as_slice() else {
+        panic!("{:?}", analysis.output);
+    };
+    assert!(
+        !matches!(column.lineage, dlin_sqllineage::Lineage::Complete(_)),
+        "{:?}",
+        column.lineage
+    );
+}

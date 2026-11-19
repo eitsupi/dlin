@@ -129,8 +129,7 @@ pub(crate) fn resolve(
             .map(|mapping| {
                 mapping
                     .slot
-                    .map(|slot| cx.mapping_cache.models.arena.structure(slot).clone())
-                    .unwrap_or_default()
+                    .map_or_default(|slot| cx.mapping_cache.models.arena.structure(slot).clone())
             })
             .collect(),
         shape: mapping::models(&mut cx).scope(root).schema.clone(),

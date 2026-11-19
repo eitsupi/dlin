@@ -209,9 +209,9 @@ pub(super) fn resolve_captured_binding(
         Binding::Cte(scope) | Binding::DerivedTable(scope) => {
             resolve_through_scope(name, scope, cx)
         }
-        Binding::VirtualSource(source) => virtual_column_origin(name, source, graph)
-            .map(Sources::one)
-            .unwrap_or_default(),
+        Binding::VirtualSource(source) => {
+            virtual_column_origin(name, source, graph).map_or_default(Sources::one)
+        }
     }
 }
 

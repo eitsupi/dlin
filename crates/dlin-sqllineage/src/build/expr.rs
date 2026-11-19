@@ -14,6 +14,49 @@ impl LineageBuilder {
     /// function arguments so all three use the same output shape rules.
     fn collect_subquery_value_inputs(&mut self, query: &ast::Query) -> Vec<NodeId> {
         let scope = self.visit_subquery(ScopeKind::Subquery, query);
+        self.subquery_value_inputs(scope)
+    }
+
+    /// Add the value of SQLite's `x IN name` or `x IN name(args)`, which
+    /// SQLite reads as `x IN (SELECT * FROM name)`. The relation goes through
+    /// the ordinary FROM path, so CTE names, table-valued function arguments
+    /// and reads are handled as in the explicit form.
+    fn collect_in_table_value_inputs(
+        &mut self,
+        name: &ast::ObjectName,
+        args: Option<&Vec<ast::FunctionArg>>,
+    ) -> Vec<NodeId> {
+        let from = ast::TableWithJoins {
+            relation: ast::TableFactor::Table {
+                name: name.clone(),
+                alias: None,
+                args: args.map(|args| ast::TableFunctionArgs {
+                    args: args.clone(),
+                    settings: None,
+                }),
+                with_hints: vec![],
+                version: None,
+                with_ordinality: false,
+                partitions: vec![],
+                json_path: None,
+                sample: None,
+                index_directives: vec![],
+                inheritance: None,
+            },
+            joins: vec![],
+        };
+        let scope = self.push_scope(ScopeKind::Subquery);
+        self.visit_from(std::slice::from_ref(&from));
+        self.visit_projection(&[ast::SelectItem::Wildcard(
+            ast::WildcardAdditionalOptions::default(),
+        )]);
+        self.pop_scope();
+        self.subquery_value_inputs(scope)
+    }
+
+    /// The value a subquery scope gives when used as a scalar: its single
+    /// projected column, or an unsupported input for any other shape.
+    fn subquery_value_inputs(&mut self, scope: crate::graph::scope::ScopeId) -> Vec<NodeId> {
         let [column] = self.graph.scopes.output_columns(scope) else {
             return vec![self.graph.add_unsupported("subquery value output")];
         };
@@ -200,14 +243,6 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::InUnnest {
-                expr, array_expr, ..
-            } => {
-                let mut v = self.collect_ancestors(expr);
-                v.extend(self.collect_ancestors(array_expr));
-                v
-            }
-
             Expr::MemberOf(m) => {
                 let mut v = self.collect_ancestors(&m.value);
                 v.extend(self.collect_ancestors(&m.array));
@@ -352,9 +387,24 @@ impl LineageBuilder {
 
             Expr::Subquery(query) => self.collect_subquery_value_inputs(query),
 
-            Expr::InSubquery { expr, subquery, .. } => {
+            Expr::In { expr, target, .. } => {
                 let mut v = self.collect_ancestors(expr);
-                v.extend(self.collect_subquery_value_inputs(subquery));
+                match target {
+                    ast::InTarget::List(list) => {
+                        for item in list {
+                            v.extend(self.collect_ancestors(item));
+                        }
+                    }
+                    ast::InTarget::Subquery(subquery) => {
+                        v.extend(self.collect_subquery_value_inputs(subquery));
+                    }
+                    ast::InTarget::Unnest(array_expr) => {
+                        v.extend(self.collect_ancestors(array_expr));
+                    }
+                    ast::InTarget::Table { name, args } => {
+                        v.extend(self.collect_in_table_value_inputs(name, args.as_ref()));
+                    }
+                }
                 v
             }
 
@@ -369,14 +419,6 @@ impl LineageBuilder {
                 let mut v = self.collect_ancestors(expr);
                 v.extend(self.collect_ancestors(low));
                 v.extend(self.collect_ancestors(high));
-                v
-            }
-
-            Expr::InList { expr, list, .. } => {
-                let mut v = self.collect_ancestors(expr);
-                for item in list {
-                    v.extend(self.collect_ancestors(item));
-                }
                 v
             }
 
