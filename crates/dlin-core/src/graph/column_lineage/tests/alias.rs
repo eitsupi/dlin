@@ -389,10 +389,126 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
         .find(|column| column.column() == "id")
         .unwrap();
 
-    assert_eq!(id.lineage.known()[0].table, "raw_b");
+    assert_eq!(id.lineage.known()[0].table, "raw.raw_b");
     assert_eq!(
         id.lineage.known()[0].model_path[0].output.model,
         "shared_model"
+    );
+}
+
+/// The known tables of each output column of a model reading `source` with
+/// `sql`, paired with the unique id of the resource its boundary reached.
+fn source_reads(
+    source: crate::parser::manifest::ManifestSource,
+    sql: &str,
+) -> Vec<(String, Option<String>)> {
+    let model_id = "model.pkg.reader";
+    let source_id = source.unique_id.clone();
+    let manifest = Manifest {
+        nodes: HashMap::from([(
+            model_id.to_string(),
+            node(
+                model_id,
+                "reader",
+                None,
+                None,
+                vec![&source_id],
+                &[],
+                Some(sql),
+                None,
+                None,
+            ),
+        )]),
+        sources: HashMap::from([(source_id, source)]),
+        ..Default::default()
+    };
+    let result = super::super::compute_cross_model_column_lineage(
+        &manifest,
+        "reader",
+        DlinDialect::Generic,
+        &mut ColumnLineageCache::disabled(),
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    result
+        .slots()
+        .iter()
+        .map(|slot| {
+            let known = slot.lineage.known();
+            assert_eq!(known.len(), 1, "{slot:?}");
+            let boundary = result
+                .boundaries
+                .iter()
+                .find(|boundary| boundary.root.slot == slot.id)
+                .expect("each column reaches a boundary");
+            (known[0].table.clone(), boundary.resource.unique_id.clone())
+        })
+        .collect()
+}
+
+fn read(table: &str, unique_id: Option<&str>) -> (String, Option<String>) {
+    (table.to_string(), unique_id.map(str::to_string))
+}
+
+/// A source without a schema whose `relation_name` puts it in another schema
+/// than the source name. Compiled SQL names a source by its physical
+/// relation, so neither its logical name nor the default schema refers to it.
+#[test]
+fn a_source_is_read_only_through_its_physical_relation() {
+    let source_id = "source.pkg.raw.orders";
+    let orders = || crate::parser::manifest::ManifestSource {
+        identifier: Some("orders_v2".to_string()),
+        relation_name: Some(r#""landing"."orders_v2""#.to_string()),
+        ..source("orders", source_id)
+    };
+    let source = Some(source_id);
+
+    for (sql, expected) in [
+        (
+            "select id from landing.orders_v2",
+            read("landing.orders_v2", source),
+        ),
+        (
+            "select id from orders_v2",
+            read("landing.orders_v2", source),
+        ),
+        ("select id from raw.orders", read("raw.orders", None)),
+        ("select id from orders", read("orders", None)),
+        ("select id from raw.orders_v2", read("raw.orders_v2", None)),
+    ] {
+        assert_eq!(source_reads(orders(), sql), [expected], "{sql}");
+    }
+
+    assert_eq!(
+        source_reads(
+            orders(),
+            "select v2.id, other.id as other_id from landing.orders_v2 as v2 cross join raw.orders as other",
+        ),
+        [read("landing.orders_v2", source), read("raw.orders", None)]
+    );
+}
+
+/// A source whose schema differs from its source name is not read through
+/// the source name, even when its identifier is its logical name.
+#[test]
+fn a_source_is_not_read_through_its_source_name_as_a_schema() {
+    let source_id = "source.pkg.stripe.payments";
+    let payments = || crate::parser::manifest::ManifestSource {
+        source_name: "stripe".to_string(),
+        schema: Some("stripe_raw".to_string()),
+        ..source("payments", source_id)
+    };
+
+    assert_eq!(
+        source_reads(payments(), "select id from stripe_raw.payments"),
+        [read("stripe_raw.payments", Some(source_id))]
+    );
+    assert_eq!(
+        source_reads(payments(), "select id from payments"),
+        [read("stripe_raw.payments", Some(source_id))]
+    );
+    assert_eq!(
+        source_reads(payments(), "select id from stripe.payments"),
+        [read("stripe.payments", None)]
     );
 }
 

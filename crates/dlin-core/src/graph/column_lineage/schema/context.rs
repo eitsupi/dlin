@@ -268,7 +268,6 @@ impl<'a> SchemaContext<'a> {
                     source.schema.as_deref(),
                     physical_identifier,
                     &source.source_name,
-                    &source.name,
                     evidence.clone(),
                 );
             }
@@ -419,7 +418,6 @@ fn register_model_relation(
     !was_present
 }
 
-#[allow(clippy::too_many_arguments)]
 fn register_source_relation(
     schema: &mut CatalogSnapshot,
     rendered: Option<&str>,
@@ -427,21 +425,41 @@ fn register_source_relation(
     schema_name: Option<&str>,
     physical_identifier: &str,
     source_name: &str,
-    logical_name: &str,
     evidence: SchemaEvidence,
 ) -> bool {
-    let physical =
-        RelationRef::from_manifest_resource(rendered, database, schema_name, physical_identifier);
+    let physical = RelationRef::from_manifest_source(
+        rendered,
+        database,
+        schema_name,
+        physical_identifier,
+        source_name,
+    );
     let was_present = schema.contains_relation(&physical);
     schema.add_relation(physical.clone(), physical.render(), evidence);
 
+    // dbt's default schema names the physical relation only when the relation
+    // was built with it. A `relation_name` in another schema means a table of
+    // the default schema with this identifier is a different relation.
+    let schema_name = schema_name.or_else(|| {
+        (physical
+            == RelationRef::from_manifest_source(
+                None,
+                database,
+                None,
+                physical_identifier,
+                source_name,
+            ))
+        .then_some(source_name)
+    });
+    // The source's logical name (`source_name.name`) is not an alias. dbt
+    // renders `source()` as the physical relation in compiled SQL, so a
+    // logical name that differs from it there refers to another relation.
     let aliases = [
-        RelationRef::from_manifest(None, schema_name, physical_identifier),
-        RelationRef::from_manifest(None, None, physical_identifier),
-        RelationRef::from_manifest(None, None, logical_name),
-        RelationRef::from_manifest(None, Some(source_name), logical_name),
+        schema_name
+            .map(|schema| RelationRef::from_manifest(None, Some(schema), physical_identifier)),
+        Some(RelationRef::from_manifest(None, None, physical_identifier)),
     ];
-    for alias in aliases {
+    for alias in aliases.into_iter().flatten() {
         if alias != physical {
             schema.add_alias(alias, physical.clone());
         }

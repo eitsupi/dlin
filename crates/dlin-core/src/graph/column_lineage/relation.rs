@@ -104,6 +104,12 @@ fn needs_quoting(value: &str) -> bool {
             .any(|character| matches!(character, '.' | '"' | '`'))
 }
 
+/// The schema of a source: the declared one, or the source's name as dbt
+/// defaults it.
+pub(crate) fn source_schema<'a>(schema: Option<&'a str>, source_name: &'a str) -> &'a str {
+    schema.unwrap_or(source_name)
+}
+
 /// A structurally represented relation, from bare table name to
 /// catalog.schema.table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -210,6 +216,26 @@ impl RelationRef {
                 || Self::from_manifest(catalog, schema, name),
                 |relation| relation.as_manifest().with_scoped_namespace(),
             )
+    }
+
+    /// The relation of a manifest source. dbt gives a source without a
+    /// `schema` the source's own name as its schema, so the same default
+    /// applies when the relation is built from fields. A `relation_name`
+    /// rendered by the adapter takes precedence, as for every manifest
+    /// resource. A missing `database` is not guessed.
+    pub(crate) fn from_manifest_source(
+        rendered: Option<&str>,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        identifier: &str,
+        source_name: &str,
+    ) -> Self {
+        Self::from_manifest_resource(
+            rendered,
+            catalog,
+            Some(source_schema(schema, source_name)),
+            identifier,
+        )
     }
 
     /// Construct a relation from a backend table reference. Backends expose
@@ -639,6 +665,59 @@ mod tests {
                 "{rendered:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_source_without_a_schema_takes_the_source_name_as_its_schema() {
+        let relation = RelationRef::from_manifest_source(None, None, None, "orders", "raw");
+        assert_eq!(relation.render(), "raw.orders");
+        assert_eq!(relation.catalog(), None);
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(None, Some("raw"), "orders")
+        );
+    }
+
+    #[test]
+    fn a_source_keeps_its_physical_identifier_and_declared_schema() {
+        let relation = RelationRef::from_manifest_source(None, None, None, "orders_v2", "raw");
+        assert_eq!(relation.render(), "raw.orders_v2");
+
+        let relation =
+            RelationRef::from_manifest_source(None, Some("db"), Some("landing"), "orders", "raw");
+        assert_eq!(relation.render(), "db.landing.orders");
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(Some("db"), Some("landing"), "orders")
+        );
+    }
+
+    #[test]
+    fn a_source_relation_name_takes_precedence_over_the_schema_default() {
+        let relation = RelationRef::from_manifest_source(
+            Some(r#""db"."landing"."orders""#),
+            Some("db"),
+            None,
+            "orders",
+            "raw",
+        );
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(Some("db"), Some("landing"), "orders")
+        );
+
+        // A two-part relation_name is kept as rendered, without a database.
+        let relation = RelationRef::from_manifest_source(
+            Some(r#""landing"."orders""#),
+            Some("db"),
+            None,
+            "orders",
+            "raw",
+        );
+        assert_eq!(
+            relation,
+            RelationRef::from_manifest(None, Some("landing"), "orders")
+        );
     }
 
     fn parsed(input: &str) -> RelationRef {

@@ -82,7 +82,7 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
             .iter()
             .map(|source| (source.table.as_str(), source.column.value.as_str()))
             .collect::<Vec<_>>(),
-        vec![("external_table_a", "real_col")]
+        vec![("raw.external_table_a", "real_col")]
     );
 
     let id = result
@@ -99,7 +99,10 @@ fn test_cross_model_bigquery_source_free_union_reaches_external_sources() {
     id_sources.sort_unstable();
     assert_eq!(
         id_sources,
-        vec![("external_table_a", "id"), ("external_table_b", "id")]
+        vec![
+            ("raw.external_table_a", "id"),
+            ("raw.external_table_b", "id")
+        ]
     );
 }
 
@@ -126,7 +129,7 @@ fn test_cross_model_bigquery_compound_field_access_reaches_external_array_column
     );
     let source = &first_item.lineage.known()[0];
     assert_eq!(source.column, "items_array");
-    assert_eq!(source.table, "external_table_a");
+    assert_eq!(source.table, "raw.external_table_a");
     assert!(
         source
             .model_path
@@ -395,7 +398,7 @@ fn test_cross_model_bigquery_unnest_reaches_external_array_column() {
             .iter()
             .map(|source| (source.table.as_str(), source.column.value.as_str()))
             .collect::<Vec<_>>(),
-        vec![("external_table_a", "items_array")]
+        vec![("raw.external_table_a", "items_array")]
     );
     assert!(
         item.lineage
@@ -467,7 +470,7 @@ fn test_cross_model_bigquery_nested_star_keeps_known_user_id_lineage() {
             .lineage
             .known()
             .iter()
-            .any(|source| source.table == "raw_table" && source.column == "user_id"),
+            .any(|source| source.table == "raw.raw_table" && source.column == "user_id"),
         "user_id should trace to raw_table.user_id, got: {:?}; errors: {:?}",
         user_id.lineage.known(),
         result.errors
@@ -1382,8 +1385,9 @@ fn test_cross_model_case_insensitive_catalog_match_uses_upstream_output_name() {
         chosen.lineage.known()
     );
     let source = &chosen.lineage.known()[0];
-    // The raw source is referenced as orders in the upstream SQL.
-    assert_eq!(source.table, "orders");
+    // The raw source is referenced as `orders` in the upstream SQL; its schema
+    // defaults to the source name.
+    assert_eq!(source.table, "raw.orders");
     assert_eq!(source.column, "id");
     assert!(
         source

@@ -337,11 +337,12 @@ pub(super) fn upstream_resource_candidates(
                     unique_id: source.unique_id.clone(),
                     name: format!("{}.{}", source.source_name, source.name),
                     kind: TraceResourceKind::Source,
-                    relation: RelationRef::from_manifest_resource(
+                    relation: RelationRef::from_manifest_source(
                         source.relation_name.as_deref(),
                         source.database.as_deref(),
                         source.schema.as_deref(),
                         source.identifier.as_deref().unwrap_or(&source.name),
+                        &source.source_name,
                     ),
                 },
                 Some(TraceBoundaryReason::ExternalRelation),

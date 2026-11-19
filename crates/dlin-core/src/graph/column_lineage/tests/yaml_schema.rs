@@ -53,7 +53,7 @@ fn star_over_yaml_only_source_expands_declared_columns() {
     for entry in result.slots() {
         assert_eq!(
             pairs(entry),
-            [("src", entry.column().as_str())],
+            [("raw.src", entry.column().as_str())],
             "column {}",
             entry.column()
         );
@@ -77,7 +77,7 @@ fn quoted_yaml_column_matches_a_quoted_reference_in_snowflake() {
         result.slots()[0].name,
         OutputName::Explicit(Ident::quoted("id", Quote::Double))
     );
-    assert_eq!(pairs(&result.slots()[0]), [("src", "\"id\"")]);
+    assert_eq!(pairs(&result.slots()[0]), [("raw.src", "\"id\"")]);
 }
 
 /// Two models-of-record for one physical table: two source definitions with

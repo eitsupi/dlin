@@ -956,7 +956,7 @@ fn test_persistent_cache_does_not_reuse_results_when_yaml_evidence_changes() {
     let e5_pairs = pairs_by_column(&e5_result);
     assert!(
         e5_pairs.iter().any(|(column, sources)| column == "extra"
-            && sources == &[("src".to_string(), "extra".to_string())]),
+            && sources == &[("raw.src".to_string(), "extra".to_string())]),
         "SELECT * must include the new column: {e5_pairs:?}"
     );
 }

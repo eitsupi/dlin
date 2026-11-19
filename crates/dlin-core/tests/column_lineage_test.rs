@@ -374,3 +374,23 @@ fn test_cross_model_customers_three_levels() {
         }
     }
 }
+
+#[test]
+fn test_cross_model_sources_without_a_declared_schema_default_to_the_source_name() {
+    // The fixture declares its sources without a schema; dbt gives such a
+    // source its own name as the schema, so the leaf is `raw.orders` and not
+    // the model-like `orders`.
+    let manifest = load_fixture_manifest();
+    let result = compute_cross_model_column_lineage(&manifest, "customers");
+
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let mut tables: Vec<&str> = result
+        .slots()
+        .iter()
+        .flat_map(|entry| entry.lineage.known())
+        .map(|source| source.table.as_str())
+        .collect();
+    tables.sort_unstable();
+    tables.dedup();
+    assert_eq!(tables, ["raw.customers", "raw.orders", "raw.payments"]);
+}
