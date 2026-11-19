@@ -45,6 +45,7 @@ pub enum ManifestDiagnosticKind {
     /// A node in the manifest uses a resource kind not represented by the
     /// graph's typed node vocabulary.
     UnsupportedResourceType,
+    InvalidUnitTest,
 }
 
 impl ManifestDiagnosticKind {
@@ -58,6 +59,7 @@ impl ManifestDiagnosticKind {
             Self::InvalidDbtVersion => "invalid_dbt_version",
             Self::UnknownTopLevelKey => "unknown_top_level_key",
             Self::UnsupportedResourceType => "unsupported_resource_type",
+            Self::InvalidUnitTest => "invalid_unit_test",
         }
     }
 
@@ -72,6 +74,7 @@ impl ManifestDiagnosticKind {
                 | Self::InvalidDbtVersion
                 | Self::UnknownTopLevelKey
                 | Self::UnsupportedResourceType
+                | Self::InvalidUnitTest
         )
     }
 }
@@ -116,6 +119,7 @@ pub struct ManifestDiagnostic {
     pub raw_type: Option<String>,
     /// The raw schema URI involved in the diagnostic, when applicable.
     pub schema: Option<String>,
+    pub section: Option<String>,
 }
 
 impl ManifestDiagnostic {
@@ -204,6 +208,7 @@ impl ManifestLoadReport {
             matches!(
                 diagnostic.kind,
                 ManifestDiagnosticKind::UnsupportedResourceType
+                    | ManifestDiagnosticKind::InvalidUnitTest
                     | ManifestDiagnosticKind::FutureSchemaVersion
             )
         }) {
@@ -301,6 +306,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     raw_resource: None,
                     raw_type: None,
                     schema: None,
+                    section: None,
                 }],
             };
         }
@@ -318,6 +324,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                     raw_resource: None,
                     raw_type: None,
                     schema: None,
+                    section: None,
                 }],
             };
         }
@@ -345,6 +352,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
             raw_type: None,
             schema: Some(observations.metadata.schema.display()),
+            section: Some("metadata".into()),
         }),
         (ObservedField::Missing, None) => diagnostics.push(ManifestDiagnostic {
             kind: ManifestDiagnosticKind::MissingSchemaVersion,
@@ -356,6 +364,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
             raw_type: None,
             schema: None,
+            section: Some("metadata".into()),
         }),
         (ObservedField::String(_), Some(schema)) if schema_number.is_none() => diagnostics
             .push(ManifestDiagnostic {
@@ -369,6 +378,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some("metadata.dbt_schema_version".to_string()),
             raw_type: None,
             schema: Some(schema.to_string()),
+            section: Some("metadata".into()),
         }),
         (ObservedField::String(_), Some(schema))
             if schema_number.is_some_and(|number| {
@@ -385,6 +395,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                 raw_resource: Some("metadata.dbt_schema_version".to_string()),
                 raw_type: None,
                 schema: Some(schema.to_string()),
+                section: Some("metadata".into()),
             })
         }
         (ObservedField::String(_), Some(_)) => {}
@@ -408,6 +419,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
                 raw_resource: Some("metadata.dbt_version".to_string()),
                 raw_type: None,
                 schema: raw_schema.clone(),
+                section: Some("metadata".into()),
             })
         }
         (ObservedField::Missing, None) => diagnostics.push(ManifestDiagnostic {
@@ -418,6 +430,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some("metadata.dbt_version".to_string()),
             raw_type: None,
             schema: raw_schema.clone(),
+            section: Some("metadata".into()),
         }),
         (ObservedField::String(_), Some(_)) => {}
         (ObservedField::Missing, Some(_))
@@ -438,11 +451,12 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: Some(key.clone()),
             raw_type: None,
             schema: raw_schema.clone(),
+            section: None,
         });
     }
 
     // Resource entries may occur in the active graph `nodes` map, known but
-    // unsupported `functions`/`unit_tests` maps, or a future top-level map.
+    // unsupported `functions` map, or a future top-level map.
     // The decoder inspects only these maps for unsupported resources; generic
     // maps such as macros/docs/groups/selectors are intentionally ignored.
     let mut diagnosed_resources = BTreeSet::new();
@@ -454,14 +468,26 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
         &mut diagnosed_resources,
         raw_schema.as_deref(),
     );
-    append_unsupported_resource_diagnostics(
-        "unit_tests",
-        Some("unit_test"),
-        &observations,
-        &mut diagnostics,
-        &mut diagnosed_resources,
-        raw_schema.as_deref(),
-    );
+    let mut unit_tests: Vec<_> = manifest.unit_tests.iter().collect();
+    unit_tests.sort_unstable_by_key(|(id, _)| *id);
+    for (id, value) in unit_tests {
+        if !super::valid_unit_test(id, value) {
+            diagnostics.push(ManifestDiagnostic {
+                kind: ManifestDiagnosticKind::InvalidUnitTest,
+                severity: ManifestDiagnosticSeverity::Warning,
+                message: format!("invalid unit test entry '{id}' in 'unit_tests'"),
+                hint: Some("Expected a unit test object with matching resource type and ID".into()),
+                raw_resource: Some(id.clone()),
+                raw_type: value
+                    .get("resource_type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| Some("unit_test".into())),
+                schema: raw_schema.clone(),
+                section: Some("unit_tests".into()),
+            });
+        }
+    }
 
     append_unsupported_resource_diagnostics(
         "nodes",
@@ -493,6 +519,7 @@ pub fn load_manifest_report_from_bytes(content: &[u8], manifest_path: &Path) -> 
             raw_resource: None,
             raw_type: None,
             schema: raw_schema,
+            section: None,
         });
         return ManifestLoadReport {
             manifest: None,
@@ -548,6 +575,7 @@ fn append_unsupported_resource_diagnostics(
             raw_resource: Some(unique_id.clone()),
             raw_type: Some(raw_type.to_string()),
             schema: schema.map(ToOwned::to_owned),
+            section: Some(map_name.to_owned()),
         });
     }
 }

@@ -46,6 +46,7 @@ pub(super) struct JsonRpcError {
 pub(super) struct McpState {
     pub(super) project_dir: PathBuf,
     pub(super) manifest_path: PathBuf,
+    pub(super) manifest_hash: u64,
     pub(super) dialect: DlinDialect,
     pub(super) dialect_warning: Option<String>,
     pub(super) manifest_warnings: Vec<parser::manifest::ManifestDiagnostic>,
@@ -116,7 +117,15 @@ impl McpState {
             .unwrap_or_else(|_| args.project_dir.clone());
         let manifest_path =
             resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
-        let graph_report = parser::manifest::build_graph_from_manifest_report(&manifest_path)?;
+        let bytes = std::fs::read(&manifest_path).map_err(|source| {
+            dlin_core::error::DbtLineageError::FileReadError {
+                path: manifest_path.clone(),
+                source,
+            }
+        })?;
+        let manifest_hash = super::page::fingerprint(&bytes);
+        let report = parser::manifest::load_manifest_report_from_bytes(&bytes, &manifest_path);
+        let graph_report = parser::manifest::build_graph_from_load_report(report)?;
         let parser::manifest::ManifestGraphReport {
             graph: dag,
             diagnostics,
@@ -128,6 +137,7 @@ impl McpState {
         Ok(Self {
             project_dir,
             manifest_path,
+            manifest_hash,
             dialect: resolved_dialect.dialect,
             dialect_warning: resolved_dialect.warning,
             manifest_warnings: diagnostics
@@ -219,6 +229,7 @@ pub(super) fn initialize_result(params: &Value) -> Value {
         "capabilities": {
             "tools": { "listChanged": false }
         },
+        "instructions": "Use get_project_summary to check manifest freshness and load diagnostics. Partial column lineage can omit sources. Boundaries such as external relations and constants are normal; failed analysis or an incomplete search limits what can be concluded. Possible impacts are unconfirmed. Schema evidence explains what the result relies on. Follow next_cursor with the same query for more rows or request detail full for paths and evidence.",
         "serverInfo": {
             "name": "dlin",
             "version": env!("CARGO_PKG_VERSION")

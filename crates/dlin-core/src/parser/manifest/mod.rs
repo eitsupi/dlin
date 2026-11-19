@@ -128,6 +128,7 @@ pub(crate) fn manifest_has_future_schema(manifest: &Manifest) -> bool {
 /// A node entry in the manifest (model, seed, snapshot, test, analysis)
 #[derive(Debug, Deserialize)]
 pub struct ManifestNode {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     #[serde(default)]
@@ -158,6 +159,7 @@ pub struct ManifestNode {
 /// A source entry in the manifest
 #[derive(Debug, Deserialize)]
 pub struct ManifestSource {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     pub source_name: String,
@@ -193,6 +195,7 @@ pub struct ManifestColumn {
 /// An exposure entry in the manifest
 #[derive(Debug, Deserialize)]
 pub struct ManifestExposure {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     #[serde(default)]
@@ -221,6 +224,7 @@ pub struct ManifestExposureOwner {
 /// A semantic model entry in the manifest (dbt Semantic Layer)
 #[derive(Debug, Deserialize)]
 pub struct ManifestSemanticModel {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     pub label: Option<String>,
@@ -234,6 +238,7 @@ pub struct ManifestSemanticModel {
 /// A metric entry in the manifest (dbt Semantic Layer)
 #[derive(Debug, Deserialize)]
 pub struct ManifestMetric {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     pub label: Option<String>,
@@ -247,6 +252,7 @@ pub struct ManifestMetric {
 /// A saved query entry in the manifest (dbt Semantic Layer)
 #[derive(Debug, Deserialize)]
 pub struct ManifestSavedQuery {
+    pub package_name: Option<String>,
     pub unique_id: String,
     pub name: String,
     pub label: Option<String>,
@@ -428,7 +434,40 @@ pub fn load_manifest_strict_from_bytes(content: &[u8], manifest_path: &Path) -> 
     load_manifest_report_from_bytes(content, manifest_path).into_manifest_strict()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Deserialize)]
+pub struct ManifestFile {
+    pub package: Option<String>,
+    pub path: String,
+}
+
+pub fn resource_package<'a>(unique_id: &'a str, package: Option<&'a str>) -> Option<&'a str> {
+    package.filter(|name| !name.is_empty()).or_else(|| {
+        let (_, rest) = unique_id.split_once('.')?;
+        let (owner, _) = rest.split_once('.')?;
+        (!owner.is_empty()).then_some(owner)
+    })
+}
+
+fn valid_unit_test(id: &str, value: &serde_json::Value) -> bool {
+    let mut parts = id.splitn(3, '.');
+    parts.next() == Some("unit_test")
+        && parts.filter(|part| !part.is_empty()).count() == 2
+        && value
+            .get("resource_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("unit_test")
+        && value.get("unique_id").and_then(serde_json::Value::as_str) == Some(id)
+}
+
 impl Manifest {
+    /// Unit tests with valid artifact identities, omitted from the graph.
+    pub fn skipped_unit_test_count(&self) -> usize {
+        self.unit_tests
+            .iter()
+            .filter(|(id, value)| valid_unit_test(id, value))
+            .count()
+    }
+
     /// Collect `compiled_code` from manifest nodes as a mapping from graph
     /// identity to SQL string. Nodes without `compiled_code` are omitted.
     ///
@@ -447,47 +486,100 @@ impl Manifest {
         map
     }
 
-    /// Collect all unique file paths that define the manifest's nodes, sources,
-    /// semantic layer resources and exposures.
-    /// Returns relative paths as stored in the manifest (e.g. "models/staging/stg_orders.sql").
-    pub fn collect_file_paths(&self) -> BTreeSet<String> {
+    /// Collect the paths of active resources, preserving their owning package.
+    pub fn referenced_files(&self) -> BTreeSet<ManifestFile> {
         let mut paths = BTreeSet::new();
+        let mut insert = |id: &str, package: Option<&str>, path: Option<&str>| {
+            if let Some(path) = path {
+                paths.insert(ManifestFile {
+                    package: resource_package(id, package).map(str::to_owned),
+                    path: path.to_owned(),
+                });
+            }
+        };
         for node in self.nodes.values() {
-            let p = node.original_file_path.as_ref().or(node.path.as_ref());
-            if let Some(p) = p {
-                paths.insert(p.clone());
-            }
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
+            );
         }
-        for source in self.sources.values() {
-            let p = source.original_file_path.as_ref().or(source.path.as_ref());
-            if let Some(p) = p {
-                paths.insert(p.clone());
-            }
+        for node in self.sources.values() {
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
+            );
         }
-        for sm in self.semantic_models.values() {
-            let p = sm.original_file_path.as_ref().or(sm.path.as_ref());
-            if let Some(p) = p {
-                paths.insert(p.clone());
-            }
+        for node in self.semantic_models.values() {
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
+            );
         }
-        for metric in self.metrics.values() {
-            let p = metric.original_file_path.as_ref().or(metric.path.as_ref());
-            if let Some(p) = p {
-                paths.insert(p.clone());
-            }
+        for node in self.metrics.values() {
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
+            );
         }
-        for sq in self.saved_queries.values() {
-            let p = sq.original_file_path.as_ref().or(sq.path.as_ref());
-            if let Some(p) = p {
-                paths.insert(p.clone());
-            }
+        for node in self.saved_queries.values() {
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
+            );
         }
-        for exposure in self.exposures.values() {
-            if let Some(p) = &exposure.original_file_path {
-                paths.insert(p.clone());
+        for node in self.exposures.values() {
+            insert(
+                &node.unique_id,
+                node.package_name.as_deref(),
+                node.original_file_path.as_deref(),
+            );
+        }
+        for (id, value) in &self.macros {
+            let owner = resource_package(
+                id,
+                value
+                    .get("package_name")
+                    .and_then(serde_json::Value::as_str),
+            );
+            if owner.is_some_and(|name| self.is_builtin_macro_package(name)) {
+                continue;
             }
+            insert(
+                id,
+                owner,
+                value
+                    .get("original_file_path")
+                    .and_then(serde_json::Value::as_str),
+            );
         }
         paths
+    }
+
+    /// dbt and its active adapter ship macros outside the package install directory.
+    fn is_builtin_macro_package(&self, name: &str) -> bool {
+        if self.metadata.project_name.as_deref() == Some(name) {
+            return false;
+        }
+        let adapter = self.metadata.adapter_type.as_deref();
+        matches!(name, "dbt" | "dbt_compare_macros")
+            || adapter.is_some_and(|adapter| name.strip_prefix("dbt_") == Some(adapter))
+            || matches!(
+                (adapter, name),
+                (Some("redshift"), "dbt_postgres") | (Some("databricks"), "dbt_spark")
+            )
+    }
+
+    /// Collect unique relative paths without package information.
+    pub fn collect_file_paths(&self) -> BTreeSet<String> {
+        self.referenced_files()
+            .into_iter()
+            .map(|file| file.path)
+            .collect()
     }
 }
 

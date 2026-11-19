@@ -11,6 +11,16 @@ use super::tools::{
     list_nodes, normalize_table_short_name, tools,
 };
 
+fn body(result: &Value) -> Value {
+    assert!(result.get("structuredContent").is_none());
+    assert_eq!(result["content"].as_array().unwrap().len(), 1);
+    assert_eq!(result["content"][0]["type"], "text");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let value: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(text, value.to_string());
+    value
+}
+
 fn fixture_project_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -145,7 +155,7 @@ fn mcp_auto_detects_manifest_dialect() {
     )
     .unwrap();
 
-    assert!(result["structuredContent"].get("warnings").is_none());
+    assert!(body(&result).get("warnings").is_none());
 }
 
 #[test]
@@ -167,7 +177,7 @@ fn mcp_explicit_supported_dialect_has_no_warning() {
     )
     .unwrap();
 
-    assert!(result["structuredContent"].get("warnings").is_none());
+    assert!(body(&result).get("warnings").is_none());
 }
 
 #[test]
@@ -177,7 +187,8 @@ fn mcp_keeps_target_source_less_indeterminate_diagnostic() {
         &json!({
             "model": "standalone",
             "column": "x",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -202,7 +213,8 @@ fn mcp_rebases_rename_and_suppresses_unrelated_same_named_diagnostics() {
         &json!({
             "model": "target",
             "column": "z",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -225,15 +237,12 @@ fn mcp_dialect_warning_preserves_legacy_string_shape() {
     let mut state = column_lineage_state();
     state.dialect_warning = Some("using generic instead".to_string());
     let result = call_tool(
-        &json!({"name": "get_project_summary", "arguments": {}}),
+        &json!({"name": "get_column_lineage", "arguments": {"model":"stg_orders", "column":"order_id", "direction":"upstream"}}),
         &state,
     )
     .unwrap();
-    assert!(result["structuredContent"]["warnings"][0].is_string());
-    assert_eq!(
-        result["structuredContent"]["warnings"][0],
-        "using generic instead"
-    );
+    assert!(body(&result)["warnings"][0].is_string());
+    assert_eq!(body(&result)["warnings"][0], "using generic instead");
 }
 
 #[test]
@@ -274,18 +283,12 @@ fn mcp_unknown_resource_warning_preserves_core_identity() {
         &state,
     )
     .unwrap();
-    assert_eq!(
-        result["structuredContent"]["warnings"][0]["kind"],
-        "unsupported_resource_type"
-    );
-    assert_eq!(
-        result["structuredContent"]["warnings"][0]["raw_type"],
-        "operation"
-    );
-    assert_eq!(
-        result["structuredContent"]["warnings"][0]["hint"],
-        state.manifest_warnings[0].hint.as_deref().unwrap()
-    );
+    let diag = &body(&result)["manifest_diagnostics"][0];
+    assert_eq!(diag["kind"], "unsupported_resource_type");
+    assert_eq!(diag["section"], "nodes");
+    assert_eq!(diag["resource_type"], "operation");
+    assert_eq!(diag["count"], 1);
+    assert_eq!(diag["examples"][0]["id"], "operation.proj.refresh");
 }
 
 #[test]
@@ -315,24 +318,15 @@ fn mcp_future_schema_warning_is_visible_with_structured_identity() {
         &state,
     )
     .unwrap();
-    let warning = result["structuredContent"]["warnings"]
+    let result = body(&result);
+    let warning = result["manifest_diagnostics"]
         .as_array()
         .unwrap()
         .iter()
         .find(|warning| warning["kind"] == "future_schema_version")
-        .expect("future schema warning");
-    assert_eq!(warning["level"], "warning");
-    assert!(
-        warning["what"]
-            .as_str()
-            .is_some_and(|what| !what.is_empty())
-    );
-    assert!(warning["why"].is_null());
-    assert!(
-        warning["hint"]
-            .as_str()
-            .is_some_and(|hint| !hint.is_empty())
-    );
+        .unwrap();
+    assert_eq!(warning["count"], 1);
+    assert!(warning["examples"][0]["message"].is_string());
 }
 
 #[test]
@@ -355,15 +349,15 @@ fn find_nodes_returns_full_details_including_compiled_sql() {
     let result = call_tool(
         &json!({
             "name": "find_nodes",
-            "arguments": { "names": ["stg_orders"] }
+            "arguments": { "names": ["stg_orders"], "include_sql":true }
         }),
         &state,
     )
     .unwrap();
 
     assert_eq!(result["isError"], false);
-    assert_eq!(result["structuredContent"]["count"], 1);
-    let node = &result["structuredContent"]["nodes"][0];
+    assert_eq!(body(&result)["count"], 1);
+    let node = &body(&result)["nodes"][0];
     assert_eq!(node["name"], Value::String("stg_orders".to_string()));
     assert!(
         node.get("compiled_sql").is_some(),
@@ -386,7 +380,7 @@ fn find_nodes_resolves_manifest_unique_id() {
     assert_eq!(result["count"], 1);
     assert_eq!(result["not_found"], json!([]));
     assert_eq!(result["nodes"][0]["name"], json!("stg_orders"));
-    assert!(result["nodes"][0]["compiled_sql"].is_string());
+    assert!(result["nodes"][0].get("compiled_sql").is_none());
 }
 
 #[test]
@@ -458,7 +452,7 @@ fn lineage_defaults_to_one_hop_for_focused_models() {
     let nodes = value["nodes"].as_array().unwrap();
     let edges = value["edges"].as_array().unwrap();
 
-    assert!(nodes.iter().any(|node| node["label"] == "orders"));
+    assert!(nodes.iter().any(|node| node["name"] == "orders"));
     assert!(!edges.is_empty());
 }
 
@@ -474,7 +468,7 @@ fn lineage_reports_not_found_for_unknown_models() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|n| n["label"] == "orders")
+            .any(|n| n["name"] == "orders")
     );
 }
 
@@ -501,7 +495,7 @@ fn lineage_resolves_manifest_unique_id() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|n| n["label"] == "orders")
+            .any(|n| n["name"] == "orders")
     );
 }
 
@@ -553,7 +547,8 @@ fn column_lineage_parse_failure_not_replaced_when_model_given_as_unique_id() {
         &json!({
             "model": "model.clp.stg_bad_sql",
             "column": "some_col",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -585,7 +580,8 @@ fn column_lineage_parse_failure_not_replaced_by_column_not_found() {
         &json!({
             "model": "stg_bad_sql",
             "column": "some_col",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -618,7 +614,8 @@ fn column_lineage_unrelated_upstream_parse_failure_does_not_suppress_column_not_
         &json!({
             "model": "mart_unrelated_parse_fail",
             "column": "nonexistent_col",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -643,7 +640,8 @@ fn column_lineage_upstream_parse_failure_shown_when_column_depends_on_failing_mo
         &json!({
             "model": "mart_unrelated_parse_fail",
             "column": "bad_col",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -668,7 +666,8 @@ fn column_lineage_upstream_parse_failure_hidden_when_column_unrelated_to_failing
         &json!({
             "model": "mart_unrelated_parse_fail",
             "column": "order_id",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -697,7 +696,8 @@ fn column_lineage_unrelated_column_not_found_suppressed_when_name_collides_with_
         &json!({
             "model": "mart_id_name_collision",
             "column": "order_id",
-            "direction": "upstream"
+            "direction": "upstream",
+            "detail": "full"
         }),
         &state,
     )
@@ -831,4 +831,211 @@ fn normalize_table_short_name_extracts_leaf_name() {
         "orders"
     );
     assert_eq!(normalize_table_short_name("orders"), "orders");
+}
+
+#[test]
+fn manifest_diagnostics_are_grouped_in_summary_and_unit_tests_do_not_expand_other_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_path = temp.path().join("manifest.json");
+    let mut artifact = json!({
+        "metadata":{"project_name":"proj","adapter_type":"duckdb"},
+        "nodes":{},
+        "unit_tests":{}
+    });
+    for i in (0..5).rev() {
+        let id = format!("operation.proj.run_{i}");
+        artifact["nodes"][&id] =
+            json!({"name":format!("run_{i}"),"unique_id":id,"resource_type":"operation"});
+    }
+    let load = |artifact: &Value| {
+        std::fs::write(&manifest_path, artifact.to_string()).unwrap();
+        McpState::load(McpArgs {
+            project_dir: temp.path().to_path_buf(),
+            manifest_path: Some(manifest_path.clone()),
+            dialect: None,
+        })
+        .unwrap()
+    };
+    let request = json!({"name":"list_nodes","arguments":{}});
+    let before = call_tool(&request, &load(&artifact)).unwrap();
+    for i in 0..73 {
+        let id = format!("unit_test.proj.check_{i}");
+        artifact["unit_tests"][&id] = json!({"unique_id":id,"resource_type":"unit_test",
+            "model":"orders","given":[{"input":"ref('raw_orders')","rows":[]}],"expect":{"rows":[]}});
+    }
+    let state = load(&artifact);
+    assert_eq!(call_tool(&request, &state).unwrap(), before);
+    let summary = body(&call_tool(&json!({"name":"get_project_summary"}), &state).unwrap());
+    assert_eq!(summary["skipped_unit_tests"], 73);
+    assert_eq!(summary["manifest_status"]["verification"], "unverified");
+    assert!(summary.get("vars_count").is_none());
+    let diag = &summary["manifest_diagnostics"][0];
+    assert_eq!(diag["kind"], "unsupported_resource_type");
+    assert_eq!(diag["count"], 5);
+    assert_eq!(diag["examples"].as_array().unwrap().len(), 3);
+    assert_eq!(diag["examples"][0]["id"], "operation.proj.run_0");
+}
+
+#[test]
+fn compact_wire_size_and_detail_agree_on_column_lineage_facts() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = McpState::load(McpArgs {
+        project_dir: temp.path().to_path_buf(),
+        manifest_path: Some(column_lineage_fixture_project_dir().join("target/manifest.json")),
+        dialect: None,
+    })
+    .unwrap();
+    for (model, column, direction, wire_max, text_before) in [
+        ("orders", "total_amount", "upstream", 2736, 1833),
+        (
+            "mart_unrelated_parse_fail",
+            "bad_col",
+            "upstream",
+            3300,
+            2213,
+        ),
+        ("stg_orders", "order_id", "downstream", 7025, 4902),
+    ] {
+        let args = json!({"model":model,"column":column,"direction":direction});
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"get_column_lineage","arguments":args}});
+        let response =
+            handle_request(parse_request(&request.to_string()).unwrap(), &state).unwrap();
+        let wire = serde_json::to_vec(&response).unwrap().len();
+        let result = response.result.unwrap();
+        let text_length = result["content"][0]["text"].as_str().unwrap().len();
+        assert!(
+            wire <= wire_max && text_length < text_before,
+            "{model}.{column}: wire {wire}, text {text_length}"
+        );
+        let summary = body(&result);
+        let mut full_args = args;
+        full_args["detail"] = json!("full");
+        let full = get_column_lineage(&full_args, &state).unwrap();
+        for key in [
+            "status",
+            "known_count",
+            "unresolved_count",
+            "confirmed_count",
+            "possible_count",
+            "no_impact",
+        ] {
+            assert_eq!(summary.get(key), full.get(key), "{model}.{column} {key}");
+        }
+        match (model, direction) {
+            ("orders", _) => {
+                assert_eq!(summary["status"], "complete");
+                assert!(summary["known_count"].as_u64().unwrap() > 0);
+            }
+            (_, "upstream") => {
+                assert_eq!(summary["status"], "partial");
+                assert_eq!(summary["known_count"], 0);
+                assert_eq!(summary["incomplete_boundary"], true);
+            }
+            _ => {
+                assert_eq!(summary["no_impact"], false);
+                assert!(summary["confirmed_count"].as_u64().unwrap() > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn pages_preserve_edges_and_endpoints_and_reject_mismatched_cursors() {
+    let state = state();
+    let args = json!({"models":["orders"], "upstream_depth":3,"downstream_depth":3});
+    let complete = get_lineage(&args, &state).unwrap();
+    let mut paged_args = args.clone();
+    paged_args["limit"] = json!(1);
+    let mut collected = Vec::new();
+    loop {
+        let page = get_lineage(&paged_args, &state).unwrap();
+        let id = |value: &Value| value.as_str().unwrap().to_owned();
+        let nodes: HashSet<_> = page["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| id(&node["unique_id"]))
+            .collect();
+        assert!(nodes.contains("model.simple_project.orders"));
+        for edge in page["edges"].as_array().unwrap() {
+            assert!(nodes.contains(&id(&edge["source"])));
+            assert!(nodes.contains(&id(&edge["target"])));
+            collected.push(edge.clone());
+        }
+        let cursor = &page["page"]["next_cursor"];
+        if cursor.is_null() {
+            break;
+        }
+        let mut mismatch = paged_args.clone();
+        mismatch["cursor"] = cursor.clone();
+        mismatch["upstream_depth"] = json!(2);
+        assert!(get_lineage(&mismatch, &state).is_err());
+        paged_args["cursor"] = cursor.clone();
+    }
+    assert_eq!(collected, *complete["edges"].as_array().unwrap());
+}
+
+#[test]
+fn invalid_tool_arguments_use_one_compact_text_item() {
+    let result = call_tool(
+        &json!({"name":"find_nodes","arguments":{"names":vec!["orders";21]}}),
+        &state(),
+    )
+    .unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        body(&result)["error"]
+            .as_str()
+            .unwrap()
+            .contains("at most 20")
+    );
+}
+
+#[test]
+fn column_pages_preserve_each_impact_and_gap_at_both_detail_levels() {
+    let state = column_lineage_state();
+    for detail in ["summary", "full"] {
+        let args = json!({"model":"stg_orders","column":"order_id","direction":"downstream","detail":detail});
+        let all = get_column_lineage(&args, &state).unwrap();
+        let mut request = args.clone();
+        request["limit"] = json!(1);
+        let mut confirmed = Vec::new();
+        let mut possible = Vec::new();
+        let mut gaps = Vec::new();
+        loop {
+            let result = get_column_lineage(&request, &state).unwrap();
+            assert_eq!(result["confirmed_count"], all["confirmed_count"]);
+            assert_eq!(result["possible_count"], all["possible_count"]);
+            confirmed.extend_from_slice(result["confirmed"].as_array().unwrap());
+            possible.extend_from_slice(result["possible"].as_array().unwrap());
+            for entry in result["exploration"].as_array().unwrap() {
+                if let Some(rows) = entry["gaps"].as_array() {
+                    gaps.extend_from_slice(rows);
+                }
+            }
+            if result["page"]["next_cursor"].is_null() {
+                break;
+            }
+            request["cursor"] = result["page"]["next_cursor"].clone();
+            let mut mismatch = request.clone();
+            mismatch["detail"] = json!(if detail == "summary" {
+                "full"
+            } else {
+                "summary"
+            });
+            assert!(get_column_lineage(&mismatch, &state).is_err());
+        }
+        assert_eq!(confirmed, *all["confirmed"].as_array().unwrap());
+        assert_eq!(possible, *all["possible"].as_array().unwrap());
+        let all_gaps: Vec<_> = all["exploration"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["gaps"].as_array())
+            .flatten()
+            .cloned()
+            .collect();
+        assert_eq!(gaps, all_gaps);
+    }
 }

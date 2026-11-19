@@ -1,19 +1,17 @@
-use std::collections::HashSet;
-use std::sync::LazyLock;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use path_slash::PathExt as _;
 use serde_json::{Value, json};
 
-use super::protocol::McpState;
-use crate::commands::{check_manifest_freshness, read_seed_schemas};
+use super::{column_result, page::Page, protocol::McpState};
+use crate::commands::{check_loaded_manifest_freshness, read_seed_schemas};
 use dlin_core::graph;
 use dlin_core::graph::types::NodeType;
-use dlin_core::parser;
 use dlin_core::render;
 
 pub(super) fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "get_project_summary",
             "description": "Return a summary of the loaded dbt project: node counts by type, total edge count, and whether manifest.json reflects the latest project source files (SQL models, YAML schemas, seeds, and macros).",
@@ -37,7 +35,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "find_nodes",
-            "description": "Look up one or more dbt nodes by name or unique ID. Returns full details including compiled SQL, column list, description, tags, file path, and materialization.",
+            "description": "Look up one or more dbt nodes by name or unique ID. Returns node details and columns. Use include_sql to request compiled SQL.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -68,7 +66,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Analyse the downstream impact of changing a model: returns all downstream nodes with their distance and a severity score based on node type and materialization.",
+            "description": "Analyse the downstream impact of changing a model: returns downstream nodes with their distance and a DAG severity based on node type and materialization.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
@@ -78,7 +76,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_column_lineage",
-            "description": "Trace the lineage of a single column across upstream or downstream models, following transformations. Requires compiled SQL in manifest.json.",
+            "description": "Trace a column upstream or downstream using compiled SQL. Partial results may omit sources. Possible impacts are unconfirmed, and incomplete exploration may miss targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -90,7 +88,24 @@ pub(super) fn tools() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
-    ]
+    ];
+    for tool in &mut tools {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        let default_limit = if name == "get_lineage" { 50 } else { 20 };
+        let impact = matches!(name.as_str(), "get_impact" | "get_column_lineage");
+        let properties = &mut tool["inputSchema"]["properties"];
+        if name == "find_nodes" {
+            properties["include_sql"] = json!({"type":"boolean","default":false,"description":"Include compiled SQL when available."});
+            properties["names"]["maxItems"] = json!(20);
+        } else if name != "get_project_summary" {
+            properties["limit"] = json!({"type":"integer","minimum":1,"maximum":100,"default":default_limit,"description":"Maximum rows on this page."});
+            properties["cursor"] = json!({"type":"string","description":"Use next_cursor from the previous page with the same query."});
+        }
+        if impact {
+            properties["detail"] = json!({"type":"string","enum":["summary","full"],"default":"summary","description":"Full includes paths and supporting details. Both modes can be paginated."});
+        }
+    }
+    tools
 }
 
 pub(super) fn call_tool(
@@ -116,31 +131,23 @@ pub(super) fn call_tool(
     };
 
     Ok(match result {
-        Ok(value) => tool_result(value, false, state),
-        Err(err) => tool_result(json!({ "error": err.to_string() }), true, state),
+        Ok(value) => tool_result(
+            value,
+            false,
+            (name == "get_column_lineage")
+                .then_some(state.dialect_warning.as_deref())
+                .flatten(),
+        ),
+        Err(err) => tool_result(json!({ "error": err.to_string() }), true, None),
     })
 }
 
-fn tool_result(mut value: Value, is_error: bool, state: &McpState) -> Value {
-    if let Some(object) = value.as_object_mut() {
-        let mut warnings = state
-            .manifest_warnings
-            .iter()
-            .map(parser::manifest::ManifestDiagnostic::to_warning_json)
-            .collect::<Vec<_>>();
-        if let Some(warning) = &state.dialect_warning {
-            // Dialect warnings predate structured manifest diagnostics and
-            // are part of the existing MCP JSON contract.
-            warnings.push(json!(warning));
-        }
-        if !warnings.is_empty() {
-            object.insert("warnings".to_string(), Value::Array(warnings));
-        }
+fn tool_result(mut value: Value, is_error: bool, warning: Option<&str>) -> Value {
+    if let Some(warning) = warning {
+        value["warnings"] = json!([warning]);
     }
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     json!({
-        "content": [{ "type": "text", "text": text }],
-        "structuredContent": value,
+        "content": [{ "type": "text", "text": value.to_string() }],
         "isError": is_error
     })
 }
@@ -152,24 +159,50 @@ pub(super) fn get_project_summary(state: &McpState) -> Result<Value> {
         .project_name
         .clone()
         .unwrap_or_else(|| "(unknown)".to_string());
-    let manifest_status = match parser::project::DbtProject::load(&state.project_dir) {
-        Ok(project) => check_manifest_freshness(
-            &state.project_dir,
-            Some(&state.manifest_path),
-            &project,
-            Some(&state.manifest),
-        ),
-        Err(_) => None,
-    };
-    let report = render::summary::SummaryReport {
-        project_name,
-        source_mode: "manifest".to_string(),
-        node_counts: render::summary::count_nodes(&state.dag),
-        edge_count: state.dag.edge_count(),
-        vars_count: 0,
-        manifest_status,
-    };
-    Ok(serde_json::to_value(report)?)
+    let freshness =
+        check_loaded_manifest_freshness(&state.project_dir, &state.manifest_path, &state.manifest);
+    let manifest_status = json!({
+        "verification": freshness.verification(),
+        "found": freshness.found,
+        "is_stale": freshness.is_stale,
+        "stale_file_count": freshness.stale_file_count,
+        "deleted_file_count": freshness.deleted_file_count,
+        "stale_files": freshness.stale_files.iter().take(3).collect::<Vec<_>>(),
+        "deleted_files": freshness.deleted_files.iter().take(3).collect::<Vec<_>>(),
+        "unverified_count": freshness.unverified.len(),
+        "unverified": freshness.unverified.iter().take(3).collect::<Vec<_>>(),
+    });
+    let mut value = json!({
+        "project_name": project_name,
+        "source_mode": "manifest",
+        "node_counts": render::summary::count_nodes(&state.dag),
+        "edge_count": state.dag.edge_count(),
+        "manifest_status": manifest_status,
+    });
+    value["skipped_unit_tests"] = json!(state.manifest.skipped_unit_test_count());
+    let mut groups = BTreeMap::new();
+    for diagnostic in &state.manifest_warnings {
+        let key = (
+            diagnostic.kind.as_str(),
+            diagnostic.section.as_deref(),
+            diagnostic.raw_type.as_deref(),
+        );
+        groups.entry(key).or_insert_with(Vec::new).push((
+            diagnostic.raw_resource.as_deref(),
+            diagnostic.message.as_str(),
+        ));
+    }
+    value["manifest_diagnostics"] = json!(groups.into_iter().map(
+        |((kind, section, resource_type), mut entries)| {
+            entries.sort_unstable();
+            json!({
+                "kind": kind, "section": section, "resource_type": resource_type,
+                "count": entries.len(), "examples": entries.iter().take(3)
+                    .map(|(id, message)| json!({"id": id, "message": message})).collect::<Vec<_>>(),
+            })
+        }
+    ).collect::<Vec<_>>());
+    Ok(value)
 }
 
 pub(super) fn list_nodes(args: &Value, state: &McpState) -> Result<Value> {
@@ -180,36 +213,64 @@ pub(super) fn list_nodes(args: &Value, state: &McpState) -> Result<Value> {
     };
     let type_filter = parse_node_type_filter(args)?;
 
-    let mut nodes = Vec::new();
-    for idx in state.dag.node_indices() {
-        let node = &state.dag[idx];
-        if node.node_type == NodeType::Phantom {
-            continue;
-        }
-        if let Some(ref filter) = type_filter
-            && !filter.contains(&node.node_type)
-        {
-            continue;
-        }
-        if let Some(query) = query.as_deref()
-            && !node_matches_query(node, query)
-        {
-            continue;
-        }
-        nodes.push(node_summary(node));
-    }
-    nodes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let mut nodes: Vec<_> = state
+        .dag
+        .node_weights()
+        .filter(|node| {
+            node.node_type != NodeType::Phantom
+                && type_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.contains(&node.node_type))
+                && query
+                    .as_deref()
+                    .is_none_or(|query| node_matches_query(node, query))
+        })
+        .collect();
+    nodes.sort_unstable_by_key(|node| (&node.label, &node.unique_id));
+    let mut types: Vec<_> = type_filter
+        .iter()
+        .flatten()
+        .map(|kind| kind.label())
+        .collect();
+    types.sort_unstable();
+    let page = Page::new(
+        args,
+        20,
+        nodes.len(),
+        state.manifest_hash,
+        ("list_nodes", &query, type_filter.is_some(), types),
+    )?;
+    let nodes: Vec<_> = nodes[page.range()].iter().map(|node| {
+        let description = node.description.as_deref().map(|text| excerpt(text, 160));
+        json!({
+            "unique_id": node.unique_id, "name": node.label, "node_type": node.node_type.label(),
+            "description": description, "file_path": node.file_path.as_ref().map(|path| path.to_slash_lossy()),
+            "materialization": node.materialization, "tags": node.tags,
+        })
+    }).collect();
+    Ok(json!({"nodes": nodes, "count": nodes.len(), "page": page.metadata()}))
+}
 
-    Ok(json!({
-        "nodes": nodes,
-        "count": nodes.len()
-    }))
+/// Bound a text field without splitting a character.
+pub(super) fn excerpt(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
 }
 
 pub(super) fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let names = required_string_array(args, "names")?;
+    anyhow::ensure!(
+        names.len() <= 20,
+        "find_nodes accepts at most 20 names; split the request"
+    );
     let type_filter = parse_node_type_filter(args)?;
-    let sql_contents = state.manifest.collect_sql_contents();
+    let include_sql = match args.get("include_sql") {
+        None | Some(Value::Null) => false,
+        Some(value) => value.as_bool().context("include_sql must be a boolean")?,
+    };
+    let sql_contents = include_sql.then(|| state.manifest.collect_sql_contents());
 
     let mut nodes = Vec::new();
     let mut not_found = Vec::new();
@@ -224,8 +285,12 @@ pub(super) fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
                     .as_ref()
                     .is_none_or(|f| f.contains(&node.node_type))
                 {
-                    let compiled_sql = sql_contents.get(&node.unique_id).map(String::as_str);
-                    nodes.push(node_detail(node, compiled_sql));
+                    let mut detail = node_summary(node);
+                    detail["columns"] = json!(node.columns);
+                    if let Some(sql) = &sql_contents {
+                        detail["compiled_sql"] = json!(sql.get(&node.unique_id));
+                    }
+                    nodes.push(detail);
                 } else {
                     not_found.push(name);
                 }
@@ -328,21 +393,6 @@ fn node_summary(node: &graph::types::NodeData) -> Value {
     })
 }
 
-fn node_detail(node: &graph::types::NodeData, compiled_sql: Option<&str>) -> Value {
-    let mut value = node_summary(node);
-    value["columns"] = json!(node.columns);
-    value["compiled_sql"] = json!(compiled_sql);
-    value
-}
-
-static GRAPH_NODE_FIELDS_SET: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    render::json::GRAPH_NODE_FIELDS
-        .iter()
-        .filter(|&&f| f != "sql_content")
-        .map(|field| (*field).to_string())
-        .collect()
-});
-
 pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let models = required_string_array(args, "models")?;
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
@@ -359,27 +409,65 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
         .map(|(original, _)| original.clone())
         .collect();
     let resolved_models: Vec<String> = normalized_models.into_iter().flatten().collect();
-    if resolved_models.is_empty() {
-        return Ok(json!({
-            "nodes": [],
-            "edges": [],
-            "not_found": not_found
-        }));
-    }
-
-    let filtered = graph::filter::filter_graph(
-        &state.dag,
-        &resolved_models,
-        upstream,
-        downstream,
-        &[],
-        true,
+    let filtered = if resolved_models.is_empty() {
+        Default::default()
+    } else {
+        graph::filter::filter_graph(
+            &state.dag,
+            &resolved_models,
+            upstream,
+            downstream,
+            &[],
+            true,
+        )?
+    };
+    let mut edges: Vec<_> = filtered
+        .edge_indices()
+        .filter_map(|edge| {
+            let (from, to) = filtered.edge_endpoints(edge)?;
+            Some((from, to, &filtered[edge]))
+        })
+        .collect();
+    edges.sort_by_key(|(from, to, edge)| {
+        (
+            &filtered[*from].unique_id,
+            &filtered[*to].unique_id,
+            edge.edge_type.label(),
+            edge.collapsed_through,
+        )
+    });
+    let page = Page::new(
+        args,
+        50,
+        edges.len(),
+        state.manifest_hash,
+        (
+            "get_lineage",
+            &resolved_models,
+            &not_found,
+            upstream,
+            downstream,
+        ),
     )?;
-    let mut buf = Vec::new();
-    render::json::render_json_to_writer(&filtered, None, &GRAPH_NODE_FIELDS_SET, &mut buf, false)?;
-    let mut result: Value = serde_json::from_slice(&buf)?;
-    result["not_found"] = json!(not_found);
-    Ok(result)
+    let mut included: HashSet<_> = filtered
+        .node_indices()
+        .filter(|idx| resolved_models.contains(&filtered[*idx].unique_id))
+        .collect();
+    let edges: Vec<_> = edges[page.range()]
+        .iter()
+        .map(|(from, to, edge)| {
+            included.extend([*from, *to]);
+            json!({"source": filtered[*from].unique_id, "target": filtered[*to].unique_id,
+            "edge_type":edge.edge_type.label(), "collapsed_through":edge.collapsed_through})
+        })
+        .collect();
+    let mut included: Vec<_> = included.into_iter().collect();
+    included.sort_unstable_by_key(|idx| &filtered[*idx].unique_id);
+    let nodes: Vec<_> = included.iter().map(|idx| {
+        let node = &filtered[*idx];
+        json!({"unique_id":node.unique_id, "name":node.label, "node_type":node.node_type.label()})
+    }).collect();
+    Ok(json!({"nodes":nodes, "edges":edges, "not_found":not_found, "page":page.metadata()}))
 }
 
 pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
@@ -387,15 +475,62 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
     let idx = graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
         .with_context(|| format!("model not found: {model}"))?;
-    let report = graph::impact::compute_impact(&state.dag, idx);
-    Ok(serde_json::to_value(report)?)
+    let mut report = graph::impact::compute_impact(&state.dag, idx);
+    let detail = column_result::Detail::parse(args)?;
+    report.impacted_nodes.sort_by_key(|node| {
+        (
+            node.distance,
+            std::cmp::Reverse(node.severity),
+            node.unique_id.clone(),
+        )
+    });
+    let page = Page::new(
+        args,
+        20,
+        report.impacted_nodes.len(),
+        state.manifest_hash,
+        ("get_impact", &normalized, detail),
+    )?;
+    let nodes = &report.impacted_nodes[page.range()];
+    let mut value = json!({
+        "source_model":report.source_model, "overall_severity":report.overall_severity,
+        "affected_models":report.affected_models, "affected_tests":report.affected_tests,
+        "affected_exposures":report.affected_exposures, "page":page.metadata(),
+    });
+    if detail.full() {
+        let ids: HashSet<_> = nodes.iter().map(|node| node.unique_id.as_str()).collect();
+        value["impacted_nodes"] = json!(nodes);
+        value["exposure_paths"] = json!(
+            report
+                .exposure_paths
+                .iter()
+                .filter(|path| ids.contains(path.exposure_id.as_str()))
+                .map(|path| json!({"exposure_id":path.exposure_id, "exposure":path.exposure, "path":path.path}))
+                .collect::<Vec<_>>()
+        );
+        value["exposure_paths_truncated"] = json!(report.exposure_paths_truncated);
+    } else {
+        value["impacted_nodes"] = json!(
+            nodes
+                .iter()
+                .map(|node| json!({
+                    "unique_id":node.unique_id, "label":node.label, "node_type":node.node_type,
+                    "distance":node.distance, "severity":node.severity,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(value)
 }
 
 pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let model = required_string(args, "model")?;
     let column = required_string(args, "column")?;
     let direction = required_string(args, "direction")?;
+    let detail = column_result::Detail::parse(args)?;
     let seeds = read_seed_schemas(&state.project_dir, &state.manifest);
+    let snapshot = super::page::fingerprint((state.manifest_hash, state.dialect, &seeds));
+    let key = (snapshot, model, column, direction, detail);
     let mut cache = state.column_lineage_cache.borrow_mut();
     let mut analysis = graph::column_lineage::ColumnLineageAnalysis::new(
         &state.manifest,
@@ -494,7 +629,7 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                                 == graph::column_lineage::ColumnLineageErrorKind::ColumnAmbiguous
                     }));
             }
-            Ok(serde_json::to_value(&report)?)
+            column_result::upstream(args, key, &report)
         }
         "downstream" => {
             let report = analysis.compute_column_impact(
@@ -502,7 +637,7 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
                 column,
                 graph::column_lineage::ImpactScope::ValueOnly,
             );
-            Ok(serde_json::to_value(&report)?)
+            column_result::downstream(args, key, &report)
         }
         _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),
     }

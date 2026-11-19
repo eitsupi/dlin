@@ -29,6 +29,7 @@ fn source_free_union_manifest() -> Manifest {
         sql: &str,
     ) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -50,6 +51,7 @@ fn source_free_union_manifest() -> Manifest {
 
     fn source(unique_id: &str, name: &str, output_columns: &[&str]) -> ManifestSource {
         ManifestSource {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             source_name: "raw".to_string(),
@@ -132,6 +134,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
         sql: &str,
     ) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -158,6 +161,7 @@ fn bigquery_compound_field_access_manifest() -> Manifest {
     sources.insert(
         source_id.to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: source_id.to_string(),
             name: "external_table_a".to_string(),
             source_name: "raw".to_string(),
@@ -226,6 +230,7 @@ fn bigquery_struct_field_cross_model_manifest() -> Manifest {
         sql: &str,
     ) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -304,6 +309,7 @@ fn same_named_deep_error_manifest() -> Manifest {
         sql: &str,
     ) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -411,6 +417,7 @@ fn duplicate_column_error_manifest() -> Manifest {
     let model =
         |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
             ManifestNode {
+                package_name: None,
                 unique_id: unique_id.to_string(),
                 name: name.to_string(),
                 alias: None,
@@ -487,6 +494,7 @@ fn bigquery_nested_star_manifest() -> Manifest {
         sql: &str,
     ) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -508,6 +516,7 @@ fn bigquery_nested_star_manifest() -> Manifest {
 
     fn source(unique_id: &str, name: &str, output_columns: &[&str]) -> ManifestSource {
         ManifestSource {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             source_name: "raw".to_string(),

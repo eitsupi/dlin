@@ -12,7 +12,7 @@ pub(crate) struct ManifestDagContext {
     pub(crate) manifest: Option<parser::manifest::Manifest>,
     pub(crate) manifest_bytes: Option<Vec<u8>>,
     pub(crate) project_name: Option<String>,
-    pub(crate) referenced_file_paths: Vec<String>,
+    pub(crate) referenced_files: Vec<parser::manifest::ManifestFile>,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -48,13 +48,12 @@ pub(crate) fn build_dag(
             // compact model-level analysis without deserializing Manifest.
             let manifest_bytes = load_manifest_bytes(&resolved)?;
             if let Some(analysis) = cache.take_for_manifest(&manifest_bytes) {
-                let (graph, diagnostics, project_name, referenced_file_paths) =
-                    analysis.into_parts();
+                let (graph, diagnostics, project_name, referenced_files) = analysis.into_parts();
                 let context = ManifestDagContext {
                     manifest: None,
                     manifest_bytes: Some(manifest_bytes),
                     project_name,
-                    referenced_file_paths,
+                    referenced_files,
                 };
                 return Ok((graph, None, diagnostics, Some(context)));
             }
@@ -69,14 +68,14 @@ pub(crate) fn build_dag(
                 ..
             } = graph_report;
             let project_name = manifest.metadata.project_name.clone();
-            let referenced_file_paths: Vec<String> =
-                manifest.collect_file_paths().into_iter().collect();
+            let referenced_files: Vec<parser::manifest::ManifestFile> =
+                manifest.referenced_files().into_iter().collect();
             if !no_cache {
                 let analysis = parser::manifest_cache::ManifestAnalysis::new(
                     graph.clone(),
                     diagnostics.clone(),
                     project_name.clone(),
-                    referenced_file_paths.clone(),
+                    referenced_files.clone(),
                 );
                 cache.insert_for_manifest(&manifest_bytes, analysis);
                 cache.save();
@@ -88,7 +87,7 @@ pub(crate) fn build_dag(
                 diagnostics,
                 Some(ManifestDagContext {
                     project_name,
-                    referenced_file_paths,
+                    referenced_files,
                     manifest: Some(manifest),
                     manifest_bytes: None,
                 }),

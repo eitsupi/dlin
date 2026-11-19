@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::types::LineageGraph;
-use crate::parser::manifest::ManifestDiagnostic;
+use crate::parser::manifest::{ManifestDiagnostic, ManifestFile};
 
 const CACHE_DIR: &str = ".dlin_cache";
 const CACHE_FILENAME: &str = "manifest_graph_cache.json";
@@ -18,7 +18,7 @@ pub struct ManifestAnalysis {
     graph: LineageGraph,
     diagnostics: Vec<ManifestDiagnostic>,
     project_name: Option<String>,
-    referenced_file_paths: Vec<String>,
+    freshness_files: Vec<ManifestFile>,
 }
 
 impl ManifestAnalysis {
@@ -26,13 +26,13 @@ impl ManifestAnalysis {
         graph: LineageGraph,
         diagnostics: Vec<ManifestDiagnostic>,
         project_name: Option<String>,
-        referenced_file_paths: Vec<String>,
+        freshness_files: Vec<ManifestFile>,
     ) -> Self {
         Self {
             graph,
             diagnostics,
             project_name,
-            referenced_file_paths,
+            freshness_files,
         }
     }
 
@@ -42,13 +42,13 @@ impl ManifestAnalysis {
         LineageGraph,
         Vec<ManifestDiagnostic>,
         Option<String>,
-        Vec<String>,
+        Vec<ManifestFile>,
     ) {
         (
             self.graph,
             self.diagnostics,
             self.project_name,
-            self.referenced_file_paths,
+            self.freshness_files,
         )
     }
 }
@@ -247,9 +247,13 @@ mod tests {
                 raw_resource: None,
                 raw_type: None,
                 schema: None,
+                section: Some("nodes".into()),
             }],
             Some("project".to_string()),
-            vec!["models/orders.sql".to_string()],
+            vec![ManifestFile {
+                package: Some("proj".into()),
+                path: "models/orders.sql".into(),
+            }],
         )
     }
 
@@ -289,7 +293,8 @@ mod tests {
         };
         assert_eq!(analyses(&graph), analyses(&original));
         assert_eq!(project_name.as_deref(), Some("project"));
-        assert_eq!(paths, ["models/orders.sql"]);
+        assert_eq!(paths[0].path, "models/orders.sql");
+        assert_eq!(paths[0].package.as_deref(), Some("proj"));
         assert_eq!(diagnostics.len(), 1);
     }
 

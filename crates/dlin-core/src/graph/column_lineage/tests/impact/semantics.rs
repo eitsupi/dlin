@@ -11,6 +11,7 @@ fn model(
     columns: &[&str],
 ) -> ManifestNode {
     ManifestNode {
+        package_name: None,
         unique_id: unique_id.to_string(),
         name: name.to_string(),
         alias: None,
@@ -305,6 +306,7 @@ fn model_and_source_sharing_a_relation_create_a_possible_path_and_gap() {
     sources.insert(
         source_id.to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: source_id.to_string(),
             name: "shared".to_string(),
             source_name: "raw".to_string(),
@@ -462,6 +464,7 @@ fn open_relation_manifest(declare_relation: bool) -> Manifest {
         sources.insert(
             "source.proj.raw.other".to_string(),
             ManifestSource {
+                package_name: None,
                 unique_id: "source.proj.raw.other".to_string(),
                 name: "other".to_string(),
                 source_name: "raw".to_string(),
@@ -866,6 +869,7 @@ fn partial_lineage_keeps_known_paths_and_excludes_only_declared_unrelated_remain
     sources.insert(
         fees_source.to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: fees_source.to_string(),
             name: "fees".to_string(),
             source_name: "raw".to_string(),

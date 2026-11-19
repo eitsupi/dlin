@@ -43,9 +43,12 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
                     &project_dir,
                     args.manifest_path.as_ref(),
                     &project,
-                    manifest_context
-                        .as_ref()
-                        .map(|context| context.referenced_file_paths.as_slice()),
+                    manifest_context.as_ref().map(|context| {
+                        (
+                            context.project_name.as_deref(),
+                            context.referenced_files.as_slice(),
+                        )
+                    }),
                 ),
                 Err(e) => {
                     let is_not_found = e
@@ -96,33 +99,10 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Collect file paths referenced in manifest that no longer exist on disk.
-fn find_deleted_manifest_files(
-    manifest: &parser::manifest::Manifest,
-    project_dir: &Path,
-) -> Vec<String> {
-    let paths = manifest.collect_file_paths();
-    find_deleted_manifest_paths(paths.iter(), project_dir)
-}
-
-fn find_deleted_manifest_paths<'a>(
-    paths: impl IntoIterator<Item = &'a String>,
-    project_dir: &Path,
-) -> Vec<String> {
-    let mut deleted: Vec<String> = paths
-        .into_iter()
-        .filter(|p| !project_dir.join(p).exists())
-        .cloned()
-        .collect();
-    deleted.sort();
-    deleted
-}
-
 /// Collect files whose mtimes can make a manifest stale.
 ///
-/// The project file and the optional project-level vars file affect dbt's
-/// interpretation of the discovered resources, so they are freshness inputs
-/// even though they do not live under one of the configured resource paths.
+/// Project configuration and dependency declarations affect which inputs
+/// dbt loads, even when they live outside the configured resource paths.
 fn collect_manifest_freshness_inputs(
     project_dir: &Path,
     project: &parser::project::DbtProject,
@@ -139,18 +119,25 @@ fn collect_manifest_freshness_inputs(
         .chain(files.yaml_files)
         .collect::<Vec<_>>();
 
-    for name in ["dbt_project.yml", "vars.yml"] {
-        let path = project_dir.join(name);
-        if path.is_file() {
-            inputs.push(path);
-        }
-    }
+    inputs.extend(
+        std::iter::once("dbt_project.yml")
+            .chain(OPTIONAL_PROJECT_FILES)
+            .map(|name| project_dir.join(name))
+            .filter(|path| path.is_file()),
+    );
 
     inputs.sort();
     inputs.dedup();
 
     Ok(inputs)
 }
+
+const OPTIONAL_PROJECT_FILES: [&str; 4] = [
+    "vars.yml",
+    "packages.yml",
+    "dependencies.yml",
+    "package-lock.yml",
+];
 
 /// Return whether a freshness input is newer than the manifest.
 ///
@@ -175,81 +162,192 @@ pub(crate) fn check_manifest_freshness(
     project: &parser::project::DbtProject,
     manifest: Option<&parser::manifest::Manifest>,
 ) -> Option<render::summary::ManifestStatus> {
-    let paths = manifest.map(|value| value.collect_file_paths().into_iter().collect::<Vec<_>>());
+    let files =
+        manifest.map(|manifest| manifest.referenced_files().into_iter().collect::<Vec<_>>());
     check_manifest_freshness_with_referenced_paths(
         project_dir,
         manifest_path,
         project,
-        paths.as_deref(),
+        manifest
+            .zip(files.as_deref())
+            .map(|(manifest, files)| (manifest.metadata.project_name.as_deref(), files)),
     )
 }
 
-/// Check manifest freshness using compact referenced paths from the model-level
-/// cache. This avoids reparsing the typed manifest on warm summary paths.
+/// Reuse package-owned file references from the model-level cache on warm paths.
 #[cfg(not(tarpaulin_include))]
-pub(crate) fn check_manifest_freshness_with_referenced_paths(
+fn check_manifest_freshness_with_referenced_paths(
     project_dir: &Path,
     manifest_path: Option<&PathBuf>,
     project: &parser::project::DbtProject,
-    referenced_file_paths: Option<&[String]>,
+    references: Option<(Option<&str>, &[parser::manifest::ManifestFile])>,
 ) -> Option<render::summary::ManifestStatus> {
-    let not_found = render::summary::ManifestStatus {
-        found: false,
-        is_stale: false,
-        stale_file_count: 0,
-        stale_files: vec![],
-        deleted_file_count: 0,
-        deleted_files: vec![],
+    let Ok(resolved) = resolve_manifest_path_or_default(manifest_path, project_dir) else {
+        return Some(render::summary::ManifestStatus::default());
     };
-
-    let resolved = match resolve_manifest_path_or_default(manifest_path, project_dir) {
-        Ok(p) => p,
-        Err(_) => return Some(not_found),
+    let Ok(mtime) = std::fs::metadata(&resolved).and_then(|m| m.modified()) else {
+        return Some(render::summary::ManifestStatus::default());
     };
-
-    let manifest_mtime = match std::fs::metadata(&resolved).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return Some(not_found),
-    };
-
-    let files = match collect_manifest_freshness_inputs(project_dir, project) {
-        Ok(f) => f,
-        Err(_) => return None,
-    };
-
-    let mut stale_files: Vec<String> = Vec::new();
-    for file in &files {
-        if is_freshness_input_stale(file, manifest_mtime) {
-            let rel = file.strip_prefix(project_dir).unwrap_or(file);
-            stale_files.push(rel.to_slash_lossy().into_owned());
+    let (manifest, files);
+    let (name, files) = match references {
+        Some(references) => references,
+        None => {
+            manifest = parser::manifest::load_manifest(&resolved)
+                .map_err(|err| {
+                    dlin_core::warn!("cannot parse manifest.json for deleted-file check: {}", err);
+                })
+                .ok()?;
+            files = manifest.referenced_files().into_iter().collect::<Vec<_>>();
+            (manifest.metadata.project_name.as_deref(), files.as_slice())
         }
-    }
-    stale_files.sort();
-
-    // Check for deleted files: paths referenced in manifest but missing on disk
-    let deleted_files = match referenced_file_paths {
-        Some(paths) => find_deleted_manifest_paths(paths.iter(), project_dir),
-        None => match parser::manifest::load_manifest(&resolved) {
-            Ok(manifest) => find_deleted_manifest_files(&manifest, project_dir),
-            Err(e) => {
-                dlin_core::warn!("cannot parse manifest.json for deleted-file check: {}", e);
-                return None;
-            }
-        },
     };
-
-    let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
-    Some(render::summary::ManifestStatus {
-        found: true,
-        is_stale,
-        stale_file_count: stale_files.len(),
-        stale_files,
-        deleted_file_count: deleted_files.len(),
-        deleted_files,
-    })
+    Some(assess_freshness(
+        project_dir,
+        Some(project),
+        name,
+        files,
+        mtime,
+    ))
 }
 
-/// Run the `check-manifest` subcommand
+fn assess_freshness(
+    project_dir: &Path,
+    project: Option<&parser::project::DbtProject>,
+    manifest_project: Option<&str>,
+    files: &[parser::manifest::ManifestFile],
+    manifest_mtime: std::time::SystemTime,
+) -> render::summary::ManifestStatus {
+    use dlin_core::parser::package_roots::{PackageRoots, relative_resource_path};
+    use render::summary::{ManifestStatus, UnverifiedFiles};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let unverified = |reason| ManifestStatus {
+        found: true,
+        unverified: vec![UnverifiedFiles {
+            package: None,
+            reason,
+        }],
+        ..Default::default()
+    };
+    let Some(project) = project else {
+        return unverified("project_unavailable");
+    };
+    if manifest_project.is_some_and(|name| name != project.name) {
+        return unverified("project_mismatch");
+    }
+    let mut gaps = BTreeSet::new();
+    let inputs = match collect_manifest_freshness_inputs(project_dir, project) {
+        Ok(files) => files,
+        Err(_) => {
+            gaps.insert(UnverifiedFiles {
+                package: None,
+                reason: "project_discovery_failed",
+            });
+            Vec::new()
+        }
+    };
+    let display = |path: &Path| {
+        path.strip_prefix(project_dir)
+            .unwrap_or(path)
+            .to_slash_lossy()
+            .into_owned()
+    };
+    let mut stale: BTreeSet<_> = inputs
+        .iter()
+        .filter(|path| is_freshness_input_stale(path, manifest_mtime))
+        .map(|path| display(path))
+        .collect();
+    let mut deleted = BTreeSet::new();
+    let mut inspect_file =
+        |root: &parser::package_roots::ResourceRoot, relative: &Path, required: bool| {
+            let label = display(&root.display_path.join(relative));
+            match std::fs::metadata(root.path.join(relative)).and_then(|m| m.modified()) {
+                Ok(mtime) if mtime > manifest_mtime => {
+                    stale.insert(label);
+                    None
+                }
+                Ok(_) => None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if required {
+                        deleted.insert(label);
+                    }
+                    None
+                }
+                Err(_) => Some("unreadable_resource_file"),
+            }
+        };
+    let resolver = PackageRoots::new(project_dir, project);
+    let mut roots = BTreeMap::new();
+    for file in files {
+        let package = file.package.as_deref().filter(|name| *name != project.name);
+        let gap = |reason| UnverifiedFiles {
+            package: package.map(str::to_owned),
+            reason,
+        };
+        let root = match roots
+            .entry(package)
+            .or_insert_with(|| resolver.resolve(package))
+        {
+            Ok(root) => root,
+            Err(reason) => {
+                gaps.insert(gap(reason));
+                continue;
+            }
+        };
+        let Some(relative) = relative_resource_path(&file.path) else {
+            gaps.insert(gap("invalid_resource_path"));
+            continue;
+        };
+        if let Some(reason) = inspect_file(root, relative, true) {
+            gaps.insert(gap(reason));
+        }
+    }
+    for (package, root) in roots {
+        if let (Some(package), Ok(root)) = (package, root) {
+            let config_files = std::iter::once(("dbt_project.yml", true))
+                .chain(OPTIONAL_PROJECT_FILES.map(|name| (name, false)));
+            for (name, required) in config_files {
+                if let Some(reason) = inspect_file(&root, Path::new(name), required) {
+                    gaps.insert(UnverifiedFiles {
+                        package: Some(package.to_owned()),
+                        reason,
+                    });
+                }
+            }
+        }
+    }
+    ManifestStatus {
+        found: true,
+        is_stale: !stale.is_empty() || !deleted.is_empty(),
+        stale_file_count: stale.len(),
+        stale_files: stale.into_iter().collect(),
+        deleted_file_count: deleted.len(),
+        deleted_files: deleted.into_iter().collect(),
+        unverified: gaps.into_iter().collect(),
+        project_verified: true,
+    }
+}
+
+pub(crate) fn check_loaded_manifest_freshness(
+    project_dir: &Path,
+    manifest_path: &Path,
+    manifest: &parser::manifest::Manifest,
+) -> render::summary::ManifestStatus {
+    let Ok(mtime) = std::fs::metadata(manifest_path).and_then(|m| m.modified()) else {
+        return render::summary::ManifestStatus::default();
+    };
+    let project = parser::project::DbtProject::load(project_dir).ok();
+    let files: Vec<_> = manifest.referenced_files().into_iter().collect();
+    assess_freshness(
+        project_dir,
+        project.as_ref(),
+        manifest.metadata.project_name.as_deref(),
+        &files,
+        mtime,
+    )
+}
+
+/// Run the `check-manifest` subcommand.
 #[cfg(not(tarpaulin_include))]
 pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> {
     let project_dir = args.project_dir.canonicalize().map_err(|e| {
@@ -259,88 +357,50 @@ pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> 
             e
         )
     })?;
-
     let manifest_path =
         resolve_manifest_path_or_default(args.manifest_path.as_ref(), &project_dir)?;
-    let manifest_mtime = std::fs::metadata(&manifest_path)
-        .and_then(|m| m.modified())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "cannot read manifest.json at {}: {}",
-                manifest_path.display(),
-                e
-            )
-        })?;
-
-    // Discover project files
-    let project = parser::project::DbtProject::load(&project_dir)?;
-    let files = collect_manifest_freshness_inputs(&project_dir, &project)?;
-
-    // Collect all SQL/YAML files and compare mtimes
-    let mut stale_files: Vec<PathBuf> = Vec::new();
-    for file in &files {
-        if is_freshness_input_stale(file, manifest_mtime) {
-            let rel = file.strip_prefix(&project_dir).unwrap_or(file);
-            stale_files.push(rel.to_path_buf());
-        }
-    }
-
-    stale_files.sort();
-
-    // Check for deleted files: paths referenced in manifest but missing on disk
-    let manifest_report = parser::manifest::load_manifest_report(&manifest_path)?;
-    warn_manifest_diagnostics(&manifest_report.diagnostics);
-    let manifest = manifest_report.into_manifest()?;
-    let deleted_files: Vec<PathBuf> = find_deleted_manifest_files(&manifest, &project_dir)
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
-
-    let is_stale = !stale_files.is_empty() || !deleted_files.is_empty();
+    let report = parser::manifest::load_manifest_report(&manifest_path)?;
+    warn_manifest_diagnostics(&report.diagnostics);
+    let status =
+        check_loaded_manifest_freshness(&project_dir, &manifest_path, &report.into_manifest()?);
 
     match args.output {
-        CheckManifestOutputFormat::Text => {
-            if !args.quiet {
-                if is_stale {
-                    let mut parts = Vec::new();
-                    if !stale_files.is_empty() {
-                        parts.push(format!(
-                            "{} file{} newer",
-                            stale_files.len(),
-                            if stale_files.len() == 1 { "" } else { "s" }
-                        ));
+        CheckManifestOutputFormat::Text if !args.quiet => {
+            if status.is_stale {
+                println!(
+                    "manifest.json is stale ({} newer, {} deleted):",
+                    status.stale_file_count, status.deleted_file_count
+                );
+                if !status.stale_files.is_empty() {
+                    println!("Files newer than manifest:");
+                    for file in &status.stale_files {
+                        println!("  {file}");
                     }
-                    if !deleted_files.is_empty() {
-                        parts.push(format!("{} deleted", deleted_files.len(),));
-                    }
-                    println!("manifest.json is stale ({}):", parts.join(", "));
-                    if !stale_files.is_empty() {
-                        println!("Files newer than manifest:");
-                        for f in &stale_files {
-                            println!("  {}", f.display());
-                        }
-                    }
-                    if !deleted_files.is_empty() {
-                        println!("Files referenced in manifest but not found:");
-                        for f in &deleted_files {
-                            println!("  {}", f.display());
-                        }
-                    }
-                } else {
-                    println!("manifest.json is up-to-date");
                 }
+                if !status.deleted_files.is_empty() {
+                    println!("Files referenced in manifest but not found:");
+                    for file in &status.deleted_files {
+                        println!("  {file}");
+                    }
+                }
+            } else if status.verification() == "verified" {
+                println!("manifest.json is up-to-date");
+            }
+            for gap in &status.unverified {
+                println!(
+                    "Freshness unverified for {} ({})",
+                    gap.package.as_deref().unwrap_or("project"),
+                    gap.reason
+                );
             }
         }
+        CheckManifestOutputFormat::Text => {}
         CheckManifestOutputFormat::Json => {
             use std::io::Write;
-            let result = serde_json::json!({
-                "manifest_path": manifest_path.to_string_lossy(),
-                "is_stale": is_stale,
-                "stale_file_count": stale_files.len(),
-                "stale_files": stale_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
-                "deleted_file_count": deleted_files.len(),
-                "deleted_files": deleted_files.iter().map(|f| f.to_slash_lossy().into_owned()).collect::<Vec<_>>(),
-            });
+            let mut result = serde_json::to_value(&status)?;
+            result.as_object_mut().unwrap().remove("found");
+            result["manifest_path"] = serde_json::json!(manifest_path);
+            result["verification"] = serde_json::json!(status.verification());
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
             let res = if std::io::IsTerminal::is_terminal(&stdout) {
@@ -350,7 +410,7 @@ pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> 
             };
             if let Err(e) = res {
                 if e.io_error_kind() != Some(std::io::ErrorKind::BrokenPipe) {
-                    return Err(anyhow::anyhow!(e));
+                    return Err(e.into());
                 }
             } else if let Err(e) = writeln!(out)
                 && e.kind() != std::io::ErrorKind::BrokenPipe
@@ -359,9 +419,7 @@ pub(crate) fn run_check_manifest_command(args: CheckManifestArgs) -> Result<()> 
             }
         }
     }
-
-    if is_stale {
-        // Flush stdout before exiting to ensure buffered output is written
+    if status.is_stale {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::process::exit(1);
     }

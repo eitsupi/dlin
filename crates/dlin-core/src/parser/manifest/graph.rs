@@ -105,6 +105,15 @@ pub fn build_graph_from_parsed_manifest_strict(manifest: &Manifest) -> Result<Li
     if super::manifest_has_future_schema(manifest) || manifest.capabilities.future_schema {
         anyhow::bail!("manifest uses a future dbt schema version");
     }
+    if let Some(id) = manifest
+        .unit_tests
+        .iter()
+        .filter(|(id, value)| !super::valid_unit_test(id, value))
+        .map(|(id, _)| id)
+        .min()
+    {
+        anyhow::bail!("invalid unit test entry '{id}' in 'unit_tests'");
+    }
     if let Some((unique_id, raw_type)) = find_unsupported_resource(manifest) {
         anyhow::bail!(
             "manifest resource '{unique_id}' uses unsupported resource type '{raw_type}'"
@@ -130,10 +139,6 @@ fn find_unsupported_resource(manifest: &Manifest) -> Option<(String, String)> {
     candidates.extend(find_unsupported_raw_resources(
         &manifest.functions,
         "function",
-    ));
-    candidates.extend(find_unsupported_raw_resources(
-        &manifest.unit_tests,
-        "unit_test",
     ));
 
     // `extra` is the parsed representation of the same unknown top-level

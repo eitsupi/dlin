@@ -134,7 +134,7 @@ For analysts and agents who work from a distributed `manifest.json` without acce
 dlin mcp --manifest-path path/to/manifest.json
 ```
 
-Available MCP tools: project summary, model search, lineage, impact analysis, and column-level lineage.
+Tools return compact JSON as a single text result. Use `get_project_summary` to check manifest freshness and loading diagnostics. Lineage and impact results distinguish confirmed paths from possible paths and show where analysis could not continue. Request `detail: "full"` for paths and evidence, or follow `page.next_cursor` with the same query for more rows. Use `include_sql: true` with `find_nodes` to request compiled SQL.
 
 The SQL dialect for column lineage is detected from the manifest's `adapter_type`; `--dialect` overrides it. Requires a compiled `manifest.json` (`dbt compile`).
 

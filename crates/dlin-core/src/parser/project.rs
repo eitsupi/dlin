@@ -26,6 +26,12 @@ struct VarsFile {
 pub struct DbtProject {
     pub name: String,
 
+    #[serde(
+        rename = "packages-install-path",
+        default = "default_packages_install_path"
+    )]
+    pub packages_install_path: serde_json::Value,
+
     #[serde(rename = "model-paths", default = "default_model_paths")]
     pub model_paths: ProjectPaths,
 
@@ -165,6 +171,10 @@ pub fn sql_file_stem(path: &Path) -> String {
         .to_string()
 }
 
+fn default_packages_install_path() -> serde_json::Value {
+    serde_json::Value::String("dbt_packages".into())
+}
+
 impl DbtProject {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let project_file = project_dir.join("dbt_project.yml");
@@ -226,6 +236,13 @@ impl DbtProject {
             project.vars = vars;
         }
         Ok(project)
+    }
+
+    /// The configured package installation directory if it is a literal path.
+    pub fn package_install_dir(&self, project_dir: &Path) -> Option<PathBuf> {
+        let value = self.packages_install_path.as_str()?;
+        (!value.trim().is_empty() && !["{{", "{%", "{#"].iter().any(|mark| value.contains(mark)))
+            .then(|| project_dir.join(value))
     }
 
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {

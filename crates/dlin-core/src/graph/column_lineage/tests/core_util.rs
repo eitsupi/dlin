@@ -402,6 +402,7 @@ fn test_bigquery_source_free_unnest_is_traced_without_sources() {
     nodes.insert(
         "model.proj.unnest_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.unnest_model".to_string(),
             name: "unnest_model".to_string(),
             alias: None,

@@ -34,7 +34,7 @@ pub struct NodeCounts {
 /// Maximum number of file names to show in text output.
 const MAX_FILES_TEXT: usize = 5;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct ManifestStatus {
     pub found: bool,
     pub is_stale: bool,
@@ -42,6 +42,28 @@ pub struct ManifestStatus {
     pub stale_files: Vec<String>,
     pub deleted_file_count: usize,
     pub deleted_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unverified: Vec<UnverifiedFiles>,
+    #[serde(skip)]
+    pub project_verified: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct UnverifiedFiles {
+    pub package: Option<String>,
+    pub reason: &'static str,
+}
+
+impl ManifestStatus {
+    pub fn verification(&self) -> &'static str {
+        if !self.project_verified {
+            "unverified"
+        } else if self.unverified.is_empty() {
+            "verified"
+        } else {
+            "partially_verified"
+        }
+    }
 }
 
 /// Count nodes by type from a lineage graph.
@@ -184,8 +206,16 @@ pub fn render_summary_text<W: Write>(report: &SummaryReport, w: &mut W) -> io::R
             writeln!(w, "Manifest:      stale ({})", parts.join(", "))?;
             render_file_list(w, "newer", &ms.stale_files, MAX_FILES_TEXT)?;
             render_file_list(w, "deleted", &ms.deleted_files, MAX_FILES_TEXT)?;
-        } else {
+        } else if ms.unverified.is_empty() {
             writeln!(w, "Manifest:      up-to-date")?;
+        }
+        for gap in &ms.unverified {
+            writeln!(
+                w,
+                "Freshness unverified for {} ({})",
+                gap.package.as_deref().unwrap_or("project"),
+                gap.reason
+            )?;
         }
     }
 
@@ -287,6 +317,7 @@ mod tests {
             ],
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -305,6 +336,7 @@ mod tests {
             stale_files: vec![],
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -322,6 +354,7 @@ mod tests {
             stale_files: vec![],
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -361,6 +394,7 @@ mod tests {
             ],
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_json(&report, &mut buf, false).unwrap();
@@ -441,6 +475,7 @@ mod tests {
             stale_files: vec!["models/staging/stg_orders.sql".to_string()],
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -461,6 +496,7 @@ mod tests {
                 "models/old_model.sql".to_string(),
                 "models/removed.sql".to_string(),
             ],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -480,6 +516,7 @@ mod tests {
             stale_files: vec!["models/updated.sql".to_string()],
             deleted_file_count: 1,
             deleted_files: vec!["models/removed.sql".to_string()],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -500,6 +537,7 @@ mod tests {
             stale_files: files,
             deleted_file_count: 0,
             deleted_files: vec![],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_text(&report, &mut buf).unwrap();
@@ -521,6 +559,7 @@ mod tests {
             stale_files: vec!["models/a.sql".to_string()],
             deleted_file_count: 1,
             deleted_files: vec!["models/b.sql".to_string()],
+            ..Default::default()
         });
         let mut buf = Vec::new();
         render_summary_json(&report, &mut buf, false).unwrap();

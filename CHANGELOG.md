@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
+### Manifest loading
+
+- Valid dbt unit tests are omitted from lineage graphs without warnings. Strict manifest loading accepts these entries and still rejects invalid unit test identities.
+
+- Manifest freshness checks resolve package-owned files from the configured installation directory. Checks include package macros and dependency configuration files. Missing packages are reported as unverified. Missing files in installed packages still make the manifest stale.
+
+### MCP
+
+- Tools return one compact JSON text item. Lists and lineage can be paginated, impact tools default to a summary, and node details include compiled SQL on request.
+- Project summaries include manifest freshness and grouped load diagnostics.
+
 ### Column-level lineage
 
 - CLI column commands now exit with status 0 when a column's providers cannot be verified because a candidate relation's columns are unknown, provided there are no other fatal diagnostics. Multiple confirmed providers still produce a fatal ambiguity.
-- Column lineage uses the CSV header for seeds in the current project when the manifest declares no columns for them.
+- Column lineage uses the CSV header for seeds in the current project or installed packages when the manifest declares no columns for them.
 
 ## [0.3.0-alpha.1] - 2026-11-19
 

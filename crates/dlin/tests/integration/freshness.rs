@@ -357,3 +357,240 @@ fn test_root_freshness_input_is_not_duplicated_when_discovered() {
     assert_eq!(summary_status["stale_file_count"], 1);
     assert_eq!(stale_files(&summary_status)[0], "dbt_project.yml");
 }
+
+#[test]
+fn package_paths_are_verified_independently_and_missing_packages_are_unverified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::create_dir_all(root.join("vendor/elementary/models")).unwrap();
+    fs::write(
+        root.join("vendor/elementary/dbt_project.yml"),
+        "name: elementary\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("dbt_project.yml"),
+        "name: sample\npackages-install-path: vendor\n",
+    )
+    .unwrap();
+    fs::write(root.join("models/shared.sql"), "select 1").unwrap();
+    let model = |package: &str, name: &str| {
+        serde_json::json!({
+            "unique_id":format!("model.{package}.{name}"), "package_name":package,
+            "name":name,"resource_type":"model","original_file_path":format!("models/{name}.sql")
+        })
+    };
+    let mut nodes = serde_json::Map::new();
+    nodes.insert("model.sample.shared".into(), model("sample", "shared"));
+    nodes.insert(
+        "model.elementary.shared".into(),
+        model("elementary", "shared"),
+    );
+    nodes.insert("model.missing.shared".into(), model("missing", "shared"));
+    let artifact = root.join("target/manifest.json");
+    for i in 0..29 {
+        let name = format!("model_{i}");
+        nodes.insert(
+            format!("model.elementary.{name}"),
+            model("elementary", &name),
+        );
+        fs::write(
+            root.join(format!("vendor/elementary/models/{name}.sql")),
+            "select 1",
+        )
+        .unwrap();
+    }
+    let shared = root.join("vendor/elementary/models/shared.sql");
+    fs::write(&shared, "select 1").unwrap();
+    fs::write(
+        &artifact,
+        serde_json::json!({
+            "metadata":{"project_name":"sample","adapter_type":"duckdb"},"nodes":nodes,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(check["deleted_file_count"], 0);
+    assert_eq!(check["unverified"][0]["package"], "missing");
+    let summary = run_manifest_summary(&tmp);
+    assert_eq!(summary["unverified"], check["unverified"]);
+    assert_eq!(
+        run_manifest_summary(&tmp),
+        summary,
+        "warm cache retains package ownership"
+    );
+
+    fs::remove_file(shared).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["is_stale"], true);
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["vendor/elementary/models/shared.sql"])
+    );
+    assert_eq!(check["unverified"][0]["package"], "missing");
+    assert_eq!(
+        run_manifest_summary(&tmp)["deleted_files"],
+        check["deleted_files"]
+    );
+}
+
+#[test]
+fn check_manifest_and_mcp_agree_about_unresolved_package_installation_and_deletions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(
+        root.join("dbt_project.yml"),
+        "name: sample\npackages-install-path: \"{{ env_var('PACKAGE_PATH') }}\"\n",
+    )
+    .unwrap();
+    let artifact = root.join("target/manifest.json");
+    fs::write(&artifact, r#"{
+        "metadata":{"project_name":"sample","adapter_type":"duckdb"},
+        "nodes":{
+            "model.sample.gone":{"unique_id":"model.sample.gone","name":"gone","resource_type":"model","original_file_path":"models/gone.sql"},
+            "model.elementary.model":{"unique_id":"model.elementary.model","name":"model","resource_type":"model","original_file_path":"models/model.sql"}
+        }
+    }"#).unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(
+        check["unverified"],
+        serde_json::json!([{"package":"elementary","reason":"unresolved_install_path"}])
+    );
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["models/gone.sql"])
+    );
+
+    let summary = run_mcp_freshness(root);
+    for field in ["verification", "is_stale", "deleted_files", "unverified"] {
+        assert_eq!(summary[field], check[field], "{field}");
+    }
+}
+
+fn run_mcp_freshness(root: &Path) -> serde_json::Value {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut server = Command::new(binary_path())
+        .arg("mcp")
+        .args(["--project-dir", root.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        server.stdin.take().unwrap(),
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_project_summary"}
+        })
+    )
+    .unwrap();
+    let output = server.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    summary["manifest_status"].clone()
+}
+
+#[test]
+fn macro_only_packages_are_checked_and_builtin_macros_are_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let package = root.join("dbt_packages/dbt_utils");
+    let configuration = package.join("dbt_project.yml");
+    let macros = package.join("macros/utils.sql");
+    let artifact = root.join("target/manifest.json");
+    fs::create_dir_all(package.join("macros")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("dbt_project.yml"), "name: sample\n").unwrap();
+    fs::write(&configuration, "name: dbt_utils\n").unwrap();
+    fs::write(&macros, "{% macro example() %}1{% endmacro %}").unwrap();
+    fs::write(&artifact, r#"{
+        "metadata":{"project_name":"sample","adapter_type":"redshift"},
+        "nodes":{},
+        "macros":{
+            "macro.dbt_utils.example":{"package_name":"dbt_utils","unique_id":"macro.dbt_utils.example","original_file_path":"macros/utils.sql","path":"utils.sql"},
+            "macro.dbt_utils.other":{"package_name":"dbt_utils","original_file_path":"macros/utils.sql"},
+            "macro.dbt.core":{"package_name":"dbt","original_file_path":"macros/core.sql"},
+            "macro.dbt_redshift.adapter":{"package_name":"dbt_redshift","original_file_path":"macros/adapter.sql"},
+            "macro.dbt_postgres.shared":{"package_name":"dbt_postgres","original_file_path":"macros/shared.sql"},
+            "macro.dbt_compare_macros.compare":{"package_name":"dbt_compare_macros","original_file_path":"macros/compare.sql"}
+        }
+    }"#).unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "verified");
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(run_mcp_freshness(root)["verification"], "verified");
+    assert_eq!(run_manifest_summary(&tmp)["is_stale"], false);
+
+    set_mtime_newer_than(&configuration, &artifact);
+    set_mtime_newer_than(&macros, &artifact);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(
+        check["stale_files"],
+        serde_json::json!([
+            "dbt_packages/dbt_utils/dbt_project.yml",
+            "dbt_packages/dbt_utils/macros/utils.sql"
+        ])
+    );
+    assert_eq!(run_mcp_freshness(root)["stale_files"], check["stale_files"]);
+    assert_eq!(
+        run_manifest_summary(&tmp)["stale_files"],
+        check["stale_files"]
+    );
+
+    fs::remove_file(&macros).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["dbt_packages/dbt_utils/macros/utils.sql"])
+    );
+    fs::remove_dir_all(&package).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(check["deleted_files"], serde_json::json!([]));
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(
+        check["unverified"],
+        serde_json::json!([{"package":"dbt_utils","reason":"package_not_installed"}])
+    );
+    assert_eq!(run_mcp_freshness(root)["unverified"], check["unverified"]);
+}
+
+#[test]
+fn dependency_declarations_and_lockfile_make_the_manifest_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("target")).unwrap();
+    let artifact = root.join("target/manifest.json");
+    fs::write(root.join("dbt_project.yml"), "name: sample\n").unwrap();
+    fs::write(
+        &artifact,
+        r#"{"metadata":{"project_name":"sample","adapter_type":"duckdb"},"nodes":{}}"#,
+    )
+    .unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    for name in ["packages.yml", "dependencies.yml", "package-lock.yml"] {
+        let config = root.join(name);
+        fs::write(&config, "packages: []\n").unwrap();
+        set_mtime_newer_than(&config, &artifact);
+        let check = run_check_manifest(&tmp);
+        assert_eq!(check["is_stale"], true);
+        assert_eq!(check["stale_files"], serde_json::json!([name]));
+        assert_eq!(run_mcp_freshness(root)["stale_files"], check["stale_files"]);
+        fs::remove_file(config).unwrap();
+    }
+}

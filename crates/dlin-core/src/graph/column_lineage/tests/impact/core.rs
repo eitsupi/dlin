@@ -172,6 +172,7 @@ fn test_column_impact_distinguishes_same_relation_in_different_schemas() {
                 deps: Vec<&str>,
                 columns: &[&str],
                 sql: Option<&str>| ManifestNode {
+        package_name: None,
         unique_id: id.to_string(),
         name: name.to_string(),
         alias: alias.map(str::to_string),
@@ -314,6 +315,7 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
             (
                 source_id.to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: source_id.to_string(),
                     name: "source_model".to_string(),
                     alias: None,
@@ -333,6 +335,7 @@ fn test_column_impact_qualified_source_matches_unqualified_model_relation() {
             (
                 downstream_id.to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: downstream_id.to_string(),
                     name: "downstream_model".to_string(),
                     alias: None,
@@ -393,6 +396,7 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
             (
                 source_id.to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: source_id.to_string(),
                     name: "source_model".to_string(),
                     alias: Some("orders".to_string()),
@@ -412,6 +416,7 @@ fn test_column_impact_unqualified_source_matches_qualified_model_relation() {
             (
                 downstream_id.to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: downstream_id.to_string(),
                     name: "downstream_model".to_string(),
                     alias: None,
@@ -468,6 +473,7 @@ fn test_column_impact_does_not_attribute_ambiguous_bare_source() {
                 schema: Option<&str>,
                 depends_on: Vec<&str>,
                 compiled_code: &str| ManifestNode {
+        package_name: None,
         unique_id: unique_id.to_string(),
         name: name.to_string(),
         alias: alias.map(str::to_string),

@@ -32,6 +32,7 @@ fn node(
         })
         .collect();
     ManifestNode {
+        package_name: None,
         unique_id: id.to_string(),
         name: name.to_string(),
         alias: alias.map(str::to_string),
@@ -397,6 +398,7 @@ fn cross_model_lineage_resolves_same_named_dependency_by_unique_id() {
 
 fn source(name: &str, unique_id: &str) -> crate::parser::manifest::ManifestSource {
     crate::parser::manifest::ManifestSource {
+        package_name: None,
         unique_id: unique_id.to_string(),
         name: name.to_string(),
         source_name: "raw".to_string(),
