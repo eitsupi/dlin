@@ -31,8 +31,9 @@ use crate::types::Dialect;
 pub(crate) enum ArgumentSemantic {
     ValueExpression,
     DatePart(DatePartGrammar),
-    /// The Unicode normalization mode of `BigQuery` `NORMALIZE` and
-    /// `NORMALIZE_AND_CASEFOLD` (`NFC`, `NFKC`, `NFD` or `NFKD`).
+    /// A Unicode normalization form written as a keyword (`NFC`, `NFKC`,
+    /// `NFD` or `NFKD`), as `NORMALIZE` takes it in `BigQuery`, `PostgreSQL`
+    /// and Trino.
     NormalizationMode,
 }
 
@@ -92,7 +93,7 @@ const BQ_VALUE_VALUE_PART: &[ArgumentSemantic] = &[
     ArgumentSemantic::DatePart(BIGQUERY_DATE_PART),
 ];
 const BQ_VALUE: &[ArgumentSemantic] = &[ArgumentSemantic::ValueExpression];
-const BQ_VALUE_NORMALIZATION_MODE: &[ArgumentSemantic] = &[
+const VALUE_NORMALIZATION_MODE: &[ArgumentSemantic] = &[
     ArgumentSemantic::ValueExpression,
     ArgumentSemantic::NormalizationMode,
 ];
@@ -759,6 +760,7 @@ const BQ_TRUNC_WITH_TIMEZONE_NAMES: &[&str] = &["TIMESTAMP_TRUNC"];
 const BQ_DIFF_NAMES: &[&str] = &["DATE_DIFF", "DATETIME_DIFF", "TIME_DIFF", "TIMESTAMP_DIFF"];
 const LAST_DAY_NAMES: &[&str] = &["LAST_DAY"];
 const BQ_NORMALIZE_NAMES: &[&str] = &["NORMALIZE", "NORMALIZE_AND_CASEFOLD"];
+const NORMALIZE_NAMES: &[&str] = &["NORMALIZE"];
 const SNOW_ADD_DIFF_NAMES: &[&str] = &[
     "DATEADD",
     "TIMEADD",
@@ -809,9 +811,17 @@ const BIGQUERY_SIGNATURES: &[FunctionSignature] = &[
     FunctionSignature {
         names: BQ_NORMALIZE_NAMES,
         arity: 2,
-        arguments: BQ_VALUE_NORMALIZATION_MODE,
+        arguments: VALUE_NORMALIZATION_MODE,
     },
 ];
+
+/// `normalize(text, form)` in `PostgreSQL` and Trino takes the form as a
+/// keyword, like `BigQuery` `NORMALIZE`.
+const NORMALIZE_SIGNATURES: &[FunctionSignature] = &[FunctionSignature {
+    names: NORMALIZE_NAMES,
+    arity: 2,
+    arguments: VALUE_NORMALIZATION_MODE,
+}];
 
 const SNOWFLAKE_SIGNATURES: &[FunctionSignature] = &[
     FunctionSignature {
@@ -978,12 +988,11 @@ fn profile(dialect: Dialect) -> &'static [FunctionSignature] {
         Dialect::Databricks => DATABRICKS_SIGNATURES,
         Dialect::Redshift => REDSHIFT_SIGNATURES,
         Dialect::MsSql => MSSQL_SIGNATURES,
+        Dialect::PostgreSql | Dialect::Trino => NORMALIZE_SIGNATURES,
         Dialect::Generic
         | Dialect::Ansi
-        | Dialect::PostgreSql
         | Dialect::Hive
         | Dialect::DuckDb
-        | Dialect::Trino
         | Dialect::Spark
         | Dialect::ClickHouse
         | Dialect::SQLite => &[],
@@ -1177,6 +1186,22 @@ mod tests {
             )
             .is_none()
         );
+        // The same syntax has the same meaning wherever it exists.
+        for dialect in [Dialect::PostgreSql, Dialect::Trino] {
+            let signature = classify_function(
+                dialect,
+                &function("SELECT normalize(name_col, nfkc) FROM t"),
+            )
+            .unwrap();
+            assert_eq!(signature.arguments, VALUE_NORMALIZATION_MODE);
+            assert!(
+                classify_function(
+                    dialect,
+                    &function("SELECT NORMALIZE_AND_CASEFOLD(name_col, NFKC) FROM t")
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]

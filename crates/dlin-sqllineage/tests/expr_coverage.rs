@@ -265,6 +265,23 @@ FROM events"#,
 }
 
 #[test]
+fn postgres_and_trino_normalization_forms_are_syntax_only() {
+    for dialect in [Dialect::PostgreSql, Dialect::Trino] {
+        let result = analyze_with_dialect(
+            r#"SELECT normalize(name_col, NFKC) AS norm, normalize(name_col) AS norm_default FROM events"#,
+            dialect,
+        );
+        for name in ["norm", "norm_default"] {
+            assert_eq!(
+                concrete_sources(find_mapping(&result.output.columns, name)),
+                vec![("events".into(), "name_col".into())],
+                "{dialect:?} {name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn normalization_mode_position_keeps_columns_outside_the_grammar() {
     // A quoted identifier, a column in another function, and the mode
     // keyword under a dialect without the grammar are all real values.
