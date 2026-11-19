@@ -6,7 +6,7 @@ use path_slash::PathExt as _;
 use serde_json::{Value, json};
 
 use super::protocol::McpState;
-use crate::commands::check_manifest_freshness;
+use crate::commands::{check_manifest_freshness, read_seed_schemas};
 use dlin_core::graph;
 use dlin_core::graph::types::NodeType;
 use dlin_core::parser;
@@ -395,12 +395,14 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
     let model = required_string(args, "model")?;
     let column = required_string(args, "column")?;
     let direction = required_string(args, "direction")?;
+    let seeds = read_seed_schemas(&state.project_dir, &state.manifest);
     let mut cache = state.column_lineage_cache.borrow_mut();
     let mut analysis = graph::column_lineage::ColumnLineageAnalysis::new(
         &state.manifest,
         state.dialect,
         &mut cache,
-    );
+    )
+    .with_seed_schemas(&seeds);
 
     match direction {
         "upstream" => {

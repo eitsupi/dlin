@@ -110,8 +110,10 @@ pub(crate) fn run_column_lineage_command(
     };
 
     let column_filter: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+    let seeds = read_seed_schemas(&project_dir, &manifest);
     let mut analysis =
-        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache);
+        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache)
+            .with_seed_schemas(&seeds);
 
     let reports: Vec<_> = models
         .iter()
@@ -213,8 +215,10 @@ pub(crate) fn run_column_impact_command(
         graph::column_lineage::ColumnLineageCache::load(&project_dir, cache_dir)
     };
 
+    let seeds = read_seed_schemas(&project_dir, &manifest);
     let mut analysis =
-        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache);
+        graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache)
+            .with_seed_schemas(&seeds);
 
     let reports: Vec<_> = columns
         .iter()

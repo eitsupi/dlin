@@ -54,11 +54,20 @@ fn column_upstream_json(
     tmp: &tempfile::TempDir,
     models: &[&str],
 ) -> (std::process::ExitStatus, serde_json::Value) {
+    run_column_upstream_json(tmp, models, &["--no-cache"])
+}
+
+fn run_column_upstream_json(
+    tmp: &tempfile::TempDir,
+    models: &[&str],
+    args: &[&str],
+) -> (std::process::ExitStatus, serde_json::Value) {
     let manifest_path = tmp.path().join("target/manifest.json");
     let output = Command::new(binary_path())
         .args(["column", "upstream"])
         .args(models)
-        .args(["-o", "json", "--no-cache", "--manifest-path"])
+        .args(args)
+        .args(["-o", "json", "--manifest-path"])
         .arg(&manifest_path)
         .current_dir(tmp.path())
         .output()
@@ -617,4 +626,62 @@ fn two_models_known_to_publish_a_name_stay_ambiguous() {
         "{medium}"
     );
     assert_eq!(reports[0]["errors"][0]["kind"], "column_ambiguous");
+}
+
+#[test]
+fn seed_csv_settles_a_join_and_header_changes_refresh_cached_lineage() {
+    let tmp = seed_join_dir(&[]);
+    fs::write(tmp.path().join("dbt_project.yml"), "name: test_project\n").unwrap();
+    fs::create_dir(tmp.path().join("seeds")).unwrap();
+    let csv = tmp.path().join("seeds/category_seed.csv");
+    fs::write(&csv, "source,source_category\nweb,referral\n").unwrap();
+
+    let (status, reports) = run_column_upstream_json(&tmp, &["join_model"], &[]);
+    assert!(status.success(), "{reports}");
+    let medium = column_lineage(&reports, "join_model", "event_medium");
+    assert_eq!(medium["status"], "complete", "{medium}");
+    assert_eq!(known_sources(medium), ["p.d.external_table_a.event_medium"]);
+    let category = column_lineage(&reports, "join_model", "source_category");
+    assert_eq!(
+        known_sources(category),
+        ["p.d.category_seed.source_category"]
+    );
+    assert!(
+        reports[0]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| {
+                record["origin"] == "seed_file"
+                    && record["subject"] == "seed.test_project.category_seed"
+                    && record["coverage"] == "exhaustive"
+                    && record["order"] == "proven"
+            }),
+        "{reports}"
+    );
+
+    fs::write(
+        &csv,
+        "source,source_category,event_medium\nweb,referral,email\n",
+    )
+    .unwrap();
+    let (status, reports) = run_column_upstream_json(&tmp, &["join_model"], &[]);
+    assert!(
+        !status.success(),
+        "the changed header creates an ambiguity: {reports}"
+    );
+    let medium = column_lineage(&reports, "join_model", "event_medium");
+    assert_eq!(
+        medium["unresolved"][0]["reason"]["kind"], "ambiguous",
+        "{medium}"
+    );
+
+    fs::remove_file(&csv).unwrap();
+    let (status, reports) = run_column_upstream_json(&tmp, &["join_model"], &[]);
+    assert!(status.success(), "{reports}");
+    let medium = column_lineage(&reports, "join_model", "event_medium");
+    assert_eq!(
+        medium["unresolved"][0]["reason"]["kind"], "unverified",
+        "{medium}"
+    );
 }
