@@ -268,7 +268,6 @@ impl<'a> SchemaContext<'a> {
                     source.schema.as_deref(),
                     physical_identifier,
                     &source.source_name,
-                    &source.name,
                     evidence.clone(),
                 );
             }
@@ -419,7 +418,6 @@ fn register_model_relation(
     !was_present
 }
 
-#[allow(clippy::too_many_arguments)]
 fn register_source_relation(
     schema: &mut CatalogSnapshot,
     rendered: Option<&str>,
@@ -427,7 +425,6 @@ fn register_source_relation(
     schema_name: Option<&str>,
     physical_identifier: &str,
     source_name: &str,
-    logical_name: &str,
     evidence: SchemaEvidence,
 ) -> bool {
     let physical = RelationRef::from_manifest_source(
@@ -454,16 +451,13 @@ fn register_source_relation(
             ))
         .then_some(source_name)
     });
+    // The source's logical name (`source_name.name`) is not an alias. dbt
+    // renders `source()` as the physical relation in compiled SQL, so a
+    // logical name that differs from it there refers to another relation.
     let aliases = [
         schema_name
             .map(|schema| RelationRef::from_manifest(None, Some(schema), physical_identifier)),
         Some(RelationRef::from_manifest(None, None, physical_identifier)),
-        Some(RelationRef::from_manifest(None, None, logical_name)),
-        Some(RelationRef::from_manifest(
-            None,
-            Some(source_name),
-            logical_name,
-        )),
     ];
     for alias in aliases.into_iter().flatten() {
         if alias != physical {

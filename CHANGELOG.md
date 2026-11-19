@@ -1,11 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Bug Fixes
-
-- Keep the schema of sources declared without one in column lineage output, defaulting it to the source name as dbt does, so a column from `raw.orders` is no longer shown as `orders` in plain, Mermaid and DOT output or in JSON `known[].table`
-
 ## [0.3.0-alpha.2] - 2026-11-19
 
 ### Breaking Changes
@@ -20,6 +14,8 @@
 
 ### Bug Fixes
 
+- Keep the schema of sources declared without one in column lineage output, defaulting it to the source name as dbt does, so a column from `raw.orders` is no longer shown as `orders` in plain, Mermaid and DOT output or in JSON `known[].table` (#276)
+- Stop attributing a table to a source whose physical relation has another name. Compiled SQL names a source by its physical relation, so a reference to the source's logical name, such as `raw.orders` for a source stored as `landing.orders_v2`, now reads that table rather than the source (#276)
 - Resolve BigQuery `INFORMATION_SCHEMA` references with their project and dataset or region intact. Match these references to declared sources and preserve their namespace in column lineage JSON (#272)
 - Trace fields exposed by unaliased BigQuery `UNNEST` to their array inputs. When the element schema is unknown, report possible providers and downstream impact instead of guessing a source (#272)
 - Stop treating normalization modes such as `NFKC` as column references in BigQuery `NORMALIZE` and `NORMALIZE_AND_CASEFOLD`, and in PostgreSQL and Trino `normalize` (#272)
