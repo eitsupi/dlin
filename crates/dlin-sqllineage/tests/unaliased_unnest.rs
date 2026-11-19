@@ -146,6 +146,26 @@ fn offset_of_an_unaliased_unnest_is_a_known_column() {
 }
 
 #[test]
+fn offset_of_an_unaliased_scalar_unnest_is_a_known_column() {
+    // The element has no fields, but the expansion still publishes its
+    // offset, which no relation of the enclosing query supplies.
+    let catalog = KnownTables(&[("events", &["id", "offset"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT
+  (SELECT MAX(offset) FROM UNNEST([1, 2]) WITH OFFSET) AS last_index,
+  (SELECT MAX(pos) FROM UNNEST(GENERATE_ARRAY(1, 3)) WITH OFFSET AS pos) AS last_pos
+FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    for name in ["last_index", "last_pos"] {
+        let column = find_mapping(&analysis.output.columns, name);
+        assert!(unresolved(column).is_empty(), "{column:?}");
+        assert!(known_sources(column).is_empty(), "{column:?}");
+    }
+}
+
+#[test]
 fn scalar_arrays_publish_no_field_names() {
     // A literal of scalars and a generated series have no fields, so names
     // still reach the enclosing query.

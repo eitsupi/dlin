@@ -458,15 +458,19 @@ impl LineageBuilder {
                 if alias.is_none()
                     && self.dialect == crate::Dialect::BigQuery
                     && let [array] = array_exprs.as_slice()
-                    && !is_known_scalar_array(array)
                 {
                     let [dependencies] = <[_; 1]>::try_from(dependencies)
                         .expect("one dependency list per array expression");
-                    self.add_anonymous_unnest(
-                        dependencies,
-                        *with_offset,
-                        with_offset_alias.as_ref(),
-                    );
+                    // A scalar element has no field to publish; the
+                    // expansion still publishes its offset.
+                    let open_element = (!is_known_scalar_array(array)).then_some(dependencies);
+                    if open_element.is_some() || *with_offset {
+                        self.add_anonymous_unnest(
+                            open_element,
+                            *with_offset,
+                            with_offset_alias.as_ref(),
+                        );
+                    }
                     return;
                 }
                 self.add_virtual_unnest(
@@ -860,14 +864,15 @@ impl LineageBuilder {
         self.add_binding(alias_name, Binding::VirtualSource(virtual_id));
     }
 
-    /// A `BigQuery` `UNNEST` without a range variable, over an array whose
-    /// element type is not known. The element of an array of STRUCTs
-    /// publishes its fields as columns of the FROM clause, so any name may be
-    /// one of them; no name qualifies a reference to them. `WITH OFFSET`
-    /// adds a column named by its alias, `offset` by default.
+    /// A `BigQuery` `UNNEST` without a range variable. The element of an
+    /// array of STRUCTs publishes its fields as columns of the FROM clause;
+    /// when the element type is not known, `open_element` holds the array's
+    /// dependencies and any name may be one of those fields. No name
+    /// qualifies a reference to them. `WITH OFFSET` adds a column named by
+    /// its alias, `offset` by default.
     fn add_anonymous_unnest(
         &mut self,
-        dependencies: Vec<crate::graph::node::NodeId>,
+        open_element: Option<Vec<crate::graph::node::NodeId>>,
         with_offset: bool,
         with_offset_alias: Option<&sqlparser::ast::Ident>,
     ) {
@@ -882,7 +887,7 @@ impl LineageBuilder {
         let source =
             self.graph
                 .scopes
-                .add_virtual_source(self.current_scope, columns, Some(dependencies));
+                .add_virtual_source(self.current_scope, columns, open_element);
         self.graph
             .scopes
             .add_anonymous(self.current_scope, AnonymousRange::Virtual(source));
