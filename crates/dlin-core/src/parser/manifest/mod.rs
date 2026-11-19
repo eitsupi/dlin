@@ -452,14 +452,11 @@ fn valid_unit_test(id: &str, value: &serde_json::Value) -> bool {
     let mut parts = id.splitn(3, '.');
     parts.next() == Some("unit_test")
         && parts.filter(|part| !part.is_empty()).count() == 2
-        && value.as_object().is_some_and(|object| {
-            object
-                .get("resource_type")
-                .is_none_or(|kind| kind.as_str() == Some("unit_test"))
-                && object
-                    .get("unique_id")
-                    .is_none_or(|value| value.as_str() == Some(id))
-        })
+        && value
+            .get("resource_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("unit_test")
+        && value.get("unique_id").and_then(serde_json::Value::as_str) == Some(id)
 }
 
 impl Manifest {
@@ -492,11 +489,11 @@ impl Manifest {
     /// Collect the paths of active resources, preserving their owning package.
     pub fn referenced_files(&self) -> BTreeSet<ManifestFile> {
         let mut paths = BTreeSet::new();
-        let mut insert = |id: &str, package: Option<&str>, path: Option<&String>| {
+        let mut insert = |id: &str, package: Option<&str>, path: Option<&str>| {
             if let Some(path) = path {
                 paths.insert(ManifestFile {
                     package: resource_package(id, package).map(str::to_owned),
-                    path: path.clone(),
+                    path: path.to_owned(),
                 });
             }
         };
@@ -504,45 +501,77 @@ impl Manifest {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref().or(node.path.as_ref()),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
             );
         }
         for node in self.sources.values() {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref().or(node.path.as_ref()),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
             );
         }
         for node in self.semantic_models.values() {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref().or(node.path.as_ref()),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
             );
         }
         for node in self.metrics.values() {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref().or(node.path.as_ref()),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
             );
         }
         for node in self.saved_queries.values() {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref().or(node.path.as_ref()),
+                node.original_file_path.as_deref().or(node.path.as_deref()),
             );
         }
         for node in self.exposures.values() {
             insert(
                 &node.unique_id,
                 node.package_name.as_deref(),
-                node.original_file_path.as_ref(),
+                node.original_file_path.as_deref(),
+            );
+        }
+        for (id, value) in &self.macros {
+            let owner = resource_package(
+                id,
+                value
+                    .get("package_name")
+                    .and_then(serde_json::Value::as_str),
+            );
+            if owner.is_some_and(|name| self.is_builtin_macro_package(name)) {
+                continue;
+            }
+            insert(
+                id,
+                owner,
+                value
+                    .get("original_file_path")
+                    .and_then(serde_json::Value::as_str),
             );
         }
         paths
+    }
+
+    /// dbt and its active adapter ship macros outside the package install directory.
+    fn is_builtin_macro_package(&self, name: &str) -> bool {
+        if self.metadata.project_name.as_deref() == Some(name) {
+            return false;
+        }
+        let adapter = self.metadata.adapter_type.as_deref();
+        matches!(name, "dbt" | "dbt_compare_macros")
+            || adapter.is_some_and(|adapter| name.strip_prefix("dbt_") == Some(adapter))
+            || matches!(
+                (adapter, name),
+                (Some("redshift"), "dbt_postgres") | (Some("databricks"), "dbt_spark")
+            )
     }
 
     /// Collect unique relative paths without package information.

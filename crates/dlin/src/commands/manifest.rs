@@ -101,9 +101,8 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
 /// Collect files whose mtimes can make a manifest stale.
 ///
-/// The project file and the optional project-level vars file affect dbt's
-/// interpretation of the discovered resources, so they are freshness inputs
-/// even though they do not live under one of the configured resource paths.
+/// Project configuration and dependency declarations affect which inputs
+/// dbt loads, even when they live outside the configured resource paths.
 fn collect_manifest_freshness_inputs(
     project_dir: &Path,
     project: &parser::project::DbtProject,
@@ -120,18 +119,25 @@ fn collect_manifest_freshness_inputs(
         .chain(files.yaml_files)
         .collect::<Vec<_>>();
 
-    for name in ["dbt_project.yml", "vars.yml"] {
-        let path = project_dir.join(name);
-        if path.is_file() {
-            inputs.push(path);
-        }
-    }
+    inputs.extend(
+        std::iter::once("dbt_project.yml")
+            .chain(OPTIONAL_PROJECT_FILES)
+            .map(|name| project_dir.join(name))
+            .filter(|path| path.is_file()),
+    );
 
     inputs.sort();
     inputs.dedup();
 
     Ok(inputs)
 }
+
+const OPTIONAL_PROJECT_FILES: [&str; 4] = [
+    "vars.yml",
+    "packages.yml",
+    "dependencies.yml",
+    "package-lock.yml",
+];
 
 /// Return whether a freshness input is newer than the manifest.
 ///
@@ -252,6 +258,24 @@ fn assess_freshness(
         .map(|path| display(path))
         .collect();
     let mut deleted = BTreeSet::new();
+    let mut inspect_file =
+        |root: &parser::package_roots::ResourceRoot, relative: &Path, required: bool| {
+            let label = display(&root.display_path.join(relative));
+            match std::fs::metadata(root.path.join(relative)).and_then(|m| m.modified()) {
+                Ok(mtime) if mtime > manifest_mtime => {
+                    stale.insert(label);
+                    None
+                }
+                Ok(_) => None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if required {
+                        deleted.insert(label);
+                    }
+                    None
+                }
+                Err(_) => Some("unreadable_resource_file"),
+            }
+        };
     let resolver = PackageRoots::new(project_dir, project);
     let mut roots = BTreeMap::new();
     for file in files {
@@ -274,17 +298,21 @@ fn assess_freshness(
             gaps.insert(gap("invalid_resource_path"));
             continue;
         };
-        let label = display(&root.display_path.join(relative));
-        match std::fs::metadata(root.path.join(relative)).and_then(|m| m.modified()) {
-            Ok(mtime) if mtime > manifest_mtime => {
-                stale.insert(label);
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                deleted.insert(label);
-            }
-            Err(_) => {
-                gaps.insert(gap("unreadable_resource_file"));
+        if let Some(reason) = inspect_file(root, relative, true) {
+            gaps.insert(gap(reason));
+        }
+    }
+    for (package, root) in roots {
+        if let (Some(package), Ok(root)) = (package, root) {
+            let config_files = std::iter::once(("dbt_project.yml", true))
+                .chain(OPTIONAL_PROJECT_FILES.map(|name| (name, false)));
+            for (name, required) in config_files {
+                if let Some(reason) = inspect_file(&root, Path::new(name), required) {
+                    gaps.insert(UnverifiedFiles {
+                        package: Some(package.to_owned()),
+                        reason,
+                    });
+                }
             }
         }
     }

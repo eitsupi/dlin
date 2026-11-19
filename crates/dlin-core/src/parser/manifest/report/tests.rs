@@ -527,7 +527,7 @@ fn test_known_macro_map_is_not_classified_as_graph_resource() {
                 "macros": {"macro.proj.helper": {"resource_type": "macro"}},
                 "functions": {"function.proj.helper": {"name": "helper"}},
                 "unit_tests": {
-                    "unit_test.proj.check": {"name": "check"},
+                    "unit_test.proj.check": {"name": "check", "resource_type":"unit_test", "unique_id":"unit_test.proj.check"},
                     "unit_test.proj.known": {"resource_type": "model"}
                 },
                 "future_resources": {
@@ -575,6 +575,9 @@ fn strict_load_skips_valid_unit_tests_and_rejects_invalid_identities() {
     assert_eq!(manifest.skipped_unit_test_count(), 1);
     for value in [
         serde_json::json!(0),
+        serde_json::json!({}),
+        serde_json::json!({"resource_type":"unit_test"}),
+        serde_json::json!({"unique_id":"unit_test.proj.check"}),
         serde_json::json!({"resource_type":"model"}),
         serde_json::json!({"unique_id":"unit_test.proj.other"}),
     ] {

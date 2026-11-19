@@ -6,7 +6,7 @@
 
 - Valid dbt unit tests are omitted from lineage graphs without warnings. Strict manifest loading accepts these entries and still rejects invalid unit test identities.
 
-- Manifest freshness checks resolve package-owned files from the configured installation directory. Missing packages are reported as unverified. Missing files in installed packages still make the manifest stale.
+- Manifest freshness checks resolve package-owned files from the configured installation directory. Checks include package macros and dependency configuration files. Missing packages are reported as unverified. Missing files in installed packages still make the manifest stale.
 
 ### MCP
 

@@ -18,7 +18,7 @@ pub struct ManifestAnalysis {
     graph: LineageGraph,
     diagnostics: Vec<ManifestDiagnostic>,
     project_name: Option<String>,
-    referenced_files: Vec<ManifestFile>,
+    freshness_files: Vec<ManifestFile>,
 }
 
 impl ManifestAnalysis {
@@ -26,13 +26,13 @@ impl ManifestAnalysis {
         graph: LineageGraph,
         diagnostics: Vec<ManifestDiagnostic>,
         project_name: Option<String>,
-        referenced_files: Vec<ManifestFile>,
+        freshness_files: Vec<ManifestFile>,
     ) -> Self {
         Self {
             graph,
             diagnostics,
             project_name,
-            referenced_files,
+            freshness_files,
         }
     }
 
@@ -48,7 +48,7 @@ impl ManifestAnalysis {
             self.graph,
             self.diagnostics,
             self.project_name,
-            self.referenced_files,
+            self.freshness_files,
         )
     }
 }

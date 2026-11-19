@@ -249,7 +249,7 @@ fn strict_graph_skips_valid_unit_tests() {
             },
             "nodes": {},
             "unit_tests": {
-                "unit_test.proj.check": {"name": "check"}
+                "unit_test.proj.check": {"name": "check", "resource_type":"unit_test", "unique_id":"unit_test.proj.check"}
             }
         }"#,
         std::path::Path::new("manifest.json"),
@@ -319,7 +319,7 @@ fn strict_graph_selects_first_unsupported_resource_by_unique_id() {
             "function.proj.b": {"name": "b"}
         },
         "unit_tests": {
-            "unit_test.proj.c": {"name": "c"}
+            "unit_test.proj.c": {"name": "c", "resource_type":"unit_test", "unique_id":"unit_test.proj.c"}
         },
         "future_resources": {
             "future.proj.d": {"resource_type": "future_resource"}

@@ -366,6 +366,11 @@ fn package_paths_are_verified_independently_and_missing_packages_are_unverified(
     fs::create_dir_all(root.join("target")).unwrap();
     fs::create_dir_all(root.join("vendor/elementary/models")).unwrap();
     fs::write(
+        root.join("vendor/elementary/dbt_project.yml"),
+        "name: elementary\n",
+    )
+    .unwrap();
+    fs::write(
         root.join("dbt_project.yml"),
         "name: sample\npackages-install-path: vendor\n",
     )
@@ -437,9 +442,6 @@ fn package_paths_are_verified_independently_and_missing_packages_are_unverified(
 
 #[test]
 fn check_manifest_and_mcp_agree_about_unresolved_package_installation_and_deletions() {
-    use std::io::Write;
-    use std::process::Stdio;
-
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     fs::create_dir(root.join("target")).unwrap();
@@ -468,6 +470,16 @@ fn check_manifest_and_mcp_agree_about_unresolved_package_installation_and_deleti
         serde_json::json!(["models/gone.sql"])
     );
 
+    let summary = run_mcp_freshness(root);
+    for field in ["verification", "is_stale", "deleted_files", "unverified"] {
+        assert_eq!(summary[field], check[field], "{field}");
+    }
+}
+
+fn run_mcp_freshness(root: &Path) -> serde_json::Value {
+    use std::io::Write;
+    use std::process::Stdio;
+
     let mut server = Command::new(binary_path())
         .arg("mcp")
         .args(["--project-dir", root.to_str().unwrap()])
@@ -489,7 +501,96 @@ fn check_manifest_and_mcp_agree_about_unresolved_package_installation_and_deleti
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let summary: serde_json::Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    for field in ["verification", "is_stale", "deleted_files", "unverified"] {
-        assert_eq!(summary["manifest_status"][field], check[field], "{field}");
+    summary["manifest_status"].clone()
+}
+
+#[test]
+fn macro_only_packages_are_checked_and_builtin_macros_are_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let package = root.join("dbt_packages/dbt_utils");
+    let configuration = package.join("dbt_project.yml");
+    let macros = package.join("macros/utils.sql");
+    let artifact = root.join("target/manifest.json");
+    fs::create_dir_all(package.join("macros")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("dbt_project.yml"), "name: sample\n").unwrap();
+    fs::write(&configuration, "name: dbt_utils\n").unwrap();
+    fs::write(&macros, "{% macro example() %}1{% endmacro %}").unwrap();
+    fs::write(&artifact, r#"{
+        "metadata":{"project_name":"sample","adapter_type":"redshift"},
+        "nodes":{},
+        "macros":{
+            "macro.dbt_utils.example":{"package_name":"dbt_utils","unique_id":"macro.dbt_utils.example","original_file_path":"macros/utils.sql","path":"utils.sql"},
+            "macro.dbt_utils.other":{"package_name":"dbt_utils","original_file_path":"macros/utils.sql"},
+            "macro.dbt.core":{"package_name":"dbt","original_file_path":"macros/core.sql"},
+            "macro.dbt_redshift.adapter":{"package_name":"dbt_redshift","original_file_path":"macros/adapter.sql"},
+            "macro.dbt_postgres.shared":{"package_name":"dbt_postgres","original_file_path":"macros/shared.sql"},
+            "macro.dbt_compare_macros.compare":{"package_name":"dbt_compare_macros","original_file_path":"macros/compare.sql"}
+        }
+    }"#).unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "verified");
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(run_mcp_freshness(root)["verification"], "verified");
+    assert_eq!(run_manifest_summary(&tmp)["is_stale"], false);
+
+    set_mtime_newer_than(&configuration, &artifact);
+    set_mtime_newer_than(&macros, &artifact);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(
+        check["stale_files"],
+        serde_json::json!([
+            "dbt_packages/dbt_utils/dbt_project.yml",
+            "dbt_packages/dbt_utils/macros/utils.sql"
+        ])
+    );
+    assert_eq!(run_mcp_freshness(root)["stale_files"], check["stale_files"]);
+    assert_eq!(
+        run_manifest_summary(&tmp)["stale_files"],
+        check["stale_files"]
+    );
+
+    fs::remove_file(&macros).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["dbt_packages/dbt_utils/macros/utils.sql"])
+    );
+    fs::remove_dir_all(&package).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(check["deleted_files"], serde_json::json!([]));
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(
+        check["unverified"],
+        serde_json::json!([{"package":"dbt_utils","reason":"package_not_installed"}])
+    );
+    assert_eq!(run_mcp_freshness(root)["unverified"], check["unverified"]);
+}
+
+#[test]
+fn dependency_declarations_and_lockfile_make_the_manifest_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("target")).unwrap();
+    let artifact = root.join("target/manifest.json");
+    fs::write(root.join("dbt_project.yml"), "name: sample\n").unwrap();
+    fs::write(
+        &artifact,
+        r#"{"metadata":{"project_name":"sample","adapter_type":"duckdb"},"nodes":{}}"#,
+    )
+    .unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    for name in ["packages.yml", "dependencies.yml", "package-lock.yml"] {
+        let config = root.join(name);
+        fs::write(&config, "packages: []\n").unwrap();
+        set_mtime_newer_than(&config, &artifact);
+        let check = run_check_manifest(&tmp);
+        assert_eq!(check["is_stale"], true);
+        assert_eq!(check["stale_files"], serde_json::json!([name]));
+        assert_eq!(run_mcp_freshness(root)["stale_files"], check["stale_files"]);
+        fs::remove_file(config).unwrap();
     }
 }
