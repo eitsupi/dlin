@@ -89,3 +89,14 @@ fn downstream_impact_of_a_model_over_defaulted_sources_still_finds_its_path() {
         "{confirmed:?}"
     );
 }
+
+#[test]
+fn upstream_dot_separates_the_source_from_the_model_of_the_same_name() {
+    let stdout = run_column(&["upstream", "customers", "-o", "dot"]);
+    for cluster in ["orders", "raw.customers", "raw.orders", "raw.payments"] {
+        assert!(
+            stdout.contains(&format!(r#"label="{cluster}";"#)),
+            "missing {cluster} cluster: {stdout}"
+        );
+    }
+}
