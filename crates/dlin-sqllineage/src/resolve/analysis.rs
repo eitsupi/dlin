@@ -408,9 +408,6 @@ pub(crate) fn semantic_failure(
         SemanticError::UnpivotExpression => DiagnosticKind::UnsupportedSyntax {
             what: "UNPIVOT on an expression",
         },
-        SemanticError::QuotingDependentTableName => DiagnosticKind::UnsupportedSyntax {
-            what: "TABLE with a name whose meaning depends on quoting",
-        },
         SemanticError::ValuesRowArityMismatch { first, row } => {
             DiagnosticKind::ValuesRowArityMismatch {
                 first: *first,

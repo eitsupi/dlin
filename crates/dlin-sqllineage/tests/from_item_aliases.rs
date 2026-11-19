@@ -228,3 +228,14 @@ fn ordinary_derived_table_inside_an_aliased_join_does_not_see_earlier_items() {
     // DuckDB lets an ordinary derived table see the items before it.
     expect_rendered_with(sql, Dialect::DuckDb, &Catalog, &["w#0 C[t.x]", "Closed"]);
 }
+
+/// `USING (...) AS alias` merges the listed columns as `USING` does.
+#[test]
+fn joins_with_a_using_alias_merge_columns() {
+    expect_rendered_with(
+        r#"SELECT * FROM t JOIN u AS d(x, q) USING (x) AS j"#,
+        Dialect::PostgreSql,
+        &Catalog,
+        &["x#0 C[t.x, u.p]", "y#1 C[t.y]", "q#2 C[u.q]", "Closed"],
+    );
+}

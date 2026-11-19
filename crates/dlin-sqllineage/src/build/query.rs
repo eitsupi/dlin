@@ -226,10 +226,7 @@ impl LineageBuilder {
                     .scopes
                     .mark_unknown_output_width(self.current_scope, "VALUES source");
             }
-            // `TABLE t` is `SELECT * FROM t`. The parser keeps the name only as
-            // text, without its quoting. Where quoting could change what the
-            // name refers to, neither the relation it reads nor its output can
-            // be told, so the statement is refused.
+            // `TABLE t` is `SELECT * FROM t`.
             SetExpr::Table(table) => {
                 let Some(table_name) = &table.table_name else {
                     self.graph
@@ -237,19 +234,10 @@ impl LineageBuilder {
                         .mark_unknown_output_width(self.current_scope, "TABLE source");
                     return;
                 };
-                let modelled = table
-                    .schema_name
-                    .iter()
-                    .chain([table_name])
-                    .all(|part| quoting_is_irrelevant(part, self.dialect));
-                if !modelled {
-                    self.reject(SemanticError::QuotingDependentTableName);
-                    return;
-                }
                 let table_ref = crate::types::TableRef {
                     catalog: None,
-                    schema: table.schema_name.as_deref().map(crate::Ident::unquoted),
-                    table: crate::Ident::unquoted(table_name.as_str()),
+                    schema: table.schema_name.as_ref().map(crate::Ident::from_ast),
+                    table: crate::Ident::from_ast(table_name),
                 };
                 let range = table_ref.table.clone();
                 for binding in self.bind_relation_reference(table_ref) {
@@ -326,15 +314,6 @@ impl LineageBuilder {
             );
         }
     }
-}
-
-/// Whether the dialect compares a name part spelled `text` the same way
-/// whether or not it is quoted, as a relation name and as a CTE name.
-fn quoting_is_irrelevant(text: &str, dialect: crate::Dialect) -> bool {
-    let unquoted = crate::Ident::unquoted(text);
-    let quoted = crate::Ident::quoted(text, crate::Quote::Double);
-    unquoted.column_key(dialect) == quoted.column_key(dialect)
-        && unquoted.relation_key(dialect) == quoted.relation_key(dialect)
 }
 
 /// Whether a `BY NAME` form has the strict meaning the engine models in the

@@ -200,14 +200,6 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::InUnnest {
-                expr, array_expr, ..
-            } => {
-                let mut v = self.collect_ancestors(expr);
-                v.extend(self.collect_ancestors(array_expr));
-                v
-            }
-
             Expr::MemberOf(m) => {
                 let mut v = self.collect_ancestors(&m.value);
                 v.extend(self.collect_ancestors(&m.array));
@@ -352,9 +344,26 @@ impl LineageBuilder {
 
             Expr::Subquery(query) => self.collect_subquery_value_inputs(query),
 
-            Expr::InSubquery { expr, subquery, .. } => {
+            Expr::In { expr, target, .. } => {
                 let mut v = self.collect_ancestors(expr);
-                v.extend(self.collect_subquery_value_inputs(subquery));
+                match target {
+                    ast::InTarget::List(list) => {
+                        for item in list {
+                            v.extend(self.collect_ancestors(item));
+                        }
+                    }
+                    ast::InTarget::Subquery(subquery) => {
+                        v.extend(self.collect_subquery_value_inputs(subquery));
+                    }
+                    ast::InTarget::Unnest(array_expr) => {
+                        v.extend(self.collect_ancestors(array_expr));
+                    }
+                    // SQLite reads `x IN name` as `x IN (SELECT * FROM name)`;
+                    // the relation it reads is not modelled.
+                    ast::InTarget::Table { .. } => {
+                        v.push(self.graph.add_unsupported("IN table"));
+                    }
+                }
                 v
             }
 
@@ -369,14 +378,6 @@ impl LineageBuilder {
                 let mut v = self.collect_ancestors(expr);
                 v.extend(self.collect_ancestors(low));
                 v.extend(self.collect_ancestors(high));
-                v
-            }
-
-            Expr::InList { expr, list, .. } => {
-                let mut v = self.collect_ancestors(expr);
-                for item in list {
-                    v.extend(self.collect_ancestors(item));
-                }
                 v
             }
 

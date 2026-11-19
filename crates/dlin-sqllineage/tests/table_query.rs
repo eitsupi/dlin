@@ -63,41 +63,41 @@ fn a_table_query_expands_catalog_columns() {
     assert_eq!(analysis.read, vec![table("t")]);
 }
 
-/// The parser keeps the name of `TABLE name` without its quoting. Where the
-/// quoting would change what the name refers to, neither the relation it reads
-/// nor its output can be told, so the statement is refused.
+/// The name of `TABLE name` keeps its quoting, so it refers to the same
+/// relation as in `SELECT * FROM name`.
 #[test]
-fn a_name_whose_quoting_matters_is_refused() {
-    for (dialect, sql) in [
+fn a_table_name_keeps_its_quoting() {
+    for (dialect, table_form, select_form) in [
         (
             Dialect::PostgreSql,
-            "WITH \"T\" AS (SELECT 1 AS x) SELECT x FROM t UNION ALL TABLE \"T\"",
+            r#"WITH "T" AS (SELECT 1 AS x) SELECT x FROM t UNION ALL TABLE "T""#,
+            r#"WITH "T" AS (SELECT 1 AS x) SELECT x FROM t UNION ALL SELECT * FROM "T""#,
         ),
-        (Dialect::Snowflake, "SELECT x FROM t UNION ALL TABLE t"),
-        (Dialect::Generic, "SELECT x FROM t UNION ALL TABLE t"),
-    ] {
-        let analysis = analyze_one_with(sql, dialect, None);
-        assert!(analysis.output.columns.is_empty(), "{dialect:?} {sql}");
-        assert!(analysis.read.is_empty(), "{dialect:?} {sql}");
-        assert_eq!(
-            analysis
-                .diagnostics
-                .iter()
-                .map(|diagnostic| &diagnostic.kind)
-                .collect::<Vec<_>>(),
-            [&dlin_sqllineage::DiagnosticKind::UnsupportedSyntax {
-                what: "TABLE with a name whose meaning depends on quoting"
-            }],
-            "{dialect:?} {sql}"
-        );
-    }
-    // Lower case names are the same quoted or not in PostgreSQL.
-    assert_eq!(
-        analyze_rendered(
-            "SELECT x, y FROM t UNION ALL TABLE t",
+        (
             Dialect::PostgreSql,
-            Some(&CATALOG)
+            r#"SELECT x, y FROM t UNION ALL TABLE "s"."T""#,
+            r#"SELECT x, y FROM t UNION ALL SELECT * FROM "s"."T""#,
         ),
-        ["x#0 C[t.x]", "y#1 C[t.y]", "Closed"]
-    );
+        (
+            Dialect::Snowflake,
+            r#"SELECT x FROM t UNION ALL TABLE t"#,
+            r#"SELECT x FROM t UNION ALL SELECT * FROM t"#,
+        ),
+        (
+            Dialect::Generic,
+            r#"SELECT x FROM t UNION ALL TABLE t"#,
+            r#"SELECT x FROM t UNION ALL SELECT * FROM t"#,
+        ),
+    ] {
+        for catalog in [Some(&CATALOG as &dyn dlin_sqllineage::Catalog), None] {
+            let expected = analyze_one_with(select_form, dialect, catalog);
+            let actual = analyze_one_with(table_form, dialect, catalog);
+            assert_eq!(actual.output, expected.output, "{dialect:?} {table_form}");
+            assert_eq!(actual.read, expected.read, "{dialect:?} {table_form}");
+            assert_eq!(
+                actual.diagnostics, expected.diagnostics,
+                "{dialect:?} {table_form}"
+            );
+        }
+    }
 }

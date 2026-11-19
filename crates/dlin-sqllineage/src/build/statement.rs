@@ -185,6 +185,7 @@ impl LineageBuilder {
             // Statements that do not carry data lineage.
             Statement::AlterCollation(_)
             | Statement::AlterConnector { .. }
+            | Statement::AlterDefaultPrivileges(_)
             | Statement::AlterFunction(_)
             | Statement::AlterIndex { .. }
             | Statement::AlterOperator { .. }
@@ -196,6 +197,7 @@ impl LineageBuilder {
             | Statement::AlterSession { .. }
             | Statement::AlterTable { .. }
             | Statement::AlterTextSearch(_)
+            | Statement::AlterTrigger(_)
             | Statement::AlterType { .. }
             | Statement::AlterUser { .. }
             | Statement::AlterView { .. }
@@ -211,12 +213,15 @@ impl LineageBuilder {
             | Statement::Commit { .. }
             | Statement::Copy { .. }
             | Statement::CopyIntoSnowflake { .. }
+            | Statement::CreateAggregate(_)
             | Statement::CreateCollation(_)
             | Statement::CreateConnector { .. }
             | Statement::CreateDatabase { .. }
             | Statement::CreateDomain { .. }
             | Statement::CreateExtension { .. }
             | Statement::CreateFileFormat { .. }
+            | Statement::CreateForeignDataWrapper(_)
+            | Statement::CreateForeignTable(_)
             | Statement::CreateFunction { .. }
             | Statement::CreateIndex(_)
             | Statement::CreateMacro { .. }
@@ -226,6 +231,7 @@ impl LineageBuilder {
             | Statement::CreatePolicy { .. }
             | Statement::CreateProcedure { .. }
             | Statement::CreateRole { .. }
+            | Statement::CreateRule(_)
             | Statement::CreateSchema { .. }
             | Statement::CreateSecret { .. }
             | Statement::CreateSequence { .. }
@@ -235,6 +241,7 @@ impl LineageBuilder {
             | Statement::CreateTrigger { .. }
             | Statement::CreateType { .. }
             | Statement::CreateUser { .. }
+            | Statement::CreateUserMapping(_)
             | Statement::CreateView { .. }
             | Statement::CreateVirtualTable { .. }
             | Statement::CreateWarehouse(_)
@@ -254,6 +261,7 @@ impl LineageBuilder {
             | Statement::DropOperatorFamily { .. }
             | Statement::DropPolicy { .. }
             | Statement::DropProcedure { .. }
+            | Statement::DropRule(_)
             | Statement::DropSecret { .. }
             | Statement::DropTrigger { .. }
             | Statement::Execute { .. }
@@ -263,6 +271,7 @@ impl LineageBuilder {
             | Statement::Fetch { .. }
             | Statement::Flush { .. }
             | Statement::Grant { .. }
+            | Statement::GrantRole(_)
             | Statement::If(_)
             | Statement::Install { .. }
             | Statement::Kill { .. }
@@ -282,12 +291,14 @@ impl LineageBuilder {
             | Statement::Put { .. }
             | Statement::RaisError { .. }
             | Statement::Raise { .. }
+            | Statement::RefreshMaterializedView(_)
             | Statement::ReleaseSavepoint { .. }
             | Statement::Remove { .. }
             | Statement::RenameTable { .. }
             | Statement::Reset { .. }
             | Statement::Return(_)
             | Statement::Revoke { .. }
+            | Statement::RevokeRole(_)
             | Statement::Rollback { .. }
             | Statement::Savepoint { .. }
             | Statement::Set(_)

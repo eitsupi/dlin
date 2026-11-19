@@ -450,3 +450,26 @@ fn aliases_keep_proven_values_when_an_unknown_delegate_output_is_replaced() {
                 [Unresolved::Unsupported { what: "column alias position unknown" }])
     ));
 }
+
+#[test]
+fn every_in_target_is_a_value_input() {
+    expect_rendered_in(
+        r#"SELECT t.a IN (1, t.b) AS p FROM t"#,
+        Dialect::Generic,
+        &["p#0 C[t.a, t.b] Expression", "Closed"],
+    );
+    expect_rendered_in(
+        r#"SELECT t.a IN UNNEST(t.b) AS p FROM t"#,
+        Dialect::BigQuery,
+        &["p#0 C[t.a, t.b] Expression", "Closed"],
+    );
+    // SQLite's `x IN name` reads a relation that is not modelled.
+    expect_rendered_in(
+        r#"SELECT t.a IN u AS p FROM t"#,
+        Dialect::SQLite,
+        &[
+            r#"p#0 P[t.a | Unsupported { what: "IN table" }] Expression"#,
+            "Closed",
+        ],
+    );
+}
