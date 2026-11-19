@@ -434,3 +434,62 @@ fn package_paths_are_verified_independently_and_missing_packages_are_unverified(
         check["deleted_files"]
     );
 }
+
+#[test]
+fn check_manifest_and_mcp_agree_about_unresolved_package_installation_and_deletions() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(
+        root.join("dbt_project.yml"),
+        "name: sample\npackages-install-path: \"{{ env_var('PACKAGE_PATH') }}\"\n",
+    )
+    .unwrap();
+    let artifact = root.join("target/manifest.json");
+    fs::write(&artifact, r#"{
+        "metadata":{"project_name":"sample","adapter_type":"duckdb"},
+        "nodes":{
+            "model.sample.gone":{"unique_id":"model.sample.gone","name":"gone","resource_type":"model","original_file_path":"models/gone.sql"},
+            "model.elementary.model":{"unique_id":"model.elementary.model","name":"model","resource_type":"model","original_file_path":"models/model.sql"}
+        }
+    }"#).unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(
+        check["unverified"],
+        serde_json::json!([{"package":"elementary","reason":"unresolved_install_path"}])
+    );
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["models/gone.sql"])
+    );
+
+    let mut server = Command::new(binary_path())
+        .arg("mcp")
+        .args(["--project-dir", root.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        server.stdin.take().unwrap(),
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"get_project_summary"}
+        })
+    )
+    .unwrap();
+    let output = server.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    for field in ["verification", "is_stale", "deleted_files", "unverified"] {
+        assert_eq!(summary["manifest_status"][field], check[field], "{field}");
+    }
+}

@@ -127,6 +127,7 @@ mod tests {
             affected_tests: 1,
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
+                exposure_id: String::new(),
                 exposure: "dashboard".to_string(),
                 path: vec![
                     "stg_orders".to_string(),
@@ -343,6 +344,7 @@ mod tests {
             affected_tests: 1,
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
+                exposure_id: String::new(),
                 exposure: "dashboard".to_string(),
                 path: vec![
                     "stg_orders".to_string(),
@@ -411,6 +413,7 @@ mod tests {
             affected_tests: 0,
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
+                exposure_id: String::new(),
                 exposure: "dashboard".to_string(),
                 path: vec![
                     "stg_orders".to_string(),

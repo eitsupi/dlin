@@ -32,6 +32,8 @@ impl ImpactSeverity {
 /// Path from source model to an exposure
 #[derive(Debug, Clone, Serialize)]
 pub struct ExposurePath {
+    #[serde(skip)]
+    pub exposure_id: String,
     pub exposure: String,
     pub path: Vec<String>,
 }
@@ -165,6 +167,7 @@ pub fn compute_impact(graph: &LineageGraph, source_idx: NodeIndex) -> ImpactRepo
                 if *count < MAX_PATHS_PER_EXPOSURE {
                     *count += 1;
                     exposure_paths.push(ExposurePath {
+                        exposure_id: graph[current].unique_id.clone(),
                         exposure: graph[current].label.clone(),
                         path: path.iter().map(|&idx| graph[idx].label.clone()).collect(),
                     });
