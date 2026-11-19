@@ -231,6 +231,8 @@ impl LineageBuilder {
             | Statement::CreatePolicy { .. }
             | Statement::CreateProcedure { .. }
             | Statement::CreateRole { .. }
+            // A rule defines statements to run later; they are not analysed
+            // as part of this one.
             | Statement::CreateRule(_)
             | Statement::CreateSchema { .. }
             | Statement::CreateSecret { .. }
@@ -291,6 +293,8 @@ impl LineageBuilder {
             | Statement::Put { .. }
             | Statement::RaisError { .. }
             | Statement::Raise { .. }
+            // The refresh runs the view's stored definition, which this
+            // statement does not contain.
             | Statement::RefreshMaterializedView(_)
             | Statement::ReleaseSavepoint { .. }
             | Statement::Remove { .. }

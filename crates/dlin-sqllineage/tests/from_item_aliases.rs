@@ -239,3 +239,22 @@ fn joins_with_a_using_alias_merge_columns() {
         &["x#0 C[t.x, u.p]", "y#1 C[t.y]", "q#2 C[u.q]", "Closed"],
     );
 }
+
+/// The alias of `USING (...) AS alias` is not bound, so a column qualified by
+/// it has no complete lineage.
+#[test]
+fn a_column_qualified_by_a_using_alias_is_not_resolved() {
+    let analysis = common::analyze_one_with(
+        r#"SELECT j.x FROM t JOIN u AS d(x, q) USING (x) AS j"#,
+        Dialect::PostgreSql,
+        Some(&Catalog),
+    );
+    let [column] = analysis.output.columns.as_slice() else {
+        panic!("{:?}", analysis.output);
+    };
+    assert!(
+        !matches!(column.lineage, dlin_sqllineage::Lineage::Complete(_)),
+        "{:?}",
+        column.lineage
+    );
+}

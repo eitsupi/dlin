@@ -463,13 +463,56 @@ fn every_in_target_is_a_value_input() {
         Dialect::BigQuery,
         &["p#0 C[t.a, t.b] Expression", "Closed"],
     );
-    // SQLite's `x IN name` reads a relation that is not modelled.
-    expect_rendered_in(
-        r#"SELECT t.a IN u AS p FROM t"#,
-        Dialect::SQLite,
-        &[
-            r#"p#0 P[t.a | Unsupported { what: "IN table" }] Expression"#,
-            "Closed",
-        ],
-    );
+}
+
+/// SQLite reads `x IN name` and `x IN name(args)` as
+/// `x IN (SELECT * FROM name...)`, so both forms read the same relations
+/// and give the same value.
+#[test]
+fn sqlite_in_table_is_in_select_star() {
+    for (sql, read) in [
+        (r#"SELECT t.a FROM t WHERE t.a IN u"#, &["t", "u"][..]),
+        // A CTE name reads the relations of the CTE, not a table of its name.
+        (
+            r#"WITH c AS (SELECT a FROM v) SELECT t.a FROM t WHERE t.a IN c"#,
+            &["t", "v"],
+        ),
+        // A table-valued function reads the relations of its arguments, not
+        // a table of its name.
+        (
+            r#"SELECT t.a FROM t WHERE t.a IN json_each((SELECT v FROM w))"#,
+            &["t", "w"],
+        ),
+    ] {
+        let analysis = analyze_one_with(sql, Dialect::SQLite, None);
+        assert_eq!(
+            analysis
+                .read
+                .iter()
+                .map(|relation| relation.name.value.as_str())
+                .collect::<Vec<_>>(),
+            read,
+            "{sql}"
+        );
+    }
+    for (in_table, explicit) in [
+        (
+            r#"SELECT t.a IN u AS p FROM t"#,
+            r#"SELECT t.a IN (SELECT * FROM u) AS p FROM t"#,
+        ),
+        (
+            r#"WITH c AS (SELECT a FROM v) SELECT t.a IN c AS p FROM t"#,
+            r#"WITH c AS (SELECT a FROM v) SELECT t.a IN (SELECT * FROM c) AS p FROM t"#,
+        ),
+        (
+            r#"SELECT t.a IN json_each(t.b) AS p FROM t"#,
+            r#"SELECT t.a IN (SELECT * FROM json_each(t.b)) AS p FROM t"#,
+        ),
+    ] {
+        let actual = analyze_one_with(in_table, Dialect::SQLite, None);
+        let expected = analyze_one_with(explicit, Dialect::SQLite, None);
+        assert_eq!(actual.output, expected.output, "{in_table}");
+        assert_eq!(actual.read, expected.read, "{in_table}");
+        assert_eq!(actual.diagnostics, expected.diagnostics, "{in_table}");
+    }
 }
