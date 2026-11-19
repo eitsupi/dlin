@@ -76,8 +76,7 @@ pub(super) fn assemble(
             structure: structure
                 .columns
                 .get(index)
-                .map(|evidence| references(evidence, catalog))
-                .unwrap_or_default(),
+                .map_or_default(|evidence| references(evidence, catalog)),
             lineage: references(&mapping.sources.all_evidence(), catalog),
             known: known
                 .into_iter()
