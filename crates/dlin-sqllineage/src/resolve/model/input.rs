@@ -342,6 +342,13 @@ impl Walk {
         let mut present = Vec::new();
         match farther {
             Self::Absent => return Self::Possible { answer, candidates },
+            // The farther clauses already find the name ambiguous between
+            // providers known to publish it. Only a nearer provider that does
+            // publish it gives the reference a valid reading, so they are no
+            // candidates; their columns still decide the transform.
+            Self::Present(InputLookup::Ambiguous { values: listed, .. }) => {
+                values.extend(listed);
+            }
             Self::Present(lookup) => {
                 let (more, listed) = providers_of(&lookup);
                 match lookup {

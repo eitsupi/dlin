@@ -461,3 +461,21 @@ fn duckdb_implicit_lateral_reference_reads_the_item_before_it() {
         assert_eq!(read_names(&result), ["t"], "{sql}");
     }
 }
+
+// The enclosing query is ambiguous about `x` between two relations known to
+// publish it, so the reference has a valid reading only if the subquery's own
+// relation publishes it. The name is left to that relation's columns, and the
+// relations that conflict are no candidates.
+#[test]
+fn a_scope_that_may_provide_the_column_over_a_conflict_around_it() {
+    let catalog = KnownTables(&[("a", &["x"]), ("b", &["x"])]);
+    check_unverified(
+        "SELECT (SELECT x FROM u) AS v FROM a, b",
+        Some(&catalog),
+        "v",
+        &[],
+        &["u"],
+    );
+    // Without the subquery's relation, the conflict stays ambiguous.
+    check_ambiguous("SELECT x AS v FROM a, b", Some(&catalog), "v", &["a", "b"]);
+}
