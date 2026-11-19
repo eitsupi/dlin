@@ -388,6 +388,7 @@ impl Evaluator<'_, '_, '_> {
                                 Candidate::Relation(relation) => Some(crate::types::TableRef {
                                     catalog: relation.catalog,
                                     schema: relation.schema,
+                                    namespace: relation.namespace,
                                     table: relation.name,
                                 }),
                                 _ => None,

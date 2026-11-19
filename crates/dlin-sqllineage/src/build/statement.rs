@@ -14,7 +14,7 @@ impl LineageBuilder {
             }
 
             Statement::Insert(insert) => {
-                self.graph.tables.output = Some(Self::table_ref_from_table_object(&insert.table));
+                self.graph.tables.output = Some(self.table_ref_from_table_object(&insert.table));
                 if let Some(ref source) = insert.source {
                     let columns = insert
                         .columns
@@ -37,7 +37,7 @@ impl LineageBuilder {
 
             Statement::CreateTable(ct) => {
                 if let Some(ref query) = ct.query {
-                    self.graph.tables.output = Some(Self::table_ref_from_object_name(&ct.name));
+                    self.graph.tables.output = Some(self.table_ref_from_object_name(&ct.name));
                     let columns = ct
                         .columns
                         .iter()
@@ -51,7 +51,7 @@ impl LineageBuilder {
             }
 
             Statement::Update(update) => {
-                if let Some(tref) = Self::table_ref_from_table_factor(&update.table.relation) {
+                if let Some(tref) = self.table_ref_from_table_factor(&update.table.relation) {
                     self.graph.tables.output = Some(tref);
                 }
                 for join in &update.table.joins {
@@ -94,7 +94,7 @@ impl LineageBuilder {
                 };
                 if let Some(tref) = from_tables
                     .first()
-                    .and_then(|f| Self::table_ref_from_table_factor(&f.relation))
+                    .and_then(|f| self.table_ref_from_table_factor(&f.relation))
                 {
                     self.graph.tables.output = Some(tref);
                 }
@@ -108,7 +108,7 @@ impl LineageBuilder {
             }
 
             Statement::Merge(merge) => {
-                if let Some(tref) = Self::table_ref_from_table_factor(&merge.table) {
+                if let Some(tref) = self.table_ref_from_table_factor(&merge.table) {
                     self.graph.tables.output = Some(tref);
                 }
                 self.visit_table_factor(&merge.source);
@@ -367,43 +367,70 @@ impl LineageBuilder {
         let _ = self.collect_ancestors(expr);
     }
 
-    pub(crate) fn table_ref_from_object_name(name: &ast::ObjectName) -> TableRef {
+    pub(crate) fn table_ref_from_object_name(&self, name: &ast::ObjectName) -> TableRef {
         let parts: Vec<crate::Ident> = name
             .0
             .iter()
             .filter_map(|p| p.as_ident())
             .map(crate::Ident::from_ast)
             .collect();
+        if self.dialect == crate::Dialect::BigQuery {
+            // `[project.]scope.INFORMATION_SCHEMA.view`, where the scope is a
+            // region (`region-us`) or a dataset. A path quoted as one
+            // identifier is already split into its parts by the parser.
+            match parts.as_slice() {
+                [catalog, scope, namespace, view] if is_information_schema(namespace) => {
+                    return TableRef {
+                        catalog: Some(catalog.clone()),
+                        schema: Some(scope.clone()),
+                        namespace: Some(crate::RelationNamespace::InformationSchema),
+                        table: view.clone(),
+                    };
+                }
+                [scope, namespace, view] if is_information_schema(namespace) => {
+                    return TableRef {
+                        catalog: None,
+                        schema: Some(scope.clone()),
+                        namespace: Some(crate::RelationNamespace::InformationSchema),
+                        table: view.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
         match parts.as_slice() {
             [table] => TableRef {
                 catalog: None,
                 schema: None,
+                namespace: None,
                 table: table.clone(),
             },
             [schema, table] => TableRef {
                 catalog: None,
                 schema: Some(schema.clone()),
+                namespace: None,
                 table: table.clone(),
             },
             [catalog, schema, table] => TableRef {
                 catalog: Some(catalog.clone()),
                 schema: Some(schema.clone()),
+                namespace: None,
                 table: table.clone(),
             },
             _ => TableRef::new(name.to_string()),
         }
     }
 
-    fn table_ref_from_table_object(obj: &ast::TableObject) -> TableRef {
+    fn table_ref_from_table_object(&self, obj: &ast::TableObject) -> TableRef {
         match obj {
-            ast::TableObject::TableName(name) => Self::table_ref_from_object_name(name),
+            ast::TableObject::TableName(name) => self.table_ref_from_object_name(name),
             _ => TableRef::new(obj.to_string()),
         }
     }
 
-    fn table_ref_from_table_factor(factor: &ast::TableFactor) -> Option<TableRef> {
+    fn table_ref_from_table_factor(&self, factor: &ast::TableFactor) -> Option<TableRef> {
         match factor {
-            ast::TableFactor::Table { name, .. } => Some(Self::table_ref_from_object_name(name)),
+            ast::TableFactor::Table { name, .. } => Some(self.table_ref_from_object_name(name)),
             _ => None,
         }
     }
@@ -422,4 +449,10 @@ fn assignment_target_name(target: &AssignmentTarget) -> crate::Ident {
             .and_then(|p| p.as_ident())
             .map_or_else(|| crate::Ident::unquoted(""), crate::Ident::from_ast),
     }
+}
+
+/// Whether a part of a `BigQuery` path names the `INFORMATION_SCHEMA`
+/// namespace, which `BigQuery` matches case-insensitively.
+fn is_information_schema(part: &crate::Ident) -> bool {
+    part.value.eq_ignore_ascii_case("INFORMATION_SCHEMA")
 }

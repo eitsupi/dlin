@@ -331,3 +331,54 @@ fn unaliased_unnest_field_is_a_possible_downstream_impact_of_the_array() {
     assert_eq!(targets("confirmed"), ["param_upstream.page_aliased"]);
     assert_eq!(targets("possible"), ["param_upstream.page_bare"]);
 }
+
+#[test]
+fn information_schema_views_keep_their_parts() {
+    let tmp = bigquery_manifest_dir(&[(
+        "jobs_model",
+        r#"with a as (
+  select job_id from `p`.`region-us.INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`
+)
+
+, b as (
+  select job_id from `p`.`region-us`.`INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`
+)
+
+, c as (
+  select job_id from `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+)
+
+select a.job_id as job_a, b.job_id as job_b, c.job_id as job_c
+from a cross join b cross join c"#,
+        &[],
+    )]);
+    let (status, reports) = column_upstream_json(&tmp, &["jobs_model"]);
+    assert!(status.success(), "{reports}");
+    for (column, table) in [
+        ("job_a", "p.region-us.information_schema.JOBS_BY_PROJECT"),
+        ("job_b", "p.region-us.information_schema.JOBS_BY_PROJECT"),
+        ("job_c", "region-us.information_schema.jobs_by_project"),
+    ] {
+        let lineage = column_lineage(&reports, "jobs_model", column);
+        assert_eq!(lineage["status"], "complete", "{column}: {lineage}");
+        assert_eq!(
+            known_sources(lineage),
+            [format!("{table}.job_id")],
+            "{column}"
+        );
+    }
+    let boundaries = reports[0]["boundaries"].as_array().unwrap();
+    assert_eq!(boundaries.len(), 3, "{boundaries:?}");
+    for boundary in boundaries {
+        let relation = &boundary["resource"]["relation"];
+        assert_eq!(relation["namespace"], "information_schema", "{relation}");
+        assert_eq!(relation["schema"]["value"], "region-us", "{relation}");
+        assert!(
+            !boundary["resource"]["name"]
+                .as_str()
+                .unwrap()
+                .contains(['"', '`']),
+            "{boundary}"
+        );
+    }
+}

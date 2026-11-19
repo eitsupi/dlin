@@ -420,6 +420,7 @@ fn natural_join_keeps_schema_dependent_contributions_when_a_side_is_unknown() {
     let relation = |name: &str| Relation {
         catalog: None,
         schema: None,
+        namespace: None,
         name: Ident::unquoted(name),
     };
     let expected = |known: &str, unknown: &str| Lineage::Partial {

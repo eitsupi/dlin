@@ -2,20 +2,28 @@
 
 use crate::types::TableRef;
 use crate::{
-    Candidate, Dialect, Ident, Relation, SetOperand, SetOperationKind, SourceColumn, Unresolved,
+    Candidate, Dialect, Ident, Relation, RelationNamespace, SetOperand, SetOperationKind,
+    SourceColumn, Unresolved,
 };
 
-pub(crate) type RelationKey = (Option<String>, Option<String>, String);
+pub(crate) type RelationKey = (
+    Option<String>,
+    Option<String>,
+    Option<RelationNamespace>,
+    String,
+);
 
 fn parts_key(
     catalog: Option<&Ident>,
     schema: Option<&Ident>,
+    namespace: Option<RelationNamespace>,
     name: &Ident,
     dialect: Dialect,
 ) -> RelationKey {
     (
         catalog.map(|id| id.relation_key(dialect).into_owned()),
         schema.map(|id| id.relation_key(dialect).into_owned()),
+        namespace,
         name.relation_key(dialect).into_owned(),
     )
 }
@@ -24,6 +32,7 @@ pub(crate) fn relation_key(relation: &Relation, dialect: Dialect) -> RelationKey
     parts_key(
         relation.catalog.as_ref(),
         relation.schema.as_ref(),
+        relation.namespace,
         &relation.name,
         dialect,
     )
@@ -33,6 +42,7 @@ pub(crate) fn table_key(table: &TableRef, dialect: Dialect) -> RelationKey {
     parts_key(
         table.catalog.as_ref(),
         table.schema.as_ref(),
+        table.namespace,
         &table.table,
         dialect,
     )

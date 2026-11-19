@@ -136,10 +136,33 @@ pub enum Quote {
 pub struct Relation {
     /// Catalog or database component, if present.
     pub catalog: Option<Ident>,
-    /// Schema component, if present.
+    /// Schema component, if present. In a namespace, the scope it is read
+    /// for, such as a `BigQuery` dataset or region.
     pub schema: Option<Ident>,
+    /// The system namespace the relation belongs to, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<RelationNamespace>,
     /// Relation name.
     pub name: Ident,
+}
+
+/// A system namespace that qualifies a relation name beyond its schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationNamespace {
+    /// `BigQuery` `INFORMATION_SCHEMA` views, such as
+    /// `project.region-us.INFORMATION_SCHEMA.JOBS_BY_PROJECT`, whose scope is
+    /// a region or a dataset.
+    InformationSchema,
+}
+
+impl RelationNamespace {
+    /// How the namespace is written in SQL.
+    pub fn sql_name(self) -> &'static str {
+        match self {
+            Self::InformationSchema => "INFORMATION_SCHEMA",
+        }
+    }
 }
 
 #[cfg(test)]

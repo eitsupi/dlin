@@ -11,6 +11,7 @@ fn source(table: Ident, column: Ident) -> SourceColumn {
         relation: Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: table,
         },
         column,

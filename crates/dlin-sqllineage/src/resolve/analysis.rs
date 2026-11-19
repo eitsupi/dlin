@@ -494,6 +494,7 @@ pub(crate) fn plain_relation(table: &TableRef) -> Relation {
     Relation {
         catalog: table.catalog.clone(),
         schema: table.schema.clone(),
+        namespace: table.namespace,
         name: table.table.clone(),
     }
 }
@@ -510,6 +511,7 @@ mod tests {
         let relation = |name| Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Ident::unquoted(name),
         };
         let candidate = |table, column| SourceColumn {

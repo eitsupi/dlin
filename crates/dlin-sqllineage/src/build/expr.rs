@@ -538,16 +538,19 @@ impl LineageBuilder {
                 [table] => Some(Binding::Table(TableRef {
                     catalog: None,
                     schema: None,
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 [schema, table] => Some(Binding::Table(TableRef {
                     catalog: None,
                     schema: Some(Ident::from_ast(schema)),
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 [catalog, schema, table] => Some(Binding::Table(TableRef {
                     catalog: Some(Ident::from_ast(catalog)),
                     schema: Some(Ident::from_ast(schema)),
+                    namespace: None,
                     table: Ident::from_ast(table),
                 })),
                 // Keep the legacy display-only fallback for an unsupported

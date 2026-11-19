@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use super::catalog::CatalogSnapshot;
 use super::dialect::DlinDialect;
-use crate::graph::column_lineage::relation::{Identifier, RelationRef};
+use crate::graph::column_lineage::relation::{Identifier, RelationNamespace, RelationRef};
 
 pub(crate) struct CatalogAdapter<'a> {
     snapshot: &'a CatalogSnapshot,
@@ -86,6 +86,19 @@ fn relation_ref_from_engine(relation: &sqllineage::Relation) -> RelationRef {
         relation.schema.as_ref().map(component),
         component(&relation.name),
     )
+    .in_namespace(relation.namespace.map(namespace_from_engine))
+}
+
+fn namespace_from_engine(namespace: sqllineage::RelationNamespace) -> RelationNamespace {
+    match namespace {
+        sqllineage::RelationNamespace::InformationSchema => RelationNamespace::InformationSchema,
+    }
+}
+
+fn namespace_to_engine(namespace: RelationNamespace) -> sqllineage::RelationNamespace {
+    match namespace {
+        RelationNamespace::InformationSchema => sqllineage::RelationNamespace::InformationSchema,
+    }
 }
 
 /// Keep dlin's source spelling stable while the engine retains SQL quote metadata.
@@ -115,6 +128,7 @@ pub(crate) fn source_relation(
     let schema = relation.schema.as_ref().map(part);
     let name = part(&relation.name);
     RelationRef::from_backend(catalog.as_deref(), schema.as_deref(), &name)
+        .in_namespace(relation.namespace.map(namespace_from_engine))
 }
 
 fn relation_from_ref(relation: &RelationRef) -> sqllineage::Relation {
@@ -134,6 +148,7 @@ fn relation_from_ref(relation: &RelationRef) -> sqllineage::Relation {
     sqllineage::Relation {
         catalog: relation.catalog().map(ident),
         schema: relation.schema().map(ident),
+        namespace: relation.namespace().map(namespace_to_engine),
         name: ident(relation.name()),
     }
 }
@@ -161,6 +176,7 @@ mod source_relation_tests {
             let mut relation = sqllineage::Relation {
                 catalog: None,
                 schema: None,
+                namespace: None,
                 name: sqllineage::Ident::quoted("users", sqllineage::Quote::Double),
             };
             assert_eq!(
@@ -278,6 +294,7 @@ mod tests {
         sqllineage::Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: sqllineage::Ident::unquoted(name),
         }
     }

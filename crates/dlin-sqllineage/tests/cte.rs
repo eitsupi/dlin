@@ -401,6 +401,7 @@ fn select_star_from_derived_table() {
         vec![Relation {
             catalog: Some(Ident::unquoted("core")),
             schema: Some(Ident::unquoted("cos_dw")),
+            namespace: None,
             name: Ident::unquoted("some_table"),
         }]
     );

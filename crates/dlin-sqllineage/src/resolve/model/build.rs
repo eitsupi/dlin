@@ -821,6 +821,7 @@ fn opaque_alias_segment(
         .map(|table| crate::Relation {
             catalog: table.catalog.clone(),
             schema: table.schema.clone(),
+            namespace: table.namespace,
             name: table.table.clone(),
         })
         .collect();

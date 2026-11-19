@@ -19,6 +19,7 @@ fn source(relation: &str, column: &str) -> SourceColumn {
         relation: Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Ident::unquoted(relation),
         },
         column: Ident::unquoted(column),
@@ -550,6 +551,7 @@ fn table_source_reads_like_a_star_over_the_relation() {
     let relation = Relation {
         catalog: None,
         schema: Some(Ident::unquoted("public")),
+        namespace: None,
         name: Ident::unquoted("other_source"),
     };
     assert_eq!(result.read, vec![relation.clone()]);
@@ -688,6 +690,7 @@ fn qualified_table_source_is_not_hidden_by_a_same_named_cte() {
             Relation {
                 catalog: None,
                 schema: Some(Ident::unquoted("public")),
+                namespace: None,
                 name: Ident::unquoted("c")
             },
         ]

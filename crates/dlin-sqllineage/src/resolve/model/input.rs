@@ -54,6 +54,7 @@ impl RangeRef {
             Binding::Table(table) => Some(Candidate::Relation(Relation {
                 catalog: table.catalog.clone(),
                 schema: table.schema.clone(),
+                namespace: table.namespace,
                 name: table.table.clone(),
             })),
             Binding::Cte(_) => Some(Candidate::Cte(self.name.clone())),
@@ -431,6 +432,7 @@ fn table_candidate(table: &TableRef) -> Candidate {
     Candidate::Relation(Relation {
         catalog: table.catalog.clone(),
         schema: table.schema.clone(),
+        namespace: table.namespace,
         name: table.table.clone(),
     })
 }

@@ -18,6 +18,7 @@ fn schema_table(schema: &str, table: &str) -> Relation {
     Relation {
         catalog: None,
         schema: Some(Ident::unquoted(schema)),
+        namespace: None,
         name: Ident::unquoted(table),
     }
 }
@@ -99,6 +100,7 @@ fn catalog_qualified_column_resolves_to_the_relation() {
         let expected = Relation {
             catalog: Some(Ident::unquoted("cat")),
             schema: Some(Ident::unquoted("sch")),
+            namespace: None,
             name: Ident::unquoted("tbl"),
         };
         assert_concrete(&result, "col", &expected, "col");
@@ -143,6 +145,7 @@ fn short_qualifier_without_from_keeps_structured_relation() {
         &Relation {
             catalog: None,
             schema: None,
+            namespace: None,
             name: Ident::unquoted("orders"),
         },
         "id",

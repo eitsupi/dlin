@@ -4,6 +4,7 @@ fn table(name: &str) -> Relation {
     Relation {
         catalog: None,
         schema: None,
+        namespace: None,
         name: Ident::unquoted(name),
     }
 }
@@ -68,6 +69,7 @@ fn relation_names_keep_source_spelling_and_expose_dialect_key() {
         Some(Relation {
             catalog: None,
             schema: Some(Ident::unquoted("MySchema")),
+            namespace: None,
             name: Ident::unquoted("MyTable")
         })
     );
@@ -86,6 +88,7 @@ fn quoted_relation_names_preserve_spelling() {
         Some(Relation {
             catalog: None,
             schema: Some(Ident::quoted("MySchema", dlin_sqllineage::Quote::Double)),
+            namespace: None,
             name: Ident::quoted("MyTable", dlin_sqllineage::Quote::Double),
         })
     );

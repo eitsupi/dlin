@@ -401,6 +401,7 @@ pub fn relation(value: &str) -> Relation {
     Relation {
         catalog,
         schema,
+        namespace: None,
         name: u(name),
     }
 }

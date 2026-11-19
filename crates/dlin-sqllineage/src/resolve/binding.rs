@@ -195,6 +195,7 @@ pub(super) fn resolve_captured_binding(
                     candidates: vec![Candidate::Relation(Relation {
                         catalog: table.catalog,
                         schema: table.schema,
+                        namespace: table.namespace,
                         name: table.table,
                     })],
                 }))

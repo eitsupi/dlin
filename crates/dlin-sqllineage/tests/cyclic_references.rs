@@ -89,6 +89,7 @@ fn a_star_over_a_cycle_through_a_union_is_an_unexpanded_star() {
                     relation: dlin_sqllineage::Relation {
                         catalog: None,
                         schema: None,
+                        namespace: None,
                         name: dlin_sqllineage::Ident::unquoted("t"),
                     },
                     column: dlin_sqllineage::Ident::unquoted("x"),

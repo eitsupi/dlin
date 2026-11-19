@@ -7,6 +7,7 @@ use std::fmt;
 pub(crate) struct TableRef {
     pub catalog: Option<Ident>,
     pub schema: Option<Ident>,
+    pub namespace: Option<crate::RelationNamespace>,
     pub table: Ident,
 }
 
@@ -16,6 +17,7 @@ impl TableRef {
         Self {
             catalog: None,
             schema: None,
+            namespace: None,
             table: Ident::unquoted(table),
         }
     }
@@ -28,6 +30,9 @@ impl fmt::Display for TableRef {
         }
         if let Some(s) = &self.schema {
             write!(f, "{}.", s.value)?;
+        }
+        if let Some(namespace) = self.namespace {
+            write!(f, "{}.", namespace.sql_name())?;
         }
         write!(f, "{}", self.table.value)
     }

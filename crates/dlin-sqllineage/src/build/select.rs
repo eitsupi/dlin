@@ -387,7 +387,7 @@ impl LineageBuilder {
                     });
                     return;
                 }
-                let table_ref = Self::table_ref_from_object_name(name);
+                let table_ref = self.table_ref_from_object_name(name);
                 let bindings = self.bind_relation_reference(table_ref.clone());
                 let alias_name = alias
                     .as_ref()
@@ -566,7 +566,7 @@ impl LineageBuilder {
                 alias,
                 ..
             } => {
-                let table_ref = Self::table_ref_from_object_name(name);
+                let table_ref = self.table_ref_from_object_name(name);
                 let default_name = table_ref.table.clone();
                 self.bind_unmodelled_factor(
                     "semantic view",

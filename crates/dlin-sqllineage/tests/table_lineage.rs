@@ -128,6 +128,7 @@ fn select_with_schema_qualified_table() {
         vec![Relation {
             catalog: None,
             schema: Some(Ident::unquoted("myschema")),
+            namespace: None,
             name: Ident::unquoted("mytable"),
         }]
     );
@@ -138,4 +139,71 @@ fn non_lineage_ddl_returns_empty() {
     let result = analyze_one("DROP TABLE foo");
     assert_eq!(result.written, None);
     assert!(result.read.is_empty());
+}
+
+/// `relation` as `catalog|schema|namespace|name`, with `-` for a missing part.
+fn relation_parts(relation: &Relation) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        relation
+            .catalog
+            .as_ref()
+            .map_or("-", |part| part.value.as_str()),
+        relation
+            .schema
+            .as_ref()
+            .map_or("-", |part| part.value.as_str()),
+        relation
+            .namespace
+            .map_or("-", |namespace| namespace.sql_name()),
+        relation.name.value
+    )
+}
+
+#[test]
+fn bigquery_information_schema_views_keep_their_scope() {
+    // Quoting the region and the namespace together is split by the parser
+    // like quoting them apart; a project is optional, and a dataset scopes
+    // dataset views the way a region scopes region views.
+    for (sql, expected) in [
+        (
+            "SELECT job_id FROM `p`.`region-us.INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`",
+            "p|region-us|INFORMATION_SCHEMA|JOBS_BY_PROJECT",
+        ),
+        (
+            "SELECT job_id FROM `p`.`region-us`.`INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`",
+            "p|region-us|INFORMATION_SCHEMA|JOBS_BY_PROJECT",
+        ),
+        (
+            "SELECT job_id FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT",
+            "-|region-us|INFORMATION_SCHEMA|JOBS_BY_PROJECT",
+        ),
+        (
+            "SELECT table_name FROM p.analytics.information_schema.TABLES",
+            "p|analytics|INFORMATION_SCHEMA|TABLES",
+        ),
+    ] {
+        let result = common::analyze_all(sql, dlin_sqllineage::Dialect::BigQuery)
+            .into_single()
+            .unwrap();
+        assert_eq!(
+            result.read.iter().map(relation_parts).collect::<Vec<_>>(),
+            [expected],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn information_schema_is_a_schema_outside_bigquery() {
+    let result = common::analyze_all(
+        "SELECT table_name FROM analytics.information_schema.tables",
+        dlin_sqllineage::Dialect::Snowflake,
+    )
+    .into_single()
+    .unwrap();
+    assert_eq!(
+        result.read.iter().map(relation_parts).collect::<Vec<_>>(),
+        ["analytics|information_schema|-|tables"]
+    );
 }
