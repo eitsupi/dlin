@@ -206,3 +206,76 @@ fn other_dialects_keep_their_unnest_rules() {
         "{column:?}"
     );
 }
+
+/// The names of the known source columns of an output column, as
+/// `relation.column`.
+fn known_names(analysis: &dlin_sqllineage::StatementAnalysis, output: &str) -> Vec<String> {
+    let column = find_mapping(&analysis.output.columns, output);
+    assert!(unresolved(column).is_empty(), "{column:?}");
+    known_sources(column)
+        .iter()
+        .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
+        .collect()
+}
+
+#[test]
+fn explicit_struct_type_decides_the_element_fields() {
+    // The element publishes `key` and `value`, which hide the enclosing
+    // relation's `value`; a name it does not publish reaches the enclosing
+    // relation.
+    let catalog = KnownTables(&[("events", &["id", "params", "value", "threshold"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT
+  (SELECT value.string_value
+   FROM UNNEST(CAST(params AS ARRAY<STRUCT<key STRING, value STRUCT<string_value STRING>>>))
+   WHERE key = "page") AS page,
+  (SELECT MAX(threshold)
+   FROM UNNEST(CAST(params AS ARRAY<STRUCT<key STRING, value STRING>>))) AS max_threshold
+FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    assert_eq!(known_names(&analysis, "page"), ["events.params"]);
+    assert_eq!(known_names(&analysis, "max_threshold"), ["events.threshold"]);
+}
+
+#[test]
+fn struct_literals_decide_the_element_fields() {
+    let catalog = KnownTables(&[("events", &["id", "amount", "fee", "label"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT
+  (SELECT SUM(v) FROM UNNEST([STRUCT('amount' AS k, amount AS v), STRUCT('fee' AS k, fee AS v)])) AS total,
+  (SELECT MAX(v) FROM UNNEST([STRUCT<k STRING, v INT64>('amount', amount)])) AS typed,
+  (SELECT MAX(label) FROM UNNEST([STRUCT('amount' AS k, amount AS v)])) AS outer_label
+FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    assert_eq!(
+        known_names(&analysis, "total"),
+        ["events.amount", "events.fee"]
+    );
+    assert_eq!(known_names(&analysis, "typed"), ["events.amount"]);
+    assert_eq!(known_names(&analysis, "outer_label"), ["events.label"]);
+}
+
+#[test]
+fn struct_literals_without_consistent_names_stay_unknown() {
+    // Unnamed fields, and literals that disagree on their names, give no
+    // element type to rely on.
+    let catalog = KnownTables(&[("events", &["id", "amount", "fee"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT
+  (SELECT MAX(v) FROM UNNEST([STRUCT(amount, fee)])) AS unnamed,
+  (SELECT MAX(v) FROM UNNEST([STRUCT(amount AS v), STRUCT(fee AS w)])) AS mixed
+FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    for name in ["unnamed", "mixed"] {
+        let (present, possible) = unverified(&analysis, name, "v");
+        assert!(present.is_empty(), "{name}");
+        assert_eq!(possible.len(), 1, "{name}: {possible:?}");
+        assert!(possible[0].starts_with("element of"), "{name}: {possible:?}");
+    }
+}

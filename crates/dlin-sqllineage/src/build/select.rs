@@ -461,16 +461,17 @@ impl LineageBuilder {
                 {
                     let [dependencies] = <[_; 1]>::try_from(dependencies)
                         .expect("one dependency list per array expression");
-                    // A scalar element has no field to publish; the
-                    // expansion still publishes its offset.
-                    let open_element = (!is_known_scalar_array(array)).then_some(dependencies);
-                    if open_element.is_some() || *with_offset {
-                        self.add_anonymous_unnest(
-                            open_element,
-                            *with_offset,
-                            with_offset_alias.as_ref(),
-                        );
-                    }
+                    let element = match element_shape(array, self.dialect) {
+                        // A scalar element has no field to publish; the
+                        // expansion still publishes its offset.
+                        ElementShape::Scalar if !*with_offset => return,
+                        ElementShape::Scalar => AnonymousElement::Scalar,
+                        ElementShape::Fields(names) => {
+                            AnonymousElement::Fields(names, dependencies)
+                        }
+                        ElementShape::Unknown => AnonymousElement::Open(dependencies),
+                    };
+                    self.add_anonymous_unnest(element, *with_offset, with_offset_alias.as_ref());
                     return;
                 }
                 self.add_virtual_unnest(
@@ -865,25 +866,40 @@ impl LineageBuilder {
     }
 
     /// A `BigQuery` `UNNEST` without a range variable. The element of an
-    /// array of STRUCTs publishes its fields as columns of the FROM clause;
-    /// when the element type is not known, `open_element` holds the array's
-    /// dependencies and any name may be one of those fields. No name
-    /// qualifies a reference to them. `WITH OFFSET` adds a column named by
-    /// its alias, `offset` by default.
+    /// array of STRUCTs publishes its fields as columns of the FROM clause,
+    /// each taking its value from the array; no name qualifies a reference to
+    /// them. `WITH OFFSET` adds a column named by its alias, `offset` by
+    /// default.
     fn add_anonymous_unnest(
         &mut self,
-        open_element: Option<Vec<crate::graph::node::NodeId>>,
+        element: AnonymousElement,
         with_offset: bool,
         with_offset_alias: Option<&sqlparser::ast::Ident>,
     ) {
-        let columns = with_offset
-            .then(|| VirtualColumn {
-                name: with_offset_alias.map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
-                state: VirtualColumnState::KnownEmpty,
-                dependencies: Vec::new(),
-            })
-            .into_iter()
-            .collect();
+        let (mut columns, open_element) = match element {
+            AnonymousElement::Scalar => (Vec::new(), None),
+            AnonymousElement::Fields(names, dependencies) => (
+                names
+                    .into_iter()
+                    .map(|name| VirtualColumn {
+                        name,
+                        state: if dependencies.is_empty() {
+                            VirtualColumnState::KnownEmpty
+                        } else {
+                            VirtualColumnState::Unknown
+                        },
+                        dependencies: dependencies.clone(),
+                    })
+                    .collect(),
+                None,
+            ),
+            AnonymousElement::Open(dependencies) => (Vec::new(), Some(dependencies)),
+        };
+        columns.extend(with_offset.then(|| VirtualColumn {
+            name: with_offset_alias.map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
+            state: VirtualColumnState::KnownEmpty,
+            dependencies: Vec::new(),
+        }));
         let source =
             self.graph
                 .scopes
@@ -894,14 +910,52 @@ impl LineageBuilder {
     }
 }
 
-/// Whether a `BigQuery` array is known to hold values that are not STRUCTs, so
-/// that its element publishes no field names: a literal of literal values, a
-/// cast to an array of another type, or a function that generates a series.
-fn is_known_scalar_array(expr: &Expr) -> bool {
+/// The element of an unaliased expansion, as [`element_shape`] determined it,
+/// with the dependencies of the array.
+enum AnonymousElement {
+    Scalar,
+    Fields(Vec<Ident>, Vec<crate::graph::node::NodeId>),
+    Open(Vec<crate::graph::node::NodeId>),
+}
+
+/// What the element of a `BigQuery` array is known to be from the array
+/// expression alone.
+enum ElementShape {
+    /// Not a STRUCT, so it publishes no field names.
+    Scalar,
+    /// A STRUCT with these field names.
+    Fields(Vec<Ident>),
+    Unknown,
+}
+
+/// The shape of the element of `expr`, read from an explicit type or a
+/// literal: a cast to an array type, an array of literal values, an array of
+/// STRUCT literals whose fields are named alike, or a function that
+/// generates a series. Anything else, an empty literal and STRUCTs with
+/// unnamed or repeated fields included, is unknown.
+fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape {
     match expr {
-        Expr::Nested(inner) => is_known_scalar_array(inner),
+        Expr::Nested(inner) => element_shape(inner, dialect),
         Expr::Array(array) => {
-            !array.elem.is_empty() && array.elem.iter().all(|elem| matches!(elem, Expr::Value(_)))
+            if !array.elem.is_empty()
+                && array.elem.iter().all(|elem| matches!(elem, Expr::Value(_)))
+            {
+                return ElementShape::Scalar;
+            }
+            let mut fields = array
+                .elem
+                .iter()
+                .map(|elem| struct_literal_fields(elem, dialect));
+            match fields.next().flatten() {
+                Some(first)
+                    if fields.all(|other| {
+                        other.is_some_and(|other| same_names(&first, &other, dialect))
+                    }) =>
+                {
+                    ElementShape::Fields(first)
+                }
+                _ => ElementShape::Unknown,
+            }
         }
         Expr::Cast {
             data_type:
@@ -913,23 +967,80 @@ fn is_known_scalar_array(expr: &Expr) -> bool {
                     | sqlparser::ast::ArrayElemTypeDef::Qualified(elem, _),
                 ),
             ..
-        } => !matches!(**elem, sqlparser::ast::DataType::Struct(..)),
-        Expr::Function(function) => {
-            let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice()
-            else {
-                return false;
-            };
-            name.quote_style.is_none()
-                && [
-                    "GENERATE_ARRAY",
-                    "GENERATE_DATE_ARRAY",
-                    "GENERATE_TIMESTAMP_ARRAY",
-                ]
-                .iter()
-                .any(|generator| generator.eq_ignore_ascii_case(&name.value))
-        }
-        _ => false,
+        } => match &**elem {
+            sqlparser::ast::DataType::Struct(fields, _) => distinct_names(
+                fields.iter().map(|field| field.field_name.as_ref()),
+                dialect,
+            )
+            .map_or(ElementShape::Unknown, ElementShape::Fields),
+            _ => ElementShape::Scalar,
+        },
+        Expr::Function(function) if is_series_generator(function) => ElementShape::Scalar,
+        _ => ElementShape::Unknown,
     }
+}
+
+/// The field names of a STRUCT literal: those of its type when it has one
+/// (`STRUCT<a INT64>(1)`), otherwise those of its named values
+/// (`STRUCT(1 AS a)`).
+fn struct_literal_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<Ident>> {
+    let Expr::Struct { values, fields } = expr else {
+        return None;
+    };
+    if fields.is_empty() {
+        distinct_names(
+            values.iter().map(|value| match value {
+                Expr::Named { name, .. } => Some(name),
+                _ => None,
+            }),
+            dialect,
+        )
+    } else {
+        distinct_names(
+            fields.iter().map(|field| field.field_name.as_ref()),
+            dialect,
+        )
+    }
+}
+
+/// The names, when there is at least one, every one is present and none
+/// repeats another.
+fn distinct_names<'a>(
+    names: impl Iterator<Item = Option<&'a sqlparser::ast::Ident>>,
+    dialect: crate::Dialect,
+) -> Option<Vec<Ident>> {
+    let names: Vec<Ident> = names
+        .map(|name| name.map(Ident::from_ast))
+        .collect::<Option<_>>()?;
+    let mut keys = std::collections::HashSet::new();
+    let distinct = names
+        .iter()
+        .all(|name| keys.insert(name.column_key(dialect).into_owned()));
+    (!names.is_empty() && distinct).then_some(names)
+}
+
+fn same_names(left: &[Ident], right: &[Ident], dialect: crate::Dialect) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.column_key(dialect) == right.column_key(dialect))
+}
+
+/// Whether `function` is a `BigQuery` function that generates a series of
+/// scalars.
+fn is_series_generator(function: &sqlparser::ast::Function) -> bool {
+    let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return false;
+    };
+    name.quote_style.is_none()
+        && [
+            "GENERATE_ARRAY",
+            "GENERATE_DATE_ARRAY",
+            "GENERATE_TIMESTAMP_ARRAY",
+        ]
+        .iter()
+        .any(|generator| generator.eq_ignore_ascii_case(&name.value))
 }
 
 /// The last part of a function name: the range variable PostgreSQL gives a
