@@ -382,3 +382,87 @@ from a cross join b cross join c"#,
         );
     }
 }
+
+/// A source declared on a region view, the way dbt sources name
+/// `INFORMATION_SCHEMA`: the schema holds the region and the namespace, and
+/// is rendered as one quoted part.
+#[test]
+fn information_schema_source_matches_its_sql_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("target")).unwrap();
+    let manifest = serde_json::json!({
+        "metadata": {"adapter_type": "bigquery", "project_name": "test_project"},
+        "nodes": {
+            "model.test_project.jobs_model": {
+                "unique_id": "model.test_project.jobs_model",
+                "name": "jobs_model",
+                "resource_type": "model",
+                "package_name": "test_project",
+                "original_file_path": "models/jobs_model.sql",
+                "database": "p",
+                "schema": "d",
+                "alias": "jobs_model",
+                "relation_name": "`p`.`d`.`jobs_model`",
+                "depends_on": {"nodes": ["source.test_project.info.JOBS_BY_PROJECT"]},
+                "config": {"materialized": "view", "tags": []},
+                "compiled_code": r#"with quoted_together as (
+  select * from `p`.`region-us.INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`
+)
+
+, quoted_apart as (
+  select job_id from `p`.`region-us`.`INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`
+)
+
+select quoted_together.user_email, quoted_apart.job_id
+from quoted_together cross join quoted_apart"#,
+            }
+        },
+        "sources": {
+            "source.test_project.info.JOBS_BY_PROJECT": {
+                "unique_id": "source.test_project.info.JOBS_BY_PROJECT",
+                "name": "JOBS_BY_PROJECT",
+                "source_name": "info",
+                "resource_type": "source",
+                "package_name": "test_project",
+                "database": "p",
+                "schema": "region-us.INFORMATION_SCHEMA",
+                "identifier": "JOBS_BY_PROJECT",
+                "relation_name": "`p`.`region-us.INFORMATION_SCHEMA`.`JOBS_BY_PROJECT`",
+                "columns": {
+                    "job_id": {"name": "job_id"},
+                    "user_email": {"name": "user_email"}
+                }
+            }
+        },
+        "exposures": {},
+    });
+    fs::write(
+        tmp.path().join("target/manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let (status, reports) = column_upstream_json(&tmp, &["jobs_model"]);
+    assert!(status.success(), "{reports}");
+    // The star expands to the source's declared columns, so the source is
+    // what the SQL reads.
+    for column in ["user_email", "job_id"] {
+        let lineage = column_lineage(&reports, "jobs_model", column);
+        assert_eq!(lineage["status"], "complete", "{column}: {lineage}");
+        assert_eq!(
+            known_sources(lineage),
+            [format!(
+                "p.region-us.information_schema.JOBS_BY_PROJECT.{column}"
+            )],
+            "{column}"
+        );
+    }
+    let boundaries = reports[0]["boundaries"].as_array().unwrap();
+    assert!(
+        boundaries
+            .iter()
+            .all(|boundary| boundary["resource"]["unique_id"]
+                == "source.test_project.info.JOBS_BY_PROJECT"),
+        "{boundaries:?}"
+    );
+}
