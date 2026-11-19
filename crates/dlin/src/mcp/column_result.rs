@@ -71,20 +71,20 @@ impl<'a> Evidence<'a> {
     }
 
     fn project(mut self, ledger: &'a [SchemaEvidenceRecord], full: bool) -> Value {
-        if full {
-            let mut pending: Vec<_> = self.ids.iter().copied().collect();
-            let mut records = Vec::new();
-            while let Some(id) = pending.pop() {
-                if let Some(record) = ledger.iter().find(|record| &record.id == id) {
-                    pending.extend(record.derived_from.iter().filter(|id| self.ids.insert(id)));
-                    records.push(record);
-                }
+        let mut pending: Vec<_> = self.ids.iter().copied().collect();
+        let mut records = Vec::new();
+        while let Some(id) = pending.pop() {
+            if let Some(record) = ledger.iter().find(|record| &record.id == id) {
+                pending.extend(record.derived_from.iter().filter(|id| self.ids.insert(id)));
+                records.push(record);
             }
+        }
+        if full {
             records.sort_by_key(|record| &record.id);
             json!(records)
         } else {
-            let kinds: BTreeSet<_> = ledger
-                .iter()
+            let kinds: BTreeSet<_> = records
+                .into_iter()
                 .map(|record| {
                     (
                         record.origin,
@@ -166,8 +166,10 @@ pub(super) fn upstream(
     for slot in slots {
         let slot_known = rows.take(slot.lineage.known());
         let slot_unresolved = rows.take(slot.lineage.unresolved());
-        if full || !slot_known.is_empty() || !slot_unresolved.is_empty() || total == 0 {
-            evidence.add(&slot.evidence.structure);
+        evidence.add(&slot.evidence.structure);
+        let all_slot_values_on_page = slot_known.len() == slot.lineage.known().len()
+            && slot_unresolved.len() == slot.lineage.unresolved().len();
+        if all_slot_values_on_page {
             evidence.add(&slot.evidence.lineage);
         }
         for source in slot_known {
@@ -260,7 +262,7 @@ pub(super) fn upstream(
                 .iter()
                 .map(|slot| json!({
                     "id":slot.id, "name":slot.name, "ordinal":slot.ordinal,
-                    "transformation":slot.transformation, "evidence":slot.evidence,
+                    "transformation":slot.transformation, "structure_evidence":slot.evidence.structure,
                 }))
                 .collect::<Vec<_>>()
         );
@@ -385,4 +387,36 @@ pub(super) fn downstream(
         value["note"] = json!("Incomplete exploration may omit impacts.");
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_evidence_contains_cited_and_derived_records_only() {
+        let record = |id, origin, derived_from| -> SchemaEvidenceRecord {
+            serde_json::from_value(json!({
+                "id":id, "subject":id, "origin":origin, "derived_from":derived_from,
+                "coverage":"exhaustive", "coverage_basis":"enumerated", "order":"proven",
+                "enforcement":null,
+            }))
+            .unwrap()
+        };
+        let ledger = [
+            record("sql", "sql_output", vec!["seed"]),
+            record("seed", "seed_file", vec![]),
+            record("unrelated", "yaml_declaration", vec![]),
+        ];
+        let mut evidence = Evidence::default();
+        evidence.add([&ledger[0].id]);
+        let summary = evidence.project(&ledger, false);
+        let origins: Vec<_> = summary
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["origin"].as_str().unwrap())
+            .collect();
+        assert_eq!(origins, ["sql_output", "seed_file"]);
+    }
 }
