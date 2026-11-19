@@ -1,22 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0-alpha.2] - 2026-11-19
 
-### Manifest loading
+### Breaking Changes
 
-- Valid dbt unit tests are omitted from lineage graphs without warnings. Strict manifest loading accepts these entries and still rejects invalid unit test identities.
+- MCP tools return one compact JSON text result in `content` and no longer return `structuredContent`. Impact tools default to summaries, and `find_nodes` includes compiled SQL only when requested with `include_sql: true` (#274)
+- Column commands return partial lineage and exit with status 0 when an unknown schema prevents them from verifying a column's provider, provided there are no other fatal diagnostics. Confirmed ambiguities remain fatal. Column lineage JSON exposes the `unverified` reason and candidate providers (#272, #273)
 
-- Manifest freshness checks resolve package-owned files from the configured installation directory. Checks include package macros and dependency configuration files. Missing packages are reported as unverified. Missing files in installed packages still make the manifest stale.
+### Features
 
-### MCP
+- Use CSV headers as column schema evidence for seeds with no columns declared in the manifest, including installed package seeds. Changing or removing a header invalidates cached lineage that used it (#273, #274)
+- Paginate MCP node searches, lineage graphs and impact results. Request `detail: "full"` for impact paths and detailed evidence. The project summary reports manifest freshness, grouped load warnings and the number of skipped unit tests (#274)
 
-- Tools return one compact JSON text item. Lists and lineage can be paginated, impact tools default to a summary, and node details include compiled SQL on request.
-- Project summaries include manifest freshness and grouped load diagnostics.
+### Bug Fixes
 
-### Column-level lineage
-
-- CLI column commands now exit with status 0 when a column's providers cannot be verified because a candidate relation's columns are unknown, provided there are no other fatal diagnostics. Multiple confirmed providers still produce a fatal ambiguity.
-- Column lineage uses the CSV header for seeds in the current project or installed packages when the manifest declares no columns for them.
+- Resolve BigQuery `INFORMATION_SCHEMA` references with their project and dataset or region intact. Match these references to declared sources and preserve their namespace in column lineage JSON (#272)
+- Trace fields exposed by unaliased BigQuery `UNNEST` to their array inputs. When the element schema is unknown, report possible providers and downstream impact instead of guessing a source (#272)
+- Stop treating normalization modes such as `NFKC` as column references in BigQuery `NORMALIZE` and `NORMALIZE_AND_CASEFOLD`, and in PostgreSQL and Trino `normalize` (#272)
+- Check manifest paths against their owning project or installed package, including package macros and configuration. Check dependency declarations and the lockfile for updates. Report missing packages as unverified and missing files inside installed packages as stale (#274)
+- Skip valid dbt unit tests without warnings, including in strict manifest mode. Strict mode rejects entries with a missing or mismatched resource type or ID (#274)
 
 ## [0.3.0-alpha.1] - 2026-11-19
 
