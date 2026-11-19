@@ -466,3 +466,155 @@ from quoted_together cross join quoted_apart"#,
         "{boundaries:?}"
     );
 }
+
+/// A model joined with a seed whose columns are not declared, as in a
+/// real-project report: the seed may or may not have a column of the same
+/// name, so the name is left to its columns instead of failing the run.
+fn seed_join_dir(seed_columns: &[&str]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("target")).unwrap();
+    let columns: serde_json::Map<String, serde_json::Value> = seed_columns
+        .iter()
+        .map(|name| ((*name).to_string(), serde_json::json!({"name": name})))
+        .collect();
+    let model = |name: &str, sql: &str, upstream: &[&str], columns: &[&str]| {
+        serde_json::json!({
+            "unique_id": format!("model.test_project.{name}"),
+            "name": name,
+            "resource_type": "model",
+            "package_name": "test_project",
+            "original_file_path": format!("models/{name}.sql"),
+            "database": "p",
+            "schema": "d",
+            "alias": name,
+            "relation_name": format!("`p`.`d`.`{name}`"),
+            "depends_on": {"nodes": upstream},
+            "config": {"materialized": "view", "tags": []},
+            "columns": columns
+                .iter()
+                .map(|column| ((*column).to_string(), serde_json::json!({"name": column})))
+                .collect::<serde_json::Map<_, _>>(),
+            "compiled_code": sql,
+        })
+    };
+    let manifest = serde_json::json!({
+        "metadata": {"adapter_type": "bigquery", "project_name": "test_project"},
+        "nodes": {
+            "seed.test_project.category_seed": {
+                "unique_id": "seed.test_project.category_seed",
+                "name": "category_seed",
+                "resource_type": "seed",
+                "package_name": "test_project",
+                "original_file_path": "seeds/category_seed.csv",
+                "database": "p",
+                "schema": "d",
+                "alias": "category_seed",
+                "relation_name": "`p`.`d`.`category_seed`",
+                "depends_on": {"nodes": []},
+                "config": {"materialized": "seed", "tags": []},
+                "columns": columns,
+            },
+            "model.test_project.events_model": model(
+                "events_model",
+                r#"select event_source, event_medium from `p`.`d`.`external_table_a`"#,
+                &[],
+                &["event_source", "event_medium"],
+            ),
+            "model.test_project.medium_model": model(
+                "medium_model",
+                r#"select source, event_medium from `p`.`d`.`external_table_b`"#,
+                &[],
+                &["source", "event_medium"],
+            ),
+            "model.test_project.join_model": model(
+                "join_model",
+                r#"select
+  e.event_source
+  , event_medium
+  , source_category
+from `p`.`d`.`events_model` as e
+  left join `p`.`d`.`category_seed` as s on e.event_source = s.source"#,
+                &["model.test_project.events_model", "seed.test_project.category_seed"],
+                &["event_source", "event_medium", "source_category"],
+            ),
+            "model.test_project.two_models": model(
+                "two_models",
+                r#"select event_medium
+from `p`.`d`.`events_model` as e
+  join `p`.`d`.`medium_model` as m on e.event_source = m.source"#,
+                &["model.test_project.events_model", "model.test_project.medium_model"],
+                &["event_medium"],
+            ),
+        },
+        "sources": {},
+        "exposures": {},
+    });
+    fs::write(
+        tmp.path().join("target/manifest.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn a_seed_without_declared_columns_leaves_a_name_unverified() {
+    let tmp = seed_join_dir(&[]);
+    let (status, reports) = column_upstream_json(&tmp, &["join_model"]);
+    assert!(
+        status.success(),
+        "an unverified name is not fatal: {reports}"
+    );
+    // `events_model` publishes `event_medium`; the seed may too, so neither
+    // is chosen.
+    let medium = column_lineage(&reports, "join_model", "event_medium");
+    assert_eq!(medium["status"], "partial", "{medium}");
+    assert_eq!(known_sources(medium), Vec::<String>::new());
+    let reason = &medium["unresolved"][0]["reason"];
+    assert_eq!(reason["kind"], "unverified", "{medium}");
+    let names = |key: &str| -> Vec<String> {
+        reason[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                candidate["relation"]["name"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    assert_eq!(names("present_candidates"), ["events_model"]);
+    assert_eq!(names("possible_candidates"), ["category_seed"]);
+    // Only the seed can have `source_category`.
+    let category = column_lineage(&reports, "join_model", "source_category");
+    assert_eq!(category["status"], "complete", "{category}");
+    let errors = reports[0]["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .all(|error| error["kind"] == "column_indeterminate"),
+        "{errors:?}"
+    );
+
+    // Declaring the seed's columns settles the name.
+    let tmp = seed_join_dir(&["source", "source_category"]);
+    let (status, reports) = column_upstream_json(&tmp, &["join_model"]);
+    assert!(status.success(), "{reports}");
+    let medium = column_lineage(&reports, "join_model", "event_medium");
+    assert_eq!(medium["status"], "complete", "{medium}");
+}
+
+#[test]
+fn two_models_known_to_publish_a_name_stay_ambiguous() {
+    let tmp = seed_join_dir(&[]);
+    let (status, reports) = column_upstream_json(&tmp, &["two_models"]);
+    assert!(!status.success(), "a known conflict is fatal: {reports}");
+    let medium = column_lineage(&reports, "two_models", "event_medium");
+    assert_eq!(
+        medium["unresolved"][0]["reason"]["kind"], "ambiguous",
+        "{medium}"
+    );
+    assert_eq!(reports[0]["errors"][0]["kind"], "column_ambiguous");
+}
