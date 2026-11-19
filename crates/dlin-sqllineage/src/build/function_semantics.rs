@@ -1,10 +1,15 @@
-//! Compatibility semantics for temporal function arguments.
+//! Compatibility semantics for static syntax in built-in function arguments.
 //!
-//! sqlparser 0.62 retains date-part arguments of generic `Function` nodes as
+//! sqlparser returns some keyword arguments of generic `Function` nodes as
 //! ordinary `Expr::Identifier` values, which creates a semantic gap for
-//! lineage. This small, profile-scoped layer bridges that gap until sqlparser
-//! provides typed temporal function arguments; at that point these profiles
-//! and the registry should be removed or migrated to the typed AST. The
+//! lineage: a date part such as `WEEK` or a normalization mode such as `NFKC`
+//! would otherwise be collected as a column. This small, profile-scoped layer
+//! classifies those argument positions until sqlparser provides typed
+//! arguments; at that point these profiles and the registry should be
+//! removed or migrated to the typed AST.
+//!
+//! Date-part arguments are the bulk of the registry. sqlparser retains them
+//! as identifiers in generic function calls. The
 //! approach follows the direction discussed in [PR 1191](https://github.com/apache/datafusion-sqlparser-rs/pull/1191)
 //! (including `BigQuery` `WEEK(MONDAY)`) and [issue 1983](https://github.com/apache/datafusion-sqlparser-rs/issues/1983)
 //! / [PR 2030](https://github.com/apache/datafusion-sqlparser-rs/pull/2030)
@@ -26,6 +31,23 @@ use crate::types::Dialect;
 pub(crate) enum ArgumentSemantic {
     ValueExpression,
     DatePart(DatePartGrammar),
+    /// The Unicode normalization mode of `BigQuery` `NORMALIZE` and
+    /// `NORMALIZE_AND_CASEFOLD` (`NFC`, `NFKC`, `NFD` or `NFKD`).
+    NormalizationMode,
+}
+
+impl ArgumentSemantic {
+    /// Whether `expr`, found at an argument position with this role, is
+    /// static syntax that contributes no value. Anything else in that
+    /// position, such as a column or an unrecognized identifier, is walked
+    /// as a value expression.
+    pub(crate) fn is_static_syntax(self, expr: &Expr) -> bool {
+        match self {
+            Self::ValueExpression => false,
+            Self::DatePart(grammar) => expression_is_static_date_part(expr, grammar),
+            Self::NormalizationMode => expression_is_static_normalization_mode(expr),
+        }
+    }
 }
 
 /// A dialect-specific function signature. This deliberately lives outside
@@ -70,6 +92,10 @@ const BQ_VALUE_VALUE_PART: &[ArgumentSemantic] = &[
     ArgumentSemantic::DatePart(BIGQUERY_DATE_PART),
 ];
 const BQ_VALUE: &[ArgumentSemantic] = &[ArgumentSemantic::ValueExpression];
+const BQ_VALUE_NORMALIZATION_MODE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::NormalizationMode,
+];
 const SNOW_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
     ArgumentSemantic::DatePart(SNOWFLAKE_DATE_PART),
     ArgumentSemantic::ValueExpression,
@@ -732,6 +758,7 @@ const BQ_TRUNC_NAMES: &[&str] = &[
 const BQ_TRUNC_WITH_TIMEZONE_NAMES: &[&str] = &["TIMESTAMP_TRUNC"];
 const BQ_DIFF_NAMES: &[&str] = &["DATE_DIFF", "DATETIME_DIFF", "TIME_DIFF", "TIMESTAMP_DIFF"];
 const LAST_DAY_NAMES: &[&str] = &["LAST_DAY"];
+const BQ_NORMALIZE_NAMES: &[&str] = &["NORMALIZE", "NORMALIZE_AND_CASEFOLD"];
 const SNOW_ADD_DIFF_NAMES: &[&str] = &[
     "DATEADD",
     "TIMEADD",
@@ -778,6 +805,11 @@ const BIGQUERY_SIGNATURES: &[FunctionSignature] = &[
         names: LAST_DAY_NAMES,
         arity: 2,
         arguments: BQ_VALUE_PART,
+    },
+    FunctionSignature {
+        names: BQ_NORMALIZE_NAMES,
+        arity: 2,
+        arguments: BQ_VALUE_NORMALIZATION_MODE,
     },
 ];
 
@@ -909,6 +941,16 @@ pub(crate) fn expression_is_static_date_part(expr: &Expr, grammar: DatePartGramm
         }
         _ => false,
     }
+}
+
+fn expression_is_static_normalization_mode(expr: &Expr) -> bool {
+    let Expr::Identifier(ident) = expr else {
+        return false;
+    };
+    ident.quote_style.is_none()
+        && ["NFC", "NFKC", "NFD", "NFKD"]
+            .iter()
+            .any(|mode| mode.eq_ignore_ascii_case(&ident.value))
 }
 
 fn simple_function_name(function: &Function) -> Option<&str> {
@@ -1092,6 +1134,52 @@ mod tests {
     }
 
     #[test]
+    fn bigquery_normalization_mode_is_static_syntax() {
+        for sql in [
+            "SELECT NORMALIZE(name_col, NFKC) FROM t",
+            "SELECT normalize(name_col, nfkc) FROM t",
+            "SELECT NORMALIZE_AND_CASEFOLD(name_col, NFD) FROM t",
+        ] {
+            let function = function(sql);
+            let signature = classify_function(Dialect::BigQuery, &function).unwrap();
+            assert_eq!(
+                signature.arguments,
+                [
+                    ArgumentSemantic::ValueExpression,
+                    ArgumentSemantic::NormalizationMode
+                ]
+            );
+        }
+        for mode in ["NFC", "NFKC", "NFD", "NFKD", "nfc", "Nfkd"] {
+            assert!(
+                ArgumentSemantic::NormalizationMode
+                    .is_static_syntax(&Expr::Identifier(sqlparser::ast::Ident::new(mode))),
+                "{mode} should be a normalization mode"
+            );
+        }
+        for expr in [
+            Expr::Identifier(sqlparser::ast::Ident::new("name_col")),
+            Expr::Identifier(sqlparser::ast::Ident::with_quote('`', "NFKC")),
+        ] {
+            assert!(!ArgumentSemantic::NormalizationMode.is_static_syntax(&expr));
+        }
+        assert!(
+            classify_function(
+                Dialect::BigQuery,
+                &function("SELECT NORMALIZE(name_col) FROM t")
+            )
+            .is_none()
+        );
+        assert!(
+            classify_function(
+                Dialect::Generic,
+                &function("SELECT NORMALIZE(name_col, NFKC) FROM t")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn static_date_part_requires_known_grammar() {
         assert!(expression_is_static_date_part(
             &Expr::Identifier(sqlparser::ast::Ident::new("ISOYEAR")),
@@ -1168,7 +1256,9 @@ mod tests {
             &Expr::Identifier(sqlparser::ast::Ident::new("DAY_SECOND")),
             match mysql_signature.arguments[0] {
                 ArgumentSemantic::DatePart(grammar) => grammar,
-                ArgumentSemantic::ValueExpression => panic!("expected date-part role"),
+                ArgumentSemantic::ValueExpression | ArgumentSemantic::NormalizationMode => {
+                    panic!("expected date-part role")
+                }
             }
         ));
 

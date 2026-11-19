@@ -64,6 +64,8 @@ fn set_mtime_newer_than(newer: &Path, older: &Path) {
 
 #[path = "integration/artifacts.rs"]
 mod artifacts;
+#[path = "integration/bigquery_lineage.rs"]
+mod bigquery_lineage;
 #[path = "integration/cli.rs"]
 mod cli;
 #[path = "integration/error_format.rs"]
