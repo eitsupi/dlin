@@ -3,13 +3,15 @@
 //! A seed's columns are the header of its file. When a project's YAML
 //! declares no columns for a seed, the header is the only record of them in
 //! the project: without it, every name the seed may carry competes with the
-//! relations a model joins it with. Only seeds of the project itself are read,
-//! from files inside the project directory.
+//! relations a model joins it with. Seed files must be inside the project or
+//! the resolved root of an installed package.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
-use crate::parser::manifest::{Manifest, ManifestNode};
+use crate::parser::manifest::{Manifest, ManifestNode, resource_package};
+use crate::parser::package_roots::{PackageRoots, relative_resource_path};
 use crate::parser::project::DbtProject;
 
 /// The header columns of the seeds of one project, by seed unique id.
@@ -18,9 +20,17 @@ pub struct SeedSchemas {
     columns: HashMap<String, SeedFileColumns>,
 }
 
+impl Hash for SeedSchemas {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let mut entries: Vec<_> = self.columns.iter().collect();
+        entries.sort_unstable_by_key(|(id, _)| *id);
+        entries.hash(state);
+    }
+}
+
 /// The columns one seed file lists, in order, with the file they were read
 /// from relative to the project directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SeedFileColumns {
     pub(crate) path: String,
     pub(crate) names: Vec<String>,
@@ -41,8 +51,7 @@ impl SeedSchemas {
     ///
     /// Nothing is read unless `project_dir` holds the `dbt_project.yml` of the
     /// project the manifest was built for, so a manifest analysed away from
-    /// its project never reads unrelated files. Seeds of installed packages
-    /// are not read. A file that is missing is skipped silently; a file whose
+    /// its project never reads unrelated files. A file that is missing is skipped silently; a file whose
     /// header cannot be used is skipped with a warning.
     pub fn read(project_dir: &Path, manifest: &Manifest) -> (Self, Vec<SeedFileWarning>) {
         let mut schemas = Self::default();
@@ -53,35 +62,43 @@ impl SeedSchemas {
         if manifest.metadata.project_name.as_deref() != Some(project.name.as_str()) {
             return (schemas, warnings);
         }
-        let Ok(root) = project_dir.canonicalize() else {
-            return (schemas, warnings);
-        };
+        let resolver = PackageRoots::new(project_dir, &project);
+        let mut roots = HashMap::new();
         let mut seeds: Vec<&ManifestNode> = manifest
             .nodes
             .values()
-            .filter(|node| {
-                node.resource_type == "seed"
-                    && node.columns.is_empty()
-                    && seed_package(&node.unique_id) == Some(project.name.as_str())
-            })
+            .filter(|node| node.resource_type == "seed" && node.columns.is_empty())
             .collect();
         seeds.sort_by(|left, right| left.unique_id.cmp(&right.unique_id));
         for node in seeds {
             let Some(relative) = node.original_file_path.as_deref() else {
                 continue;
             };
-            let Some(path) = file_in_project(&root, relative) else {
+            let owner = resource_package(&node.unique_id, node.package_name.as_deref());
+            let Ok(root) = roots
+                .entry(owner)
+                .or_insert_with(|| resolver.resolve(owner))
+            else {
+                continue;
+            };
+            let Some(path) = file_in_project(&root.path, relative) else {
                 continue;
             };
             if !is_csv(Path::new(relative)) {
                 continue;
             }
+            let display_path = root.display_path.join(relative);
+            let display_path = display_path
+                .strip_prefix(project_dir)
+                .unwrap_or(&display_path)
+                .to_string_lossy()
+                .into_owned();
             match read_header(&path, node.config.delimiter.as_deref()) {
                 Ok(names) => {
                     schemas.columns.insert(
                         node.unique_id.clone(),
                         SeedFileColumns {
-                            path: relative.to_owned(),
+                            path: display_path,
                             names,
                         },
                     );
@@ -102,25 +119,11 @@ impl SeedSchemas {
     }
 }
 
-/// The package of a seed, from its unique id `seed.<package>.<name>`.
-fn seed_package(unique_id: &str) -> Option<&str> {
-    let mut parts = unique_id.splitn(3, '.');
-    (parts.next() == Some("seed"))
-        .then(|| parts.next())
-        .flatten()
-}
-
 /// The file `relative` names inside `root`, when it names one there: a
 /// relative path that does not climb out of the root, and that still lies
 /// inside it once links are resolved.
 fn file_in_project(root: &Path, relative: &str) -> Option<PathBuf> {
-    let relative = Path::new(relative);
-    if relative
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-    {
-        return None;
-    }
+    let relative = relative_resource_path(relative)?;
     let path = root.join(relative).canonicalize().ok()?;
     (path.starts_with(root) && path.is_file()).then_some(path)
 }
@@ -204,15 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn seed_package_comes_from_the_unique_id() {
-        assert_eq!(
-            seed_package("seed.my_project.categories"),
-            Some("my_project")
-        );
-        assert_eq!(seed_package("model.my_project.categories"), None);
-    }
-
-    #[test]
     fn files_outside_the_project_are_not_read() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -223,4 +217,42 @@ mod tests {
         assert!(file_in_project(&root, "../a.csv").is_none());
         assert!(file_in_project(&root, "/etc/hosts").is_none());
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn package_seed_follows_the_installed_local_package_link() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let project = workspace.path().join("project");
+    let package = workspace.path().join("dep");
+    let root = project.as_path();
+    fs::create_dir(root).unwrap();
+    fs::write(root.join("dbt_project.yml"), "name: root_project\n").unwrap();
+    fs::create_dir(root.join("dbt_packages")).unwrap();
+    fs::create_dir_all(package.join("seeds")).unwrap();
+    fs::write(package.join("seeds/categories.csv"), "id|category\n").unwrap();
+    symlink("../../dep", root.join("dbt_packages/dep")).unwrap();
+    let manifest: Manifest = serde_json::from_value(serde_json::json!({
+        "metadata":{"project_name":"root_project"},
+        "nodes":{"seed.dep.categories":{
+            "unique_id":"seed.dep.categories","package_name":"dep","name":"categories","resource_type":"seed",
+            "original_file_path":"seeds/categories.csv","config":{"delimiter":"|"}
+        }}
+    })).unwrap();
+    let (schemas, warnings) = SeedSchemas::read(root, &manifest);
+    assert!(warnings.is_empty());
+    assert_eq!(
+        schemas.get("seed.dep.categories").unwrap().names,
+        ["id", "category"]
+    );
+
+    let seed_link = package.join("seeds/categories.csv");
+    fs::remove_file(&seed_link).unwrap();
+    fs::write(root.join("outside.csv"), "outside\n").unwrap();
+    symlink(root.join("outside.csv"), seed_link).unwrap();
+    let (schemas, _) = SeedSchemas::read(root, &manifest);
+    assert!(schemas.get("seed.dep.categories").is_none());
 }
