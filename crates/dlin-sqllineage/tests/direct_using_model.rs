@@ -90,6 +90,46 @@ fn assert_candidates(sql: &str, dialect: Dialect, catalog: bool, expected: &[Can
     }
 }
 
+/// Like [`assert_candidates`], for a name left to columns that are not known:
+/// one unverified name whose candidates, known to publish it or not, are
+/// exactly `expected`.
+fn assert_unverified_candidates(
+    sql: &str,
+    dialect: Dialect,
+    catalog: bool,
+    expected: &[Candidate],
+) {
+    let actual = output_lineage(sql, dialect, catalog);
+    let Lineage::Partial { known, unresolved } = actual else {
+        panic!("{sql}: expected an unverified name, got {actual:?}");
+    };
+    assert!(
+        known.is_empty(),
+        "{sql}: unexpected known sources {known:?}"
+    );
+    let [
+        Unresolved::Unverified {
+            present_candidates,
+            possible_candidates,
+            ..
+        },
+    ] = unresolved.as_slice()
+    else {
+        panic!("{sql}: no unverified candidate set in {unresolved:?}");
+    };
+    let candidates: Vec<&Candidate> = present_candidates
+        .iter()
+        .chain(possible_candidates)
+        .collect();
+    assert_eq!(candidates.len(), expected.len(), "{sql}: {candidates:?}");
+    for candidate in expected {
+        assert!(
+            candidates.contains(&candidate),
+            "{sql}: missing {candidate:?} from {candidates:?}"
+        );
+    }
+}
+
 fn physical(names: &[&str]) -> Vec<Candidate> {
     names
         .iter()
@@ -154,11 +194,11 @@ fn unknown_derived_and_cte_ranges_are_possible_providers() {
         ],
     ));
     for (sql, candidates) in cases {
-        assert_candidates(sql, Dialect::Generic, false, &candidates);
+        assert_unverified_candidates(sql, Dialect::Generic, false, &candidates);
     }
     // Read through a star over the same clause, the owners are the same.
     for (sql, candidates) in cases_through_star() {
-        assert_candidates(&sql, Dialect::Generic, false, &candidates);
+        assert_unverified_candidates(&sql, Dialect::Generic, false, &candidates);
     }
 }
 
@@ -168,7 +208,7 @@ fn unknown_derived_and_cte_ranges_are_possible_providers() {
 fn a_listed_column_competes_with_an_unknown_derived_table() {
     let sql = "WITH c AS (SELECT x AS id FROM s) \
                SELECT id FROM c JOIN (SELECT * FROM b) d ON TRUE";
-    assert_candidates(
+    assert_unverified_candidates(
         sql,
         Dialect::Generic,
         false,
@@ -275,13 +315,13 @@ fn duplicate_range_names_keep_both_listed_columns() {
 fn unknown_natural_then_using_names_one_of_the_natural_relations() {
     let source = "a NATURAL RIGHT JOIN b LEFT JOIN c USING (id)";
     let expected = physical(&["a", "b"]);
-    assert_candidates(
+    assert_unverified_candidates(
         &format!("SELECT id FROM {source}"),
         Dialect::Generic,
         false,
         &expected,
     );
-    assert_candidates(
+    assert_unverified_candidates(
         &format!("SELECT id FROM (SELECT * FROM {source}) AS natural_boundary"),
         Dialect::Generic,
         false,
@@ -289,13 +329,13 @@ fn unknown_natural_then_using_names_one_of_the_natural_relations() {
     );
     // An inner join keeps the right side as a source of the key as well.
     let inner = "a NATURAL JOIN b JOIN c USING (id)";
-    assert_candidates(
+    assert_unverified_candidates(
         &format!("SELECT id FROM {inner}"),
         Dialect::Generic,
         false,
         &physical(&["a", "b", "c"]),
     );
-    assert_candidates(
+    assert_unverified_candidates(
         &format!("SELECT id FROM (SELECT * FROM {inner}) AS natural_boundary"),
         Dialect::Generic,
         false,

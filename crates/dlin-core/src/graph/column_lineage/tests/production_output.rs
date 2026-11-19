@@ -341,9 +341,9 @@ fn ambiguous_candidates_are_listed_in_lowercase() {
     let result = generic("SELECT x FROM A JOIN B ON 1 = 1", &["x"]);
     assert_column_error(
         &result,
-        ColumnLineageErrorKind::ColumnAmbiguous,
+        ColumnLineageErrorKind::ColumnIndeterminate,
         "x",
-        "column 'x': column 'x' is ambiguous between a, b",
+        "column 'x': column 'x' may come from a or b, whose columns are not known",
         None,
     );
 
@@ -351,9 +351,9 @@ fn ambiguous_candidates_are_listed_in_lowercase() {
     let result = generic("SELECT x FROM \"A\" JOIN b ON 1 = 1", &["x"]);
     assert_column_error(
         &result,
-        ColumnLineageErrorKind::ColumnAmbiguous,
+        ColumnLineageErrorKind::ColumnIndeterminate,
         "x",
-        "column 'x': column 'x' is ambiguous between A, b",
+        "column 'x': column 'x' may come from A or b, whose columns are not known",
         None,
     );
 }
@@ -363,9 +363,9 @@ fn qualified_candidates_are_listed_in_lowercase() {
     let result = generic("SELECT x FROM Raw.A JOIN Raw.B ON 1 = 1", &["x"]);
     assert_column_error(
         &result,
-        ColumnLineageErrorKind::ColumnAmbiguous,
+        ColumnLineageErrorKind::ColumnIndeterminate,
         "x",
-        "column 'x': column 'x' is ambiguous between raw.a, raw.b",
+        "column 'x': column 'x' may come from raw.a or raw.b, whose columns are not known",
         None,
     );
 }

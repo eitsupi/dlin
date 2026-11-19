@@ -289,9 +289,12 @@ pub fn cases() -> Vec<Case> {
             (relation("a"), vec![u("id")]),
             (relation("b"), vec![u("id")]),
         ]),
-        ambiguous(
+        // Either relation may have the column; neither is chosen, and only
+        // their columns can tell which one the query reads.
+        unverified(
             "unknown_tables_do_not_choose_arbitrary_source",
             "SELECT id FROM a CROSS JOIN b",
+            vec![],
             vec![relation("a"), relation("b")],
         ),
     ]);
@@ -802,6 +805,31 @@ fn ambiguous(name: &str, sql: &str, mut tables: Vec<Relation>) -> Case {
             vec![Unresolved::Ambiguous {
                 column: u("id"),
                 candidates: tables.into_iter().map(Candidate::Relation).collect(),
+            }],
+        )],
+    )
+}
+
+fn unverified(
+    name: &str,
+    sql: &str,
+    mut present: Vec<Relation>,
+    mut possible: Vec<Relation>,
+) -> Case {
+    present.sort();
+    possible.sort();
+    Case::new(
+        name,
+        sql,
+        Dialect::Generic,
+        vec![partial_col(
+            0,
+            u("id"),
+            vec![],
+            vec![Unresolved::Unverified {
+                column: u("id"),
+                present_candidates: present.into_iter().map(Candidate::Relation).collect(),
+                possible_candidates: possible.into_iter().map(Candidate::Relation).collect(),
             }],
         )],
     )

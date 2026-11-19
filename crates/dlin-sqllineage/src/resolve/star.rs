@@ -243,10 +243,21 @@ impl Evaluator<'_, '_, '_> {
                 }
                 (sources, TransformKind::Direct)
             }
-            ValueId::Uncertain { column, candidates } => (
-                Sources::one(ColumnOrigin::Unresolved(Unresolved::Ambiguous {
+            ValueId::Uncertain {
+                column,
+                candidates,
+                present,
+            } => (
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Unverified {
                     column: column.clone(),
-                    candidates: candidates.iter().filter_map(RangeRef::candidate).collect(),
+                    present_candidates: candidates[..*present]
+                        .iter()
+                        .filter_map(RangeRef::candidate)
+                        .collect(),
+                    possible_candidates: candidates[*present..]
+                        .iter()
+                        .filter_map(RangeRef::candidate)
+                        .collect(),
                 })),
                 TransformKind::Direct,
             ),
@@ -490,6 +501,7 @@ impl Evaluator<'_, '_, '_> {
                 return Some(self.slot_read(listed_slot(model, index)));
             }
             Choice::Ambiguous(ambiguity) => {
+                let unverified = model.unverified(&ambiguity);
                 let mut candidates = ambiguity.candidates;
                 if candidates.is_empty() {
                     // Columns without a range variable are attributed to the
@@ -517,11 +529,30 @@ impl Evaluator<'_, '_, '_> {
                     unsupported_reasons(&sources.origins, &mut reasons);
                     transform = merge_transform(&transform, &listed);
                 }
-                let ambiguous = ColumnOrigin::Unresolved(Unresolved::Ambiguous {
-                    column: name.clone(),
-                    candidates,
-                });
-                let mut sources = Sources::one(ambiguous);
+                let origin = match unverified {
+                    Some((mut present, possible)) => {
+                        // A column the scope defines has no range variable;
+                        // the CTE or derived table that is read stands for it.
+                        if ambiguity.defined {
+                            present.extend(self.cx.graph.scopes.reading_binding(scope).map(
+                                |(name, binding)| match binding {
+                                    Binding::Cte(_) => Candidate::Cte(name),
+                                    _ => Candidate::Derived(Some(name)),
+                                },
+                            ));
+                        }
+                        Unresolved::Unverified {
+                            column: name.clone(),
+                            present_candidates: self.with_array_sources(present),
+                            possible_candidates: self.with_array_sources(possible),
+                        }
+                    }
+                    None => Unresolved::Ambiguous {
+                        column: name.clone(),
+                        candidates,
+                    },
+                };
+                let mut sources = Sources::one(ColumnOrigin::Unresolved(origin));
                 for what in reasons {
                     sources.push(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
                 }
@@ -576,6 +607,13 @@ impl Evaluator<'_, '_, '_> {
                 let mut mapping = cut_segment();
                 mapping.sources =
                     Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }));
+                Some(mapping)
+            }
+            UnknownProvider::Opaque(OpaqueReason::ArrayElement) => {
+                let mut mapping = cut_segment();
+                mapping.sources = Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                    what: "array element",
+                }));
                 Some(mapping)
             }
             UnknownProvider::Opaque(OpaqueReason::Recursive) => None,
@@ -693,6 +731,11 @@ impl Evaluator<'_, '_, '_> {
             UnknownProvider::Opaque(
                 OpaqueReason::Unsupported(what) | OpaqueReason::UnmodelledSource(what),
             ) => Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what })),
+            UnknownProvider::Opaque(OpaqueReason::ArrayElement) => {
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported {
+                    what: "array element",
+                }))
+            }
             // What an opaque segment provides is not known: a value read
             // through it is unresolved, never source-free.
             UnknownProvider::Opaque(OpaqueReason::Recursive) => {

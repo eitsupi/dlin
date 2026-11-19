@@ -435,9 +435,12 @@ fn test_cross_model_rebases_distinct_same_column_errors_to_target_outputs() {
         .find(|error| error.column_name() == Some("other_col"))
         .expect("right diagnostic should be rebased to other_col");
     assert_eq!(right_error.slot(), Some(OutputSlotId::new(1)));
-    assert_eq!(right_error.kind, ColumnLineageErrorKind::ColumnAmbiguous);
+    assert_eq!(
+        right_error.kind,
+        ColumnLineageErrorKind::ColumnIndeterminate
+    );
     assert!(right_error.what.starts_with("column 'other_col':"));
-    assert!(right_error.what.contains("is ambiguous between"));
+    assert!(right_error.what.contains("whose columns are not known"));
     assert_eq!(result.errors.len(), 2, "errors: {:?}", result.errors);
 }
 

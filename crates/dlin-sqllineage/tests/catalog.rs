@@ -619,9 +619,10 @@ fn ambiguous_column_without_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
     let result = configured(sql, Dialect::Generic, None);
     let m = find_mapping(&result.output.columns, "name");
+    // Either relation may have it; their columns decide.
     assert!(matches!(&m.lineage, Lineage::Partial { unresolved, .. }
-        if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-            if column.value == "name" && candidates.len() >= 2)));
+        if matches!(&unresolved[..], [Unresolved::Unverified { column, present_candidates, possible_candidates }]
+            if column.value == "name" && present_candidates.is_empty() && possible_candidates.len() == 2)));
 }
 
 #[test]

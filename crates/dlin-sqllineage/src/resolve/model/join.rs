@@ -281,6 +281,7 @@ fn take_key(
                 ValueId::Uncertain {
                     column: key.clone(),
                     candidates: ranges.clone().into(),
+                    present: 0,
                 }
             } else {
                 values
@@ -437,6 +438,7 @@ fn fold_groups(
                         ValueId::Uncertain {
                             column: key.clone(),
                             candidates: candidate_ranges.clone(),
+                            present: 0,
                         }
                     } else {
                         ValueId::Merged(Box::new(left_side.value), Box::new(right_side.value))

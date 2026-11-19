@@ -330,7 +330,7 @@ fn the_catalog_narrows_which_relation_supplies_a_name() {
     expect_catalog("SELECT x FROM t, u", &["x#0 C[t.x]", "Closed"]);
     expect_catalog(
         "SELECT p FROM u, unknown_rel",
-        &["p#0 P[ | Ambiguous(p: u unknown_rel)]", "Closed"],
+        &["p#0 P[ | Unverified(p: u | unknown_rel)]", "Closed"],
     );
 }
 

@@ -61,7 +61,7 @@ fn test_derived_table_select_star_passthrough_is_traced() {
 }
 
 #[test]
-fn test_join_select_star_passthrough_is_ambiguous() {
+fn test_join_select_star_passthrough_is_unverified() {
     // JOIN-derived-table pattern: SELECT id FROM base JOIN (SELECT * FROM ext) src ON true
     // The star lives inside a JOIN subquery, not the outermost select list or FROM clause.
     // Neither relation's columns are known, so the star may publish `id` as well and the
@@ -87,14 +87,14 @@ fn test_join_select_star_passthrough_is_ambiguous() {
         &[],
         &["customer_id", "id", "order_date", "order_id", "status"],
     );
-    // The ambiguity is a finding about `id` itself, not a hidden column, so it
-    // carries no star hint.
+    // The unverified name is a finding about `id` itself, not a hidden
+    // column, so it carries no star hint; it is not fatal.
     assert!(
         result
             .errors
             .iter()
             .any(|error| error.column.as_deref() == Some("id")
-                && matches!(error.kind, ColumnLineageErrorKind::ColumnAmbiguous))
+                && matches!(error.kind, ColumnLineageErrorKind::ColumnIndeterminate))
     );
 }
 

@@ -382,7 +382,7 @@ fn an_unresolved_part_found_upstream_keeps_its_evidence_and_the_path_to_it() {
     let m = lineage(&manifest, "m");
     let upstream = &slot(&m, "x").lineage.unresolved()[0];
     assert!(
-        matches!(upstream.reason, UnresolvedReason::Ambiguous { .. }),
+        matches!(upstream.reason, UnresolvedReason::Unverified { .. }),
         "{upstream:?}"
     );
     assert_eq!(upstream.evidence, ids(&[YAML_SOURCE]));

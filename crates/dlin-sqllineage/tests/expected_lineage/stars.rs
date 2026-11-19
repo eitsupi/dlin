@@ -884,16 +884,15 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
     explicit_flag.ordinal = None;
     let mut renamed_flag = partial_col(0, u("kept"), vec![], vec![behind("b", "flag")]);
     renamed_flag.ordinal = None;
+    // `a` lists the old name; the unknown columns of `b` may hold it too.
     let renamed_ambiguous = partial_col(
         1,
         u("renamed"),
         vec![],
-        vec![Unresolved::Ambiguous {
+        vec![Unresolved::Unverified {
             column: u("renamed"),
-            candidates: vec![
-                dlin_sqllineage::Candidate::Relation(relation("a")),
-                dlin_sqllineage::Candidate::Relation(relation("b")),
-            ],
+            present_candidates: vec![dlin_sqllineage::Candidate::Relation(relation("a"))],
+            possible_candidates: vec![dlin_sqllineage::Candidate::Relation(relation("b"))],
         }],
     );
     vec![
@@ -974,12 +973,10 @@ fn partial_catalog_modifier_cases() -> Vec<Case> {
                 0,
                 u("renamed"),
                 vec![],
-                vec![Unresolved::Ambiguous {
+                vec![Unresolved::Unverified {
                     column: u("renamed"),
-                    candidates: vec![
-                        dlin_sqllineage::Candidate::Relation(relation("a")),
-                        dlin_sqllineage::Candidate::Relation(relation("b")),
-                    ],
+                    present_candidates: vec![dlin_sqllineage::Candidate::Relation(relation("a"))],
+                    possible_candidates: vec![dlin_sqllineage::Candidate::Relation(relation("b"))],
                 }],
             )],
         )
@@ -1071,14 +1068,16 @@ fn modifier_over_cte_star_cases() -> Vec<Case> {
 /// is the derived table's alone, and the renamed column resolves as `id` does
 /// in the CTE.
 fn modifier_over_cte_of_several_stars_cases() -> Vec<Case> {
-    let kept_ambiguous = |candidates: &[&str]| {
+    // Either star may publish the old name, and neither is known to.
+    let kept_unverified = |candidates: &[&str]| {
         partial_col(
             0,
             u("kept"),
             vec![],
-            vec![Unresolved::Ambiguous {
+            vec![Unresolved::Unverified {
                 column: u("kept"),
-                candidates: candidates
+                present_candidates: vec![],
+                possible_candidates: candidates
                     .iter()
                     .map(|table| dlin_sqllineage::Candidate::Relation(relation(table)))
                     .collect(),
@@ -1113,7 +1112,7 @@ fn modifier_over_cte_of_several_stars_cases() -> Vec<Case> {
             "WITH c AS (SELECT a.*, b.* EXCLUDE (kept) FROM a, b) ",
             "RENAME (id AS kept)",
             Dialect::Snowflake,
-            kept_ambiguous(&["a", "b"]),
+            kept_unverified(&["a", "b"]),
         ),
     ] {
         for (suffix, join) in [("", ""), ("_beside_a_relation_without_it", " CROSS JOIN e")] {

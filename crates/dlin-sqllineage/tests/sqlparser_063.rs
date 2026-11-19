@@ -176,8 +176,15 @@ fn postgres_unqualified_column_over_nested_join_is_ambiguous_without_catalog() {
     let mapping = find_mapping(&result.output.columns, "x");
     match &mapping.lineage {
         Lineage::Partial { unresolved, .. } => match unresolved.as_slice() {
-            [Unresolved::Ambiguous { column, candidates }] => {
+            [
+                Unresolved::Unverified {
+                    column,
+                    present_candidates,
+                    possible_candidates: candidates,
+                },
+            ] => {
                 assert_eq!(column.value, "x");
+                assert!(present_candidates.is_empty());
                 let mut names: Vec<_> = candidates
                     .iter()
                     .map(|candidate| match candidate {
@@ -192,7 +199,7 @@ fn postgres_unqualified_column_over_nested_join_is_ambiguous_without_catalog() {
                 names.sort_unstable();
                 assert_eq!(names, vec!["a", "b", "c"]);
             }
-            other => panic!("expected an ambiguous origin over a, b and c, got {other:?}"),
+            other => panic!("expected an unverified origin over a, b and c, got {other:?}"),
         },
         other => panic!("expected partial lineage, got {other:?}"),
     }

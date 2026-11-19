@@ -186,7 +186,9 @@ fn cast_is_direct_by_decision() {
 }
 
 #[test]
-fn join_without_known_schema_reports_genuine_ambiguity() {
+fn join_without_known_schema_leaves_the_name_unverified() {
+    // Either table may have `id`; only their columns can tell which one the
+    // query reads, so the name is unverified, not ambiguous.
     let result = generic(
         "select id from left_table join right_table on left_table.id = right_table.id",
         &[],
@@ -194,7 +196,7 @@ fn join_without_known_schema_reports_genuine_ambiguity() {
     let error = assert_column_error(
         &result,
         "id",
-        ColumnLineageErrorKind::ColumnAmbiguous,
+        ColumnLineageErrorKind::ColumnIndeterminate,
         "left_table",
     );
     assert!(error.what.contains("right_table"), "what: {}", error.what);

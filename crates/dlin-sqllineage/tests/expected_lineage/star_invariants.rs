@@ -180,7 +180,7 @@ fn unknown_may_carry(sql: &str, name: &Ident, dialect: dlin_sqllineage::Dialect)
 fn ambiguous_lookup(lineages: &[Lineage], name: &Ident, dialect: dlin_sqllineage::Dialect) -> bool {
     matches!(lineages, [Lineage::Partial { known, unresolved }]
         if known.is_empty()
-            && matches!(&unresolved[..], [Unresolved::Ambiguous { column, .. }]
+            && matches!(&unresolved[..], [Unresolved::Ambiguous { column, .. } | Unresolved::Unverified { column, .. }]
                 if column.column_key(dialect) == name.column_key(dialect)))
 }
 

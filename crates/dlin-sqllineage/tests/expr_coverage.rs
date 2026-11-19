@@ -424,8 +424,8 @@ fn unqualified_struct_field_access_keeps_binding_ambiguity() {
     assert!(matches!(
         &m.lineage,
         Lineage::Partial { unresolved, .. }
-            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-                if column.value == "event" && candidates.len() == 2)
+            if matches!(&unresolved[..], [Unresolved::Unverified { column, possible_candidates, .. }]
+                if column.value == "event" && possible_candidates.len() == 2)
     ));
 }
 

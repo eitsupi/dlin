@@ -83,6 +83,53 @@ fn check_complete(
     }
 }
 
+/// The candidates of a column whose only content is one unverified name: the
+/// relations known to publish it, then those that may, each sorted by name.
+fn unverified_candidates(column: &OutputColumn) -> (Vec<String>, Vec<String>) {
+    let Lineage::Partial { known, unresolved } = &column.lineage else {
+        panic!("expected an unverified column, got {:?}", column.lineage);
+    };
+    assert!(known.is_empty(), "{:?}", column.lineage);
+    let [
+        Unresolved::Unverified {
+            present_candidates,
+            possible_candidates,
+            ..
+        },
+    ] = unresolved.as_slice()
+    else {
+        panic!("expected one unverified name, got {:?}", column.lineage);
+    };
+    let names = |candidates: &[Candidate]| {
+        let mut names: Vec<String> = candidates
+            .iter()
+            .map(|candidate| match candidate {
+                Candidate::Relation(relation) => relation.name.value.clone(),
+                other => panic!("unexpected candidate {other:?}"),
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    (names(present_candidates), names(possible_candidates))
+}
+
+fn check_unverified(
+    sql: &str,
+    catalog: Option<&dyn Catalog>,
+    column: &str,
+    present: &[&str],
+    possible: &[&str],
+) {
+    for dialect in ALL_DIALECTS {
+        let result = analyze(sql, dialect, catalog);
+        let (actual_present, actual_possible) =
+            unverified_candidates(find_mapping(&result.output.columns, column));
+        assert_eq!(actual_present, present, "{dialect:?}: {sql}");
+        assert_eq!(actual_possible, possible, "{dialect:?}: {sql}");
+    }
+}
+
 fn check_ambiguous(sql: &str, catalog: Option<&dyn Catalog>, column: &str, expected: &[&str]) {
     for dialect in ALL_DIALECTS {
         let result = analyze(sql, dialect, catalog);
@@ -150,25 +197,28 @@ fn a_scope_without_a_from_clause_provides_nothing() {
 // is `t.x`. Neither can be preferred.
 #[test]
 fn a_scope_that_may_provide_the_column_competes_with_the_scope_around() {
-    check_ambiguous(
+    check_unverified(
         "SELECT (SELECT x FROM u) AS v FROM t",
         None,
         "v",
+        &[],
         &["t", "u"],
     );
     // The enclosing query knows `x`; the subquery's relation may have it too.
-    check_ambiguous(
+    check_unverified(
         "SELECT (SELECT x FROM w) AS v FROM t",
         Some(&T_X_U_Y),
         "v",
-        &["t", "w"],
+        &["t"],
+        &["w"],
     );
     // A competition that spans more than two scopes.
-    check_ambiguous(
+    check_unverified(
         "SELECT (SELECT (SELECT x FROM w) FROM u) AS v FROM t",
         Some(&T_X_U_Y),
         "v",
-        &["t", "w"],
+        &["t"],
+        &["w"],
     );
 }
 

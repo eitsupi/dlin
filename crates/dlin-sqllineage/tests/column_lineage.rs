@@ -223,7 +223,7 @@ fn unqualified_identifier_does_not_capture_relation_alias() {
     assert!(matches!(
         &mapping.lineage,
         Lineage::Partial { unresolved, .. }
-            if matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }] if column.value == "a" && candidates.len() == 2)
+            if matches!(&unresolved[..], [Unresolved::Unverified { column, possible_candidates, .. }] if column.value == "a" && possible_candidates.len() == 2)
     ));
 }
 

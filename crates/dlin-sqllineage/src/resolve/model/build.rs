@@ -507,7 +507,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 let element = open.then(|| {
                     OutputElement::Unknown(UnknownSegment {
                         ranges: ranges.clone(),
-                        ..UnknownSegment::opaque(OpaqueReason::UnmodelledSource("array element"))
+                        ..UnknownSegment::opaque(OpaqueReason::ArrayElement)
                     })
                 });
                 element
@@ -767,9 +767,10 @@ fn apply_output_aliases(
                     // A source the analysis does not model stays the reason
                     // for both the renamed and the remaining columns.
                     let unmodelled = match segment.provider {
-                        UnknownProvider::Opaque(reason @ OpaqueReason::UnmodelledSource(_)) => {
-                            Some(reason)
-                        }
+                        UnknownProvider::Opaque(
+                            reason @ (OpaqueReason::UnmodelledSource(_)
+                            | OpaqueReason::ArrayElement),
+                        ) => Some(reason),
                         _ => None,
                     };
                     if unmodelled.is_none() {
