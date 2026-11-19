@@ -248,8 +248,10 @@ impl InputModel {
             Choice::Ambiguous(ambiguity) => {
                 // The candidates of the listed columns publish the name; the
                 // others, an element of an array among them, only may. Two
-                // that publish it leave the name ambiguous whatever the others
-                // carry; one or none leaves it to what the others publish.
+                // listed columns leave the name ambiguous whatever the others
+                // carry, even two of one relation read twice; one or none
+                // leaves it to what the others publish. A column that a join
+                // merges is listed once.
                 let mut present = candidates_of(ambiguity.listed.iter().flat_map(|&index| {
                     match &elements[index] {
                         OutputElement::Column(slot) => slot.candidate_ranges.iter(),
@@ -273,7 +275,7 @@ impl InputModel {
                             OutputElement::Unknown(_) => None,
                         })
                 };
-                if present.len() < 2 && possible.iter().any(is_array_element) {
+                if ambiguity.listed.len() < 2 && possible.iter().any(is_array_element) {
                     return Standing::Present(InputLookup::Unverified {
                         present,
                         possible,
