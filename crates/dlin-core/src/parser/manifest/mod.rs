@@ -274,6 +274,12 @@ pub struct ManifestConfig {
     pub tags: Vec<String>,
     #[serde(default)]
     pub contract: Option<ManifestContractConfig>,
+    /// The field delimiter of a seed file, as its config resolves it.
+    #[serde(default)]
+    pub delimiter: Option<String>,
+    /// Whether the seed materialization quotes its column identifiers.
+    #[serde(default)]
+    pub quote_columns: Option<bool>,
 }
 
 /// The `contract` entry of a node config.

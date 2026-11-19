@@ -18,6 +18,7 @@ fn test_build_graph_from_minimal_manifest() {
                     materialized: Some("view".to_string()),
                     tags: vec!["staging".to_string()],
                     contract: None,
+                    ..ManifestConfig::default()
                 },
                 description: Some("Staged orders".to_string()),
                 path: Some("models/staging/stg_orders.sql".to_string()),
@@ -373,6 +374,7 @@ fn test_build_graph_with_seeds_and_snapshots() {
                         materialized: Some("snapshot".to_string()),
                         tags: vec![],
                         contract: None,
+                        ..ManifestConfig::default()
                     },
                     description: None,
                     path: Some("snapshots/snap_orders.sql".to_string()),
@@ -534,6 +536,7 @@ fn test_build_graph_optional_fields() {
                     materialized: None,
                     tags: vec![],
                     contract: None,
+                    ..ManifestConfig::default()
                 },
                 description: None,
                 path: None,
@@ -703,6 +706,7 @@ fn test_build_graph_complex_chain() {
                         materialized: Some("view".to_string()),
                         tags: vec![],
                         contract: None,
+                        ..ManifestConfig::default()
                     },
                     description: None,
                     path: None,
@@ -753,6 +757,7 @@ fn test_build_graph_complex_chain() {
                         materialized: Some("table".to_string()),
                         tags: vec!["marts".to_string()],
                         contract: None,
+                        ..ManifestConfig::default()
                     },
                     description: Some("Order fact table".to_string()),
                     path: None,

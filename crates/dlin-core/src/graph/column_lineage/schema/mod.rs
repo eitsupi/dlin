@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) mod context;
 pub(super) mod evidence;
+mod seed_files;
 mod sql_output;
 
 pub(super) use context::SchemaContext;
@@ -10,6 +11,7 @@ pub use evidence::{
     ContractEnforcementEvidence, CoverageBasis, EnforcementApplicability, EvidenceId,
     SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin,
 };
+pub use seed_files::{SeedFileWarning, SeedSchemas};
 
 use crate::parser::manifest::Manifest;
 
@@ -41,10 +43,12 @@ impl SemanticDigestCache {
     pub(super) fn digest_for_node(
         &mut self,
         manifest: &Manifest,
+        seeds: Option<&SeedSchemas>,
         node: &crate::parser::manifest::ManifestNode,
     ) -> SemanticDigest {
         self.digest_for_id(
             manifest,
+            seeds,
             &node.unique_id,
             &mut HashSet::new(),
             &mut Vec::new(),
@@ -52,9 +56,11 @@ impl SemanticDigestCache {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn digest_for_id(
         &mut self,
         manifest: &Manifest,
+        seeds: Option<&SeedSchemas>,
         id: &str,
         visiting: &mut HashSet<String>,
         path: &mut Vec<String>,
@@ -87,6 +93,15 @@ impl SemanticDigestCache {
         if let Some(node) = manifest.nodes.get(id) {
             parts.push(format!("node:{id}"));
             append_node_local_parts(&mut parts, node);
+            // The header of a seed file decides the seed's columns, so a
+            // changed or removed file changes what its readers see.
+            if let Some(file) = seeds.and_then(|seeds| seeds.get(id)) {
+                parts.push(format!("seed_file:{}", file.path));
+                parts.push(format!("seed_file_quote:{:?}", node.config.quote_columns));
+                for name in &file.names {
+                    parts.push(format!("seed_file_column:{name}"));
+                }
+            }
 
             let mut dependency_ids = node.depends_on.nodes.iter().collect::<Vec<_>>();
             dependency_ids.sort_unstable();
@@ -95,8 +110,14 @@ impl SemanticDigestCache {
                 if manifest.nodes.contains_key(dependency_id)
                     || manifest.sources.contains_key(dependency_id)
                 {
-                    let dependency_digest =
-                        self.digest_for_id(manifest, dependency_id, visiting, path, cycle_nodes);
+                    let dependency_digest = self.digest_for_id(
+                        manifest,
+                        seeds,
+                        dependency_id,
+                        visiting,
+                        path,
+                        cycle_nodes,
+                    );
                     persistent_cache_safe &= dependency_digest.persistent_cache_safe;
                     if cycle_nodes.contains(id) && cycle_nodes.contains(dependency_id.as_str()) {
                         parts.push(format!("cycle-dependency:{dependency_id}"));
@@ -154,7 +175,7 @@ pub(super) fn compute_semantic_digest(
     node: &crate::parser::manifest::ManifestNode,
 ) -> u64 {
     SemanticDigestCache::default()
-        .digest_for_node(manifest, node)
+        .digest_for_node(manifest, None, node)
         .value
 }
 

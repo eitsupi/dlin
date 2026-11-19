@@ -610,8 +610,11 @@ fn partial_entry_round_trips_through_the_cache() {
     assert_eq!(contribution.model_path.len(), 1);
 
     // The stored single-model entry is the typed internal value, not a copy.
-    let digest = SemanticDigestCache::default()
-        .digest_for_node(&manifest, &manifest.nodes[&model_id("partial_model")]);
+    let digest = SemanticDigestCache::default().digest_for_node(
+        &manifest,
+        None,
+        &manifest.nodes[&model_id("partial_model")],
+    );
     let stored = reloaded
         .get(&model_id("partial_model"), DIALECT, digest.value)
         .expect("partial_model is cached");

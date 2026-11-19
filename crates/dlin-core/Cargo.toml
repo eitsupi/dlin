@@ -12,11 +12,12 @@ categories = ["development-tools", "visualization"]
 
 [features]
 clap = ["dep:clap"]
-column-lineage = ["dep:sqllineage"]
+column-lineage = ["dep:sqllineage", "dep:csv"]
 
 [dependencies]
 clap = { workspace = true, optional = true }
 sqllineage = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
 petgraph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::evidence::{EvidenceId, SchemaEvidence, yaml_schema_evidence};
+use super::seed_files::SeedSchemas;
 use super::sql_output::SqlOutputSchema;
 use crate::graph::column_lineage::backend::sqllineage::{analyze_sql, single_lineage_statement};
 use crate::graph::column_lineage::backend::{DlinDialect, catalog::CatalogSnapshot};
@@ -41,6 +42,8 @@ pub(crate) enum AdoptedSchema {
     /// The YAML declaration of a node that has no SQL definition by nature,
     /// such as a source.
     Yaml(EvidenceId),
+    /// The header of the file of a seed that declares no columns in YAML.
+    SeedFile(EvidenceId),
     /// The YAML declaration of a model whose SQL gave no schema.
     YamlFallback {
         evidence: EvidenceId,
@@ -55,6 +58,9 @@ pub(crate) enum AdoptedSchema {
 pub(crate) struct NodeSchemaKnowledge {
     pub(crate) sql_output: SqlOutputState,
     pub(crate) yaml_declaration: Option<SchemaEvidence>,
+    /// The header of a seed's file, read only for a seed without YAML
+    /// columns.
+    pub(crate) seed_file: Option<SchemaEvidence>,
     pub(crate) adopted: AdoptedSchema,
 }
 
@@ -69,7 +75,18 @@ impl NodeSchemaKnowledge {
         Self {
             sql_output: SqlOutputState::Unavailable,
             yaml_declaration,
+            seed_file: None,
             adopted,
+        }
+    }
+
+    /// A seed without YAML columns has the columns of its file's header.
+    fn for_seed_file(seed_file: SchemaEvidence) -> Self {
+        Self {
+            sql_output: SqlOutputState::Unavailable,
+            yaml_declaration: None,
+            adopted: AdoptedSchema::SeedFile(seed_file.id.clone()),
+            seed_file: Some(seed_file),
         }
     }
 
@@ -94,6 +111,7 @@ impl NodeSchemaKnowledge {
         Self {
             sql_output,
             yaml_declaration,
+            seed_file: None,
             adopted,
         }
     }
@@ -103,6 +121,7 @@ impl NodeSchemaKnowledge {
         let id = match &self.adopted {
             AdoptedSchema::Sql(id)
             | AdoptedSchema::Yaml(id)
+            | AdoptedSchema::SeedFile(id)
             | AdoptedSchema::YamlFallback { evidence: id, .. } => id,
             AdoptedSchema::None => return None,
         };
@@ -112,6 +131,7 @@ impl NodeSchemaKnowledge {
         };
         sql.into_iter()
             .chain(self.yaml_declaration.as_ref())
+            .chain(self.seed_file.as_ref())
             .find(|evidence| &evidence.id == id)
     }
 
@@ -171,6 +191,7 @@ pub(crate) struct NameDifference {
 /// traversal started.
 pub(in crate::graph::column_lineage) struct SchemaContext<'a> {
     manifest: &'a Manifest,
+    seeds: Option<&'a SeedSchemas>,
     dialect: DlinDialect,
     memo: HashMap<String, Arc<NodeSchemaKnowledge>>,
     visiting: Vec<String>,
@@ -179,10 +200,12 @@ pub(in crate::graph::column_lineage) struct SchemaContext<'a> {
 impl<'a> SchemaContext<'a> {
     pub(in crate::graph::column_lineage) fn new(
         manifest: &'a Manifest,
+        seeds: Option<&'a SeedSchemas>,
         dialect: DlinDialect,
     ) -> Self {
         Self {
             manifest,
+            seeds,
             dialect,
             memo: HashMap::new(),
             visiting: Vec::new(),
@@ -267,7 +290,21 @@ impl<'a> SchemaContext<'a> {
             return None;
         }
         let manifest = self.manifest;
-        if let Some(node) = manifest.nodes.get(id) {
+        if let Some(node) = manifest.nodes.get(id)
+            && node.resource_type == "seed"
+            && node.columns.is_empty()
+            && let Some(file) = self.seeds.and_then(|seeds| seeds.get(id))
+        {
+            let evidence = SchemaEvidence::seed_file(
+                id,
+                file.names.iter().cloned(),
+                node.config.quote_columns,
+                self.dialect,
+            );
+            let knowledge = Arc::new(NodeSchemaKnowledge::for_seed_file(evidence));
+            self.memo.insert(id.to_owned(), Arc::clone(&knowledge));
+            Some(knowledge)
+        } else if let Some(node) = manifest.nodes.get(id) {
             self.visiting.push(id.to_owned());
             let mut affected = false;
             let knowledge = Arc::new(self.model_knowledge(id, node, &mut affected));

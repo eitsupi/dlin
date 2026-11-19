@@ -99,7 +99,7 @@ fn test_dependency_provides_its_sql_output_and_not_its_yaml_columns() {
 
     // The catalog that the reader is analysed against holds the SQL output of
     // the dependency only; its YAML declaration is a separate record.
-    let catalog = schema::SchemaContext::new(&manifest, DlinDialect::Generic)
+    let catalog = schema::SchemaContext::new(&manifest, None, DlinDialect::Generic)
         .catalog_for(manifest.nodes.get("model.proj.orders").unwrap())
         .unwrap();
     assert_eq!(catalog.table_columns("stg_orders"), Some(vec!["sql_only"]));
