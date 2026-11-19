@@ -290,3 +290,29 @@ FROM events"#,
         );
     }
 }
+
+#[test]
+fn known_fields_of_two_elements_are_ambiguous() {
+    // Both elements publish `x`, and so does a relation that lists it next to
+    // an element that publishes it: the name is ambiguous whatever else is
+    // unknown, as BigQuery rejects it.
+    let catalog = KnownTables(&[("events", &["id", "x"])]);
+    for sql in [
+        r#"SELECT x AS v FROM UNNEST([STRUCT(1 AS x)]), UNNEST([STRUCT(2 AS x)])"#,
+        r#"SELECT x AS v FROM events, UNNEST([STRUCT(2 AS x)])"#,
+        r#"SELECT x AS v FROM UNNEST([STRUCT(1 AS x)]), UNNEST([STRUCT(2 AS x)]), UNNEST(events_params)"#,
+    ] {
+        let analysis = analyze_one_with(sql, Dialect::BigQuery, Some(&catalog));
+        let column = find_mapping(&analysis.output.columns, "v");
+        let reasons = unresolved(column);
+        assert!(
+            reasons.iter().any(|reason| matches!(
+                reason,
+                Unresolved::Ambiguous { candidates, .. } if candidates.len() >= 2
+            )) && !reasons
+                .iter()
+                .any(|reason| matches!(reason, Unresolved::Unverified { .. })),
+            "{sql}: {column:?}"
+        );
+    }
+}

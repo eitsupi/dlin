@@ -60,7 +60,12 @@ pub(crate) enum CandidateKey {
     Relation(RelationKey),
     Cte(String),
     Derived(Option<String>),
-    ArrayElement(Vec<(RelationKey, String)>),
+    /// The columns the array reads, then the expansion, which keeps two
+    /// expansions of the same array apart.
+    ArrayElement(
+        Vec<(RelationKey, String)>,
+        Option<crate::graph::scope::VirtualSourceId>,
+    ),
 }
 
 pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> CandidateKey {
@@ -78,7 +83,7 @@ pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> Candidat
                 .collect();
             sources.sort();
             sources.dedup();
-            CandidateKey::ArrayElement(sources)
+            CandidateKey::ArrayElement(sources, element.source)
         }
     }
 }

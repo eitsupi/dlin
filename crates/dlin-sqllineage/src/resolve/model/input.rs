@@ -155,6 +155,18 @@ pub(in crate::resolve) enum InputLookup {
     },
 }
 
+/// Keep the first of each candidate, in order.
+fn dedup_candidates(candidates: &mut Vec<Candidate>) {
+    let mut seen = Vec::new();
+    candidates.retain(|candidate| {
+        let new = !seen.contains(candidate);
+        if new {
+            seen.push(candidate.clone());
+        }
+        new
+    });
+}
+
 fn is_array_element(candidate: &Candidate) -> bool {
     matches!(candidate, Candidate::ArrayElement(_))
 }
@@ -233,62 +245,65 @@ impl InputModel {
                     contributing: slot.candidate_ranges.clone(),
                 })
             }
-            Choice::Ambiguous(ambiguity) if ambiguity.candidates.iter().any(is_array_element) => {
+            Choice::Ambiguous(ambiguity) => {
                 // The candidates of the listed columns publish the name; the
-                // others, the element among them, only may.
-                let present = candidates_of(ambiguity.listed.iter().flat_map(|&index| {
+                // others, an element of an array among them, only may. Two
+                // that publish it leave the name ambiguous whatever the others
+                // carry; one or none leaves it to what the others publish.
+                let mut present = candidates_of(ambiguity.listed.iter().flat_map(|&index| {
                     match &elements[index] {
                         OutputElement::Column(slot) => slot.candidate_ranges.iter(),
                         OutputElement::Unknown(_) => [].iter(),
                     }
                 }));
-                let possible = ambiguity
+                dedup_candidates(&mut present);
+                let mut possible: Vec<Candidate> = ambiguity
                     .candidates
-                    .into_iter()
+                    .iter()
                     .filter(|candidate| !present.contains(candidate))
+                    .cloned()
                     .collect();
-                Standing::Present(InputLookup::Unverified {
-                    present,
-                    possible,
-                    values: ambiguity
+                dedup_candidates(&mut possible);
+                let listed_values = || {
+                    ambiguity
                         .listed
                         .iter()
                         .filter_map(|&index| match &elements[index] {
                             OutputElement::Column(slot) => Some(slot.value.clone()),
                             OutputElement::Unknown(_) => None,
                         })
+                };
+                if present.len() < 2 && possible.iter().any(is_array_element) {
+                    return Standing::Present(InputLookup::Unverified {
+                        present,
+                        possible,
+                        values: listed_values().collect(),
+                    });
+                }
+                Standing::Present(InputLookup::Ambiguous {
+                    typed: !ambiguity.refinable,
+                    values: listed_values()
+                        .chain(
+                            self.model
+                                .matches(name)
+                                .unknown
+                                .iter()
+                                .filter_map(|&index| {
+                                    let OutputElement::Unknown(segment) = &elements[index] else {
+                                        return None;
+                                    };
+                                    // Evaluated only for the reasons it cannot be
+                                    // known; an ambiguity claims no source.
+                                    Some(ValueId::Named {
+                                        providers: vec![segment.provider.clone()],
+                                        column: name.clone(),
+                                    })
+                                }),
+                        )
                         .collect(),
+                    candidates: ambiguity.candidates,
                 })
             }
-            Choice::Ambiguous(ambiguity) => Standing::Present(InputLookup::Ambiguous {
-                typed: !ambiguity.refinable,
-                values: ambiguity
-                    .listed
-                    .iter()
-                    .filter_map(|&index| match &elements[index] {
-                        OutputElement::Column(slot) => Some(slot.value.clone()),
-                        _ => None,
-                    })
-                    .chain(
-                        self.model
-                            .matches(name)
-                            .unknown
-                            .iter()
-                            .filter_map(|&index| {
-                                let OutputElement::Unknown(segment) = &elements[index] else {
-                                    return None;
-                                };
-                                // Evaluated only for the reasons it cannot
-                                // be known; an ambiguity claims no source.
-                                Some(ValueId::Named {
-                                    providers: vec![segment.provider.clone()],
-                                    column: name.clone(),
-                                })
-                            }),
-                    )
-                    .collect(),
-                candidates: ambiguity.candidates,
-            }),
         }
     }
 }
@@ -387,18 +402,11 @@ impl Walk {
                 mut present,
                 values,
             } => {
-                let mut seen = Vec::new();
-                candidates.retain(|candidate| {
-                    let new = !seen.contains(candidate);
-                    if new {
-                        seen.push(candidate.clone());
-                    }
-                    new
-                });
+                dedup_candidates(&mut candidates);
                 // A nearer element of an array may hide what the farther
                 // clauses provide, a confirmed ambiguity among them included.
                 if candidates.iter().any(is_array_element) {
-                    present.dedup();
+                    dedup_candidates(&mut present);
                     let possible = candidates
                         .into_iter()
                         .filter(|candidate| !present.contains(candidate))
