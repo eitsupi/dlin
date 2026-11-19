@@ -334,3 +334,41 @@ fn known_fields_of_two_elements_are_ambiguous() {
         );
     }
 }
+
+#[test]
+fn star_reads_the_unnamed_element_of_a_scalar_array() {
+    let catalog = KnownTables(&[("events", &["id", "scores"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT * FROM events, UNNEST(CAST(events.scores AS ARRAY<INT64>)) WITH OFFSET"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    let columns = &analysis.output.columns;
+    assert_eq!(columns.len(), 4, "{columns:?}");
+    assert_eq!(columns[2].name, dlin_sqllineage::OutputName::Anonymous);
+    assert_eq!(
+        known_sources(&columns[2])
+            .iter()
+            .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
+            .collect::<Vec<_>>(),
+        ["events.scores"]
+    );
+    assert!(unresolved(&columns[2]).is_empty(), "{:?}", columns[2]);
+    assert_eq!(
+        common::output_name(&columns[3]),
+        Some("offset"),
+        "{:?}",
+        columns[3]
+    );
+
+    let literal = analyze_one_with(
+        r#"SELECT * FROM UNNEST([10, 20]) WITH OFFSET"#,
+        Dialect::BigQuery,
+        None,
+    );
+    assert_eq!(literal.output.columns.len(), 2, "{:?}", literal.output);
+    assert_eq!(
+        literal.output.columns[0].name,
+        dlin_sqllineage::OutputName::Anonymous
+    );
+}

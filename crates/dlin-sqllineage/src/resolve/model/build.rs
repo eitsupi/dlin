@@ -521,7 +521,13 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                                 OutputElement::Column(ColumnSlot {
                                     id: None,
                                     name: column.name.clone(),
-                                    output_name: OutputName::Explicit(column.name.clone()),
+                                    // The element of a scalar array has no
+                                    // name; a star still reads it.
+                                    output_name: if column.name.value.is_empty() {
+                                        OutputName::Anonymous
+                                    } else {
+                                        OutputName::Explicit(column.name.clone())
+                                    },
                                     ordinal: (!open).then_some(index),
                                     position: if open {
                                         PositionRange {

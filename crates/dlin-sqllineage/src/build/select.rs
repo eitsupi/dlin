@@ -855,7 +855,8 @@ impl LineageBuilder {
 
     /// A `BigQuery` `UNNEST` without a range variable. The element of an
     /// array of STRUCTs publishes its fields as columns of the FROM clause,
-    /// each taking its value from the array; no name qualifies a reference to
+    /// each taking its value from the array, and the element of any other
+    /// array is one column without a name; no name qualifies a reference to
     /// them. `WITH OFFSET` adds a column named by its alias, `offset` by
     /// default.
     fn add_anonymous_unnest(
@@ -866,13 +867,19 @@ impl LineageBuilder {
     ) {
         let (mut columns, open_element) = match element_shape(array, self.dialect) {
             ElementShape::Scalar => {
-                self.collect_ancestors(array);
-                // A scalar element has no field to publish; the expansion
-                // still publishes its offset.
-                if !with_offset {
-                    return;
-                }
-                (Vec::new(), None)
+                // A scalar element is one column without a name: a star
+                // reads it, but no name refers to it.
+                let dependencies = self.collect_ancestors(array);
+                let element = VirtualColumn {
+                    name: Ident::unquoted(""),
+                    state: if dependencies.is_empty() {
+                        VirtualColumnState::KnownEmpty
+                    } else {
+                        VirtualColumnState::Unknown
+                    },
+                    dependencies,
+                };
+                (vec![element], None)
             }
             ElementShape::Fields(fields) => {
                 // A field of STRUCT literals takes its value from its own
