@@ -20,6 +20,7 @@ fn test_cte_alias_resolution() {
     sources.insert(
         "source.proj.raw.items".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.items".to_string(),
             name: "items".to_string(),
             source_name: "raw".to_string(),
@@ -49,6 +50,7 @@ fn test_cte_alias_resolution() {
     nodes.insert(
         "model.proj.stg_items".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_items".to_string(),
             name: "stg_items".to_string(),
             alias: None,
@@ -82,6 +84,7 @@ fn test_cte_alias_resolution() {
     nodes.insert(
         "model.proj.mart_items".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.mart_items".to_string(),
             name: "mart_items".to_string(),
             alias: None,
@@ -165,6 +168,7 @@ fn test_select_star_chain_with_join() {
     sources.insert(
         "source.proj.raw.users".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.users".to_string(),
             name: "users".to_string(),
             source_name: "raw".to_string(),
@@ -194,6 +198,7 @@ fn test_select_star_chain_with_join() {
     sources.insert(
         "source.proj.raw.regions".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.regions".to_string(),
             name: "regions".to_string(),
             source_name: "raw".to_string(),
@@ -223,6 +228,7 @@ fn test_select_star_chain_with_join() {
     nodes.insert(
         "model.proj.stg_users".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_users".to_string(),
             name: "stg_users".to_string(),
             alias: None,
@@ -256,6 +262,7 @@ fn test_select_star_chain_with_join() {
     nodes.insert(
         "model.proj.stg_regions".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_regions".to_string(),
             name: "stg_regions".to_string(),
             alias: None,
@@ -290,6 +297,7 @@ fn test_select_star_chain_with_join() {
     nodes.insert(
         "model.proj.mart_users".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.mart_users".to_string(),
             name: "mart_users".to_string(),
             alias: None,
@@ -408,6 +416,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     sources.insert(
         "source.proj.raw.users".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.users".to_string(),
             name: "users".to_string(),
             source_name: "raw".to_string(),
@@ -437,6 +446,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     sources.insert(
         "source.proj.raw.regions".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.regions".to_string(),
             name: "regions".to_string(),
             source_name: "raw".to_string(),
@@ -466,6 +476,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     nodes.insert(
         "model.proj.stg_users".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_users".to_string(),
             name: "stg_users".to_string(),
             alias: None,
@@ -499,6 +510,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     nodes.insert(
         "model.proj.stg_regions".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_regions".to_string(),
             name: "stg_regions".to_string(),
             alias: None,
@@ -533,6 +545,7 @@ fn test_select_star_chain_with_cte_alias_and_join() {
     nodes.insert(
         "model.proj.mart_users".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.mart_users".to_string(),
             name: "mart_users".to_string(),
             alias: None,

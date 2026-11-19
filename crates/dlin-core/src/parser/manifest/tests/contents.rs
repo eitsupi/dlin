@@ -7,6 +7,7 @@ fn test_collect_file_paths() {
             (
                 "model.proj.stg_orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.stg_orders".to_string(),
                     name: "stg_orders".to_string(),
                     alias: None,
@@ -26,6 +27,7 @@ fn test_collect_file_paths() {
             (
                 "model.proj.orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
                     alias: None,
@@ -45,6 +47,7 @@ fn test_collect_file_paths() {
             (
                 "model.proj.bare".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.bare".to_string(),
                     name: "bare".to_string(),
                     alias: None,
@@ -65,6 +68,7 @@ fn test_collect_file_paths() {
         sources: HashMap::from([(
             "source.proj.raw.orders".to_string(),
             ManifestSource {
+                package_name: None,
                 unique_id: "source.proj.raw.orders".to_string(),
                 name: "orders".to_string(),
                 source_name: "raw".to_string(),
@@ -100,6 +104,7 @@ fn test_collect_file_paths_deduplicates() {
             (
                 "source.proj.raw.orders".to_string(),
                 ManifestSource {
+                    package_name: None,
                     unique_id: "source.proj.raw.orders".to_string(),
                     name: "orders".to_string(),
                     source_name: "raw".to_string(),
@@ -117,6 +122,7 @@ fn test_collect_file_paths_deduplicates() {
             (
                 "source.proj.raw.customers".to_string(),
                 ManifestSource {
+                    package_name: None,
                     unique_id: "source.proj.raw.customers".to_string(),
                     name: "customers".to_string(),
                     source_name: "raw".to_string(),
@@ -160,6 +166,7 @@ fn test_collect_sql_contents_from_manifest() {
             (
                 "model.proj.stg_orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.stg_orders".to_string(),
                     name: "stg_orders".to_string(),
                     alias: None,
@@ -179,6 +186,7 @@ fn test_collect_sql_contents_from_manifest() {
             (
                 "test.proj.not_null_orders_id.abc123".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "test.proj.not_null_orders_id.abc123".to_string(),
                     name: "not_null_orders_id".to_string(),
                     alias: None,
@@ -198,6 +206,7 @@ fn test_collect_sql_contents_from_manifest() {
             (
                 "model.proj.no_compile".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.no_compile".to_string(),
                     name: "no_compile".to_string(),
                     alias: None,

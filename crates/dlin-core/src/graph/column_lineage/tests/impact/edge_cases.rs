@@ -66,6 +66,7 @@ fn test_column_impact_propagates_model_level_errors_from_unreachable_downstream(
     manifest.nodes.insert(
         "model.proj.broken_downstream".to_string(),
         crate::parser::manifest::ManifestNode {
+            package_name: None,
             unique_id: "model.proj.broken_downstream".to_string(),
             name: "broken_downstream".to_string(),
             alias: None,

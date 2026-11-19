@@ -25,6 +25,7 @@ fn make_test_manifest() -> Manifest {
     nodes.insert(
         "model.proj.stg_orders".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_orders".to_string(),
             name: "stg_orders".to_string(),
             alias: None,
@@ -59,6 +60,7 @@ fn make_test_manifest() -> Manifest {
         );
     }
     nodes.insert("model.proj.orders".to_string(), ManifestNode {
+            package_name: None,
             unique_id: "model.proj.orders".to_string(),
             name: "orders".to_string(),
             alias: None,
@@ -92,6 +94,7 @@ fn make_test_manifest() -> Manifest {
     nodes.insert(
         "model.proj.stg_payments".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_payments".to_string(),
             name: "stg_payments".to_string(),
             alias: None,
@@ -127,6 +130,7 @@ fn make_test_manifest() -> Manifest {
     sources.insert(
         "source.proj.raw.orders".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.orders".to_string(),
             name: "orders".to_string(),
             source_name: "raw".to_string(),
@@ -168,6 +172,7 @@ fn make_cross_model_manifest() -> Manifest {
     sources.insert(
         "source.proj.raw.orders".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.orders".to_string(),
             name: "orders".to_string(),
             source_name: "raw".to_string(),
@@ -197,6 +202,7 @@ fn make_cross_model_manifest() -> Manifest {
     sources.insert(
         "source.proj.raw.payments".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.payments".to_string(),
             name: "payments".to_string(),
             source_name: "raw".to_string(),
@@ -226,6 +232,7 @@ fn make_cross_model_manifest() -> Manifest {
     nodes.insert(
         "model.proj.stg_orders".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_orders".to_string(),
             name: "stg_orders".to_string(),
             alias: None,
@@ -262,6 +269,7 @@ fn make_cross_model_manifest() -> Manifest {
     nodes.insert(
         "model.proj.stg_payments".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.stg_payments".to_string(),
             name: "stg_payments".to_string(),
             alias: None,
@@ -298,6 +306,7 @@ fn make_cross_model_manifest() -> Manifest {
     nodes.insert(
         "model.proj.orders".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.orders".to_string(),
             name: "orders".to_string(),
             alias: None,
@@ -344,6 +353,7 @@ fn make_cross_model_manifest() -> Manifest {
     nodes.insert(
         "model.proj.customers".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.customers".to_string(),
             name: "customers".to_string(),
             alias: None,
@@ -384,6 +394,7 @@ fn make_duplicate_name_manifest() -> Manifest {
     nodes.insert(
         "model.pkg_a.stg_orders".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.pkg_a.stg_orders".to_string(),
             name: "stg_orders".to_string(),
             alias: None,
@@ -415,6 +426,7 @@ fn make_duplicate_name_manifest() -> Manifest {
     nodes.insert(
         "model.pkg_a.customers".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.pkg_a.customers".to_string(),
             name: "customers".to_string(),
             alias: None,
@@ -448,6 +460,7 @@ fn make_duplicate_name_manifest() -> Manifest {
     nodes.insert(
         "model.pkg_b.customers".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.pkg_b.customers".to_string(),
             name: "customers".to_string(),
             alias: None,
@@ -551,6 +564,7 @@ fn make_diamond_manifest() -> Manifest {
     nodes.insert(
         "model.proj.raw_data".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.raw_data".to_string(),
             name: "raw_data".to_string(),
             alias: None,
@@ -582,6 +596,7 @@ fn make_diamond_manifest() -> Manifest {
     nodes.insert(
         "model.proj.shared".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.shared".to_string(),
             name: "shared".to_string(),
             alias: None,
@@ -613,6 +628,7 @@ fn make_diamond_manifest() -> Manifest {
     nodes.insert(
         "model.proj.left_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.left_model".to_string(),
             name: "left_model".to_string(),
             alias: None,
@@ -644,6 +660,7 @@ fn make_diamond_manifest() -> Manifest {
     nodes.insert(
         "model.proj.right_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.right_model".to_string(),
             name: "right_model".to_string(),
             alias: None,
@@ -677,6 +694,7 @@ fn make_diamond_manifest() -> Manifest {
     nodes.insert(
         "model.proj.diamond_out".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.diamond_out".to_string(),
             name: "diamond_out".to_string(),
             alias: None,
@@ -728,6 +746,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     sources.insert(
         "source.proj.raw.orders".to_string(),
         ManifestSource {
+            package_name: None,
             unique_id: "source.proj.raw.orders".to_string(),
             name: "orders".to_string(),
             source_name: "raw".to_string(),
@@ -757,6 +776,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     nodes.insert(
         "model.proj.scalar_funcs".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.scalar_funcs".to_string(),
             name: "scalar_funcs".to_string(),
             alias: None,
@@ -799,6 +819,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     nodes.insert(
         "model.proj.passthrough_upper".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.passthrough_upper".to_string(),
             name: "passthrough_upper".to_string(),
             alias: None,
@@ -840,6 +861,7 @@ pub(super) fn make_transformation_manifest() -> Manifest {
     nodes.insert(
         "model.proj.passthrough_coalesce".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.passthrough_coalesce".to_string(),
             name: "passthrough_coalesce".to_string(),
             alias: None,
@@ -898,6 +920,7 @@ pub(super) fn make_reconverging_manifest() -> Manifest {
     let mut nodes = HashMap::new();
 
     let make_node = |uid: &str, name: &str, deps: Vec<String>, sql: &str| ManifestNode {
+        package_name: None,
         unique_id: uid.to_string(),
         name: name.to_string(),
         alias: None,

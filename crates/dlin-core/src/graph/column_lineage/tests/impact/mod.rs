@@ -21,6 +21,7 @@ fn duplicate_column_impact_manifest() -> Manifest {
     let model =
         |unique_id: &str, name: &str, dependencies: &[&str], output_columns: &[&str], sql: &str| {
             ManifestNode {
+                package_name: None,
                 unique_id: unique_id.to_string(),
                 name: name.to_string(),
                 alias: None,
@@ -100,6 +101,7 @@ fn make_off_path_error_manifest() -> Manifest {
     nodes.insert(
         "model.proj.source_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.source_model".to_string(),
             name: "source_model".to_string(),
             alias: None,
@@ -129,6 +131,7 @@ fn make_off_path_error_manifest() -> Manifest {
     nodes.insert(
         "model.proj.relevant_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.relevant_model".to_string(),
             name: "relevant_model".to_string(),
             alias: None,
@@ -167,6 +170,7 @@ fn make_off_path_error_manifest() -> Manifest {
     nodes.insert(
         "model.proj.sibling_model".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.proj.sibling_model".to_string(),
             name: "sibling_model".to_string(),
             alias: None,

@@ -6,6 +6,7 @@ fn test_build_graph_from_minimal_manifest() {
         nodes: HashMap::from([(
             "model.proj.stg_orders".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.stg_orders".to_string(),
                 name: "stg_orders".to_string(),
                 alias: None,
@@ -33,6 +34,7 @@ fn test_build_graph_from_minimal_manifest() {
         sources: HashMap::from([(
             "source.proj.raw.orders".to_string(),
             ManifestSource {
+                package_name: None,
                 unique_id: "source.proj.raw.orders".to_string(),
                 name: "orders".to_string(),
                 source_name: "raw".to_string(),
@@ -85,6 +87,7 @@ fn test_build_graph_preserves_canonical_manifest_ids_and_ambiguous_aliases() {
         nodes.insert(
             orig_id.clone(),
             ManifestNode {
+                package_name: None,
                 unique_id: orig_id,
                 name: "orders".to_string(),
                 alias: None,
@@ -105,6 +108,7 @@ fn test_build_graph_preserves_canonical_manifest_ids_and_ambiguous_aliases() {
     nodes.insert(
         "model.consumer.reporting".to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: "model.consumer.reporting".to_string(),
             name: "reporting".to_string(),
             alias: None,
@@ -175,6 +179,7 @@ fn test_build_graph_with_exposures() {
         nodes: HashMap::from([(
             "model.proj.orders".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.orders".to_string(),
                 name: "orders".to_string(),
                 alias: None,
@@ -195,6 +200,7 @@ fn test_build_graph_with_exposures() {
         exposures: HashMap::from([(
             "exposure.proj.weekly_report".to_string(),
             ManifestExposure {
+                package_name: None,
                 unique_id: "exposure.proj.weekly_report".to_string(),
                 name: "weekly_report".to_string(),
                 depends_on: DependsOn {
@@ -278,6 +284,7 @@ fn test_exposure_metadata_parsed() {
         exposures: HashMap::from([(
             "exposure.proj.dashboard".to_string(),
             ManifestExposure {
+                package_name: None,
                 unique_id: "exposure.proj.dashboard".to_string(),
                 name: "dashboard".to_string(),
                 depends_on: DependsOn { nodes: vec![] },
@@ -345,6 +352,7 @@ fn test_build_graph_with_seeds_and_snapshots() {
             (
                 "seed.proj.countries".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "seed.proj.countries".to_string(),
                     name: "countries".to_string(),
                     alias: None,
@@ -364,6 +372,7 @@ fn test_build_graph_with_seeds_and_snapshots() {
             (
                 "snapshot.proj.snap_orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "snapshot.proj.snap_orders".to_string(),
                     name: "snap_orders".to_string(),
                     alias: None,
@@ -414,6 +423,7 @@ fn test_build_graph_with_tests() {
             (
                 "model.proj.orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
                     alias: None,
@@ -433,6 +443,7 @@ fn test_build_graph_with_tests() {
             (
                 "test.proj.assert_positive".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "test.proj.assert_positive".to_string(),
                     name: "assert_positive".to_string(),
                     alias: None,
@@ -493,6 +504,7 @@ fn test_build_graph_missing_dependency() {
         nodes: HashMap::from([(
             "model.proj.orders".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.orders".to_string(),
                 name: "orders".to_string(),
                 alias: None,
@@ -526,6 +538,7 @@ fn test_build_graph_optional_fields() {
         nodes: HashMap::from([(
             "model.proj.bare".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.bare".to_string(),
                 name: "bare".to_string(),
                 alias: None,
@@ -628,6 +641,7 @@ fn test_original_file_path_preferred_over_path() {
         nodes: HashMap::from([(
             "model.proj.stg_orders".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.stg_orders".to_string(),
                 name: "stg_orders".to_string(),
                 alias: None,
@@ -662,6 +676,7 @@ fn test_build_graph_unknown_resource_is_not_a_model() {
         nodes: HashMap::from([(
             "operation.proj.my_operation".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "operation.proj.my_operation".to_string(),
                 name: "my_operation".to_string(),
                 alias: None,
@@ -694,6 +709,7 @@ fn test_build_graph_complex_chain() {
             (
                 "model.proj.stg_orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.stg_orders".to_string(),
                     name: "stg_orders".to_string(),
                     alias: None,
@@ -721,6 +737,7 @@ fn test_build_graph_complex_chain() {
             (
                 "model.proj.stg_payments".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.stg_payments".to_string(),
                     name: "stg_payments".to_string(),
                     alias: None,
@@ -742,6 +759,7 @@ fn test_build_graph_complex_chain() {
             (
                 "model.proj.orders".to_string(),
                 ManifestNode {
+                    package_name: None,
                     unique_id: "model.proj.orders".to_string(),
                     name: "orders".to_string(),
                     alias: None,
@@ -774,6 +792,7 @@ fn test_build_graph_complex_chain() {
             (
                 "source.proj.raw.orders".to_string(),
                 ManifestSource {
+                    package_name: None,
                     unique_id: "source.proj.raw.orders".to_string(),
                     name: "orders".to_string(),
                     source_name: "raw".to_string(),
@@ -791,6 +810,7 @@ fn test_build_graph_complex_chain() {
             (
                 "source.proj.raw.payments".to_string(),
                 ManifestSource {
+                    package_name: None,
                     unique_id: "source.proj.raw.payments".to_string(),
                     name: "payments".to_string(),
                     source_name: "raw".to_string(),

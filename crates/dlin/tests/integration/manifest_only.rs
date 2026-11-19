@@ -49,6 +49,10 @@ fn minimal_manifest_dir(project_name: Option<&str>) -> tempfile::TempDir {
         metadata
     );
 
+    let manifest_json = manifest_json.replace(
+        ".test_project.",
+        &format!(".{}.", project_name.unwrap_or("test_project")),
+    );
     fs::write(tmp.path().join("target/manifest.json"), manifest_json).unwrap();
     tmp
 }

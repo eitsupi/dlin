@@ -240,7 +240,7 @@ fn strict_graph_rejects_future_schema_capability() {
 }
 
 #[test]
-fn strict_graph_rejects_unit_tests() {
+fn strict_graph_skips_valid_unit_tests() {
     let report = load_manifest_report_from_bytes(
         br#"{
             "metadata": {
@@ -255,8 +255,12 @@ fn strict_graph_rejects_unit_tests() {
         std::path::Path::new("manifest.json"),
     );
     let manifest = report.manifest.expect("permissive load succeeds");
-    let error = build_graph_from_parsed_manifest_strict(&manifest).unwrap_err();
-    insta::assert_snapshot!(error.to_string(), @r###"manifest resource 'unit_test.proj.check' uses unsupported resource type 'unit_test'"###);
+    assert_eq!(
+        build_graph_from_parsed_manifest_strict(&manifest)
+            .unwrap()
+            .node_count(),
+        0
+    );
 }
 
 #[test]

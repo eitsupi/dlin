@@ -6,6 +6,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
         nodes: HashMap::from([(
             "model.proj.orders".to_string(),
             ManifestNode {
+                package_name: None,
                 unique_id: "model.proj.orders".to_string(),
                 name: "orders".to_string(),
                 alias: None,
@@ -26,6 +27,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
         semantic_models: HashMap::from([(
             "semantic_model.proj.orders".to_string(),
             ManifestSemanticModel {
+                package_name: None,
                 unique_id: "semantic_model.proj.orders".to_string(),
                 name: "orders".to_string(),
                 label: None,
@@ -40,6 +42,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
         metrics: HashMap::from([(
             "metric.proj.order_count".to_string(),
             ManifestMetric {
+                package_name: None,
                 unique_id: "metric.proj.order_count".to_string(),
                 name: "order_count".to_string(),
                 label: None,
@@ -54,6 +57,7 @@ fn test_build_graph_with_semantic_layer_nodes() {
         saved_queries: HashMap::from([(
             "saved_query.proj.order_metrics".to_string(),
             ManifestSavedQuery {
+                package_name: None,
                 unique_id: "saved_query.proj.order_metrics".to_string(),
                 name: "order_metrics".to_string(),
                 label: None,

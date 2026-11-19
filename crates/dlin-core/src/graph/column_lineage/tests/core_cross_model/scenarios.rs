@@ -685,6 +685,7 @@ fn seed_is_an_external_relation_under_the_fixed_policy() {
     let seed_id = "seed.proj.seed_orders";
     let model_id = "model.proj.seed_reader";
     let seed = ManifestNode {
+        package_name: None,
         unique_id: seed_id.to_string(),
         name: "seed_orders".to_string(),
         alias: None,
@@ -701,6 +702,7 @@ fn seed_is_an_external_relation_under_the_fixed_policy() {
         relation_name: None,
     };
     let reader = ManifestNode {
+        package_name: None,
         unique_id: model_id.to_string(),
         name: "seed_reader".to_string(),
         alias: None,
@@ -743,6 +745,7 @@ fn source_free_output_has_a_source_free_boundary_without_a_fake_source() {
     manifest.nodes.insert(
         unique_id.to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: "constant_model".to_string(),
             alias: None,
@@ -763,6 +766,7 @@ fn source_free_output_has_a_source_free_boundary_without_a_fake_source() {
     manifest.nodes.insert(
         downstream_id.to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: downstream_id.to_string(),
             name: "constant_downstream".to_string(),
             alias: None,
@@ -844,6 +848,7 @@ fn analysis_failure_two_hops_away_is_partial_without_a_fake_source() {
     manifest.nodes.insert(
         downstream_id.to_string(),
         ManifestNode {
+            package_name: None,
             unique_id: downstream_id.to_string(),
             name: "orders_downstream".to_string(),
             alias: None,
@@ -981,6 +986,7 @@ fn ambiguous_short_model_name_is_not_resolved_to_the_first_match() {
 fn model_cycle_is_kept_as_an_incomplete_boundary() {
     fn node(unique_id: &str, name: &str, dependency: &str, sql: &str) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -1034,6 +1040,7 @@ fn model_cycle_is_kept_as_an_incomplete_boundary() {
 fn model_level_cycle_does_not_cut_an_acyclic_slot_path() {
     fn node(unique_id: &str, name: &str, dependencies: &[&str], sql: &str) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,
@@ -1099,6 +1106,7 @@ fn model_level_cycle_does_not_cut_an_acyclic_slot_path() {
 fn diamond_can_visit_the_same_slot_in_separate_branches() {
     fn node(unique_id: &str, name: &str, dependencies: &[&str], sql: &str) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,

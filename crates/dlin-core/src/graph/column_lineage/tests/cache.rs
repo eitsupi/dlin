@@ -459,6 +459,7 @@ fn test_semantic_digest_ignores_unrelated_manifest_changes() {
     changed.exposures.insert(
         "exposure.proj.unrelated".to_string(),
         crate::parser::manifest::ManifestExposure {
+            package_name: None,
             unique_id: "exposure.proj.unrelated".to_string(),
             name: "unrelated".to_string(),
             depends_on: Default::default(),
@@ -502,6 +503,7 @@ fn test_unrelated_manifest_change_reuses_cached_lineage() {
     changed.exposures.insert(
         "exposure.proj.unrelated".to_string(),
         crate::parser::manifest::ManifestExposure {
+            package_name: None,
             unique_id: "exposure.proj.unrelated".to_string(),
             name: "unrelated".to_string(),
             depends_on: Default::default(),
@@ -639,6 +641,7 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
     // dependency digest is unsafe.
     let mut external_manifest = changed_manifest;
     let external = crate::parser::manifest::ManifestNode {
+        package_name: None,
         unique_id: "model.proj.report".to_string(),
         name: "report".to_string(),
         alias: None,

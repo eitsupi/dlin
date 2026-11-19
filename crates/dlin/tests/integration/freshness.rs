@@ -357,3 +357,80 @@ fn test_root_freshness_input_is_not_duplicated_when_discovered() {
     assert_eq!(summary_status["stale_file_count"], 1);
     assert_eq!(stale_files(&summary_status)[0], "dbt_project.yml");
 }
+
+#[test]
+fn package_paths_are_verified_independently_and_missing_packages_are_unverified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::create_dir_all(root.join("vendor/elementary/models")).unwrap();
+    fs::write(
+        root.join("dbt_project.yml"),
+        "name: sample\npackages-install-path: vendor\n",
+    )
+    .unwrap();
+    fs::write(root.join("models/shared.sql"), "select 1").unwrap();
+    let model = |package: &str, name: &str| {
+        serde_json::json!({
+            "unique_id":format!("model.{package}.{name}"), "package_name":package,
+            "name":name,"resource_type":"model","original_file_path":format!("models/{name}.sql")
+        })
+    };
+    let mut nodes = serde_json::Map::new();
+    nodes.insert("model.sample.shared".into(), model("sample", "shared"));
+    nodes.insert(
+        "model.elementary.shared".into(),
+        model("elementary", "shared"),
+    );
+    nodes.insert("model.missing.shared".into(), model("missing", "shared"));
+    let artifact = root.join("target/manifest.json");
+    for i in 0..29 {
+        let name = format!("model_{i}");
+        nodes.insert(
+            format!("model.elementary.{name}"),
+            model("elementary", &name),
+        );
+        fs::write(
+            root.join(format!("vendor/elementary/models/{name}.sql")),
+            "select 1",
+        )
+        .unwrap();
+    }
+    let shared = root.join("vendor/elementary/models/shared.sql");
+    fs::write(&shared, "select 1").unwrap();
+    fs::write(
+        &artifact,
+        serde_json::json!({
+            "metadata":{"project_name":"sample","adapter_type":"duckdb"},"nodes":nodes,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    set_mtime_newer_than_fixture(&artifact, root);
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["verification"], "partially_verified");
+    assert_eq!(check["is_stale"], false);
+    assert_eq!(check["deleted_file_count"], 0);
+    assert_eq!(check["unverified"][0]["package"], "missing");
+    let summary = run_manifest_summary(&tmp);
+    assert_eq!(summary["unverified"], check["unverified"]);
+    assert_eq!(
+        run_manifest_summary(&tmp),
+        summary,
+        "warm cache retains package ownership"
+    );
+
+    fs::remove_file(shared).unwrap();
+    let check = run_check_manifest(&tmp);
+    assert_eq!(check["is_stale"], true);
+    assert_eq!(
+        check["deleted_files"],
+        serde_json::json!(["vendor/elementary/models/shared.sql"])
+    );
+    assert_eq!(check["unverified"][0]["package"], "missing");
+    assert_eq!(
+        run_manifest_summary(&tmp)["deleted_files"],
+        check["deleted_files"]
+    );
+}

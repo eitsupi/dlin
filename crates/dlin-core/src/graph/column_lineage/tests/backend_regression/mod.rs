@@ -60,6 +60,7 @@ fn make_node(
     compiled_code: Option<&str>,
 ) -> ManifestNode {
     ManifestNode {
+        package_name: None,
         unique_id: format!("model.proj.{name}"),
         name: name.to_string(),
         alias: None,

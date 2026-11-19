@@ -545,13 +545,13 @@ fn test_known_macro_map_is_not_classified_as_graph_resource() {
             && diagnostic.raw_resource.as_deref() == Some("function.proj.helper")
             && diagnostic.raw_type.as_deref() == Some("function")
     }));
+    assert!(
+        !report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.raw_resource.as_deref() == Some("unit_test.proj.check")
+        })
+    );
     assert!(report.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType
-            && diagnostic.raw_resource.as_deref() == Some("unit_test.proj.check")
-            && diagnostic.raw_type.as_deref() == Some("unit_test")
-    }));
-    assert!(!report.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == ManifestDiagnosticKind::UnsupportedResourceType
+        diagnostic.kind == ManifestDiagnosticKind::InvalidUnitTest
             && diagnostic.raw_resource.as_deref() == Some("unit_test.proj.known")
     }));
     assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -559,4 +559,33 @@ fn test_known_macro_map_is_not_classified_as_graph_resource() {
             && diagnostic.raw_resource.as_deref() == Some("future.proj.item")
             && diagnostic.raw_type.as_deref() == Some("future_resource")
     }));
+}
+
+#[test]
+fn strict_load_skips_valid_unit_tests_and_rejects_invalid_identities() {
+    let path = Path::new("manifest.json");
+    let valid = br#"{"nodes":{},"unit_tests":{"unit_test.proj.check":{
+        "name":"check","resource_type":"unit_test","unique_id":"unit_test.proj.check",
+        "model":"orders","given":[{"input":"ref('raw_orders')","rows":[]}],
+        "expect":{"rows":[]}
+    }}}"#;
+    let manifest = load_manifest_report_from_bytes(valid, path)
+        .into_manifest_strict()
+        .unwrap();
+    assert_eq!(manifest.skipped_unit_test_count(), 1);
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!({"resource_type":"model"}),
+        serde_json::json!({"unique_id":"unit_test.proj.other"}),
+    ] {
+        let artifact = serde_json::json!({"nodes":{},"unit_tests":{"unit_test.proj.check":value}});
+        let report = load_manifest_report_from_bytes(artifact.to_string().as_bytes(), path);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diag| diag.kind == ManifestDiagnosticKind::InvalidUnitTest)
+        );
+        assert!(report.into_manifest_strict().is_err());
+    }
 }

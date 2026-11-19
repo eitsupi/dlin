@@ -1288,6 +1288,7 @@ mod impact_relevance_tests {
 
     fn model_node(unique_id: &str, name: &str, dependencies: &[&str]) -> ManifestNode {
         ManifestNode {
+            package_name: None,
             unique_id: unique_id.to_string(),
             name: name.to_string(),
             alias: None,

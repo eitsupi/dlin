@@ -86,7 +86,6 @@ fn inspect_resource_values(
 ) {
     let default_type = match map_name {
         "functions" => Some("function"),
-        "unit_tests" => Some("unit_test"),
         _ => None,
     };
     let resources = observations
@@ -321,7 +320,6 @@ impl<'de> Visitor<'de> for ManifestVisitor<'_> {
                     observations
                         .resource_maps
                         .insert(key.clone(), map_presence(manifest.unit_tests.len()));
-                    inspect_resource_values(&key, &manifest.unit_tests, observations);
                 }
                 "functions" => {
                     manifest.functions = map.next_value::<HashMap<_, _>>()?;
