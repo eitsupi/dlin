@@ -54,27 +54,43 @@ fn lineage(sql: &str, catalog: &'static [(&'static str, &'static [&'static str])
     analysis.output.columns.into_iter().next().unwrap().lineage
 }
 
-fn assert_ambiguous(
+/// Assert that `id` is read from `from` as one unverified name: `present`
+/// are known to publish it and `possible` may, so the columns that are not
+/// known decide which one the query reads.
+fn assert_unverified(
     with: &str,
     from: &str,
     catalog: &'static [(&'static str, &'static [&'static str])],
-    expected: &[Candidate],
+    present: &[Candidate],
+    possible: &[Candidate],
 ) {
     for sql in readings(with, from) {
         let Lineage::Partial { known, unresolved } = lineage(&sql, catalog) else {
-            panic!("{sql}: expected an ambiguity");
+            panic!("{sql}: expected an unverified name");
         };
         assert!(known.is_empty(), "{sql}: {known:?}");
-        let [Unresolved::Ambiguous { candidates, .. }] = unresolved.as_slice() else {
-            panic!("{sql}: expected one ambiguity, got {unresolved:?}");
+        let [
+            Unresolved::Unverified {
+                present_candidates,
+                possible_candidates,
+                ..
+            },
+        ] = unresolved.as_slice()
+        else {
+            panic!("{sql}: expected one unverified name, got {unresolved:?}");
         };
-        assert_eq!(candidates.len(), expected.len(), "{sql}: {candidates:?}");
-        for candidate in expected {
-            assert!(
-                candidates.contains(candidate),
-                "{sql}: missing {candidate:?} in {candidates:?}"
-            );
-        }
+        assert_same_candidates(&sql, present_candidates, present);
+        assert_same_candidates(&sql, possible_candidates, possible);
+    }
+}
+
+fn assert_same_candidates(sql: &str, actual: &[Candidate], expected: &[Candidate]) {
+    assert_eq!(actual.len(), expected.len(), "{sql}: {actual:?}");
+    for candidate in expected {
+        assert!(
+            actual.contains(candidate),
+            "{sql}: missing {candidate:?} in {actual:?}"
+        );
     }
 }
 
@@ -98,17 +114,19 @@ fn assert_complete(
 /// only `a` and `b`, so `c` may have it.
 #[test]
 fn a_using_key_competes_with_a_relation_of_unknown_shape() {
-    assert_ambiguous(
+    assert_unverified(
         "",
         "a JOIN b USING (id) CROSS JOIN c",
         &[("a", &["id", "x"]), ("b", &["id", "y"])],
-        &[physical("a"), physical("b"), physical("c")],
+        &[physical("a"), physical("b")],
+        &[physical("c")],
     );
-    assert_ambiguous(
+    assert_unverified(
         "",
         "a JOIN b USING (id) CROSS JOIN c",
         &[],
-        &[physical("a"), physical("b"), physical("c")],
+        &[physical("a"), physical("b")],
+        &[physical("c")],
     );
 }
 
@@ -128,11 +146,12 @@ fn a_using_key_is_unique_when_the_catalog_rules_the_other_relation_out() {
 /// `id` as well.
 #[test]
 fn a_cte_column_competes_with_a_table_of_unknown_shape() {
-    assert_ambiguous(
+    assert_unverified(
         "WITH c AS (SELECT x AS id FROM s) ",
         "c JOIN t ON TRUE",
         &[],
-        &[Candidate::Cte(Ident::unquoted("c")), physical("t")],
+        &[Candidate::Cte(Ident::unquoted("c"))],
+        &[physical("t")],
     );
     // With `t` described and lacking `id`, the CTE alone provides it.
     assert_complete(
@@ -146,21 +165,25 @@ fn a_cte_column_competes_with_a_table_of_unknown_shape() {
 /// A derived table over an unknown star competes the same way.
 #[test]
 fn a_derived_table_column_competes_with_a_table_of_unknown_shape() {
-    assert_ambiguous(
+    assert_unverified(
         "",
         "(SELECT x AS id FROM s) d JOIN t ON TRUE",
         &[],
-        &[
-            Candidate::Derived(Some(Ident::unquoted("d"))),
-            physical("t"),
-        ],
+        &[Candidate::Derived(Some(Ident::unquoted("d")))],
+        &[physical("t")],
     );
 }
 
 /// Two relations of unknown shape may both have the column.
 #[test]
 fn two_relations_of_unknown_shape_are_both_providers() {
-    assert_ambiguous("", "a JOIN b ON TRUE", &[], &[physical("a"), physical("b")]);
+    assert_unverified(
+        "",
+        "a JOIN b ON TRUE",
+        &[],
+        &[],
+        &[physical("a"), physical("b")],
+    );
     // One of them described without the column leaves the other.
     let readings = readings("", "a JOIN b ON TRUE");
     let catalog: &[(&str, &[&str])] = &[("b", &["k"])];
@@ -182,18 +205,18 @@ fn two_relations_of_unknown_shape_are_both_providers() {
 }
 
 /// A column the projection lists and a star that may publish the same name are
-/// two providers of that name.
+/// two providers of that name: the derived table publishes it, and `t` may.
 #[test]
 fn a_listed_column_and_an_unknown_star_both_publish_the_name() {
     let from = "(SELECT x AS id, * FROM t) d";
     for sql in readings("", from) {
-        assert!(
-            matches!(lineage(&sql, &[]), Lineage::Partial { known, unresolved }
-                if known.is_empty()
-                    && matches!(&unresolved[..], [Unresolved::Ambiguous { column, .. }]
-                        if column.value == "id")),
+        let (present, possible) = unverified_of(&sql, lineage(&sql, &[]));
+        assert_eq!(
+            present,
+            [Candidate::Derived(Some(Ident::unquoted("d")))],
             "{sql}"
         );
+        assert_eq!(possible, [physical("t")], "{sql}");
     }
 }
 
@@ -263,19 +286,16 @@ fn a_replaced_or_renamed_column_over_a_cte_star_is_a_provider_of_its_own() {
                 assert_eq!(lineage_in(&sql, dialect, catalog), expected, "{sql}");
             }
         }
-        // Beside a relation that may have the name too.
+        // Beside a relation that may have the name too: the derived table
+        // publishes it and `e` may.
         for sql in kept_readings(with, &format!("{derived} CROSS JOIN e")) {
-            let Lineage::Partial { known, unresolved } = lineage_in(&sql, dialect, NO_CATALOG)
-            else {
-                panic!("{sql}: expected an ambiguity");
-            };
-            assert!(known.is_empty(), "{sql}");
-            let [Unresolved::Ambiguous { candidates, .. }] = unresolved.as_slice() else {
-                panic!("{sql}: expected one ambiguity, got {unresolved:?}");
-            };
-            assert_eq!(candidates.len(), 2, "{sql}: {candidates:?}");
-            assert!(candidates.contains(&Candidate::Derived(Some(Ident::unquoted("d")))));
-            assert!(candidates.contains(&physical("e")));
+            let (present, possible) = unverified_of(&sql, lineage_in(&sql, dialect, NO_CATALOG));
+            assert_eq!(
+                present,
+                [Candidate::Derived(Some(Ident::unquoted("d")))],
+                "{sql}"
+            );
+            assert_eq!(possible, [physical("e")], "{sql}");
         }
     }
 }
@@ -288,26 +308,30 @@ fn a_plain_cte_star_beside_an_unknown_relation_stays_ambiguous() {
         "WITH c AS (SELECT * FROM t) ",
         "(SELECT * FROM c) AS d CROSS JOIN e",
     ) {
-        assert!(
-            matches!(lineage(&sql, &[]), Lineage::Partial { known, unresolved }
-                if known.is_empty()
-                    && matches!(&unresolved[..], [Unresolved::Ambiguous { candidates, .. }]
-                        if candidates.len() == 2)),
-            "{sql}"
-        );
+        let (present, possible) = unverified_of(&sql, lineage(&sql, &[]));
+        assert!(present.is_empty(), "{sql}: {present:?}");
+        assert_eq!(possible.len(), 2, "{sql}: {possible:?}");
     }
 }
 
-/// The candidates of the one ambiguity `lineage` consists of.
-fn ambiguity_of(sql: &str, lineage: Lineage) -> Vec<Candidate> {
+/// The candidates of the one unverified name `lineage` consists of: those
+/// known to publish it, then those that may.
+fn unverified_of(sql: &str, lineage: Lineage) -> (Vec<Candidate>, Vec<Candidate>) {
     let Lineage::Partial { known, unresolved } = lineage else {
-        panic!("{sql}: expected an ambiguity");
+        panic!("{sql}: expected an unverified name");
     };
     assert!(known.is_empty(), "{sql}: {known:?}");
-    let [Unresolved::Ambiguous { candidates, .. }] = unresolved.as_slice() else {
-        panic!("{sql}: expected one ambiguity, got {unresolved:?}");
+    let [
+        Unresolved::Unverified {
+            present_candidates,
+            possible_candidates,
+            ..
+        },
+    ] = unresolved.as_slice()
+    else {
+        panic!("{sql}: expected one unverified name, got {unresolved:?}");
     };
-    candidates.clone()
+    (present_candidates.clone(), possible_candidates.clone())
 }
 
 /// A REPLACE defines the column in the derived table that holds the star, so
@@ -338,12 +362,17 @@ fn a_replaced_column_does_not_inherit_the_ambiguity_of_the_scope_it_replaces_in(
             }
         }
         // Beside a relation that may have the name too, the derived table is
-        // one of two providers, not the relations behind it.
+        // one of two providers, not the relations behind it: it publishes the
+        // name and `e` may.
         for sql in kept_readings(with, &format!("{derived} CROSS JOIN e")) {
-            let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::DuckDb, NO_CATALOG));
-            assert_eq!(candidates.len(), 2, "{sql}: {candidates:?}");
-            assert!(candidates.contains(&Candidate::Derived(Some(Ident::unquoted("d")))));
-            assert!(candidates.contains(&physical("e")));
+            let (present, possible) =
+                unverified_of(&sql, lineage_in(&sql, Dialect::DuckDb, NO_CATALOG));
+            assert_eq!(
+                present,
+                [Candidate::Derived(Some(Ident::unquoted("d")))],
+                "{sql}"
+            );
+            assert_eq!(possible, [physical("e")], "{sql}");
         }
     }
 }
@@ -389,12 +418,10 @@ fn a_renamed_column_keeps_the_providers_of_its_old_name_when_the_new_name_is_exc
     // `id` may come from either star, while `kept` is excluded from `b`.
     let with = "WITH c AS (SELECT a.*, b.* EXCLUDE (kept) FROM a, b) ";
     let direct = format!("{with}SELECT id FROM c");
-    let expected = ambiguity_of(&direct, lineage_in(&direct, Dialect::Snowflake, &[]));
-    assert_eq!(expected.len(), 2, "{expected:?}");
-    assert!(expected.contains(&physical("a")));
-    assert!(expected.contains(&physical("b")));
+    let expected = unverified_of(&direct, lineage_in(&direct, Dialect::Snowflake, &[]));
+    assert_eq!(expected, (vec![], vec![physical("a"), physical("b")]));
     for sql in kept_readings(with, "(SELECT * RENAME (id AS kept) FROM c) AS d") {
-        let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::Snowflake, &[]));
+        let candidates = unverified_of(&sql, lineage_in(&sql, Dialect::Snowflake, &[]));
         assert_eq!(candidates, expected, "{sql}");
     }
 }
@@ -412,12 +439,12 @@ fn a_renamed_listed_column_competes_with_another_relation_that_may_publish_the_o
         ("WITH c AS (SELECT a.id, b.* FROM a, b) ", "c", NO_CATALOG),
     ] {
         let direct = format!("{with}SELECT id FROM (SELECT * FROM {from}) AS d");
-        let expected = ambiguity_of(&direct, lineage_in(&direct, Dialect::Snowflake, catalog));
+        let expected = unverified_of(&direct, lineage_in(&direct, Dialect::Snowflake, catalog));
         for sql in kept_readings(
             with,
             &format!("(SELECT * RENAME (id AS kept) FROM {from}) AS d"),
         ) {
-            let candidates = ambiguity_of(&sql, lineage_in(&sql, Dialect::Snowflake, catalog));
+            let candidates = unverified_of(&sql, lineage_in(&sql, Dialect::Snowflake, catalog));
             assert_eq!(candidates, expected, "{sql}");
         }
     }
@@ -443,7 +470,7 @@ fn a_renamed_listed_column_keeps_the_reason_of_an_unmodelled_competitor() {
     assert!(
         unresolved
             .iter()
-            .any(|reason| matches!(reason, Unresolved::Ambiguous { .. })),
+            .any(|reason| matches!(reason, Unresolved::Unverified { .. })),
         "{sql}: {unresolved:?}"
     );
     assert!(

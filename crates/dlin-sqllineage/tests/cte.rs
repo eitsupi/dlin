@@ -460,14 +460,15 @@ fn cte_join_unqualified_column_is_ambiguous_with_an_unknown_table() {
         SELECT a FROM cte JOIN t2 ON cte.id = t2.id";
     let result = analyze_one(sql);
     let m = find_mapping(&result.output.columns, "a");
-    // t2 may have an "a" of its own, which SQL would reject as ambiguous
+    // t2 may have an "a" of its own, which SQL would reject as ambiguous, so
+    // the CTE is not chosen while t2's columns are unknown.
     let Lineage::Partial { known, unresolved } = &m.lineage else {
         panic!("expected partial lineage, got {:?}", m.lineage);
     };
     assert!(known.is_empty());
     assert!(matches!(&unresolved[..],
-        [Unresolved::Ambiguous { column, candidates }]
-            if column.value == "a" && candidates.len() == 2));
+        [Unresolved::Unverified { column, present_candidates, possible_candidates }]
+            if column.value == "a" && present_candidates.len() == 1 && possible_candidates.len() == 1));
 }
 
 #[test]

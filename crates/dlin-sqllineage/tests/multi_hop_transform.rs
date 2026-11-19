@@ -209,8 +209,8 @@ fn an_ambiguous_unqualified_aggregate_keeps_its_transform() {
             assert!(
                 matches!(&m.lineage, Lineage::Partial { known, unresolved }
                     if known.is_empty()
-                        && matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-                            if column.value == "s" && candidates.len() == 2)),
+                        && matches!(&unresolved[..], [Unresolved::Unverified { column, present_candidates, possible_candidates }]
+                            if column.value == "s" && present_candidates.len() == 1 && possible_candidates.len() == 1)),
                 "{dialect:?}: {sql}: {:?}",
                 m.lineage
             );

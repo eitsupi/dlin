@@ -84,8 +84,8 @@ fn nested_join_star_does_not_open_a_closed_root_projection() {
     assert!(
         matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved }
         if known.is_empty()
-            && matches!(&unresolved[..], [Unresolved::Ambiguous { column, candidates }]
-                if column.value == "id" && candidates.len() == 2))
+            && matches!(&unresolved[..], [Unresolved::Unverified { column, possible_candidates, .. }]
+                if column.value == "id" && possible_candidates.len() == 2))
     );
 }
 

@@ -74,7 +74,7 @@ fn sources<'a>(result: &'a ModelColumnLineage, column: &str) -> Vec<(&'a str, &'
 }
 
 fn knowledge(manifest: &Manifest, model: &str) -> std::sync::Arc<NodeSchemaKnowledge> {
-    SchemaContext::new(manifest, DIALECT)
+    SchemaContext::new(manifest, None, DIALECT)
         .knowledge_of(&model_id(model))
         .expect("known model")
 }
@@ -187,7 +187,7 @@ fn yaml_extra_column_is_not_provided_downstream() {
     assert!(down.errors.is_empty(), "errors: {:?}", down.errors);
     assert_eq!(down.names(), ["z", "a"]);
 
-    let catalog = SchemaContext::new(&manifest, DIALECT)
+    let catalog = SchemaContext::new(&manifest, None, DIALECT)
         .catalog_for(manifest.nodes.get(&model_id("down")).unwrap())
         .unwrap();
     assert_eq!(catalog.table_columns("up"), Some(vec!["z", "a"]));
@@ -432,7 +432,7 @@ fn dependency_cycle_terminates_and_does_not_depend_on_the_query_order() {
 #[test]
 fn dependency_cycle_back_edge_gets_no_entry_even_when_yaml_declares_columns() {
     let manifest = cycle_manifest();
-    let mut context = SchemaContext::new(&manifest, DIALECT);
+    let mut context = SchemaContext::new(&manifest, None, DIALECT);
 
     // `a` reads `c`, which reads `b`, which reads `a` again. The edge back to
     // `a` is cut instead of being answered from the YAML of `a`, so `b` and
@@ -446,7 +446,7 @@ fn dependency_cycle_back_edge_gets_no_entry_even_when_yaml_declares_columns() {
 #[test]
 fn memoized_knowledge_is_shared_between_sibling_queries() {
     let manifest = order_manifest(&[]);
-    let mut context = SchemaContext::new(&manifest, DIALECT);
+    let mut context = SchemaContext::new(&manifest, None, DIALECT);
 
     let first = context.knowledge_of(&model_id("first")).unwrap();
     let again = context.knowledge_of(&model_id("first")).unwrap();

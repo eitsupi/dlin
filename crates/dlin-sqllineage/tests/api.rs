@@ -181,8 +181,9 @@ fn nested_star_does_not_open_final_output() {
                 if known.is_empty()
                     && matches!(
                         unresolved.as_slice(),
-                        [Unresolved::Ambiguous { column, candidates }]
+                        [Unresolved::Unverified { column, present_candidates, possible_candidates: candidates }]
                             if column.value == "id"
+                                && present_candidates.is_empty()
                                 && candidates.len() == 2
                                 && candidates.contains(&Candidate::Relation(Relation {
                                     catalog: None,
@@ -207,13 +208,13 @@ fn nested_star_does_not_open_final_output() {
 fn partial_known_unbound_and_ambiguous_sources_are_retained() {
     let result = one("SELECT a.x + missing AS mixed FROM a JOIN b ON 1=1");
     assert!(
-        matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved } if known.len() == 1 && matches!(&unresolved[0], Unresolved::Ambiguous { column, .. } if column.value == "missing")),
+        matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved } if known.len() == 1 && matches!(&unresolved[0], Unresolved::Unverified { column, .. } if column.value == "missing")),
         "{:?}",
         result.output.columns[0].lineage
     );
     let result = one("SELECT x FROM a JOIN b ON 1=1");
     assert!(
-        matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved } if known.is_empty() && matches!(&unresolved[0], Unresolved::Ambiguous { candidates, .. } if candidates.len() == 2))
+        matches!(&result.output.columns[0].lineage, Lineage::Partial { known, unresolved } if known.is_empty() && matches!(&unresolved[0], Unresolved::Unverified { possible_candidates, .. } if possible_candidates.len() == 2))
     );
 }
 
@@ -496,7 +497,7 @@ fn ambiguous_sources_and_known_sources_have_stable_order() {
         panic!("expected ambiguous lineage")
     };
     assert!(
-        matches!(&unresolved[0], Unresolved::Ambiguous { candidates, .. } if matches!(&candidates[0], Candidate::Relation(r) if r.name.value == "a"))
+        matches!(&unresolved[0], Unresolved::Unverified { possible_candidates: candidates, .. } if matches!(&candidates[0], Candidate::Relation(r) if r.name.value == "a"))
     );
 }
 

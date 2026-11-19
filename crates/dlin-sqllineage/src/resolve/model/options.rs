@@ -180,6 +180,7 @@ pub(super) fn apply_options(
                     Box::new(ValueId::Uncertain {
                         column: new.clone(),
                         candidates: candidates.clone(),
+                        present: listed,
                     }),
                     Box::new(ValueId::UnsupportedReasons {
                         providers,

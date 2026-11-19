@@ -222,7 +222,7 @@ fn aliases_over_an_unknown_interval_keep_alias_and_original_names_unresolved() {
                     if known.is_empty()
                         && !unresolved.is_empty()
                         && unresolved.iter().all(|reason| matches!(reason,
-                            Unresolved::Ambiguous { .. }
+                            Unresolved::Unverified { .. }
                                 | Unresolved::Unsupported { what: "column alias position unknown" }
                         ))
             ),

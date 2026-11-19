@@ -136,8 +136,8 @@ fn reading_names_after_an_unknown_segment_competes_with_the_star() {
         expect(
             &format!("WITH c AS (SELECT *, t.x AS y, t.z AS w FROM t) SELECT w, y FROM {from}"),
             &[
-                "w#0 P[ | Ambiguous(w: t)]",
-                "y#1 P[ | Ambiguous(y: t)]",
+                "w#0 P[ | Unverified(w: cte c | t)]",
+                "y#1 P[ | Unverified(y: cte c | t)]",
                 "Closed",
             ],
         );

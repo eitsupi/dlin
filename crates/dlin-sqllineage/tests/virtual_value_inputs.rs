@@ -175,9 +175,11 @@ fn virtual_column_competes_with_an_unknown_physical_provider() {
         mapping.lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            // The expansion lists `x`; `t` may have one too.
+            unresolved: vec![Unresolved::Unverified {
                 column: Ident::unquoted("x"),
-                candidates: vec![Candidate::Relation(table("t"))],
+                present_candidates: vec![],
+                possible_candidates: vec![Candidate::Relation(table("t"))],
             }],
         }
     );

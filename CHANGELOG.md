@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Column-level lineage
+
+- CLI column commands now exit with status 0 when a column's providers cannot be verified because a candidate relation's columns are unknown, provided there are no other fatal diagnostics. Multiple confirmed providers still produce a fatal ambiguity.
+- Column lineage uses the CSV header for seeds in the current project when the manifest declares no columns for them.
+
 ## [0.3.0-alpha.1] - 2026-11-19
 
 ### Highlights

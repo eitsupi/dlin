@@ -92,6 +92,32 @@ fn assert_ambiguous(result: &StatementAnalysis, expected: &[Candidate]) {
     assert_eq!(candidates, expected);
 }
 
+/// The only unresolved item of the first output is an unverified `x`: the
+/// candidates known to publish it are `present`, those that may are
+/// `possible`, each sorted the same way as the candidates of an ambiguity.
+fn assert_unverified(result: &StatementAnalysis, present: &[Candidate], possible: &[Candidate]) {
+    let Lineage::Partial { known, unresolved } = &result.output.columns[0].lineage else {
+        panic!(
+            "expected partial lineage, got {:?}",
+            result.output.columns[0]
+        );
+    };
+    assert!(known.is_empty());
+    let [
+        Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        },
+    ] = &unresolved[..]
+    else {
+        panic!("expected one unverified column, got {unresolved:?}");
+    };
+    assert_eq!(column.value, "x");
+    assert_eq!(present_candidates, present);
+    assert_eq!(possible_candidates, possible);
+}
+
 /// The first output is complete and its sources are exactly `expected`, sorted
 /// by relation and column rather than in FROM order.
 fn assert_complete_sources(result: &StatementAnalysis, expected: &[(&str, &str)]) {
@@ -182,7 +208,11 @@ fn ambiguous_candidates_are_sorted_rather_than_in_from_clause_order() {
             "SELECT x FROM t2 JOIN t3 ON t2.id = t3.id JOIN t1 ON t2.id = t1.id",
             dialect,
         );
-        assert_ambiguous(&result, &[relation("t1"), relation("t2"), relation("t3")]);
+        assert_unverified(
+            &result,
+            &[],
+            &[relation("t1"), relation("t2"), relation("t3")],
+        );
     }
 }
 
@@ -251,12 +281,10 @@ fn single_cte_provider_is_ambiguous_with_a_table_of_unknown_shape() {
         "WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t2 ON a.id = t2.id",
         Dialect::Generic,
     );
-    assert_ambiguous(
+    assert_unverified(
         &result,
-        &[
-            Candidate::Relation(table("t2")),
-            Candidate::Cte(Ident::unquoted("a")),
-        ],
+        &[Candidate::Cte(Ident::unquoted("a"))],
+        &[Candidate::Relation(table("t2"))],
     );
 }
 

@@ -158,7 +158,7 @@ fn a_partial_schema_leaves_an_ambiguity_that_relies_on_both_schemas() {
     };
     assert!(matches!(
         unresolved.as_slice(),
-        [Unresolved::Ambiguous { .. }]
+        [Unresolved::Unverified { .. }]
     ));
     assert_eq!(x.evidence.unresolved.len(), 1);
     assert_eq!(x.evidence.unresolved[0].evidence, evs(&["a", "b"]));

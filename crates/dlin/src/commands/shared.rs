@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::cli::{DialectArg, SourceType};
 use dlin_core::graph;
-use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect};
+use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, SeedSchemas};
 use dlin_core::parser;
 
 #[cfg(not(tarpaulin_include))]
@@ -322,4 +322,20 @@ pub(crate) fn resolve_dialect(
             }
         },
     }
+}
+
+pub(crate) fn read_seed_schemas(
+    project_dir: &Path,
+    manifest: &parser::manifest::Manifest,
+) -> SeedSchemas {
+    let (seeds, warnings) = SeedSchemas::read(project_dir, manifest);
+    for warning in warnings {
+        dlin_core::warn!(
+            "could not determine columns for seed '{}' at {}: {}",
+            warning.unique_id,
+            warning.path.display(),
+            warning.reason
+        );
+    }
+    seeds
 }

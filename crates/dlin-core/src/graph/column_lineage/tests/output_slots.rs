@@ -96,7 +96,7 @@ fn lineage_output_and_downstream_schema_read_the_engine_output_the_same_way() {
         r#"SELECT z, 1 + 1, a AS x, b AS "X", c AS x, u.* FROM raw.t, unknown_u u"#,
     )]);
     let result = single(&manifest, "m", dialect);
-    let knowledge = schema::SchemaContext::new(&manifest, dialect)
+    let knowledge = schema::SchemaContext::new(&manifest, None, dialect)
         .knowledge_of(&model_id("m"))
         .unwrap();
     let evidence = knowledge.adopted_evidence().unwrap();

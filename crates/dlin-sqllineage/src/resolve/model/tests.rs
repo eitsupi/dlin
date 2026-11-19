@@ -413,15 +413,17 @@ fn a_using_key_is_one_column_of_the_relations_that_supply_it() {
 
 #[test]
 fn a_using_key_competes_with_an_unknown_relation_outside_the_join() {
+    // The merged key is known to publish `id`; `c` may, so its columns
+    // decide.
     let found = lookup("SELECT id FROM a JOIN b USING (id) CROSS JOIN c", &[], "id");
-    let InputLookup::Ambiguous {
-        candidates, typed, ..
+    let InputLookup::Unverified {
+        present, possible, ..
     } = found
     else {
-        panic!("expected an ambiguity, got {found:?}");
+        panic!("expected an unverified name, got {found:?}");
     };
-    assert_eq!(candidates.len(), 3);
-    assert!(typed);
+    assert_eq!(present.len(), 2);
+    assert_eq!(possible.len(), 1);
 }
 
 #[test]
@@ -431,17 +433,14 @@ fn unknown_derived_tables_are_possible_owners() {
         &[],
         "id",
     );
-    let InputLookup::Ambiguous {
-        candidates, typed, ..
+    let InputLookup::Unverified {
+        present, possible, ..
     } = found
     else {
-        panic!("expected an ambiguity, got {found:?}");
+        panic!("expected an unverified name, got {found:?}");
     };
-    assert_eq!(candidates.len(), 2);
-    assert!(
-        typed,
-        "a derived table is not a relation a catalog can name"
-    );
+    assert!(present.is_empty());
+    assert_eq!(possible.len(), 2);
 }
 
 #[test]
@@ -449,14 +448,18 @@ fn a_listed_column_competes_with_an_unknown_relation() {
     // `b` may have an `x` of its own, so the listed `a.x` is not the only
     // possible owner.
     let found = lookup("SELECT x FROM a JOIN b ON TRUE", &[("a", vec!["x"])], "x");
-    let InputLookup::Ambiguous {
-        candidates, typed, ..
+    let InputLookup::Unverified {
+        present, possible, ..
     } = found
     else {
-        panic!("expected an ambiguity, got {found:?}");
+        panic!("expected an unverified name, got {found:?}");
     };
-    assert_eq!(candidates.len(), 2);
-    assert!(typed, "a catalog that lacks `b` cannot settle it");
+    assert_eq!(present.len(), 1, "the catalog lists `x` for `a`");
+    assert_eq!(
+        possible.len(),
+        1,
+        "a catalog that lacks `b` cannot settle it"
+    );
 }
 
 #[test]

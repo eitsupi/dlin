@@ -29,7 +29,7 @@ pub use impact::{
 pub use relation::RelationRef;
 pub use schema::{
     ContractEnforcementEvidence, CoverageBasis, EnforcementApplicability, EvidenceId,
-    SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin,
+    SchemaCoverage, SchemaEvidenceRecord, SchemaOrder, SchemaOrigin, SeedFileWarning, SeedSchemas,
 };
 use schema::{SchemaContext, SemanticDigestCache};
 pub use types::{
@@ -103,6 +103,7 @@ pub struct ColumnLineageAnalysis<'a> {
     pub(super) dialect: DlinDialect,
     pub(super) cache: &'a mut ColumnLineageCache,
     semantic_digests: SemanticDigestCache,
+    seeds: Option<&'a SeedSchemas>,
     schema: SchemaContext<'a>,
     lineage_results: HashMap<String, InternalModelColumnLineage>,
 }
@@ -118,9 +119,21 @@ impl<'a> ColumnLineageAnalysis<'a> {
             dialect,
             cache,
             semantic_digests: SemanticDigestCache::default(),
-            schema: SchemaContext::new(manifest, dialect),
+            seeds: None,
+            schema: SchemaContext::new(manifest, None, dialect),
             lineage_results: HashMap::new(),
         }
+    }
+
+    /// Use the columns read from the seed files of the project for the seeds
+    /// that declare none in YAML.
+    #[must_use]
+    pub fn with_seed_schemas(mut self, seeds: &'a SeedSchemas) -> Self {
+        self.seeds = Some(seeds);
+        self.semantic_digests = SemanticDigestCache::default();
+        self.lineage_results.clear();
+        self.schema = SchemaContext::new(self.manifest, Some(seeds), self.dialect);
+        self
     }
 
     pub fn compute_column_lineage(&mut self, model_name: &str) -> ModelColumnLineage {
@@ -323,7 +336,9 @@ pub(super) fn compute_column_lineage_internal(
         }
     };
 
-    let semantic_digest = analysis.semantic_digests.digest_for_node(manifest, node);
+    let semantic_digest = analysis
+        .semantic_digests
+        .digest_for_node(manifest, analysis.seeds, node);
     // Cache entries are keyed by the manifest's canonical identity. Callers
     // may address the same model by its short name or its unique_id, but both
     // spellings must share one persistent entry.

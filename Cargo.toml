@@ -28,6 +28,7 @@ globset = "0.4"
 # SQL parsing and AST metadata stay inside dlin-sqllineage.
 sqlparser = { version = "0.64", features = ["serde", "visitor"] }
 path-slash = "0.2.1"
+csv = "1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 

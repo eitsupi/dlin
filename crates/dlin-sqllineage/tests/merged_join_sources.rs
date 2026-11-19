@@ -94,6 +94,18 @@ fn mapping_with_dialect(
         .expect("one column")
 }
 
+fn names(candidates: &[Candidate]) -> Vec<&str> {
+    candidates
+        .iter()
+        .map(|candidate| match candidate {
+            Candidate::Relation(r) => r.name.value.as_str(),
+            Candidate::Cte(id) | Candidate::Derived(Some(id)) => id.value.as_str(),
+            Candidate::Derived(None) => "?",
+            Candidate::ArrayElement(_) => "<array element>",
+        })
+        .collect()
+}
+
 fn show_lineage(column: &OutputColumn) -> Vec<String> {
     match &column.lineage {
         Lineage::Complete(known) => known
@@ -118,6 +130,17 @@ fn show_lineage(column: &OutputColumn) -> Vec<String> {
                         .collect();
                     format!("?{}({})", column.value, names.join(","))
                 }
+                // Known to publish the name, then may.
+                Unresolved::Unverified {
+                    column,
+                    present_candidates,
+                    possible_candidates,
+                } => format!(
+                    "~{}({}|{})",
+                    column.value,
+                    names(present_candidates).join(","),
+                    names(possible_candidates).join(",")
+                ),
                 other => panic!("unexpected unresolved lineage {other:?}"),
             }));
             all
@@ -279,23 +302,23 @@ fn using_join_chains_fold_sources_left_to_right() {
 /// merge: that would report a source that may not exist.
 #[test]
 fn natural_join_of_tables_of_unknown_shape_stays_ambiguous() {
-    assert_eq!(plain("SELECT x FROM t1 NATURAL JOIN t2"), ["?x(t1,t2)"]);
+    assert_eq!(plain("SELECT x FROM t1 NATURAL JOIN t2"), ["~x(|t1,t2)"]);
     assert_eq!(
         plain("SELECT x FROM t1 NATURAL LEFT JOIN t2"),
-        ["?x(t1,t2)"]
+        ["~x(|t1,t2)"]
     );
     assert_eq!(
         plain("SELECT x FROM t1 NATURAL JOIN t2 NATURAL JOIN t3"),
-        ["?x(t1,t2,t3)"]
+        ["~x(|t1,t2,t3)"]
     );
 }
 
 #[test]
 fn only_the_named_columns_are_merged() {
-    assert_eq!(plain("SELECT y FROM t1 JOIN t2 USING (x)"), ["?y(t1,t2)"]);
+    assert_eq!(plain("SELECT y FROM t1 JOIN t2 USING (x)"), ["~y(|t1,t2)"]);
     assert_eq!(
         plain("SELECT x FROM t1 JOIN t2 ON t1.id = t2.id"),
-        ["?x(t1,t2)"]
+        ["~x(|t1,t2)"]
     );
 }
 
@@ -322,15 +345,15 @@ fn self_join_lists_the_table_once() {
 fn comma_joined_table_keeps_the_name_ambiguous() {
     assert_eq!(
         plain("SELECT x FROM t1 JOIN t2 USING (x), t3"),
-        ["?x(t1,t2,t3)"]
+        ["~x(t1,t2|t3)"]
     );
     assert_eq!(
         plain("SELECT x FROM t1 NATURAL JOIN t2 CROSS JOIN t3"),
-        ["?x(t1,t2,t3)"]
+        ["~x(|t1,t2,t3)"]
     );
     assert_eq!(
         plain("SELECT x FROM t1 JOIN t2 USING (x) JOIN t3 ON t1.id = t3.id"),
-        ["?x(t1,t2,t3)"]
+        ["~x(t1,t2|t3)"]
     );
 }
 
@@ -521,11 +544,11 @@ fn table_and_cte_sources_follow_join_kind() {
 fn unmerged_table_competes_with_a_cte_provider_unless_the_catalog_rules_it_out() {
     assert_eq!(
         plain("WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t USING (x), t3"),
-        ["?x(t,t3,a)"]
+        ["~x(t,a|t3)"]
     );
     assert_eq!(
         plain("WITH a AS (SELECT x FROM s1) SELECT x FROM a JOIN t ON a.id = t.id"),
-        ["?x(t,a)"]
+        ["~x(a|t)"]
     );
     assert_eq!(
         sources(

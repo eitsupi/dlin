@@ -141,7 +141,7 @@ fn an_unqualified_name_is_not_settled_on_another_relation() {
             sql,
             &[
                 &format!(
-                    "x#0 P[ | Ambiguous(x: t derived {range}), {}]",
+                    "x#0 P[ | Unverified(x: t | derived {range}), {}]",
                     unsupported(what)
                 ),
                 "Closed",

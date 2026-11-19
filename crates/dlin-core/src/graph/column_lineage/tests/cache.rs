@@ -528,10 +528,10 @@ fn test_semantic_digest_memoizes_shared_upstream_and_terminates_cycles() {
     let stg_orders = manifest.nodes.get("model.proj.stg_orders").unwrap();
     let mut digests = super::super::schema::SemanticDigestCache::default();
 
-    let orders_digest = digests.digest_for_node(&manifest, orders);
+    let orders_digest = digests.digest_for_node(&manifest, None, orders);
     assert!(orders_digest.persistent_cache_safe);
     let computed_after_orders = digests.computed_nodes();
-    let stg_orders_digest = digests.digest_for_node(&manifest, stg_orders);
+    let stg_orders_digest = digests.digest_for_node(&manifest, None, stg_orders);
     assert!(stg_orders_digest.persistent_cache_safe);
     assert_eq!(computed_after_orders, digests.computed_nodes());
 
@@ -546,11 +546,11 @@ fn test_semantic_digest_memoizes_shared_upstream_and_terminates_cycles() {
     let cyclic_orders = cyclic_manifest.nodes.get("model.proj.orders").unwrap();
     let cyclic_stg = cyclic_manifest.nodes.get("model.proj.stg_orders").unwrap();
     let mut orders_first = super::super::schema::SemanticDigestCache::default();
-    let orders_first_orders = orders_first.digest_for_node(&cyclic_manifest, cyclic_orders);
-    let orders_first_stg = orders_first.digest_for_node(&cyclic_manifest, cyclic_stg);
+    let orders_first_orders = orders_first.digest_for_node(&cyclic_manifest, None, cyclic_orders);
+    let orders_first_stg = orders_first.digest_for_node(&cyclic_manifest, None, cyclic_stg);
     let mut stg_first = super::super::schema::SemanticDigestCache::default();
-    let stg_first_stg = stg_first.digest_for_node(&cyclic_manifest, cyclic_stg);
-    let stg_first_orders = stg_first.digest_for_node(&cyclic_manifest, cyclic_orders);
+    let stg_first_stg = stg_first.digest_for_node(&cyclic_manifest, None, cyclic_stg);
+    let stg_first_orders = stg_first.digest_for_node(&cyclic_manifest, None, cyclic_orders);
 
     assert_ne!(orders_first_orders.value, 0);
     assert!(!orders_first_orders.persistent_cache_safe);
@@ -573,8 +573,11 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
 
     let orders = super::super::find_model_by_name(&cyclic_manifest, "orders").unwrap();
     let orders_id = orders.unique_id.clone();
-    let digest = super::super::schema::SemanticDigestCache::default()
-        .digest_for_node(&cyclic_manifest, orders);
+    let digest = super::super::schema::SemanticDigestCache::default().digest_for_node(
+        &cyclic_manifest,
+        None,
+        orders,
+    );
     assert!(!digest.persistent_cache_safe);
 
     let sentinel = InternalModelColumnLineage {
@@ -604,8 +607,11 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         .unwrap()
         .compiled_code = Some("select changed_order_id from raw.orders".to_string());
     let changed_orders = super::super::find_model_by_name(&changed_manifest, "orders").unwrap();
-    let changed_digest = super::super::schema::SemanticDigestCache::default()
-        .digest_for_node(&changed_manifest, changed_orders);
+    let changed_digest = super::super::schema::SemanticDigestCache::default().digest_for_node(
+        &changed_manifest,
+        None,
+        changed_orders,
+    );
     assert_eq!(digest.value, changed_digest.value);
     assert!(!changed_digest.persistent_cache_safe);
 
@@ -654,8 +660,11 @@ fn test_cycle_digest_is_not_used_for_persistent_cache_reuse() {
         .nodes
         .insert(external.unique_id.clone(), external);
     let external = external_manifest.nodes.get("model.proj.report").unwrap();
-    let external_digest = super::super::schema::SemanticDigestCache::default()
-        .digest_for_node(&external_manifest, external);
+    let external_digest = super::super::schema::SemanticDigestCache::default().digest_for_node(
+        &external_manifest,
+        None,
+        external,
+    );
     assert!(!external_digest.persistent_cache_safe);
 }
 

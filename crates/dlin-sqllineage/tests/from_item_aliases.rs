@@ -111,7 +111,7 @@ fn column_aliases_without_a_proven_mapping_stay_unresolved() {
     expect(
         "SELECT d.p FROM missing AS d(p)",
         &[
-            "p#0 P[ | Ambiguous(p: missing), Unsupported { what: \"column alias position unknown\" }]",
+            "p#0 P[ | Unverified(p:  | missing), Unsupported { what: \"column alias position unknown\" }]",
             "Closed",
         ],
     );

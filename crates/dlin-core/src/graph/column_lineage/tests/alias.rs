@@ -107,7 +107,7 @@ fn catalog_uses_alias_for_qualified_and_bare_relation_keys() {
         ..Default::default()
     };
     let root = manifest.nodes.get(root_id).unwrap();
-    let catalog = schema::SchemaContext::new(&manifest, DlinDialect::Generic)
+    let catalog = schema::SchemaContext::new(&manifest, None, DlinDialect::Generic)
         .catalog_for(root)
         .unwrap();
 

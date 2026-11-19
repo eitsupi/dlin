@@ -87,11 +87,14 @@ pub(super) enum ValueId {
         /// The schemas of the unknown segments that leave the dependency open.
         evidence: Evidence,
     },
-    /// A column that exactly one of several unknown relations supplies, with
-    /// no way to tell which. Naming one of them would invent a source.
+    /// A column that exactly one of several relations supplies, with no way
+    /// to tell which, because the columns of some are not known. Naming one
+    /// of them would invent a source. The first `present` candidates are
+    /// known to publish the name; the others may.
     Uncertain {
         column: Ident,
         candidates: Rc<[RangeRef]>,
+        present: usize,
     },
     /// Only the reasons that the columns `providers` publish under `column`
     /// cannot be known, without any of their sources: what an ambiguity
@@ -128,6 +131,10 @@ pub(super) enum OpaqueReason {
     /// A source whose columns are not modeled, such as VALUES or a table
     /// function, named by the construct. It may publish any name.
     UnmodelledSource(&'static str),
+    /// The fields of the element of an array whose type is not known. It may
+    /// publish any name; a reference that it may carry is unverified, with
+    /// the element as a candidate, which already says why.
+    ArrayElement,
     /// A shape whose correspondence is not implemented.
     Unsupported(&'static str),
     /// A scope that reads itself.
@@ -633,7 +640,7 @@ impl OpaqueReason {
     /// cut do not stand for the columns of one relation.
     fn publishes_names(self) -> bool {
         match self {
-            Self::UnmodelledSource(_) => true,
+            Self::UnmodelledSource(_) | Self::ArrayElement => true,
             Self::Unsupported(what) => matches!(
                 what,
                 "BY NAME set operation"

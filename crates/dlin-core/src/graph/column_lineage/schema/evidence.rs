@@ -35,6 +35,8 @@ pub enum SchemaOrigin {
     CatalogArtifact,
     /// Columns declared in dbt YAML.
     YamlDeclaration,
+    /// The header of a seed file in the project.
+    SeedFile,
 }
 
 /// Why a schema is treated as covering every column of the relation.
@@ -287,6 +289,30 @@ impl SchemaEvidence {
         .chain(self.derived_records.iter().cloned())
     }
 
+    /// The header of a seed file is the seed's exhaustive, ordered column
+    /// list as the project defines it.
+    pub(crate) fn seed_file(
+        subject: &str,
+        names: impl IntoIterator<Item = String>,
+        quote_columns: Option<bool>,
+        dialect: DlinDialect,
+    ) -> Self {
+        let mut evidence = Self::enumerated(
+            format!("seed_file:{subject}"),
+            subject,
+            SchemaOrigin::SeedFile,
+            names,
+        );
+        for column in &mut evidence.columns {
+            column.quote_specified = quote_columns;
+            if quote_columns == Some(true) {
+                column.name =
+                    sqllineage::Ident::quoted(&column.name.value, quote_for_dialect(dialect));
+            }
+        }
+        evidence
+    }
+
     /// A user-typed schema string is an explicit, ordered enumeration.
     pub(crate) fn user_enumeration(
         relation_name: &str,
@@ -360,6 +386,28 @@ pub(crate) fn yaml_schema_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_columns_preserve_explicit_quoting_and_header_order() {
+        for quote_columns in [None, Some(false), Some(true)] {
+            let evidence = SchemaEvidence::seed_file(
+                "seed.project.categories",
+                ["EventSource".to_owned(), "category".to_owned()],
+                quote_columns,
+                DlinDialect::Snowflake,
+            );
+            assert_eq!(evidence.columns[0].ordinal, Some(0));
+            assert_eq!(evidence.columns[1].ordinal, Some(1));
+            let column = &evidence.columns[0];
+            assert_eq!(column.quote_specified, quote_columns);
+            let expected = if quote_columns == Some(true) {
+                sqllineage::Ident::quoted("EventSource", sqllineage::Quote::Double)
+            } else {
+                sqllineage::Ident::unquoted("EventSource")
+            };
+            assert_eq!(column.name, expected);
+        }
+    }
 
     fn columns(names: &[&str]) -> IndexMap<String, ManifestColumn> {
         names

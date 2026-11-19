@@ -252,9 +252,10 @@ fn partial_known_sources_and_ambiguity_candidates_use_semantic_keys() {
         bigquery_ambiguous_column.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            unresolved: vec![Unresolved::Unverified {
                 column: id("Missing"),
-                candidates: vec![
+                present_candidates: vec![],
+                possible_candidates: vec![
                     Candidate::Relation(relation(None, None, id("a"))),
                     Candidate::Relation(relation(None, None, id("b"))),
                 ],
@@ -270,9 +271,10 @@ fn partial_known_sources_and_ambiguity_candidates_use_semantic_keys() {
         snowflake.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            unresolved: vec![Unresolved::Unverified {
                 column: id("id"),
-                candidates: vec![
+                present_candidates: vec![],
+                possible_candidates: vec![
                     Candidate::Relation(relation(Some(id("A")), Some(id("db")), id("t"))),
                     Candidate::Relation(relation(Some(id("Z")), Some(id("Db")), id("T"))),
                 ],
@@ -288,9 +290,10 @@ fn partial_known_sources_and_ambiguity_candidates_use_semantic_keys() {
         postgres.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            unresolved: vec![Unresolved::Unverified {
                 column: id("id"),
-                candidates: vec![
+                present_candidates: vec![],
+                possible_candidates: vec![
                     Candidate::Relation(relation(Some(id("A")), Some(id("db")), id("t"))),
                     Candidate::Relation(relation(Some(id("Z")), Some(id("Db")), id("T"))),
                 ],
@@ -306,9 +309,10 @@ fn partial_known_sources_and_ambiguity_candidates_use_semantic_keys() {
         bigquery.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            unresolved: vec![Unresolved::Unverified {
                 column: id("id"),
-                candidates: vec![
+                present_candidates: vec![],
+                possible_candidates: vec![
                     Candidate::Relation(relation(
                         Some(quoted("A", Quote::Backtick)),
                         Some(quoted("db", Quote::Backtick)),

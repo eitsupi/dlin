@@ -130,12 +130,11 @@ fn p3_partial_nonmembership_cannot_disambiguate_another_provider() {
             statement.output.columns[0].lineage,
             Lineage::Partial {
                 known: vec![],
-                unresolved: vec![Unresolved::Ambiguous {
+                // `a` lists `x`; the partial schema of `b` may still hold one.
+                unresolved: vec![Unresolved::Unverified {
                     column: Ident::unquoted("x"),
-                    candidates: vec![
-                        Candidate::Relation(relation("a")),
-                        Candidate::Relation(relation("b"))
-                    ]
+                    present_candidates: vec![Candidate::Relation(relation("a"))],
+                    possible_candidates: vec![Candidate::Relation(relation("b"))],
                 }],
             },
             "{sql}"
@@ -155,12 +154,10 @@ fn partial_inner_scope_competes_with_an_outer_listed_column() {
         statement.output.columns[0].lineage,
         Lineage::Partial {
             known: vec![],
-            unresolved: vec![Unresolved::Ambiguous {
+            unresolved: vec![Unresolved::Unverified {
                 column: Ident::unquoted("x"),
-                candidates: vec![
-                    Candidate::Relation(relation("a")),
-                    Candidate::Relation(relation("b"))
-                ]
+                present_candidates: vec![Candidate::Relation(relation("a"))],
+                possible_candidates: vec![Candidate::Relation(relation("b"))],
             }],
         }
     );

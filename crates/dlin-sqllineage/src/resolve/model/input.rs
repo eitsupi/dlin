@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use super::build::{CacheKey, OutputModels};
 use super::join::fold_join_columns;
-use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, ValueId};
+use super::{Choice, Group, OpaqueReason, OutputElement, OutputModel, UnknownProvider, ValueId};
 use crate::catalog::ColumnPresence;
 use crate::graph::scope::{
     AnonymousRange, Binding, BindingEnv, JoinOperand, MergedColumns, ScopeId,
@@ -246,63 +246,51 @@ impl InputModel {
                 })
             }
             Choice::Ambiguous(ambiguity) => {
-                // The candidates of the listed columns publish the name; the
-                // others, an element of an array among them, only may. Two
-                // listed columns leave the name ambiguous whatever the others
-                // carry, even two of one relation read twice; one or none
-                // leaves it to what the others publish. A column that a join
-                // merges is listed once.
-                let mut present = candidates_of(ambiguity.listed.iter().flat_map(|&index| {
-                    match &elements[index] {
-                        OutputElement::Column(slot) => slot.candidate_ranges.iter(),
-                        OutputElement::Unknown(_) => [].iter(),
-                    }
-                }));
-                dedup_candidates(&mut present);
-                let mut possible: Vec<Candidate> = ambiguity
-                    .candidates
+                // The listed columns decide the transform; the columns that
+                // are not known are evaluated only for the reasons they cannot
+                // be known, since neither answer claims a source.
+                let values: Vec<ValueId> = ambiguity
+                    .listed
                     .iter()
-                    .filter(|candidate| !present.contains(candidate))
-                    .cloned()
+                    .filter_map(|&index| match &elements[index] {
+                        OutputElement::Column(slot) => Some(slot.value.clone()),
+                        OutputElement::Unknown(_) => None,
+                    })
+                    .chain(
+                        self.model
+                            .matches(name)
+                            .unknown
+                            .iter()
+                            .filter_map(|&index| {
+                                let OutputElement::Unknown(segment) = &elements[index] else {
+                                    return None;
+                                };
+                                // An element of an array is a candidate of
+                                // its own, which says why its fields are not
+                                // known.
+                                if matches!(
+                                    segment.provider,
+                                    UnknownProvider::Opaque(OpaqueReason::ArrayElement)
+                                ) {
+                                    return None;
+                                }
+                                Some(ValueId::Named {
+                                    providers: vec![segment.provider.clone()],
+                                    column: name.clone(),
+                                })
+                            }),
+                    )
                     .collect();
-                dedup_candidates(&mut possible);
-                let listed_values = || {
-                    ambiguity
-                        .listed
-                        .iter()
-                        .filter_map(|&index| match &elements[index] {
-                            OutputElement::Column(slot) => Some(slot.value.clone()),
-                            OutputElement::Unknown(_) => None,
-                        })
-                };
-                if ambiguity.listed.len() < 2 && possible.iter().any(is_array_element) {
+                if let Some((present, possible)) = self.model.unverified(&ambiguity) {
                     return Standing::Present(InputLookup::Unverified {
                         present,
                         possible,
-                        values: listed_values().collect(),
+                        values,
                     });
                 }
                 Standing::Present(InputLookup::Ambiguous {
                     typed: !ambiguity.refinable,
-                    values: listed_values()
-                        .chain(
-                            self.model
-                                .matches(name)
-                                .unknown
-                                .iter()
-                                .filter_map(|&index| {
-                                    let OutputElement::Unknown(segment) = &elements[index] else {
-                                        return None;
-                                    };
-                                    // Evaluated only for the reasons it cannot be
-                                    // known; an ambiguity claims no source.
-                                    Some(ValueId::Named {
-                                        providers: vec![segment.provider.clone()],
-                                        column: name.clone(),
-                                    })
-                                }),
-                        )
-                        .collect(),
+                    values,
                     candidates: ambiguity.candidates,
                 })
             }
@@ -354,6 +342,13 @@ impl Walk {
         let mut present = Vec::new();
         match farther {
             Self::Absent => return Self::Possible { answer, candidates },
+            // The farther clauses already find the name ambiguous between
+            // providers known to publish it. Only a nearer provider that does
+            // publish it gives the reference a valid reading, so they are no
+            // candidates; their columns still decide the transform.
+            Self::Present(InputLookup::Ambiguous { values: listed, .. }) => {
+                values.extend(listed);
+            }
             Self::Present(lookup) => {
                 let (more, listed) = providers_of(&lookup);
                 match lookup {
@@ -405,20 +400,6 @@ impl Walk {
                 values,
             } => {
                 dedup_candidates(&mut candidates);
-                // A nearer element of an array may hide what the farther
-                // clauses provide, a confirmed ambiguity among them included.
-                if candidates.iter().any(is_array_element) {
-                    dedup_candidates(&mut present);
-                    let possible = candidates
-                        .into_iter()
-                        .filter(|candidate| !present.contains(candidate))
-                        .collect();
-                    return Some(InputLookup::Unverified {
-                        present,
-                        possible,
-                        values,
-                    });
-                }
                 // The same physical relation at both levels supplies the
                 // same column either way.
                 if values.is_empty()
@@ -426,11 +407,17 @@ impl Walk {
                 {
                     return Some(answer);
                 }
-                Some(InputLookup::Ambiguous {
-                    candidates,
-                    // The clauses were weighed against the catalog already,
-                    // which must not narrow the candidates down again.
-                    typed: true,
+                // A nearer clause whose columns are not known may hide what
+                // the farther clauses provide, an ambiguity among them
+                // included, so the name is left to those columns.
+                dedup_candidates(&mut present);
+                let possible = candidates
+                    .into_iter()
+                    .filter(|candidate| !present.contains(candidate))
+                    .collect();
+                Some(InputLookup::Unverified {
+                    present,
+                    possible,
                     values,
                 })
             }
