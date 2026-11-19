@@ -72,7 +72,7 @@ git diff --name-only main | dlin graph -o json
 
 dlin supports two source modes for model-level commands.
 
-**SQL parse mode (default)** is for developers editing a live dbt project. It reads `ref()` and `source()` directly from SQL without waiting for `dbt compile`, so model-level lineage quickly identifies the related models. Read the relevant SQL for exact transformation behavior.
+**SQL parse mode (default)** is for developers editing a live dbt project. It interprets the Jinja in SQL files and in YAML dependency expressions to find `ref()` and `source()` calls without waiting for `dbt compile`, so model-level lineage quickly identifies the related models. Read the relevant SQL for exact transformation behavior.
 
 **Manifest mode** (`--source manifest`) is for analysts or agents analyzing compiled state rather than editing live SQL. A developer compiles once and shares `manifest.json`; users explore the resolved graph without SQL or Python. Use column-level lineage when a field-level trace is needed; it requires the compiled manifest.
 
@@ -92,6 +92,7 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 - `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported)
 - `env_var()` uses its default and never reads the environment. A different value at run time can select a different dependency or branch than the one shown
 - Values known only at run time (`target`, `env_var()` without a default, `run_query()` results) do not select dependencies; `execute` is false, as when dbt parses the project
+- Dependencies selected through `adapter.dispatch()` or namespaced package macros (e.g. `dbt_utils.*`) may be missed
 - Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
 
 When these limitations matter, use `--source manifest`.
@@ -130,12 +131,12 @@ For analysts and agents who work from a distributed `manifest.json` without acce
 `dlin mcp` exposes a stdio MCP server that AI assistants supporting MCP can connect to directly.
 
 ```sh
-dlin mcp --dialect bigquery path/to/manifest.json
+dlin mcp --manifest-path path/to/manifest.json
 ```
 
 Available MCP tools: project summary, model search, lineage, impact analysis, and column-level lineage.
 
-Pass `--dialect` to match your project's SQL dialect for accurate column lineage. Requires a compiled `manifest.json` (`dbt compile`).
+The SQL dialect for column lineage is detected from the manifest's `adapter_type`; `--dialect` overrides it. Requires a compiled `manifest.json` (`dbt compile`).
 
 ## Features
 
@@ -146,7 +147,7 @@ Pass `--dialect` to match your project's SQL dialect for accurate column lineage
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
-- **Column-level lineage** (experimental): traces columns across models with transformation classification through the Rust lineage backend; requires `manifest.json`
+- **Column-level lineage** (experimental): traces columns across models with transformation classification, reports partial results, where tracing stopped and the assumptions it relied on; requires `manifest.json`
 
 ## Mermaid diagrams
 
@@ -284,9 +285,11 @@ Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
 `dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. Regression fixtures and real dbt project validation show that column-level lineage is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
 
+Output is JSON by default; `-o plain` is easier to read, and `-o mermaid` / `-o dot` draw diagrams.
+
 ```sh
 # Where does each output column of orders come from?
-dlin column upstream orders
+dlin column upstream orders -o plain
 
 # What downstream columns are affected if stg_orders.order_id changes?
 dlin column downstream stg_orders --column order_id
@@ -304,100 +307,61 @@ dlin check-manifest && dlin column upstream orders
 
 ### Column upstream
 
-Traces each output column of a model back to its raw source columns, following references across intermediate models.
+Traces each output column of a model back to its source columns, following references across intermediate models. Output columns are listed in SQL order; duplicate names and identifier quoting are kept.
 
 ```sh
-dlin column upstream customers -o mermaid
+dlin column upstream customers --column order_count --column lifetime_value -o plain
 ```
 
-```mermaid
-flowchart LR
-  subgraph sg0["customers"]
-    n0_0["customer_id"]
-    n0_1["email"]
-    n0_2["first_name"]
-    n0_3["last_name"]
-    n0_4["lifetime_value"]
-    n0_5["order_count"]
-  end
-  subgraph sg1["orders"]
-    n1_0["order_id"]
-    n1_1["total_amount"]
-  end
-  subgraph sg2["raw.customers"]
-    n2_0["email"]
-    n2_1["first_name"]
-    n2_2["id"]
-    n2_3["last_name"]
-  end
-  subgraph sg3["raw.orders"]
-    n3_0["id"]
-  end
-  subgraph sg4["raw.payments"]
-    n4_0["amount"]
-  end
-  subgraph sg5["stg_customers"]
-    n5_0["customer_id"]
-    n5_1["email"]
-    n5_2["first_name"]
-    n5_3["last_name"]
-  end
-  subgraph sg6["stg_orders"]
-    n6_0["order_id"]
-  end
-  subgraph sg7["stg_payments"]
-    n7_0["amount"]
-  end
-
-  n2_2 -->|"direct"|n5_0
-  n5_0 -->|"direct"|n0_0
-  n2_0 -->|"direct"|n5_1
-  n5_1 -->|"direct"|n0_1
-  n2_1 -->|"direct"|n5_2
-  n5_2 -->|"direct"|n0_2
-  n2_3 -->|"direct"|n5_3
-  n5_3 -->|"direct"|n0_3
-  n4_0 -->|"direct"|n7_0
-  n7_0 -->|"direct"|n1_1
-  n1_1 -->|"aggregation"|n0_4
-  n3_0 -->|"direct"|n6_0
-  n6_0 -->|"direct"|n1_0
-  n1_0 -->|"aggregation"|n0_5
+```
+customers (2 columns listed: 2 complete, 0 partial)
+  order_count     →  orders.id → stg_orders.order_id → orders.order_id (aggregation)
+                       boundary: external relation at stg_orders.order_id for customers.order_count: raw.orders (source, policy: snapshot unsupported; seed external)
+  lifetime_value  →  payments.amount → stg_payments.amount → orders.total_amount (aggregation)
+                       boundary: external relation at stg_payments.amount for customers.lifetime_value: raw.payments (source, policy: snapshot unsupported; seed external)
+  assumes yaml:source.clp.raw.orders (YAML columns taken as exhaustive): order_count
+  assumes yaml:source.clp.raw.payments (YAML columns taken as exhaustive): lifetime_value
 ```
 
-`customer_id`, `email`, etc. pass through `stg_customers` unchanged from `raw.customers` (all `direct`). `lifetime_value` and `order_count` are aggregated at the `customers` model. The final edge to `customers` is labeled `aggregation`, while all upstream hops carry their actual transformation type (here `direct`, since staging and mart models pass columns through unchanged).
+Each column's lineage is `complete`, or `partial` when some contributions could not be resolved. A partial column keeps its known sources and lists the unresolved parts with a reason (for example a column hidden behind an unexpanded `SELECT *`, an ambiguous name, or unsupported syntax).
 
-Transformation types shown on edges: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
+A `boundary` line says where tracing stopped and why. Reaching a source, seed or other external relation, or a constant, is a legitimate end. A model that failed analysis, a missing definition, a cycle, an ambiguous model name or a snapshot is an incomplete stop, and the column stays partial.
+
+An `assumes` line names a schema the result relies on without proof. By default, a column list declared in YAML is taken as the full list of columns, and the line shows which conclusions depend on that.
+
+Transformation types: `direct`, `aggregation`, `expression`, `cast`, `conditional`, `unknown`.
 
 ### Column downstream
 
-Traces a column forward to all downstream models and columns that depend on it.
+Finds the downstream models and columns whose values depend on a column.
 
 ```sh
-dlin column downstream stg_orders --column order_id -o mermaid
+dlin column downstream stg_payments --column amount -o mermaid
 ```
 
 ```mermaid
 flowchart LR
   subgraph sg0["customers"]
-    n0_0["order_count"]
+    n0_0["lifetime_value"]
   end
   subgraph sg1["order_enriched"]
-    n1_0["order_id"]
+    n1_0["amount"]
   end
   subgraph sg2["orders"]
-    n2_0["order_id"]
+    n2_0["total_amount"]
   end
-  subgraph sg3["stg_orders"]
-    n3_0["order_id"]
+  subgraph sg3["stg_payments"]
+    n3_0["amount"]
   end
 
-  n2_0 -->|"aggregation"|n0_0
-  n3_0 -->|"direct"|n1_0
-  n3_0 -->|"direct"|n2_0
+  n3_0 -->|"value direct"|n2_0
+  n2_0 -->|"value aggregation"|n0_0
+  n3_0 -->|"value direct"|n1_0
 ```
 
-`stg_orders.order_id` flows directly into `orders.order_id` and `order_enriched.order_id`. `orders.order_id` is then aggregated into `customers.order_count`. Each edge shows its per-hop transformation type.
+`stg_payments.amount` flows directly into `orders.total_amount` and `order_enriched.amount`, and `orders.total_amount` is aggregated into `customers.lifetime_value`.
+
+Results are split into `confirmed` impacts, `possible` impacts reached through a finite set of candidates (such as an ambiguous name), and an `exploration` status that says whether the search was complete. No impact is concluded only when nothing is confirmed or possible and the exploration is complete. Only value dependencies are reported; columns used only in filter predicates and join conditions (row dependencies) are not collected yet.
 
 ### Performance benchmark
 
@@ -414,9 +378,11 @@ These synthetic results use artifacts derived from the real dbt fixture. Native 
 ### Known limitations
 
 - **Requires `dbt compile`**: no SQL parse mode fallback; manifest with compiled SQL is always needed
-- **SELECT \* chains**: resolution depends on YAML column definitions in upstream models; unresolved columns are reported in `errors[]`
-- **Dialect-specific syntax**: pass `--dialect bigquery` (or other dialect) for better coverage
-- **Performance**: first run parses all upstream models; results are cached in `.dlin_cache/` for subsequent queries
+- **Value dependencies only**: row dependencies (filter predicates, join conditions) are not collected
+- **Partial results**: `SELECT *` over relations without known columns, unsupported syntax and ambiguous names leave lineage partial. In JSON, check `output.columns[].lineage.status`, `output.columns[].lineage.unresolved[]`, `output.shape` and `boundaries[]`; `errors[]` holds diagnostics such as parse failures
+- **YAML column lists are assumed complete**: when a YAML column list is used as a schema, it is treated as exhaustive; results that rely on this cite it in `evidence[]` and show an `assumes` note in plain, Mermaid and DOT output
+- **Dialect**: auto-detected from the manifest's `adapter_type`; pass `--dialect` to override
+- **Cache**: results are cached in `.dlin_cache/` (`--no-cache` and `--refresh-cache` control it)
 
 ## Key subcommands
 

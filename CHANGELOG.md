@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.3.0-alpha.1] - 2026-11-19
+
+### Highlights
+
+- **Model-level lineage (SQL mode).** A new Jinja interpreter replaces placeholder rendering and regex recovery. It evaluates project variables, macro calls, conditions and loops to extract dependencies from SQL and supported YAML expressions (#262, #263, #264)
+- **Column-level lineage (Experimental).** The redesigned SQL analysis engine tracks ordered, quoted output slots, preserves known sources in partial results, and reports trace boundaries, possible impacts and schema evidence (#215, #244, #245, #246, #250)
+
+### Breaking Changes
+
+#### Model-level lineage (SQL mode)
+
+- With `execute` set to false, the interpreter skips `if execute` bodies and standard `statement` blocks. Refs in branches ruled out by project variables or in unused macros no longer produce edges. Names that depend on unknown runtime values no longer produce guessed edges or placeholder warnings. Literal refs under unknown conditions still produce edges. Unresolved literal refs and sources still emit warnings (#262, #263)
+- `env_var()` uses its default without reading environment variables. Calls without a default and calls for `DBT_ENV_SECRET*` remain unknown. Both `var()` and `env_var()` accept `default=` (#262, #263)
+- Repeated refs to the same model produce a single edge. SQL mode no longer reads or writes `.dlin_cache/extraction_cache.json`. The `--cache-dir`, `--no-cache` and `--refresh-cache` flags have no effect in SQL mode and still control manifest and column lineage caching (#263)
+
+#### Column-level lineage
+
+- Column lineage JSON changes without a compatibility layer, including MCP results. Upstream uses `output.columns[]` and replaces `traced_columns` and `total_columns` with `listed_columns`, `value_complete_columns` and `value_partial_columns`. Downstream reports `confirmed`, `possible` and `exploration`. See both column subcommands' `--help` for the schemas (#244, #245, #246, #249, #250)
+- Output columns follow compiled SQL order, preserve duplicates and quoting, and use dialect-specific name matching. Columns declared only in YAML are omitted from the output and produce a non-fatal diagnostic. Ambiguous upstream column selections and ambiguous short model names are reported without choosing a match. Downstream searches still look for references by name when the input slot cannot be identified (#222, #225, #245, #246)
+- The right operand of `EXCEPT` contributes no column values. Constants and failed models no longer appear as sources, and references through unmodelled FROM items stay unresolved (#243, #246, #255)
+- Some failures previously reported as `parse_failure` now use `unsupported_syntax` or `unsupported_statement`. Unequal-width `VALUES` rows now fail analysis with `VALUES_ROW_ARITY_MISMATCH` (#251, #255)
+
+#### Rust API
+
+- The bundled `dlin-sqllineage` crate replaces the `sqllineage` git dependency and exposes a structured analysis API. The `dlin-core` column lineage and impact result types follow the new output model (#211, #215, #244, #245, #246)
+- `build_graph` and `build_graph_report` take `(project_dir, project_name, files, vars)`. The old SQL extraction functions are removed, and `ManifestNode::relation_name()` is now `identifier()` (#257, #263, #264)
+
+### Features
+
+- Interpret dependency expressions in generic test arguments, exposure `depends_on` entries including `source()`, and YAML snapshot `relation` values (#264)
+- Partial lineage retains known sources. Trace boundaries distinguish external relations and source-free outputs from incomplete stops such as failed analysis, missing definitions or cycles. Downstream reports possible impacts from finite candidate sets. Confirmed and possible paths to the same output can both be reported. It concludes “no impact” only when both impact lists are empty and exploration is complete (#244, #246)
+- Results cite the SQL output, catalog or YAML evidence each conclusion relies on. Plain, Mermaid and DOT output flag conclusions that rely on a YAML column list assumed exhaustive or on a declared enforced contract (#248, #249, #250)
+- Improve value tracing through supported scalar and ARRAY subqueries, `IN` and `UNNEST`, and resolve positional column aliases and aliased joins where the dialect and output shape permit. Support `TABLE` when the relation can be identified, and strict `BY NAME` forms in BigQuery and `UNION BY NAME` in DuckDB and Snowflake when both sides have the same known, unique names (#226, #252, #254, #255, #256)
+- `dlin-core` exposes per-node dependency analysis through `NodeData::dependency_analysis`. Manifest nodes are marked `not_assessed`. The CLI does not expose this analysis yet (#258, #264)
+
+### Bug Fixes
+
+- Exposures report their defining YAML path in SQL mode and `original_file_path` in manifest mode. Generic test definitions under `tests/generic/` are loaded as macros, and macro files can contain `{% test %}` blocks. Definition files no longer appear as singular test nodes (#264, #265, #266)
+- Match upstream manifest relations using the adapter's rendered `relation_name` when available and usable, including ClickHouse two-part names (#257)
+- Fix name resolution for joins, `LATERAL` scopes, unaliased derived tables and star modifiers. A `LATERAL` scoping fix prevents a stack overflow. Unsupported expressions such as lambdas now leave lineage partial, and relation reads include subqueries in more clauses (#227, #231, #233, #238, #251, #253, #256)
+
+### Performance
+
+- SQL mode parses macro files once per run, avoiding recompilation for each model. In the interpreter benchmark on six real projects, median elapsed time for `summary --source sql --no-cache -o json --quiet` was 0.17–0.95× the v0.2.6 baseline (#262, #263)
+
+### Known Limitations
+
+- Plain, Mermaid and DOT output and JSON `known[].table` can omit the source prefix. For example, a column from `raw.orders` can appear as `orders.id` in a path and be hard to distinguish from the `orders` model. The boundary shows `raw.orders` in full. A fix is planned for the next release
+
 ## [0.2.6] - 2026-10-25
 
 ### Bug Fixes
