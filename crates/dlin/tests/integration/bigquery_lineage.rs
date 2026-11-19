@@ -168,3 +168,166 @@ from base"#,
         assert_eq!(report["errors"], serde_json::json!([]), "{report}");
     }
 }
+
+/// GA4-style lookups of an unaliased `UNNEST` over an array of STRUCTs, read
+/// from a model and from an unmodelled table.
+fn unaliased_unnest_dir() -> tempfile::TempDir {
+    let lookup = |relation: &str| {
+        format!(
+            r#"select
+  (select value.string_value from unnest(params) where key = "page") as page_bare
+  , (select p.value.string_value from unnest(params) as p where p.key = "page") as page_aliased
+from `p`.`d`.`{relation}`"#
+        )
+    };
+    let upstream = lookup("upstream_model");
+    let external = lookup("external_table_a");
+    bigquery_manifest_dir(&[
+        (
+            "upstream_model",
+            r#"select id, params from `p`.`d`.`external_table_a`"#,
+            &[],
+        ),
+        ("param_upstream", &upstream, &["upstream_model"]),
+        ("param_external", &external, &[]),
+    ])
+}
+
+/// The candidates of the single `unverified` reason of a lineage, rendered
+/// as `relation` or `element of relation.column`.
+fn unverified_candidates(lineage: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let unresolved = lineage["unresolved"].as_array().unwrap();
+    assert_eq!(unresolved.len(), 1, "{lineage}");
+    let reason = &unresolved[0]["reason"];
+    assert_eq!(reason["kind"], "unverified", "{lineage}");
+    assert_eq!(reason["column"]["value"], "value");
+    let render = |candidates: &serde_json::Value| -> Vec<String> {
+        candidates
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| match candidate["kind"].as_str().unwrap() {
+                "relation" => candidate["relation"]["name"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                "array_element" => candidate["array_sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|source| {
+                        format!(
+                            "element of {}.{}",
+                            source["relation"]["name"]["value"].as_str().unwrap(),
+                            source["column"]["value"].as_str().unwrap()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                other => panic!("unexpected candidate kind {other}"),
+            })
+            .collect()
+    };
+    (
+        render(&reason["present_candidates"]),
+        render(&reason["possible_candidates"]),
+    )
+}
+
+#[test]
+fn unaliased_unnest_field_is_not_a_column_of_the_outer_relation() {
+    let tmp = unaliased_unnest_dir();
+    let (status, reports) = column_upstream_json(&tmp, &["param_upstream", "param_external"]);
+    assert!(
+        status.success(),
+        "an unverified name is not fatal: {reports}"
+    );
+
+    // The upstream model lists no `value`, so only the element can carry it.
+    let bare = column_lineage(&reports, "param_upstream", "page_bare");
+    assert_eq!(bare["status"], "partial");
+    assert_eq!(known_sources(bare), Vec::<String>::new());
+    assert_eq!(
+        unverified_candidates(bare),
+        (vec![], vec!["element of upstream_model.params".to_string()])
+    );
+
+    // The columns of the unmodelled table are not known, so both may carry
+    // it, and neither becomes a known source.
+    let bare = column_lineage(&reports, "param_external", "page_bare");
+    assert_eq!(bare["status"], "partial");
+    assert_eq!(known_sources(bare), Vec::<String>::new());
+    assert_eq!(
+        unverified_candidates(bare),
+        (
+            vec![],
+            vec![
+                "external_table_a".to_string(),
+                "element of external_table_a.params".to_string()
+            ]
+        )
+    );
+
+    for model in ["param_upstream", "param_external"] {
+        let aliased = column_lineage(&reports, model, "page_aliased");
+        assert_eq!(aliased["status"], "complete", "{model}: {aliased}");
+        assert_eq!(
+            known_sources(aliased),
+            ["p.d.external_table_a.params".to_string()],
+            "{model}"
+        );
+        let report = reports
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|report| report["model"] == model)
+            .unwrap();
+        let errors = report["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{report}");
+        assert_eq!(errors[0]["kind"], "column_indeterminate");
+        assert_eq!(errors[0]["column"], "page_bare");
+    }
+}
+
+#[test]
+fn unaliased_unnest_field_is_a_possible_downstream_impact_of_the_array() {
+    let tmp = unaliased_unnest_dir();
+    let output = Command::new(binary_path())
+        .args([
+            "column",
+            "downstream",
+            "upstream_model",
+            "--column",
+            "params",
+            "-o",
+            "json",
+            "--no-cache",
+            "--manifest-path",
+        ])
+        .arg(tmp.path().join("target/manifest.json"))
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run dlin");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let targets = |key: &str| -> Vec<String> {
+        reports[0][key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|impact| {
+                format!(
+                    "{}.{}",
+                    impact["target"]["model"].as_str().unwrap(),
+                    impact["target"]["column"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    assert_eq!(targets("confirmed"), ["param_upstream.page_aliased"]);
+    assert_eq!(targets("possible"), ["param_upstream.page_bare"]);
+}

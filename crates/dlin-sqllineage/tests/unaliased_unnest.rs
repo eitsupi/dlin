@@ -1,0 +1,188 @@
+//! BigQuery `UNNEST` without a range variable. The element of an array of
+//! STRUCTs publishes its fields as columns of the FROM clause, so a name may
+//! be a field of the element or a column of an enclosing query. Without the
+//! element type, the reference stays open between the candidates instead of
+//! being attributed to the enclosing relation.
+
+mod common;
+
+use common::{KnownTables, analyze_one_with, find_mapping, known_sources, unresolved};
+use dlin_sqllineage::{Candidate, Dialect, Ident, Unresolved};
+
+/// The column names the array expression of each element candidate reads,
+/// and the relation names of the other candidates.
+fn candidate_names(candidates: &[Candidate]) -> Vec<String> {
+    candidates
+        .iter()
+        .map(|candidate| match candidate {
+            Candidate::Relation(relation) => relation.name.value.clone(),
+            Candidate::ArrayElement(element) => format!(
+                "element of [{}]",
+                element
+                    .array_sources
+                    .iter()
+                    .map(|source| format!("{}.{}", source.relation.name.value, source.column.value))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// The single `Unverified` reason of an output column, as
+/// `(present, possible)` candidate names.
+fn unverified(
+    analysis: &dlin_sqllineage::StatementAnalysis,
+    output: &str,
+    name: &str,
+) -> (Vec<String>, Vec<String>) {
+    let column = find_mapping(&analysis.output.columns, output);
+    assert!(known_sources(column).is_empty(), "{column:?}");
+    match unresolved(column) {
+        [
+            Unresolved::Unverified {
+                column,
+                present_candidates,
+                possible_candidates,
+            },
+        ] => {
+            assert_eq!(column, &Ident::unquoted(name));
+            (
+                candidate_names(present_candidates),
+                candidate_names(possible_candidates),
+            )
+        }
+        other => panic!("expected one unverified reason: {other:?}"),
+    }
+}
+
+const PARAMS: &str = r#"
+SELECT
+  (SELECT value.string_value FROM UNNEST(params) WHERE key = "page") AS page_bare,
+  (SELECT p.value.string_value FROM UNNEST(params) AS p WHERE p.key = "page") AS page_aliased
+FROM events
+"#;
+
+#[test]
+fn element_field_over_a_relation_without_the_name_stays_open() {
+    // `events` lists its columns and has no `value`, so only the element
+    // can carry it; its type is unknown, so nothing shows that it does.
+    let catalog = KnownTables(&[("events", &["id", "params"])]);
+    let analysis = analyze_one_with(PARAMS, Dialect::BigQuery, Some(&catalog));
+    assert_eq!(
+        unverified(&analysis, "page_bare", "value"),
+        (
+            Vec::<String>::new(),
+            vec!["element of [events.params]".to_string()]
+        )
+    );
+    let aliased = find_mapping(&analysis.output.columns, "page_aliased");
+    assert_eq!(
+        known_sources(aliased)
+            .iter()
+            .map(|source| source.column.value.as_str())
+            .collect::<Vec<_>>(),
+        ["params"]
+    );
+    assert!(unresolved(aliased).is_empty());
+}
+
+#[test]
+fn element_field_over_a_relation_with_unknown_columns_lists_both() {
+    let analysis = analyze_one_with(PARAMS, Dialect::BigQuery, None);
+    assert_eq!(
+        unverified(&analysis, "page_bare", "value"),
+        (
+            Vec::<String>::new(),
+            vec![
+                "events".to_string(),
+                "element of [events.params]".to_string()
+            ]
+        )
+    );
+}
+
+#[test]
+fn element_may_hide_a_column_of_the_enclosing_query() {
+    let catalog = KnownTables(&[("events", &["id", "params", "value"])]);
+    let analysis = analyze_one_with(PARAMS, Dialect::BigQuery, Some(&catalog));
+    assert_eq!(
+        unverified(&analysis, "page_bare", "value"),
+        (
+            vec!["events".to_string()],
+            vec!["element of [events.params]".to_string()]
+        )
+    );
+}
+
+#[test]
+fn element_in_the_same_from_clause_as_a_relation() {
+    let catalog = KnownTables(&[("events", &["id", "params", "value"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT value AS v, id FROM events, UNNEST(events.params)"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    assert_eq!(
+        unverified(&analysis, "v", "value"),
+        (
+            vec!["events".to_string()],
+            vec!["element of [events.params]".to_string()]
+        )
+    );
+}
+
+#[test]
+fn offset_of_an_unaliased_unnest_is_a_known_column() {
+    let catalog = KnownTables(&[("events", &["id", "params"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT (SELECT MAX(offset) FROM UNNEST(params) WITH OFFSET) AS last_index FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    let column = find_mapping(&analysis.output.columns, "last_index");
+    assert!(unresolved(column).is_empty(), "{column:?}");
+}
+
+#[test]
+fn scalar_arrays_publish_no_field_names() {
+    // A literal of scalars and a generated series have no fields, so names
+    // still reach the enclosing query.
+    let catalog = KnownTables(&[("events", &["id", "threshold"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT
+  (SELECT COUNT(*) FROM UNNEST([1, 2, 3]) WHERE threshold > 1) AS literal_count,
+  (SELECT COUNT(*) FROM UNNEST(GENERATE_ARRAY(1, 10)) WHERE threshold > 1) AS series_count,
+  (SELECT MAX(threshold) FROM UNNEST(GENERATE_DATE_ARRAY('2024-01-01', '2024-01-31'))) AS max_threshold
+FROM events"#,
+        Dialect::BigQuery,
+        Some(&catalog),
+    );
+    let column = find_mapping(&analysis.output.columns, "max_threshold");
+    assert!(unresolved(column).is_empty(), "{column:?}");
+    assert_eq!(
+        known_sources(column)
+            .iter()
+            .map(|source| source.column.value.as_str())
+            .collect::<Vec<_>>(),
+        ["threshold"]
+    );
+}
+
+#[test]
+fn other_dialects_keep_their_unnest_rules() {
+    let catalog = KnownTables(&[("events", &["id", "params", "value"])]);
+    let analysis = analyze_one_with(
+        r#"SELECT (SELECT value FROM UNNEST(params)) AS v FROM events"#,
+        Dialect::Generic,
+        Some(&catalog),
+    );
+    let column = find_mapping(&analysis.output.columns, "v");
+    assert!(
+        !unresolved(column)
+            .iter()
+            .any(|reason| matches!(reason, Unresolved::Unverified { .. })),
+        "{column:?}"
+    );
+}

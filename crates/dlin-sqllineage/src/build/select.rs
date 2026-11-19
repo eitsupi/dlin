@@ -10,8 +10,8 @@ use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
-    Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn, ScopeKind,
-    VirtualColumn, VirtualColumnState,
+    AnonymousRange, Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn,
+    ScopeKind, VirtualColumn, VirtualColumnState,
 };
 use crate::types::SemanticError;
 use crate::{Ident, OutputName};
@@ -425,7 +425,7 @@ impl LineageBuilder {
                 } else {
                     self.graph
                         .scopes
-                        .add_anonymous_derived(self.current_scope, derived_scope);
+                        .add_anonymous(self.current_scope, AnonymousRange::Derived(derived_scope));
                 }
             }
 
@@ -451,10 +451,24 @@ impl LineageBuilder {
                 with_offset_alias,
                 with_ordinality,
             } => {
-                let dependencies = array_exprs
+                let dependencies: Vec<_> = array_exprs
                     .iter()
                     .map(|expr| self.collect_ancestors(expr))
                     .collect();
+                if alias.is_none()
+                    && self.dialect == crate::Dialect::BigQuery
+                    && let [array] = array_exprs.as_slice()
+                    && !is_known_scalar_array(array)
+                {
+                    let [dependencies] = <[_; 1]>::try_from(dependencies)
+                        .expect("one dependency list per array expression");
+                    self.add_anonymous_unnest(
+                        dependencies,
+                        *with_offset,
+                        with_offset_alias.as_ref(),
+                    );
+                    return;
+                }
                 self.add_virtual_unnest(
                     alias.as_ref(),
                     None,
@@ -678,7 +692,7 @@ impl LineageBuilder {
             None => self
                 .graph
                 .scopes
-                .add_anonymous_derived(self.current_scope, scope),
+                .add_anonymous(self.current_scope, AnonymousRange::Derived(scope)),
         }
     }
 
@@ -842,8 +856,74 @@ impl LineageBuilder {
         let virtual_id = self
             .graph
             .scopes
-            .add_virtual_source(self.current_scope, columns);
+            .add_virtual_source(self.current_scope, columns, None);
         self.add_binding(alias_name, Binding::VirtualSource(virtual_id));
+    }
+
+    /// A `BigQuery` `UNNEST` without a range variable, over an array whose
+    /// element type is not known. The element of an array of STRUCTs
+    /// publishes its fields as columns of the FROM clause, so any name may be
+    /// one of them; no name qualifies a reference to them. `WITH OFFSET`
+    /// adds a column named by its alias, `offset` by default.
+    fn add_anonymous_unnest(
+        &mut self,
+        dependencies: Vec<crate::graph::node::NodeId>,
+        with_offset: bool,
+        with_offset_alias: Option<&sqlparser::ast::Ident>,
+    ) {
+        let columns = with_offset
+            .then(|| VirtualColumn {
+                name: with_offset_alias.map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
+                state: VirtualColumnState::KnownEmpty,
+                dependencies: Vec::new(),
+            })
+            .into_iter()
+            .collect();
+        let source =
+            self.graph
+                .scopes
+                .add_virtual_source(self.current_scope, columns, Some(dependencies));
+        self.graph
+            .scopes
+            .add_anonymous(self.current_scope, AnonymousRange::Virtual(source));
+    }
+}
+
+/// Whether a `BigQuery` array is known to hold values that are not STRUCTs, so
+/// that its element publishes no field names: a literal of literal values, a
+/// cast to an array of another type, or a function that generates a series.
+fn is_known_scalar_array(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_known_scalar_array(inner),
+        Expr::Array(array) => {
+            !array.elem.is_empty() && array.elem.iter().all(|elem| matches!(elem, Expr::Value(_)))
+        }
+        Expr::Cast {
+            data_type:
+                sqlparser::ast::DataType::Array(
+                    sqlparser::ast::ArrayElemTypeDef::AngleBracket(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::SquareBracket(elem, _)
+                    | sqlparser::ast::ArrayElemTypeDef::Parenthesis(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::ParenthesisNotNull(elem)
+                    | sqlparser::ast::ArrayElemTypeDef::Qualified(elem, _),
+                ),
+            ..
+        } => !matches!(**elem, sqlparser::ast::DataType::Struct(..)),
+        Expr::Function(function) => {
+            let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice()
+            else {
+                return false;
+            };
+            name.quote_style.is_none()
+                && [
+                    "GENERATE_ARRAY",
+                    "GENERATE_DATE_ARRAY",
+                    "GENERATE_TIMESTAMP_ARRAY",
+                ]
+                .iter()
+                .any(|generator| generator.eq_ignore_ascii_case(&name.value))
+        }
+        _ => false,
     }
 }
 

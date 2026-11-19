@@ -9,7 +9,7 @@ use crate::types::{Dialect, TableRef};
 
 pub(crate) type ScopeId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct VirtualSourceId {
     scope: ScopeId,
     index: usize,
@@ -31,6 +31,10 @@ pub(crate) struct VirtualColumn {
 #[derive(Debug, Clone)]
 pub(crate) struct VirtualSource {
     pub columns: Vec<VirtualColumn>,
+    /// For the element of an array whose type is not known, the value
+    /// dependencies of the array: the element may then publish fields under
+    /// any name, besides `columns`.
+    pub open_element: Option<Vec<NodeId>>,
 }
 
 pub(crate) struct ScopeTree {
@@ -104,9 +108,9 @@ struct Scope {
     binding_log: Vec<JoinOperand>,
     /// Joins in this scope that merge columns, in source order.
     join_merges: Vec<JoinMerge>,
-    /// Derived tables without a range variable, with their position in
+    /// FROM items without a range variable, with their position in
     /// `binding_log`.
-    anonymous_derived: Vec<(usize, ScopeId)>,
+    anonymous: Vec<(usize, AnonymousRange)>,
     output_columns: Vec<ScopeColumn>,
     /// Positional names supplied by a CTE or derived-table alias list.
     /// Applied after schema expansion, when the actual output slots are known.
@@ -128,7 +132,7 @@ impl Scope {
             relations: Vec::new(),
             binding_log: Vec::new(),
             join_merges: Vec::new(),
-            anonymous_derived: Vec::new(),
+            anonymous: Vec::new(),
             output_columns: Vec::new(),
             output_aliases: None,
             output_plan: OutputPlan::Projection,
@@ -157,11 +161,32 @@ pub(crate) enum MergedColumns {
 }
 
 /// A FROM item one side of a join combines: a range variable, by its name,
-/// or a derived table written without one.
+/// or a FROM item written without one.
 #[derive(Debug, Clone)]
 pub(crate) enum JoinOperand {
     Named(Ident),
-    Anonymous(ScopeId),
+    Anonymous(AnonymousRange),
+}
+
+/// A FROM item without a range variable. No name can qualify a reference to
+/// its columns, but an unqualified name may still be one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnonymousRange {
+    /// A derived table: `FROM (SELECT ...)`.
+    Derived(ScopeId),
+    /// A virtual source, such as a value table produced by an unaliased
+    /// expansion.
+    Virtual(VirtualSourceId),
+}
+
+impl AnonymousRange {
+    /// The binding the FROM item would have if a range variable named it.
+    pub(crate) fn binding(self) -> Binding {
+        match self {
+            Self::Derived(scope) => Binding::DerivedTable(scope),
+            Self::Virtual(source) => Binding::VirtualSource(source),
+        }
+    }
 }
 
 /// A `USING` or `NATURAL` join. Each side lists the relations it combines
@@ -476,7 +501,7 @@ impl ScopeTree {
             .visible_entries(step.visible)
             .map(|entry| entry.seq + 1);
         let anonymous = scope
-            .anonymous_derived
+            .anonymous
             .iter()
             .filter(|(at, _)| *at < step.visible)
             .map(|(at, _)| *at + 1);
@@ -530,11 +555,13 @@ impl ScopeTree {
         &mut self,
         scope: ScopeId,
         columns: Vec<VirtualColumn>,
+        open_element: Option<Vec<NodeId>>,
     ) -> VirtualSourceId {
         let index = self.scopes[scope].virtual_sources.len();
-        self.scopes[scope]
-            .virtual_sources
-            .push(VirtualSource { columns });
+        self.scopes[scope].virtual_sources.push(VirtualSource {
+            columns,
+            open_element,
+        });
         VirtualSourceId { scope, index }
     }
 
@@ -706,20 +733,20 @@ impl ScopeTree {
         self.scopes.len()
     }
 
-    pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {
+    pub fn add_anonymous(&mut self, parent: ScopeId, range: AnonymousRange) {
         let at = self.scopes[parent].binding_log.len();
         self.scopes[parent]
             .binding_log
-            .push(JoinOperand::Anonymous(child));
-        self.scopes[parent].anonymous_derived.push((at, child));
+            .push(JoinOperand::Anonymous(range));
+        self.scopes[parent].anonymous.push((at, range));
     }
 
-    /// Derived tables without a range variable in the FROM clause at `env`,
-    /// each with its position among the entries of the scope, which orders
-    /// it among the range variables of the clause.
-    pub fn anonymous_derived(&self, env: BindingEnv) -> Vec<(usize, ScopeId)> {
+    /// FROM items without a range variable in the FROM clause at `env`, each
+    /// with its position among the entries of the scope, which orders it
+    /// among the range variables of the clause.
+    pub fn anonymous(&self, env: BindingEnv) -> Vec<(usize, AnonymousRange)> {
         self.scopes[env.scope]
-            .anonymous_derived
+            .anonymous
             .iter()
             .filter(|(at, _)| *at < env.visible)
             .copied()
@@ -877,7 +904,7 @@ mod tests {
         let root = ScopeTree::root();
         tree.add_binding(root, Ident::unquoted("base"), table("base"));
         let before = tree.env(root);
-        let source = tree.add_virtual_source(root, Vec::new());
+        let source = tree.add_virtual_source(root, Vec::new(), None);
         tree.add_binding(
             root,
             Ident::unquoted("base"),

@@ -949,8 +949,36 @@ fn unresolved_may_include_input(
             }
             unresolved.iter().any(|candidate| match candidate {
                 UnresolvedCandidate::Relation { relation } => relation_matches_source(relation),
+                UnresolvedCandidate::ArrayElement { array_sources } => {
+                    array_sources.iter().any(|source| {
+                        name_matches(&source.column) && relation_matches_source(&source.relation)
+                    })
+                }
                 UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => false,
             })
+        }
+        // A relation candidate carries the name itself; the element of an
+        // array carries a field of the array it reads, whatever its name.
+        UnresolvedReason::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => {
+            present_candidates
+                .iter()
+                .chain(possible_candidates)
+                .any(|candidate| match candidate {
+                    UnresolvedCandidate::Relation { relation } => {
+                        name_matches(column) && relation_matches_source(relation)
+                    }
+                    UnresolvedCandidate::ArrayElement { array_sources } => {
+                        array_sources.iter().any(|source| {
+                            name_matches(&source.column)
+                                && relation_matches_source(&source.relation)
+                        })
+                    }
+                    UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => false,
+                })
         }
         UnresolvedReason::AmbiguousOutput {
             relation,
@@ -1073,17 +1101,51 @@ fn unresolved_relevance(
         UnresolvedReason::Ambiguous {
             column,
             candidates: unresolved,
-        } => combine_relevance(unresolved.iter().map(|candidate| match candidate {
-            UnresolvedCandidate::Relation { relation } => named(relation, column),
-            UnresolvedCandidate::Cte { .. } | UnresolvedCandidate::Derived { .. } => {
-                RelationRelevance::Unknown
-            }
-        })),
+        } => combine_relevance(
+            unresolved
+                .iter()
+                .map(|candidate| candidate_relevance(candidate, column, &named)),
+        ),
+        UnresolvedReason::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => combine_relevance(
+            present_candidates
+                .iter()
+                .chain(possible_candidates)
+                .map(|candidate| candidate_relevance(candidate, column, &named)),
+        ),
         UnresolvedReason::Unbound { .. }
         | UnresolvedReason::Recursive
         | UnresolvedReason::RowValue { .. }
         | UnresolvedReason::Unsupported { .. }
         | UnresolvedReason::TraceBoundary { .. } => RelationRelevance::Unknown,
+    }
+}
+
+/// Whether a candidate of an unresolved name may read the input: a relation
+/// through the name itself, the element of an array through the columns the
+/// array reads.
+fn candidate_relevance(
+    candidate: &UnresolvedCandidate,
+    column: &Ident,
+    named: &impl Fn(&RelationRef, &Ident) -> RelationRelevance,
+) -> RelationRelevance {
+    match candidate {
+        UnresolvedCandidate::Relation { relation } => named(relation, column),
+        // An array that reads nothing the statement shows may still read
+        // the input.
+        UnresolvedCandidate::ArrayElement { array_sources } if !array_sources.is_empty() => {
+            combine_relevance(
+                array_sources
+                    .iter()
+                    .map(|source| named(&source.relation, &source.column)),
+            )
+        }
+        UnresolvedCandidate::ArrayElement { .. }
+        | UnresolvedCandidate::Cte { .. }
+        | UnresolvedCandidate::Derived { .. } => RelationRelevance::Unknown,
     }
 }
 

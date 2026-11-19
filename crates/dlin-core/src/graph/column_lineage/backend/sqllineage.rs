@@ -324,6 +324,20 @@ pub(crate) fn unresolved_reason(
         relation: relation(&source.relation),
         column: Ident::from_engine(&source.column),
     };
+    let candidate = |candidate: &sqllineage::Candidate| match candidate {
+        sqllineage::Candidate::Relation(found) => UnresolvedCandidate::Relation {
+            relation: relation(found),
+        },
+        sqllineage::Candidate::Cte(name) => UnresolvedCandidate::Cte {
+            name: name.value.clone(),
+        },
+        sqllineage::Candidate::Derived(name) => UnresolvedCandidate::Derived {
+            name: name.as_ref().map(|name| name.value.clone()),
+        },
+        sqllineage::Candidate::ArrayElement(element) => UnresolvedCandidate::ArrayElement {
+            array_sources: element.array_sources.iter().map(source).collect(),
+        },
+    };
     match unresolved {
         Unresolved::AlignmentUnknown {
             operation,
@@ -360,20 +374,16 @@ pub(crate) fn unresolved_reason(
         },
         Unresolved::Ambiguous { column, candidates } => UnresolvedReason::Ambiguous {
             column: Ident::from_engine(column),
-            candidates: candidates
-                .iter()
-                .map(|candidate| match candidate {
-                    sqllineage::Candidate::Relation(found) => UnresolvedCandidate::Relation {
-                        relation: relation(found),
-                    },
-                    sqllineage::Candidate::Cte(name) => UnresolvedCandidate::Cte {
-                        name: name.value.clone(),
-                    },
-                    sqllineage::Candidate::Derived(name) => UnresolvedCandidate::Derived {
-                        name: name.as_ref().map(|name| name.value.clone()),
-                    },
-                })
-                .collect(),
+            candidates: candidates.iter().map(candidate).collect(),
+        },
+        Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => UnresolvedReason::Unverified {
+            column: Ident::from_engine(column),
+            present_candidates: present_candidates.iter().map(candidate).collect(),
+            possible_candidates: possible_candidates.iter().map(candidate).collect(),
         },
         Unresolved::Unbound { column } => UnresolvedReason::Unbound {
             column: Ident::from_engine(column),
@@ -412,9 +422,21 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
     };
     // A recursive origin is reported as such even when its base case also has
     // unresolved parts: the recursion is what makes the column untraceable.
+    // A name left open by unknown columns does not hide a name that is
+    // ambiguous between known ones.
     let first = unresolved
         .iter()
         .find(|item| matches!(item, Unresolved::Recursive))
+        .or_else(|| {
+            unresolved
+                .first()
+                .filter(|item| !matches!(item, Unresolved::Unverified { .. }))
+        })
+        .or_else(|| {
+            unresolved
+                .iter()
+                .find(|item| matches!(item, Unresolved::Ambiguous { .. }))
+        })
         .or_else(|| unresolved.first());
     let (kind, message) = match first {
         Some(Unresolved::Ambiguous { column, candidates }) => {
@@ -430,6 +452,36 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
                 } else {
                     format!(
                         "column '{}' is ambiguous between {candidates}",
+                        column.value
+                    )
+                },
+            )
+        }
+        Some(Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        }) => {
+            let possible = possible_candidates
+                .iter()
+                .map(candidate_name)
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let present = present_candidates
+                .iter()
+                .map(candidate_name)
+                .collect::<Vec<_>>()
+                .join(" or ");
+            (
+                OutputFailureKind::Indeterminate,
+                if present.is_empty() {
+                    format!(
+                        "column '{}' may come from {possible}, whose columns are not known",
+                        column.value
+                    )
+                } else {
+                    format!(
+                        "column '{}' may come from {possible}, whose columns are not known, or from {present}",
                         column.value
                     )
                 },
@@ -509,6 +561,24 @@ fn candidate_name(candidate: &sqllineage::Candidate) -> String {
             identifier_display(name)
         }
         sqllineage::Candidate::Derived(None) => "<derived>".to_string(),
+        sqllineage::Candidate::ArrayElement(element) => {
+            let sources = element
+                .array_sources
+                .iter()
+                .map(|source| {
+                    format!(
+                        "{}.{}",
+                        relation_display(&source.relation),
+                        identifier_display(&source.column)
+                    )
+                })
+                .collect::<Vec<_>>();
+            if sources.is_empty() {
+                "the element of an array".to_string()
+            } else {
+                format!("the element of UNNEST({})", sources.join(", "))
+            }
+        }
     }
 }
 

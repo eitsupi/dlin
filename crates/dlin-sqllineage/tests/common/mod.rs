@@ -228,6 +228,22 @@ fn sources_text(sources: &[dlin_sqllineage::SourceColumn]) -> String {
         .join(", ")
 }
 
+fn candidates_text(candidates: &[Candidate]) -> String {
+    candidates
+        .iter()
+        .map(|candidate| match candidate {
+            Candidate::Relation(relation) => relation.name.value.clone(),
+            Candidate::Cte(name) => format!("cte {}", name.value),
+            Candidate::Derived(Some(name)) => format!("derived {}", name.value),
+            Candidate::Derived(None) => "derived".to_string(),
+            Candidate::ArrayElement(element) => {
+                format!("element[{}]", sources_text(&element.array_sources))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn unresolved_text(unresolved: &Unresolved) -> String {
     match unresolved {
         Unresolved::AlignmentUnknown { .. } => "AlignmentUnknown".to_string(),
@@ -236,16 +252,17 @@ fn unresolved_text(unresolved: &Unresolved) -> String {
         Unresolved::Ambiguous { column, candidates } => format!(
             "Ambiguous({}: {})",
             column.value,
-            candidates
-                .iter()
-                .map(|candidate| match candidate {
-                    Candidate::Relation(relation) => relation.name.value.clone(),
-                    Candidate::Cte(name) => format!("cte {}", name.value),
-                    Candidate::Derived(Some(name)) => format!("derived {}", name.value),
-                    Candidate::Derived(None) => "derived".to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
+            candidates_text(candidates)
+        ),
+        Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => format!(
+            "Unverified({}: {} | {})",
+            column.value,
+            candidates_text(present_candidates),
+            candidates_text(possible_candidates)
         ),
         other => format!("{other:?}"),
     }

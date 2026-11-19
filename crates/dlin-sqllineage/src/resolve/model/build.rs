@@ -499,31 +499,51 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 let model = self.scope(*child);
                 forward_scope(*child, &model, &ranges, None)
             }
-            Binding::VirtualSource(source) => self
-                .graph
-                .scopes
-                .virtual_source(*source)
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    OutputElement::Column(ColumnSlot {
-                        id: None,
-                        name: column.name.clone(),
-                        output_name: OutputName::Explicit(column.name.clone()),
-                        ordinal: Some(index),
-                        position: PositionRange::exact(index),
+            Binding::VirtualSource(source) => {
+                let virtual_source = self.graph.scopes.virtual_source(*source);
+                // The fields of an element whose type is not known come
+                // first, and nothing after them has a known position.
+                let open = virtual_source.open_element.is_some();
+                let element = open.then(|| {
+                    OutputElement::Unknown(UnknownSegment {
                         ranges: ranges.clone(),
-                        candidate_ranges: ranges.clone(),
-                        value: ValueId::VirtualColumn {
-                            source: *source,
-                            index,
-                        },
-                        origin: SlotOrigin::Forwarded(column.name.clone()),
-                        structure: Evidence::default(),
+                        ..UnknownSegment::opaque(OpaqueReason::UnmodelledSource("array element"))
                     })
-                })
-                .collect(),
+                });
+                element
+                    .into_iter()
+                    .chain(
+                        virtual_source
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(|(index, column)| {
+                                OutputElement::Column(ColumnSlot {
+                                    id: None,
+                                    name: column.name.clone(),
+                                    output_name: OutputName::Explicit(column.name.clone()),
+                                    ordinal: (!open).then_some(index),
+                                    position: if open {
+                                        PositionRange {
+                                            min: index,
+                                            max: None,
+                                        }
+                                    } else {
+                                        PositionRange::exact(index)
+                                    },
+                                    ranges: ranges.clone(),
+                                    candidate_ranges: ranges.clone(),
+                                    value: ValueId::VirtualColumn {
+                                        source: *source,
+                                        index,
+                                    },
+                                    origin: SlotOrigin::Forwarded(column.name.clone()),
+                                    structure: Evidence::default(),
+                                })
+                            }),
+                    )
+                    .collect()
+            }
         }
     }
 

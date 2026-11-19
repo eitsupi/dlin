@@ -50,6 +50,7 @@ pub(crate) enum CandidateKey {
     Relation(RelationKey),
     Cte(String),
     Derived(Option<String>),
+    ArrayElement(Vec<(RelationKey, String)>),
 }
 
 pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> CandidateKey {
@@ -58,6 +59,16 @@ pub(crate) fn candidate_key(candidate: &Candidate, dialect: Dialect) -> Candidat
         Candidate::Cte(name) => CandidateKey::Cte(name.column_key(dialect).into_owned()),
         Candidate::Derived(name) => {
             CandidateKey::Derived(name.as_ref().map(|id| id.column_key(dialect).into_owned()))
+        }
+        Candidate::ArrayElement(element) => {
+            let mut sources: Vec<_> = element
+                .array_sources
+                .iter()
+                .map(|source| source_key(source, dialect))
+                .collect();
+            sources.sort();
+            sources.dedup();
+            CandidateKey::ArrayElement(sources)
         }
     }
 }
@@ -81,6 +92,7 @@ pub(crate) enum UnresolvedKey {
     BehindStar(RelationKey),
     NamedBehindStar(RelationKey, String),
     Ambiguous(String, Vec<CandidateKey>),
+    Unverified(String, Vec<CandidateKey>, Vec<CandidateKey>),
     Unbound(String),
     Recursive,
     RowValue(String),
@@ -128,6 +140,21 @@ pub(crate) fn unresolved_key(unresolved: &Unresolved, dialect: Dialect) -> Unres
         Unresolved::Ambiguous { column, candidates } => UnresolvedKey::Ambiguous(
             column.column_key(dialect).into_owned(),
             candidates
+                .iter()
+                .map(|candidate| candidate_key(candidate, dialect))
+                .collect(),
+        ),
+        Unresolved::Unverified {
+            column,
+            present_candidates,
+            possible_candidates,
+        } => UnresolvedKey::Unverified(
+            column.column_key(dialect).into_owned(),
+            present_candidates
+                .iter()
+                .map(|candidate| candidate_key(candidate, dialect))
+                .collect(),
+            possible_candidates
                 .iter()
                 .map(|candidate| candidate_key(candidate, dialect))
                 .collect(),

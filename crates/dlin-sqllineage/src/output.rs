@@ -336,6 +336,21 @@ pub enum Unresolved {
         /// keys, with equal keys retaining the first FROM occurrence's spelling.
         candidates: Vec<Candidate>,
     },
+    /// A column could come from more than one candidate, and at least one of
+    /// them publishes columns that are not known, so it may or may not carry
+    /// the name. Unlike [`Unresolved::Ambiguous`], a valid query can still
+    /// bind the name: the unknown columns decide which candidate it is.
+    Unverified {
+        /// Column name.
+        column: Ident,
+        /// Candidates known to publish a column of this name. This is about
+        /// the name only: it does not make a candidate a source of the value,
+        /// since a candidate that may carry the name can still be the one the
+        /// query binds.
+        present_candidates: Vec<Candidate>,
+        /// Candidates whose columns are not known and may carry the name.
+        possible_candidates: Vec<Candidate>,
+    },
     /// A column could not be bound to a relation in scope.
     Unbound {
         /// Unbound column name.
@@ -420,6 +435,23 @@ pub enum Candidate {
     Cte(Ident),
     /// A derived table, optionally named.
     Derived(Option<Ident>),
+    /// The element of an array expanded without a range variable, such as
+    /// `UNNEST(params)` in `BigQuery`, whose fields are not known.
+    ArrayElement(ArrayElement),
+}
+
+/// The element of an array expanded in a FROM clause.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct ArrayElement {
+    /// The columns the array expression reads, as far as the statement shows
+    /// them. Empty for a constant array, and also when the expression reads
+    /// nothing the analysis could resolve, so an empty list does not prove
+    /// that the array depends on no column.
+    pub array_sources: Vec<SourceColumn>,
+    /// The expansion this element belongs to, which tells two expansions of
+    /// the same array apart while the statement is analyzed.
+    #[serde(skip)]
+    pub(crate) source: Option<crate::graph::scope::VirtualSourceId>,
 }
 
 /// Transformation applied to an output column.
