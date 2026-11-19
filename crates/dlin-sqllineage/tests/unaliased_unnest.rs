@@ -236,7 +236,10 @@ FROM events"#,
         Some(&catalog),
     );
     assert_eq!(known_names(&analysis, "page"), ["events.params"]);
-    assert_eq!(known_names(&analysis, "max_threshold"), ["events.threshold"]);
+    assert_eq!(
+        known_names(&analysis, "max_threshold"),
+        ["events.threshold"]
+    );
 }
 
 #[test]
@@ -246,7 +249,9 @@ fn struct_literals_decide_the_element_fields() {
         r#"SELECT
   (SELECT SUM(v) FROM UNNEST([STRUCT('amount' AS k, amount AS v), STRUCT('fee' AS k, fee AS v)])) AS total,
   (SELECT MAX(v) FROM UNNEST([STRUCT<k STRING, v INT64>('amount', amount)])) AS typed,
-  (SELECT MAX(label) FROM UNNEST([STRUCT('amount' AS k, amount AS v)])) AS outer_label
+  (SELECT MAX(label) FROM UNNEST([STRUCT('amount' AS k, amount AS v)])) AS outer_label,
+  (SELECT MAX(k) FROM UNNEST([STRUCT('amount' AS k, amount AS v)])) AS constant_key,
+  (SELECT MAX(k) FROM UNNEST([STRUCT<k STRING, v INT64>(label, amount)])) AS typed_key
 FROM events"#,
         Dialect::BigQuery,
         Some(&catalog),
@@ -257,6 +262,9 @@ FROM events"#,
     );
     assert_eq!(known_names(&analysis, "typed"), ["events.amount"]);
     assert_eq!(known_names(&analysis, "outer_label"), ["events.label"]);
+    // Each field takes its value from its own expressions only.
+    assert_eq!(known_names(&analysis, "constant_key"), Vec::<String>::new());
+    assert_eq!(known_names(&analysis, "typed_key"), ["events.label"]);
 }
 
 #[test]
@@ -276,6 +284,9 @@ FROM events"#,
         let (present, possible) = unverified(&analysis, name, "v");
         assert!(present.is_empty(), "{name}");
         assert_eq!(possible.len(), 1, "{name}: {possible:?}");
-        assert!(possible[0].starts_with("element of"), "{name}: {possible:?}");
+        assert!(
+            possible[0].starts_with("element of"),
+            "{name}: {possible:?}"
+        );
     }
 }

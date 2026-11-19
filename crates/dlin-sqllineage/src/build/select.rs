@@ -451,29 +451,17 @@ impl LineageBuilder {
                 with_offset_alias,
                 with_ordinality,
             } => {
-                let dependencies: Vec<_> = array_exprs
-                    .iter()
-                    .map(|expr| self.collect_ancestors(expr))
-                    .collect();
                 if alias.is_none()
                     && self.dialect == crate::Dialect::BigQuery
                     && let [array] = array_exprs.as_slice()
                 {
-                    let [dependencies] = <[_; 1]>::try_from(dependencies)
-                        .expect("one dependency list per array expression");
-                    let element = match element_shape(array, self.dialect) {
-                        // A scalar element has no field to publish; the
-                        // expansion still publishes its offset.
-                        ElementShape::Scalar if !*with_offset => return,
-                        ElementShape::Scalar => AnonymousElement::Scalar,
-                        ElementShape::Fields(names) => {
-                            AnonymousElement::Fields(names, dependencies)
-                        }
-                        ElementShape::Unknown => AnonymousElement::Open(dependencies),
-                    };
-                    self.add_anonymous_unnest(element, *with_offset, with_offset_alias.as_ref());
+                    self.add_anonymous_unnest(array, *with_offset, with_offset_alias.as_ref());
                     return;
                 }
+                let dependencies = array_exprs
+                    .iter()
+                    .map(|expr| self.collect_ancestors(expr))
+                    .collect();
                 self.add_virtual_unnest(
                     alias.as_ref(),
                     None,
@@ -872,28 +860,51 @@ impl LineageBuilder {
     /// default.
     fn add_anonymous_unnest(
         &mut self,
-        element: AnonymousElement,
+        array: &Expr,
         with_offset: bool,
         with_offset_alias: Option<&sqlparser::ast::Ident>,
     ) {
-        let (mut columns, open_element) = match element {
-            AnonymousElement::Scalar => (Vec::new(), None),
-            AnonymousElement::Fields(names, dependencies) => (
-                names
+        let (mut columns, open_element) = match element_shape(array, self.dialect) {
+            ElementShape::Scalar => {
+                self.collect_ancestors(array);
+                // A scalar element has no field to publish; the expansion
+                // still publishes its offset.
+                if !with_offset {
+                    return;
+                }
+                (Vec::new(), None)
+            }
+            ElementShape::Fields(fields) => {
+                // A field of STRUCT literals takes its value from its own
+                // expressions; a field of a cast array from the whole array.
+                let whole = fields
+                    .iter()
+                    .any(|(_, values)| values.is_none())
+                    .then(|| self.collect_ancestors(array));
+                let columns = fields
                     .into_iter()
-                    .map(|name| VirtualColumn {
-                        name,
-                        state: if dependencies.is_empty() {
-                            VirtualColumnState::KnownEmpty
-                        } else {
-                            VirtualColumnState::Unknown
-                        },
-                        dependencies: dependencies.clone(),
+                    .map(|(name, values)| {
+                        let dependencies: Vec<_> = match values {
+                            Some(values) => values
+                                .into_iter()
+                                .flat_map(|value| self.collect_ancestors(value))
+                                .collect(),
+                            None => whole.clone().unwrap_or_default(),
+                        };
+                        VirtualColumn {
+                            name,
+                            state: if dependencies.is_empty() {
+                                VirtualColumnState::KnownEmpty
+                            } else {
+                                VirtualColumnState::Unknown
+                            },
+                            dependencies,
+                        }
                     })
-                    .collect(),
-                None,
-            ),
-            AnonymousElement::Open(dependencies) => (Vec::new(), Some(dependencies)),
+                    .collect();
+                (columns, None)
+            }
+            ElementShape::Unknown => (Vec::new(), Some(self.collect_ancestors(array))),
         };
         columns.extend(with_offset.then(|| VirtualColumn {
             name: with_offset_alias.map_or_else(|| Ident::unquoted("offset"), Ident::from_ast),
@@ -910,21 +921,14 @@ impl LineageBuilder {
     }
 }
 
-/// The element of an unaliased expansion, as [`element_shape`] determined it,
-/// with the dependencies of the array.
-enum AnonymousElement {
-    Scalar,
-    Fields(Vec<Ident>, Vec<crate::graph::node::NodeId>),
-    Open(Vec<crate::graph::node::NodeId>),
-}
-
 /// What the element of a `BigQuery` array is known to be from the array
 /// expression alone.
-enum ElementShape {
+enum ElementShape<'a> {
     /// Not a STRUCT, so it publishes no field names.
     Scalar,
-    /// A STRUCT with these field names.
-    Fields(Vec<Ident>),
+    /// A STRUCT with these fields, each with the expressions that supply its
+    /// value, or `None` when only the whole array is known to.
+    Fields(Vec<(Ident, Option<Vec<&'a Expr>>)>),
     Unknown,
 }
 
@@ -933,7 +937,7 @@ enum ElementShape {
 /// STRUCT literals whose fields are named alike, or a function that
 /// generates a series. Anything else, an empty literal and STRUCTs with
 /// unnamed or repeated fields included, is unknown.
-fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape {
+fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
     match expr {
         Expr::Nested(inner) => element_shape(inner, dialect),
         Expr::Array(array) => {
@@ -942,20 +946,38 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape {
             {
                 return ElementShape::Scalar;
             }
-            let mut fields = array
+            let Some(literals) = array
                 .elem
                 .iter()
-                .map(|elem| struct_literal_fields(elem, dialect));
-            match fields.next().flatten() {
-                Some(first)
-                    if fields.all(|other| {
-                        other.is_some_and(|other| same_names(&first, &other, dialect))
-                    }) =>
-                {
-                    ElementShape::Fields(first)
-                }
-                _ => ElementShape::Unknown,
+                .map(|elem| struct_literal_fields(elem, dialect))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return ElementShape::Unknown;
+            };
+            let Some((first, rest)) = literals.split_first() else {
+                return ElementShape::Unknown;
+            };
+            let names: Vec<Ident> = first.iter().map(|(name, _)| name.clone()).collect();
+            let consistent = rest.iter().all(|other| {
+                other.len() == names.len()
+                    && other
+                        .iter()
+                        .zip(&names)
+                        .all(|((other, _), name)| same_name(other, name, dialect))
+            });
+            if !consistent {
+                return ElementShape::Unknown;
             }
+            ElementShape::Fields(
+                names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        let values = literals.iter().map(|literal| literal[index].1).collect();
+                        (name, Some(values))
+                    })
+                    .collect(),
+            )
         }
         Expr::Cast {
             data_type:
@@ -972,7 +994,9 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape {
                 fields.iter().map(|field| field.field_name.as_ref()),
                 dialect,
             )
-            .map_or(ElementShape::Unknown, ElementShape::Fields),
+            .map_or(ElementShape::Unknown, |names| {
+                ElementShape::Fields(names.into_iter().map(|name| (name, None)).collect())
+            }),
             _ => ElementShape::Scalar,
         },
         Expr::Function(function) if is_series_generator(function) => ElementShape::Scalar,
@@ -980,26 +1004,34 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape {
     }
 }
 
-/// The field names of a STRUCT literal: those of its type when it has one
-/// (`STRUCT<a INT64>(1)`), otherwise those of its named values
+/// The fields of a STRUCT literal with the expression of each: named by its
+/// type when it has one (`STRUCT<a INT64>(1)`), otherwise by its values
 /// (`STRUCT(1 AS a)`).
-fn struct_literal_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<Ident>> {
+fn struct_literal_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Ident, &Expr)>> {
     let Expr::Struct { values, fields } = expr else {
         return None;
     };
     if fields.is_empty() {
-        distinct_names(
-            values.iter().map(|value| match value {
-                Expr::Named { name, .. } => Some(name),
+        let pairs: Vec<(&sqlparser::ast::Ident, &Expr)> = values
+            .iter()
+            .map(|value| match value {
+                Expr::Named { name, expr } => Some((name, &**expr)),
                 _ => None,
-            }),
-            dialect,
+            })
+            .collect::<Option<_>>()?;
+        let names = distinct_names(pairs.iter().map(|(name, _)| Some(*name)), dialect)?;
+        Some(
+            names
+                .into_iter()
+                .zip(pairs.into_iter().map(|(_, expr)| expr))
+                .collect(),
         )
     } else {
-        distinct_names(
+        let names = distinct_names(
             fields.iter().map(|field| field.field_name.as_ref()),
             dialect,
-        )
+        )?;
+        (names.len() == values.len()).then(|| names.into_iter().zip(values).collect())
     }
 }
 
@@ -1019,12 +1051,8 @@ fn distinct_names<'a>(
     (!names.is_empty() && distinct).then_some(names)
 }
 
-fn same_names(left: &[Ident], right: &[Ident], dialect: crate::Dialect) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| left.column_key(dialect) == right.column_key(dialect))
+fn same_name(left: &Ident, right: &Ident, dialect: crate::Dialect) -> bool {
+    left.column_key(dialect) == right.column_key(dialect)
 }
 
 /// Whether `function` is a `BigQuery` function that generates a series of
