@@ -516,3 +516,53 @@ fn sqlite_in_table_is_in_select_star() {
         assert_eq!(actual.diagnostics, expected.diagnostics, "{in_table}");
     }
 }
+
+/// A wildcard argument reads the values of every column it expands to, so
+/// it cannot be reported as an argument without inputs. Explicit column
+/// arguments keep their exact inputs.
+#[test]
+fn wildcard_function_arguments_are_not_inputless() {
+    let catalog = common::KnownTables(&[("t", &["a", "b"])]);
+    expect_rendered_with_catalog(
+        "SELECT OBJECT_CONSTRUCT('a', a, 'b', b) AS o FROM t",
+        &catalog,
+        &["o#0 C[t.a, t.b] Expression", "Closed"],
+    );
+    for sql in [
+        "SELECT OBJECT_CONSTRUCT(*) AS o FROM t",
+        "SELECT OBJECT_CONSTRUCT(t.*) AS o FROM t",
+        "SELECT HASH(* EXCLUDE (b)) AS o FROM t",
+        "SELECT OBJECT_CONSTRUCT('k', a, *) AS o FROM t",
+        "SELECT COUNT(t.*) AS o FROM t",
+        "SELECT COUNT(* ILIKE 'a%') AS o FROM t",
+        "SELECT APPROX_COUNT_DISTINCT(*) AS o FROM t",
+    ] {
+        let result = analyze_one_with(sql, Dialect::Snowflake, Some(&catalog));
+        let Lineage::Partial { unresolved, .. } = &result.output.columns[0].lineage else {
+            panic!("{sql}: {:?}", result.output.columns[0].lineage);
+        };
+        assert!(
+            unresolved.iter().any(|reason| matches!(
+                reason,
+                Unresolved::Unsupported { what } if *what == "wildcard function argument"
+            )),
+            "{sql}: {unresolved:?}"
+        );
+    }
+}
+
+/// `COUNT(*)` counts rows and reads no column value.
+#[test]
+fn count_star_reads_no_column_value() {
+    let catalog = common::KnownTables(&[("t", &["a", "b"])]);
+    expect_rendered_with_catalog(
+        "SELECT COUNT(*) AS n, count(*) AS m FROM t",
+        &catalog,
+        &["n#0 C[] Aggregation", "m#1 C[] Aggregation", "Closed"],
+    );
+}
+
+fn expect_rendered_with_catalog(sql: &str, catalog: &dyn Catalog, expected: &[&str]) {
+    let result = analyze_one_with(sql, Dialect::Snowflake, Some(catalog));
+    assert_eq!(common::render_output(&result.output), expected, "{sql}");
+}

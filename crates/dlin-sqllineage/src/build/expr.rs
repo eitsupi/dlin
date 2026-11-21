@@ -299,6 +299,13 @@ impl LineageBuilder {
                             | ast::FunctionArg::ExprNamed { arg: arg_expr, .. } => arg_expr,
                         };
                         let ast::FunctionArgExpr::Expr(expr) = arg_expr else {
+                            // A wildcard argument reads every column it
+                            // expands to, which is not modelled yet. Only
+                            // `COUNT(*)` is known to read no column value.
+                            if !function_semantics::wildcard_argument_counts_rows(func) {
+                                ancestors
+                                    .push(self.graph.add_unsupported("wildcard function argument"));
+                            }
                             continue;
                         };
                         let is_static_syntax = semantics
