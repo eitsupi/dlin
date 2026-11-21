@@ -24,6 +24,10 @@ impl LineageBuilder {
         // Bind FROM first, but retain SQL clause order for read spellings:
         // projection subqueries appear before the FROM clause's relations.
         let from_inputs = self.graph.tables.inputs.split_off(input_mark);
+        // The WINDOW clause is walked before the projection that uses it, but
+        // the relations its subqueries read keep their place after HAVING.
+        self.define_named_windows(&select.named_window);
+        let window_inputs = self.graph.tables.inputs.split_off(input_mark);
         if select.flavor == SelectFlavor::FromFirstNoSelect && select.projection.is_empty() {
             // `FROM t` without a SELECT list is shorthand for `SELECT * FROM t`.
             self.visit_projection(&[SelectItem::Wildcard(WildcardAdditionalOptions::default())]);
@@ -44,6 +48,7 @@ impl LineageBuilder {
         if let Some(having) = &select.having {
             self.scan_expr_for_tables(having);
         }
+        self.graph.tables.inputs.extend(window_inputs);
         if let Some(qualify) = &select.qualify {
             self.scan_expr_for_tables(qualify);
         }
