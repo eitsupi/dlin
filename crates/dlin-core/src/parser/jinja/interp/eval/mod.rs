@@ -24,6 +24,8 @@ use crate::graph::dependency::{
 };
 use crate::parser::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
+mod adopt;
+use adopt::{SharedList, SharedMap};
 mod builtins;
 mod calls;
 mod expressions;

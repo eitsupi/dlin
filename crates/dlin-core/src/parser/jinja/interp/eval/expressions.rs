@@ -29,21 +29,34 @@ impl<'a> Interp<'a> {
 
     /// Convert a value to a minijinja value, or explain why it is unknown.
     pub(super) fn freeze(&self, st: &State, value: &AValue, span: Span) -> Result<Value, Causes> {
-        self.freeze_at(st, value, span, 0)
+        self.freeze_at(st, value, span, 0, false)
     }
 
-    pub(super) fn freeze_at(
+    /// Like [`Self::freeze`], for a value handed to minijinja whose result
+    /// is adopted back: its containers keep their heap identity, so that a
+    /// container returned as it is can be told apart from a new one.
+    pub(super) fn freeze_shared(
+        &self,
+        st: &State,
+        value: &AValue,
+        span: Span,
+    ) -> Result<Value, Causes> {
+        self.freeze_at(st, value, span, 0, true)
+    }
+
+    fn freeze_at(
         &self,
         st: &State,
         value: &AValue,
         span: Span,
         depth: usize,
+        shared: bool,
     ) -> Result<Value, Causes> {
         // Containers can hold themselves; such values are not modelled.
         if depth > MAX_DEPTH {
             return Err(self.unsupported("deeply nested or cyclic container", span));
         }
-        let freeze = |item: &AValue| self.freeze_at(st, item, span, depth + 1);
+        let freeze = |item: &AValue| self.freeze_at(st, item, span, depth + 1, shared);
         match value {
             AValue::Known(value) => Ok(value.clone()),
             AValue::Unknown(causes) => Err(causes.clone()),
@@ -52,17 +65,35 @@ impl<'a> Interp<'a> {
                     .iter()
                     .map(freeze)
                     .collect::<Result<Vec<_>, _>>()
-                    .map(Value::from),
+                    .map(|items| {
+                        if shared {
+                            SharedList::value(*id, items)
+                        } else {
+                            Value::from(items)
+                        }
+                    }),
                 Some(HeapObj::Map(entries)) => entries
                     .iter()
                     .map(|(key, item)| freeze(item).map(|v| (key.clone(), v)))
                     .collect::<Result<Vec<_>, _>>()
-                    .map(Value::from_pairs),
+                    .map(|entries| {
+                        if shared {
+                            SharedMap::value(*id, entries)
+                        } else {
+                            Value::from_pairs(entries)
+                        }
+                    }),
                 Some(HeapObj::Namespace(attrs)) => attrs
                     .iter()
                     .map(|(key, item)| freeze(item).map(|v| (Value::from(key.as_ref()), v)))
                     .collect::<Result<Vec<_>, _>>()
-                    .map(Value::from_pairs),
+                    .map(|entries| {
+                        if shared {
+                            SharedMap::value(*id, entries)
+                        } else {
+                            Value::from_pairs(entries)
+                        }
+                    }),
                 Some(HeapObj::Clobbered(causes)) => Err(causes.clone()),
                 None => Ok(Value::UNDEFINED),
             },
@@ -128,10 +159,13 @@ impl<'a> Interp<'a> {
                         None => AValue::none(),
                     });
                 }
-                match self.freeze_all(st, &parts, span) {
-                    Ok(values) => known::slice(&values[0], &values[1], &values[2], &values[3])
-                        .map(AValue::Known)
-                        .unwrap_or_else(|_| AValue::Unknown(self.unsupported("slice", span))),
+                match self.freeze_all_shared(st, &parts, span) {
+                    Ok(values) => {
+                        match known::slice(&values[0], &values[1], &values[2], &values[3]) {
+                            Ok(value) => self.adopt_result(st, value, span),
+                            Err(_) => AValue::Unknown(self.unsupported("slice", span)),
+                        }
+                    }
                     Err(causes) => AValue::Unknown(causes),
                 }
             }
@@ -357,10 +391,30 @@ impl<'a> Interp<'a> {
         values: &[AValue],
         span: Span,
     ) -> Result<Vec<Value>, Causes> {
+        self.freeze_all_with(st, values, span, false)
+    }
+
+    /// [`Self::freeze_all`] with [`Self::freeze_shared`].
+    pub(super) fn freeze_all_shared(
+        &self,
+        st: &State,
+        values: &[AValue],
+        span: Span,
+    ) -> Result<Vec<Value>, Causes> {
+        self.freeze_all_with(st, values, span, true)
+    }
+
+    fn freeze_all_with(
+        &self,
+        st: &State,
+        values: &[AValue],
+        span: Span,
+        shared: bool,
+    ) -> Result<Vec<Value>, Causes> {
         let mut out = Vec::with_capacity(values.len());
         let mut unknown: Option<Causes> = None;
         for value in values {
-            match self.freeze(st, value, span) {
+            match self.freeze_at(st, value, span, 0, shared) {
                 Ok(v) => out.push(v),
                 Err(causes) => {
                     unknown = Some(match unknown {
@@ -377,16 +431,17 @@ impl<'a> Interp<'a> {
     }
 
     pub(super) fn binary(
-        &self,
-        st: &State,
+        &mut self,
+        st: &mut State,
         op: BinOp,
         left: &AValue,
         right: &AValue,
         span: Span,
     ) -> AValue {
-        match self.freeze_all(st, &[left.clone(), right.clone()], span) {
+        let inputs = [left.clone(), right.clone()];
+        match self.freeze_all_shared(st, &inputs, span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
-                Ok(value) => AValue::Known(value),
+                Ok(value) => self.adopt_result(st, value, span),
                 Err(_) => {
                     AValue::Unknown(self.unsupported(format!("operator {}", op.symbol()), span))
                 }
@@ -738,14 +793,14 @@ impl<'a> Interp<'a> {
             // Keep the default's own form (it may be a container).
             return Ok(values[1].clone());
         }
-        let mut frozen = match self.freeze_all(st, &values, span) {
+        let mut frozen = match self.freeze_all_shared(st, &values, span) {
             Ok(frozen) => frozen,
             Err(causes) => return Ok(AValue::Unknown(causes)),
         };
         if !kwargs.is_empty() {
             let mut pairs = Vec::new();
             for (key, value) in &kwargs {
-                match self.freeze(st, value, span) {
+                match self.freeze_shared(st, value, span) {
                     Ok(value) => pairs.push((Value::from(key.as_ref()), value)),
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 }
@@ -757,7 +812,7 @@ impl<'a> Interp<'a> {
             )));
         }
         Ok(match known::filter(name, &frozen) {
-            Some(Ok(value)) => AValue::Known(value),
+            Some(Ok(value)) => self.adopt_result(st, value, span),
             Some(Err(_)) | None => {
                 AValue::Unknown(self.unsupported(format!("filter:{name}"), span))
             }

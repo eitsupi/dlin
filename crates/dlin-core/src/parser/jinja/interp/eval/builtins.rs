@@ -215,7 +215,10 @@ impl<'a> Interp<'a> {
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 };
                 if let Some(value) = self.vars.get(&name) {
-                    return Ok(AValue::Known(Value::from(minijinja::value::Serde(value))));
+                    // Each call gives a new copy of the configured value, as
+                    // in dbt; a default is returned as it is.
+                    let value = Value::from(minijinja::value::Serde(value));
+                    return Ok(self.adopt_result(st, value, span));
                 }
                 if let Some(default) = args.get(1).or_else(|| kwarg("default")) {
                     return Ok(default.clone());
@@ -334,14 +337,14 @@ impl<'a> Interp<'a> {
                 Ok(self.alloc(st, HeapObj::Namespace(attrs)))
             }
             Builtin::Minijinja(name) => {
-                let mut values = match self.freeze_all(st, &args, span) {
+                let mut values = match self.freeze_all_shared(st, &args, span) {
                     Ok(values) => values,
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 };
                 if !kwargs.is_empty() {
                     let mut pairs = Vec::new();
                     for (key, value) in &kwargs {
-                        match self.freeze(st, value, span) {
+                        match self.freeze_shared(st, value, span) {
                             Ok(value) if key.as_ref() != "**" => {
                                 pairs.push((key.to_string(), value))
                             }
@@ -354,11 +357,12 @@ impl<'a> Interp<'a> {
                     values.push(Value::from(minijinja::value::Kwargs::from_iter(pairs)));
                 }
                 match Ok::<_, Causes>(values) {
-                    Ok(values) => Ok(known::call_global(name, &values)
-                        .map(AValue::Known)
-                        .unwrap_or_else(|_| {
+                    Ok(values) => Ok(match known::call_global(name, &values) {
+                        Ok(value) => self.adopt_result(st, value, span),
+                        Err(_) => {
                             AValue::Unknown(self.unsupported(format!("function:{name}"), span))
-                        })),
+                        }
+                    }),
                     Err(causes) => Ok(AValue::Unknown(causes)),
                 }
             }
