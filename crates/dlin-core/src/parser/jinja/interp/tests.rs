@@ -1045,15 +1045,29 @@ fn copies_ranges_and_negative_inserts() {
     assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
 }
 
-/// A lazy result that holds a container of the template still shares it;
-/// two ranges concatenate into an iterable, not a list; `dict()` keeps the
-/// order of its entries.
+/// `chain` gives a view of its inputs in minijinja and does not exist in
+/// Fusion: its result is unknown rather than a copy taken too early. Two
+/// ranges concatenate into an iterable, not a list, and a concatenation
+/// with a list is a new list. `dict()` keeps the order of its entries.
 #[test]
-fn lazy_results_concatenations_and_dict_order() {
-    let e = extract(
+fn views_concatenations_and_dict_order() {
+    for sql in [
+        r#"{% set d = {'n': 'a'} %}{% set merged = d | chain({}) %}{% do d.update({'n': 'b'}) %}{{ ref(merged.n) }}"#,
+        r#"{% set xs = ['a'] %}{% set merged = xs | chain([]) %}{% do xs.append('b') %}{{ ref(merged | last) }}"#,
         r#"{% set x = {'n': 'old'} %}{% for y in [x] | chain(range(0)) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+    ] {
+        let e = extract(sql);
+        assert!(
+            !ref_names(&e).contains(&"a") && !ref_names(&e).contains(&"old"),
+            "{sql}: {:?}",
+            ref_names(&e)
+        );
+        assert!(codes(&e).contains(&"unsupported_jinja_construct"), "{sql}");
+    }
+    let e = extract(
+        r#"{% set xs = ['a'] %}{% set ys = xs + [] %}{% do xs.append('b') %}{{ ref(ys | last) }}"#,
     );
-    assert_eq!(ref_names(&e), vec!["new"]);
+    assert_eq!(ref_names(&e), vec!["a"]);
     let e = extract(
         r#"{% set r = range(1) + range(1) %}{% do r.append(9) %}{{ ref('m' ~ (r | last)) }}"#,
     );

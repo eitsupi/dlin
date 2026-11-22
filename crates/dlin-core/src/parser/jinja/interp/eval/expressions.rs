@@ -762,6 +762,20 @@ impl<'a> Interp<'a> {
                 }
             }
         }
+        if name == "chain" {
+            // minijinja's `chain` gives a view that reads its inputs when it
+            // is used, so later changes to them show through it. Fusion has no
+            // such filter, so it is not modelled, and a change made through
+            // the view may reach any of the inputs.
+            let causes = self.unsupported("filter:chain", span);
+            let inputs: Vec<AValue> = values
+                .iter()
+                .cloned()
+                .chain(kwargs.iter().map(|(_, value)| value.clone()))
+                .collect();
+            st.clobber_reachable(&inputs, &causes);
+            return Ok(AValue::Unknown(causes));
+        }
         if name == "default" || name == "d" {
             // Jinja2 also accepts `default_value=` and `boolean=`; minijinja
             // takes them positionally.
