@@ -251,6 +251,19 @@ pub(super) fn resolve_input_reference(
     input_name_sources(env, name, cx)
 }
 
+/// The value of the unqualified column `name` at `env`, read the way a
+/// reference to it is.
+pub(super) fn unqualified_column_sources(
+    name: &Ident,
+    env: BindingEnv,
+    cx: &mut EvalContext<'_, '_>,
+) -> Sources {
+    input_name_sources(env, name, cx).map_or_else(
+        || resolve_unqualified(name, env, cx),
+        |(sources, _, _)| sources,
+    )
+}
+
 /// The origin of an unqualified column that `resolve_input_reference` could not
 /// answer: the one CTE or derived table that decides the name publishes nothing
 /// under it, so the name is ambiguous, or a virtual source that does not

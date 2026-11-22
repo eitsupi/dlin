@@ -10,9 +10,20 @@ use crate::{Dialect, Ident};
 pub(super) enum StarTarget {
     Ambiguous(Vec<crate::Candidate>),
     All,
-    Binding { name: Ident, binding: Binding },
+    Binding {
+        name: Ident,
+        binding: Binding,
+    },
     Unknown(TableRef),
-    FieldPath { binding: Binding, path: Vec<Ident> },
+    FieldPath {
+        binding: Binding,
+        path: Vec<Ident>,
+    },
+    /// A star over the fields of a column that no range variable qualifies:
+    /// `path[0]` is read like an unqualified column.
+    ColumnField {
+        path: Vec<Ident>,
+    },
     Expr,
 }
 
@@ -96,6 +107,10 @@ pub(super) fn resolve_star_target(
                         binding,
                         path: parts[matched..].to_vec(),
                     }
+                }
+            } else if graph.dialect.supports_column_field_star() {
+                StarTarget::ColumnField {
+                    path: parts.clone(),
                 }
             } else {
                 StarTarget::Unknown(table_ref_from_parts(parts))

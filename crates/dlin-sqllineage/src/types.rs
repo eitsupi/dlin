@@ -381,6 +381,17 @@ impl Dialect {
     pub(crate) const fn derived_tables_are_implicitly_lateral(self) -> bool {
         matches!(self, Self::DuckDb)
     }
+
+    /// Whether `x.*` can expand the fields of a STRUCT column `x` when no
+    /// range variable is named `x`. A range variable still takes precedence,
+    /// and a relation that is not in the FROM clause cannot be starred, so
+    /// such a qualifier always names a column in these dialects.
+    pub(crate) const fn supports_column_field_star(self) -> bool {
+        matches!(
+            self,
+            Self::BigQuery | Self::Databricks | Self::Spark | Self::DuckDb
+        )
+    }
 }
 
 /// A statement the engine cannot analyze because of what it contains.

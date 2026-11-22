@@ -466,7 +466,9 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 schema.add(&table);
                 self.relation_part(&Rc::new(table), &Rc::from([]))
             }
-            StarTarget::FieldPath { .. } => opaque(OpaqueReason::FieldPath(node_id)),
+            StarTarget::FieldPath { .. } | StarTarget::ColumnField { .. } => {
+                opaque(OpaqueReason::FieldPath(node_id))
+            }
             StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
