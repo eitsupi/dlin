@@ -479,7 +479,7 @@ Accepting gaps is a decision to take the risk; it does not prove that the change
 | `unsupported_dependency_expression`, `dependency_target_missing` | An exposure `depends_on` entry that is not supported or names nothing | The entry |
 | `not_assessed` | The node's dependencies are not assessed at all (`scope`: `manifest_dependencies`, `semantic_dependencies`) | |
 
-Every reason except `not_assessed` may hide a dependency; the ones about dynamic values and macros may also leave a wrong edge. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
+Every reason may hide a dependency, `not_assessed` included: an unassessed node's dependencies are simply not checked. The reasons about dynamic values and macros may also leave a wrong edge. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
 
 ## Filtering
 
