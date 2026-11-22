@@ -16,9 +16,23 @@ pub(crate) struct RawGraph {
     pub edges: Vec<RawEdge>,
     pub target_columns: Vec<Ident>,
     pub output_names: HashMap<NodeId, crate::OutputName>,
+    /// What decides the fields of an output column that may be a STRUCT. A
+    /// star over the column expands these.
+    pub struct_values: HashMap<NodeId, StructValue>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
+}
+
+/// How the value of an output column gets its STRUCT fields.
+#[derive(Debug, Clone)]
+pub(crate) enum StructValue {
+    /// A STRUCT built in place: its fields in order, each with the node of
+    /// its value.
+    Fields(Vec<(Ident, NodeId)>),
+    /// A column read as it is, through this reference node: its fields are
+    /// those of the column the reference names.
+    Column(NodeId),
 }
 
 impl RawGraph {
@@ -28,6 +42,7 @@ impl RawGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             output_names: HashMap::new(),
+            struct_values: HashMap::new(),
             target_columns: Vec::new(),
             empty_projection: None,
             scopes: ScopeTree::new(dialect),

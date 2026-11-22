@@ -8,6 +8,7 @@ use std::ops::ControlFlow;
 
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
+use crate::graph::StructValue;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
     AnonymousRange, Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn,
@@ -59,13 +60,16 @@ impl LineageBuilder {
         for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    let ancestors = self.collect_ancestors(expr);
+                    let (ancestors, fields) = self.projected_value(expr);
                     let kind = determine_edge_kind(expr);
                     let (name, output_name) = infer_output_name(expr);
                     let output = self.graph.add_output(name.clone(), kind.clone());
                     self.graph.set_output_name(output, output_name);
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
+                    }
+                    if let Some(value) = fields {
+                        self.graph.struct_values.insert(output, value);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -76,12 +80,15 @@ impl LineageBuilder {
                     );
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    let ancestors = self.collect_ancestors(expr);
+                    let (ancestors, fields) = self.projected_value(expr);
                     let kind = determine_edge_kind(expr);
                     let name = Ident::from_ast(alias);
                     let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
+                    }
+                    if let Some(value) = fields {
+                        self.graph.struct_values.insert(output, value);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -142,6 +149,66 @@ impl LineageBuilder {
                     );
                 }
             }
+        }
+    }
+
+    /// The ancestors of a projected expression and what decides its fields
+    /// if it is a STRUCT: a STRUCT it builds whose fields are all named and
+    /// distinct, with a node for the value of each field, or the reference
+    /// to a column it reads as it is. The fields read the same reference
+    /// nodes as the whole value.
+    fn projected_value(
+        &mut self,
+        expr: &Expr,
+    ) -> (Vec<crate::graph::node::NodeId>, Option<StructValue>) {
+        let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
+            let ancestors = self.collect_ancestors(expr);
+            let column = match ancestors.as_slice() {
+                [reference] if self.reads_whole_column(expr, *reference) => {
+                    Some(StructValue::Column(*reference))
+                }
+                _ => None,
+            };
+            return (ancestors, column);
+        };
+        let mut ancestors = Vec::new();
+        let mut nodes = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            let field_ancestors = self.collect_ancestors(value);
+            let kind = determine_edge_kind(value);
+            let node = self.graph.add_output(name.clone(), kind.clone());
+            for &ancestor in &field_ancestors {
+                self.graph.add_edge(ancestor, node, kind.clone());
+            }
+            ancestors.extend(field_ancestors);
+            nodes.push((name, node));
+        }
+        (ancestors, Some(StructValue::Fields(nodes)))
+    }
+
+    /// Whether `expr` is a name whose reference node `reference` stands for
+    /// the whole column it names, rather than a field below it. How the name
+    /// binds is left to the reference.
+    fn reads_whole_column(&self, expr: &Expr, reference: crate::graph::node::NodeId) -> bool {
+        use crate::graph::node::RawNode;
+        match (expr, &self.graph.nodes[reference]) {
+            (Expr::Nested(inner), _) => self.reads_whole_column(inner, reference),
+            (
+                Expr::Identifier(_),
+                RawNode::Unqualified { .. }
+                | RawNode::RowValueCandidate { .. }
+                | RawNode::Ref {
+                    qualifier: None, ..
+                },
+            ) => true,
+            (
+                Expr::CompoundIdentifier(parts),
+                RawNode::Ref {
+                    qualifier: Some(qualifier),
+                    ..
+                },
+            ) => qualifier.len() + 1 == parts.len(),
+            _ => false,
         }
     }
 
@@ -1014,6 +1081,75 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
         Expr::Function(function) if is_series_generator(function) => ElementShape::Scalar,
         _ => ElementShape::Unknown,
     }
+}
+
+/// The fields of a STRUCT that `expr` builds in place, with the expression
+/// of each: a STRUCT literal, or in `DuckDB` a struct literal (`{'a': 1}`)
+/// or `struct_pack(a := 1)`.
+fn struct_value_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Ident, &Expr)>> {
+    match expr {
+        Expr::Nested(inner) => struct_value_fields(inner, dialect),
+        Expr::Struct { .. } => struct_literal_fields(expr, dialect),
+        Expr::Function(function) if dialect == crate::Dialect::DuckDb => {
+            struct_pack_fields(function, dialect)
+        }
+        Expr::Dictionary(fields) if dialect == crate::Dialect::DuckDb => {
+            let names = distinct_names(fields.iter().map(|field| Some(&field.key)), dialect)?;
+            Some(
+                names
+                    .into_iter()
+                    .zip(fields.iter().map(|field| &*field.value))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The fields of a `DuckDB` `struct_pack` call, each named by its argument
+/// (`struct_pack(a := 1)`). A call with an unnamed argument, or any other
+/// clause, is not one whose fields are known.
+fn struct_pack_fields(
+    function: &sqlparser::ast::Function,
+    dialect: crate::Dialect,
+) -> Option<Vec<(Ident, &Expr)>> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArgOperator, FunctionArguments};
+    let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return None;
+    };
+    if name.quote_style.is_some()
+        || !name.value.eq_ignore_ascii_case("struct_pack")
+        || function.over.is_some()
+        || function.filter.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(list) = &function.args else {
+        return None;
+    };
+    if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&sqlparser::ast::Ident, &Expr)> = list
+        .args
+        .iter()
+        .map(|arg| match arg {
+            FunctionArg::Named {
+                name,
+                arg: FunctionArgExpr::Expr(expr),
+                operator: FunctionArgOperator::Assignment,
+            } => Some((name, expr)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let names = distinct_names(pairs.iter().map(|(name, _)| Some(*name)), dialect)?;
+    Some(
+        names
+            .into_iter()
+            .zip(pairs.into_iter().map(|(_, expr)| expr))
+            .collect(),
+    )
 }
 
 /// The fields of a STRUCT literal with the expression of each: named by its

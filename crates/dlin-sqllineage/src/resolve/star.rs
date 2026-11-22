@@ -10,7 +10,7 @@ mod slot_eval;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use super::binding::{derive_transform, resolve_captured_binding};
+use super::binding::{derive_transform, resolve_captured_binding, unqualified_column_sources};
 use super::context::EvalContext;
 use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
@@ -651,6 +651,14 @@ impl Evaluator<'_, '_, '_> {
                     let evidence = field.all_evidence();
                     sources.origins.extend(field.origins.into_iter().take(1));
                     sources.evidence.extend(&evidence);
+                }
+                sources.push(ColumnOrigin::UnknownStar);
+                sources
+            }
+            (OpaqueReason::FieldPath(_), StarTarget::ColumnField { path }) => {
+                let mut sources = Sources::default();
+                if let Some(field) = path.first() {
+                    sources.extend(unqualified_column_sources(field, *env, self.cx));
                 }
                 sources.push(ColumnOrigin::UnknownStar);
                 sources
