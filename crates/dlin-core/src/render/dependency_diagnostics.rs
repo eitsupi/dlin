@@ -508,10 +508,10 @@ fn describe(reason: &NodeDependencyReason) -> (String, &'static str, &'static st
         ),
         R::RuntimeValueUnknown { source, name, .. } => (
             format!(
-                "a dependency depends on {} {}, known only when dbt runs",
+                "a dependency is chosen by the {} {}, which is known only when dbt runs",
                 serde_json::to_value(source)
                     .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
+                    .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
                     .unwrap_or_default(),
                 quoted(name)
             ),
