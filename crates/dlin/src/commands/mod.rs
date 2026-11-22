@@ -11,6 +11,5 @@ pub(crate) use manifest::{
     check_loaded_manifest_freshness, run_check_manifest_command, run_summary_command,
 };
 pub(crate) use shared::{
-    manifest_project_gaps, read_seed_schemas, resolve_dialect, resolve_manifest_path_or_default,
-    set_verbose,
+    read_seed_schemas, resolve_dialect, resolve_manifest_path_or_default, set_verbose,
 };

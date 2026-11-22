@@ -1,5 +1,18 @@
 use super::*;
+use crate::graph::dependency::ProjectGap;
 use std::path::PathBuf;
+
+/// The impact of `source_idx` in a hand-made graph with the given gaps.
+fn impact_of(
+    graph: &LineageGraph,
+    source_idx: NodeIndex,
+    project_gaps: &[ProjectGap],
+) -> Option<ImpactReport> {
+    compute_impact(
+        &GraphBuild::from_parts(graph.clone(), project_gaps.to_vec()),
+        source_idx,
+    )
+}
 
 fn make_node(
     unique_id: &str,
@@ -132,7 +145,7 @@ fn test_classify_severity_staging() {
 #[test]
 fn test_compute_impact() {
     let (g, stg) = make_test_graph();
-    let report = compute_impact(&g, stg, &[]).unwrap();
+    let report = impact_of(&g, stg, &[]).unwrap();
 
     assert_eq!(report.source_model, "stg_orders");
     assert_eq!(report.affected_models, 1); // orders
@@ -157,7 +170,7 @@ fn test_compute_impact_leaf_node() {
         .node_indices()
         .find(|&i| g[i].label == "dashboard")
         .unwrap();
-    let report = compute_impact(&g, exp, &[]).unwrap();
+    let report = impact_of(&g, exp, &[]).unwrap();
 
     assert_eq!(report.source_model, "dashboard");
     assert_eq!(report.affected_models, 0);
@@ -178,7 +191,7 @@ fn test_impact_severity_ordering() {
 fn test_impact_isolated_node() {
     let mut g = LineageGraph::new();
     let n = g.add_node(make_node("model.x", "x", NodeType::Model, None, None));
-    let report = compute_impact(&g, n, &[]).unwrap();
+    let report = impact_of(&g, n, &[]).unwrap();
     assert_eq!(report.affected_models, 0);
     assert_eq!(report.affected_tests, 0);
     assert_eq!(report.affected_exposures, 0);
@@ -230,7 +243,7 @@ fn test_exposure_paths_multiple_exposures() {
     g.add_edge(a, exp1, EdgeData::direct(EdgeType::Exposure));
     g.add_edge(b, exp2, EdgeData::direct(EdgeType::Exposure));
 
-    let report = compute_impact(&g, src, &[]).unwrap();
+    let report = impact_of(&g, src, &[]).unwrap();
     assert_eq!(report.affected_exposures, 2);
     assert_eq!(report.exposure_paths.len(), 2);
 
@@ -288,7 +301,7 @@ fn test_exposure_paths_diamond_convergent() {
     g.add_edge(b, c, EdgeData::direct(EdgeType::Ref));
     g.add_edge(c, exp, EdgeData::direct(EdgeType::Exposure));
 
-    let report = compute_impact(&g, src, &[]).unwrap();
+    let report = impact_of(&g, src, &[]).unwrap();
     assert_eq!(report.affected_exposures, 1);
     // Both paths should be found: src->a->c->dashboard and src->b->c->dashboard
     assert_eq!(report.exposure_paths.len(), 2);
@@ -384,7 +397,7 @@ mod exploration {
     }
 
     fn report(graph: &LineageGraph, unique_id: &str, gaps: &[ProjectGap]) -> ImpactReport {
-        compute_impact(graph, find(graph, unique_id), gaps).unwrap()
+        impact_of(graph, find(graph, unique_id), gaps).unwrap()
     }
 
     fn gaps(report: &ImpactReport) -> &[ExplorationGap] {
@@ -528,10 +541,13 @@ mod exploration {
             NodeType::Model,
             DependencyAnalysis::not_assessed(NotAssessedScope::ManifestDependencies),
         ));
-        let gap = ProjectGap::NotAssessed {
-            scope: ProjectScope::ManifestDependencies,
-        };
-        let report = report(&g, "model.only", &[gap]);
+        // A manifest build records the unassessed scope itself, so a
+        // caller cannot leave it out.
+        let report = compute_impact(
+            &GraphBuild::from_manifest(g.clone()),
+            find(&g, "model.only"),
+        )
+        .unwrap();
         assert_eq!(
             gaps(&report),
             [ExplorationGap::NotAssessed {
@@ -554,7 +570,7 @@ mod exploration {
         ));
         let user = g.add_node(model("model.user", vec![]));
         g.add_edge(phantom, user, EdgeData::direct(EdgeType::Ref));
-        let report = compute_impact(&g, phantom, &[]).unwrap();
+        let report = impact_of(&g, phantom, &[]).unwrap();
         assert!(report.exploration.is_empty());
         assert!(!report.proves_no_impact());
         assert!(!report.is_acceptable_under(&DependencyPolicy::deny_all()));
@@ -565,7 +581,7 @@ mod exploration {
             NodeType::Phantom,
             DependencyAnalysis::not_assessed(NotAssessedScope::PhantomDependencies),
         ));
-        let report = compute_impact(&isolated, phantom, &[]).unwrap();
+        let report = impact_of(&isolated, phantom, &[]).unwrap();
         assert!(report.impacted_nodes.is_empty());
         assert!(!report.proves_no_impact());
     }
@@ -575,7 +591,7 @@ mod exploration {
         let mut g = LineageGraph::new();
         let idx = g.add_node(model("model.src", vec![]));
         g.remove_node(idx);
-        assert!(compute_impact(&g, idx, &[]).is_none());
+        assert!(impact_of(&g, idx, &[]).is_none());
     }
 
     #[test]
@@ -707,8 +723,8 @@ mod projects {
         let discovered = discover_files(&project.resolve_paths(&project_dir)).unwrap();
         let build =
             build_graph_report(&project_dir, &project.name, &discovered, &project.vars).unwrap();
-        let idx = crate::graph::filter::try_resolve_node_quiet(&build.graph, input).unwrap();
-        compute_impact(&build.graph, idx, &build.project_gaps).unwrap()
+        let idx = crate::graph::filter::try_resolve_node_quiet(build.graph(), input).unwrap();
+        compute_impact(&build, idx).unwrap()
     }
 
     fn gap_ids(report: &ImpactReport) -> Vec<String> {

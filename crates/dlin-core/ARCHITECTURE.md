@@ -513,8 +513,11 @@ exploration has these gaps:
   gap, so a manifest whose nodes are all in R does not look complete.
   `phantom_dependencies` is never a gap.
 
-Each input is judged with its own R, on the graph before any filtering or
-collapsing. The status is derived from the gaps. An input that is a phantom
+`compute_impact` takes a `GraphBuild`, which holds the graph and its project
+gaps together and is made only by `build_graph_report` or
+`GraphBuild::from_manifest`, so a caller cannot judge a graph without its
+gaps. Each input is judged with its own R, on the graph before any filtering
+or collapsing. The status is derived from the gaps. An input that is a phantom
 node is not a node of the project: its report keeps the reached nodes but
 has no exploration.
 

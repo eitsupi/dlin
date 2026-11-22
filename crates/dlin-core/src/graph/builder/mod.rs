@@ -1040,12 +1040,60 @@ fn process_yaml_snapshot_nodes(
 
 mod semantic_layer;
 
-/// The result of building a lineage graph from SQL files.
-#[derive(Debug)]
+/// A lineage graph together with the gaps of its dependency analysis that
+/// are not attributed to a node.
+///
+/// Judgements about completeness, such as an impact exploration, need both;
+/// keeping them in one value means a caller cannot drop the project gaps
+/// and obtain a result that looks complete. A `GraphBuild` is made only by
+/// [`build_graph_report`] or [`GraphBuild::from_manifest`].
+#[derive(Debug, Clone)]
 pub struct GraphBuild {
-    pub graph: LineageGraph,
+    graph: LineageGraph,
+    /// Sorted and deduplicated.
+    project_gaps: Vec<ProjectGap>,
+}
+
+impl GraphBuild {
+    fn new(graph: LineageGraph, mut project_gaps: Vec<ProjectGap>) -> Self {
+        project_gaps.sort();
+        project_gaps.dedup();
+        Self {
+            graph,
+            project_gaps,
+        }
+    }
+
+    /// A graph read from a manifest. Its dependencies are taken as they
+    /// are, so the build records that they are not assessed.
+    pub fn from_manifest(graph: LineageGraph) -> Self {
+        Self::new(
+            graph,
+            vec![ProjectGap::NotAssessed {
+                scope: crate::graph::dependency::ProjectScope::ManifestDependencies,
+            }],
+        )
+    }
+
+    /// A build with the given gaps, for tests that make graphs by hand.
+    #[cfg(test)]
+    pub(crate) fn from_parts(graph: LineageGraph, project_gaps: Vec<ProjectGap>) -> Self {
+        Self::new(graph, project_gaps)
+    }
+
+    pub fn graph(&self) -> &LineageGraph {
+        &self.graph
+    }
+
     /// Gaps that cannot be attributed to a node, sorted and deduplicated.
-    pub project_gaps: Vec<ProjectGap>,
+    pub fn project_gaps(&self) -> &[ProjectGap] {
+        &self.project_gaps
+    }
+
+    /// The graph alone, for uses that make no completeness judgement.
+    pub fn into_graph(self) -> LineageGraph {
+        self.graph
+    }
 }
 
 /// Build the lineage graph from discovered files.
@@ -1058,7 +1106,7 @@ pub fn build_graph(
     files: &DiscoveredFiles,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<LineageGraph> {
-    build_graph_report(project_dir, project_name, files, vars).map(|build| build.graph)
+    build_graph_report(project_dir, project_name, files, vars).map(GraphBuild::into_graph)
 }
 
 /// Like [`build_graph`], also returning the gaps found while building.
@@ -1118,10 +1166,10 @@ pub fn build_graph_report(
         &yaml_result.saved_queries,
     );
 
-    Ok(GraphBuild {
-        graph: gb.graph,
-        project_gaps: project_gaps(skipped, project_dir),
-    })
+    Ok(GraphBuild::new(
+        gb.graph,
+        project_gaps(skipped, project_dir),
+    ))
 }
 
 /// Turn skipped inputs into project gaps with project-relative paths.

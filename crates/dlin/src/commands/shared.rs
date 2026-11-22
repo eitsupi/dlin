@@ -6,7 +6,7 @@ use anyhow::Result;
 use crate::cli::{DialectArg, SourceType};
 use dlin_core::graph;
 use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, SeedSchemas};
-use dlin_core::graph::dependency::{ConfigDiagnostic, ProjectGap, ProjectScope};
+use dlin_core::graph::dependency::ConfigDiagnostic;
 use dlin_core::parser;
 use dlin_core::render::dependency_diagnostics::DependencyDiagnostics;
 
@@ -21,23 +21,14 @@ pub(crate) struct ManifestDagContext {
 /// The lineage DAG and what was learnt while building it.
 #[cfg(not(tarpaulin_include))]
 pub(crate) struct DagBuild {
-    pub(crate) dag: graph::types::LineageGraph,
+    /// The graph with the gaps of its dependency analysis.
+    pub(crate) build: graph::builder::GraphBuild,
     /// The project configuration, loaded in SQL mode.
     pub(crate) project: Option<parser::project::DbtProject>,
     pub(crate) manifest_diagnostics: Vec<parser::manifest::ManifestDiagnostic>,
     pub(crate) manifest_context: Option<ManifestDagContext>,
-    /// Gaps of the dependency analysis that are not attributed to a node.
-    pub(crate) project_gaps: Vec<ProjectGap>,
     /// Configuration that may not mean what the user intended (SQL mode).
     pub(crate) config_diagnostics: Vec<ConfigDiagnostic>,
-}
-
-/// The project gaps of a graph read from a manifest: its dependencies are
-/// taken as they are, not assessed.
-pub(crate) fn manifest_project_gaps() -> Vec<ProjectGap> {
-    vec![ProjectGap::NotAssessed {
-        scope: ProjectScope::ManifestDependencies,
-    }]
 }
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -83,8 +74,8 @@ fn emit_dependency_diagnostics(build: &DagBuild, project_dir: &Path) {
         return;
     }
     let diagnostics = DependencyDiagnostics::collect(
-        &build.dag,
-        &build.project_gaps,
+        build.build.graph(),
+        build.build.project_gaps(),
         &build.config_diagnostics,
         Some(project_dir.display().to_string()),
     );
@@ -134,11 +125,10 @@ fn build_dag_quietly(
                     referenced_files,
                 };
                 return Ok(DagBuild {
-                    dag: graph,
+                    build: graph::builder::GraphBuild::from_manifest(graph),
                     project: None,
                     manifest_diagnostics: diagnostics,
                     manifest_context: Some(context),
-                    project_gaps: manifest_project_gaps(),
                     config_diagnostics: Vec::new(),
                 });
             }
@@ -167,7 +157,7 @@ fn build_dag_quietly(
             }
 
             Ok(DagBuild {
-                dag: graph,
+                build: graph::builder::GraphBuild::from_manifest(graph),
                 project: None,
                 manifest_diagnostics: diagnostics,
                 manifest_context: Some(ManifestDagContext {
@@ -176,7 +166,6 @@ fn build_dag_quietly(
                     manifest: Some(manifest),
                     manifest_bytes: None,
                 }),
-                project_gaps: manifest_project_gaps(),
                 config_diagnostics: Vec::new(),
             })
         }
@@ -193,11 +182,10 @@ fn build_dag_quietly(
                 &project.vars,
             )?;
             Ok(DagBuild {
-                dag: build.graph,
+                build,
                 project: Some(project),
                 manifest_diagnostics: Vec::new(),
                 manifest_context: None,
-                project_gaps: build.project_gaps,
                 config_diagnostics,
             })
         }

@@ -6,7 +6,8 @@ use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
 
-use super::dependency::{DependencyAnalysis, ProjectGap};
+use super::builder::GraphBuild;
+use super::dependency::DependencyAnalysis;
 use super::types::*;
 
 mod exploration;
@@ -214,13 +215,11 @@ pub fn classify_severity(node: &NodeData) -> ImpactSeverity {
 /// Compute the impact report of the node at `source_idx`, or `None` when
 /// the graph has no such node.
 ///
-/// `project_gaps` are the gaps of the graph that are not attributed to a
-/// node; each of them makes the exploration incomplete.
-pub fn compute_impact(
-    graph: &LineageGraph,
-    source_idx: NodeIndex,
-    project_gaps: &[ProjectGap],
-) -> Option<ImpactReport> {
+/// The build's project gaps, which are not attributed to a node, each make
+/// the exploration incomplete.
+pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<ImpactReport> {
+    let graph = build.graph();
+    let project_gaps = build.project_gaps();
     let source_node = graph.node_weight(source_idx)?;
     let source_model = source_node.label.clone();
 

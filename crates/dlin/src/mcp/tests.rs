@@ -507,7 +507,8 @@ fn impact_resolves_manifest_unique_id() {
 }
 
 /// Manifest dependencies are not assessed, so no detail level or page of an
-/// impact claims that nothing is affected.
+/// impact claims that nothing is affected. The resolved input is reported
+/// outside the page too.
 #[test]
 fn impact_reports_unassessed_manifest_exploration() {
     let state = state();
@@ -518,6 +519,16 @@ fn impact_reports_unassessed_manifest_exploration() {
         )
         .unwrap();
         assert_eq!(value["proves_no_impact"], json!(false), "{detail}");
+        assert_eq!(
+            value["source_node"]["unique_id"],
+            json!("model.simple_project.orders"),
+            "{detail}"
+        );
+        assert_eq!(
+            value["source_node"]["dependency_analysis"]["unresolved"][0]["scope"],
+            json!("manifest_dependencies"),
+            "{detail}"
+        );
         assert_eq!(
             value["exploration"],
             json!([{

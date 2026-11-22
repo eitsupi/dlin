@@ -23,7 +23,7 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
     let DagBuild {
-        dag,
+        build,
         project: project_opt,
         manifest_context,
         ..
@@ -35,6 +35,7 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
         args.no_cache,
         args.refresh_cache,
     )?;
+    let dag = build.graph();
 
     let (project_name, vars_count, manifest_status) = match args.source {
         SourceType::Manifest => {
@@ -80,7 +81,7 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
         }
     };
 
-    let node_counts = render::summary::count_nodes(&dag);
+    let node_counts = render::summary::count_nodes(dag);
     let edge_count = dag.edge_count();
 
     let report = render::summary::SummaryReport {
