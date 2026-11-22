@@ -63,8 +63,7 @@ impl LineageBuilder {
         let windows = self
             .named_windows
             .get(&self.current_scope)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+            .map_or(&[][..], Vec::as_slice);
         let mut seen = Vec::new();
         while let Some(current) = name.take() {
             let key = current.column_key(self.dialect).into_owned();

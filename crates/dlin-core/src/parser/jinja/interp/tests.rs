@@ -871,3 +871,216 @@ fn test_block_spans_point_into_the_file_as_written() {
     assert_eq!(call_text("test_is_positive"), "ref('thresholds')");
     assert_eq!(call_text("test_is_even"), "source('raw', 'numbers')");
 }
+
+// ----- mutable containers whatever made them ---------------------------
+
+/// A dict or a list behaves the same whether a literal, `dict()`, `var()`, a
+/// filter or a method made it: a change is seen by every alias.
+#[test]
+fn containers_made_by_minijinja_track_changes() {
+    let vars = [
+        ("map", serde_json::json!({"n": "old"})),
+        ("list", serde_json::json!(["old"])),
+    ];
+    for init in [
+        r#"{'n': 'old'}"#,
+        r#"dict(n='old')"#,
+        r#"var('map')"#,
+        r#"[{'n': 'old'}] | first"#,
+    ] {
+        let sql = format!(
+            r#"{{% set a = {init} %}}{{% set b = a %}}{{% do a.update({{'n': 'new'}}) %}}{{{{ ref(b.n) }}}}"#
+        );
+        let e = extract_with(&sql, &[], &vars);
+        assert_eq!(ref_names(&e), vec!["new"], "{sql}");
+        assert!(e.reasons.is_empty(), "{sql}: {:?}", e.reasons);
+    }
+    for init in [
+        r#"['old']"#,
+        r#"var('list')"#,
+        r#"['old'] | list"#,
+        r#"'x,old'.split(',') | reject('eq', 'x') | list"#,
+        r#"'old'.split(',')"#,
+        r#"['x', 'old'][1:]"#,
+        r#"[] + ['old']"#,
+    ] {
+        let sql = format!(
+            r#"{{% set a = {init} %}}{{% set b = a %}}{{% do a.append('new') %}}{{{{ ref(b.pop(-1)) }}}}{{{{ ref(b[-1]) }}}}"#
+        );
+        let e = extract_with(&sql, &[], &vars);
+        assert_eq!(ref_names(&e), vec!["new", "old"], "{sql}");
+        assert!(e.reasons.is_empty(), "{sql}: {:?}", e.reasons);
+    }
+}
+
+/// The reported case: `dict()` then `update` in a `do`.
+#[test]
+fn dict_update_in_do_selects_the_new_value() {
+    let e = extract(
+        r#"{% set names = dict(n='a') %}{% do names.update({'n': 'b'}) %}select * from {{ ref(names.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["b"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+/// Each `var()` call is a new copy of the configured value, and a default
+/// is the value passed.
+#[test]
+fn var_values_are_copies_and_defaults_are_the_value_passed() {
+    let e = extract_with(
+        r#"{% set a = var('v') %}{% set b = var('missing', a) %}{% do b.update({'n': 'new'}) %}{{ ref(a.n) }}{{ ref(var('v').n) }}"#,
+        &[],
+        &[("v", serde_json::json!({"n": "old"}))],
+    );
+    assert_eq!(ref_names(&e), vec!["new", "old"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+/// A container that a filter returns as it is, or keeps inside its result,
+/// is the same container; a container the filter builds is a new one, even
+/// when it is equal to an input.
+#[test]
+fn filter_results_keep_the_identity_of_their_input_containers() {
+    let e = extract(
+        r#"{% set child = {'n': 'old'} %}{% set y = [child] | first %}{% do y.update({'n': 'new'}) %}{{ ref(child.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["new"]);
+    let e = extract(
+        r#"{% set child = {'n': 'old'} %}{% set y = ([child] | list)[0] %}{% do child.update(n='new') %}{{ ref(y.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["new"]);
+    let e = extract(
+        r#"{% set x = ['old'] %}{% set y = ([x, 'old'] | batch(1) | list)[1] %}{% do y.append('new') %}{{ ref(x[-1]) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["old"]);
+    let e = extract(
+        r#"{% set x = ['old'] %}{% set y = x | list %}{% do y.append('new') %}{{ ref(x[-1]) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["old"]);
+}
+
+/// A loop over a filtered project variable still selects its dependencies.
+#[test]
+fn loops_over_filtered_vars_select_dependencies() {
+    let e = extract_with(
+        r#"{% for m in var('models') | selectattr('enabled') %}{{ ref(m.name) }}{% endfor %}"#,
+        &[],
+        &[(
+            "models",
+            serde_json::json!([
+                {"name": "a", "enabled": true},
+                {"name": "b", "enabled": false},
+            ]),
+        )],
+    );
+    assert_eq!(ref_names(&e), vec!["a"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+/// Methods that change a container in place, as Fusion's minijinja has them.
+#[test]
+fn mutating_methods_change_the_container() {
+    let e = extract(
+        r#"{% set a = dict(n='old') %}{% set b = a.update({'n': 'new'}) %}{{ ref(b.pop('n')) }}{{ ref(a.get('n', 'gone')) }}{{ ref(a.pop('n', 'default')) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["default", "gone", "new"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+    let e = extract(
+        r#"{% set xs = ['a', 'b', 'c'] %}{% do xs.pop(0) %}{% set ys = xs.insert(1, 'x') %}{{ ref(ys[0] ~ xs[1] ~ xs | length) }}{{ ref(xs.clear() | default('cleared')) }}{{ ref('n' ~ xs | length) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["bx3", "cleared", "n0"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+/// A change that is not modelled makes the container unknown instead of
+/// leaving its old value, also when the result is discarded by `do`.
+#[test]
+fn unmodelled_changes_make_the_container_unknown() {
+    for method in [
+        "setdefault('n', 'new')",
+        "popitem()",
+        "update([('n', 'new')])",
+    ] {
+        let sql = format!(
+            r#"{{% set a = dict(n='old') %}}{{% set b = a %}}{{% do a.{method} %}}{{{{ ref(b.n) }}}}"#
+        );
+        let e = extract(&sql);
+        assert!(ref_names(&e).is_empty(), "{sql}: {:?}", ref_names(&e));
+        assert_eq!(codes(&e), vec!["unsupported_jinja_construct"], "{sql}");
+    }
+    for method in ["remove('old')", "sort()", "reverse()"] {
+        let sql = format!(r#"{{% set a = var('list') %}}{{% do a.{method} %}}{{{{ ref(a[0]) }}}}"#);
+        let e = extract_with(&sql, &[], &[("list", serde_json::json!(["old", "x"]))]);
+        assert!(ref_names(&e).is_empty(), "{sql}: {:?}", ref_names(&e));
+        assert_eq!(codes(&e), vec!["unsupported_jinja_construct"], "{sql}");
+    }
+}
+
+/// A project variable too large to model is unknown, not cut short.
+#[test]
+fn oversized_vars_reach_the_analysis_limit() {
+    let items: Vec<String> = (0..=10_000).map(|i| format!("m{i}")).collect();
+    let e = extract_with(
+        r#"{{ ref(var('models')[0]) }}"#,
+        &[],
+        &[("models", serde_json::json!(items))],
+    );
+    assert!(ref_names(&e).is_empty(), "{:?}", ref_names(&e));
+    assert_eq!(codes(&e), vec!["analysis_limit_reached"]);
+}
+
+/// `copy()` is a new outer container holding the same items; `range()` is
+/// an iterable, not a list; a negative `insert` index is not modelled.
+#[test]
+fn copies_ranges_and_negative_inserts() {
+    let e = extract(
+        r#"{% set child = {'n': 'old'} %}{% set a = [child] %}{% set b = a.copy() %}{% do b.append('x') %}{% do b[0].update(n='new') %}{{ ref(a | length ~ child.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["1new"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+    let e = extract(r#"{% set r = range(2) %}{% do r.append(9) %}{{ ref('m' ~ (r | last)) }}"#);
+    assert_eq!(ref_names(&e), vec!["m1"]);
+    let e = extract(r#"{% set xs = ['a', 'b'] %}{% do xs.insert(-1, 'x') %}{{ ref(xs[0]) }}"#);
+    assert!(ref_names(&e).is_empty(), "{:?}", ref_names(&e));
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
+}
+
+/// `chain` gives a view of its inputs in minijinja and does not exist in
+/// Fusion: its result is unknown rather than a copy taken too early. Two
+/// ranges concatenate into an iterable, not a list, and a concatenation
+/// with a list is a new list. `dict()` keeps the order of its entries.
+#[test]
+fn views_concatenations_and_dict_order() {
+    for sql in [
+        r#"{% set d = {'n': 'a'} %}{% set merged = d | chain({}) %}{% do d.update({'n': 'b'}) %}{{ ref(merged.n) }}"#,
+        r#"{% set xs = ['a'] %}{% set merged = xs | chain([]) %}{% do xs.append('b') %}{{ ref(merged | last) }}"#,
+        r#"{% set x = {'n': 'old'} %}{% for y in [x] | chain(range(0)) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // A splat argument is not modelled either.
+        r#"{% set x = {'n': 'old'} %}{% set args = [[x]] %}{% for y in [] | chain(*args) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // Nor is a filter minijinja does not know.
+        r#"{% set x = {'n': 'old'} %}{% for y in [x] | no_such_filter %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // Also when another argument is unknown.
+        r#"{% set x = {'n': 'old'} %}{% set ignored = x | no_such_filter(target.name) %}{{ ref(x.n) }}"#,
+        r#"{% set x = {'n': 'old'} %}{% set ignored = x | no_such_filter(sep=target.name) %}{{ ref(x.n) }}"#,
+    ] {
+        let e = extract(sql);
+        assert!(
+            !ref_names(&e).contains(&"a") && !ref_names(&e).contains(&"old"),
+            "{sql}: {:?}",
+            ref_names(&e)
+        );
+        assert!(codes(&e).contains(&"unsupported_jinja_construct"), "{sql}");
+    }
+    let e = extract(
+        r#"{% set xs = ['a'] %}{% set ys = xs + [] %}{% do xs.append('b') %}{{ ref(ys | last) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["a"]);
+    let e = extract(
+        r#"{% set r = range(1) + range(1) %}{% do r.append(9) %}{{ ref('m' ~ (r | last)) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["m0"]);
+    let e =
+        extract(r#"{{ ref(dict({'z': 1, 'a': 2}) | first) }}{{ ref(dict(z=1, a=2) | first) }}"#);
+    assert_eq!(ref_names(&e), vec!["z"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}

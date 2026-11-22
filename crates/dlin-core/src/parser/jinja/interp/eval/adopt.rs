@@ -1,0 +1,213 @@
+//! Values computed by minijinja, taken back into the abstract state.
+//!
+//! A list or dict that a template can change must live in the heap, so that
+//! every alias sees the change. Containers built by a template are allocated
+//! there directly; containers computed by minijinja (`dict()`, `var()`, a
+//! filter, `str.split()`) come back as plain values and are adopted here, so
+//! that they behave the same whatever produced them.
+//!
+//! A result can hold, or be, a container that was handed to minijinja, as in
+//! `[child] | first` or `items | selectattr("enabled")`. Containers handed to
+//! minijinja are frozen as [`SharedList`] and [`SharedMap`] objects that
+//! remember their heap object, so such a container is the same heap object
+//! again, while a new container gets a new one. Telling them apart by value
+//! would take a new container equal to an input for the input.
+
+use minijinja::value::{Enumerator, Object, ObjectRepr};
+
+use super::*;
+
+/// A frozen heap list.
+#[derive(Debug)]
+pub(super) struct SharedList {
+    id: HeapId,
+    items: Vec<Value>,
+}
+
+impl SharedList {
+    pub(super) fn value(id: HeapId, items: Vec<Value>) -> Value {
+        Value::from_object(Self { id, items })
+    }
+}
+
+impl Object for SharedList {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Seq
+    }
+
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        self.items.get(key.as_usize()?).cloned()
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Seq(self.items.len())
+    }
+}
+
+/// A frozen heap dict or namespace. It keeps the insertion order of its
+/// entries, as Fusion's dicts do.
+#[derive(Debug)]
+pub(super) struct SharedMap {
+    id: HeapId,
+    keys: Vec<Value>,
+    values: HashMap<Value, Value>,
+}
+
+impl SharedMap {
+    pub(super) fn value(id: HeapId, entries: Vec<(Value, Value)>) -> Value {
+        let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+        Value::from_object(Self {
+            id,
+            keys,
+            values: entries.into_iter().collect(),
+        })
+    }
+}
+
+impl Object for SharedMap {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Map
+    }
+
+    fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
+        self.values.get(key).cloned()
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Values(self.keys.clone())
+    }
+}
+
+/// The heap object a frozen container was made from, if it was frozen with
+/// [`Interp::freeze_shared`].
+fn shared_id(value: &Value) -> Option<HeapId> {
+    value
+        .downcast_object_ref::<SharedList>()
+        .map(|list| list.id)
+        .or_else(|| value.downcast_object_ref::<SharedMap>().map(|map| map.id))
+}
+
+impl<'a> Interp<'a> {
+    /// Take a value computed by minijinja into the state. Its inputs must
+    /// have been frozen with [`Interp::freeze_shared`].
+    pub(super) fn adopt_result(&mut self, st: &mut State, value: Value, span: Span) -> AValue {
+        if value.kind() == ValueKind::Iterable {
+            // A lazy result stays an iterable, unless it holds a container
+            // of the heap: a known value never holds one, which would leave
+            // a copy that changes to the container do not reach.
+            let items = super::expressions::computed_list(value.clone());
+            if !holds_shared(&items, 0) {
+                return AValue::Known(value);
+            }
+            return self.adopt_result(st, items, span);
+        }
+        if !is_container(&value) {
+            return AValue::Known(value);
+        }
+        let mut budget = MAX_ITEMS;
+        let mut allocated = Vec::new();
+        match self.adopt_at(st, value, span, 0, &mut budget, &mut allocated) {
+            Ok(value) => value,
+            Err(causes) => {
+                // Do not leave a partly adopted container behind.
+                for id in allocated {
+                    st.heap.remove(&id);
+                }
+                AValue::Unknown(causes)
+            }
+        }
+    }
+
+    fn adopt_at(
+        &mut self,
+        st: &mut State,
+        value: Value,
+        span: Span,
+        depth: usize,
+        budget: &mut usize,
+        allocated: &mut Vec<HeapId>,
+    ) -> Result<AValue, Causes> {
+        if let Some(id) = shared_id(&value) {
+            return Ok(AValue::Heap(id));
+        }
+        if !is_container(&value) {
+            return Ok(AValue::Known(value));
+        }
+        if depth > MAX_DEPTH {
+            return Err(self.limit(AnalysisLimit::RecursionDepth, span));
+        }
+        let iter = value
+            .try_iter()
+            .map_err(|_| self.unsupported("iterating a non-iterable value", span))?;
+        let mut items = Vec::new();
+        for item in iter {
+            if *budget == 0 {
+                return Err(self.limit(AnalysisLimit::WorkBudget, span));
+            }
+            *budget -= 1;
+            items.push(item);
+        }
+        let obj = if value.kind() == ValueKind::Map {
+            let mut entries = Vec::with_capacity(items.len());
+            for key in items {
+                let item = value.get_item(&key).unwrap_or(Value::UNDEFINED);
+                entries.push((
+                    key,
+                    self.adopt_at(st, item, span, depth + 1, budget, allocated)?,
+                ));
+            }
+            HeapObj::Map(entries)
+        } else {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(self.adopt_at(st, item, span, depth + 1, budget, allocated)?);
+            }
+            HeapObj::List(values)
+        };
+        let adopted = self.alloc(st, obj);
+        if let AValue::Heap(id) = adopted {
+            allocated.push(id);
+        }
+        Ok(adopted)
+    }
+
+    fn limit(&self, limit: AnalysisLimit, span: Span) -> Causes {
+        Causes::one(DependencyReason::AnalysisLimitReached {
+            limit,
+            at: self.site(span),
+        })
+    }
+}
+
+/// Whether `value` holds a container frozen with [`Interp::freeze_shared`].
+fn holds_shared(value: &Value, depth: usize) -> bool {
+    if shared_id(value).is_some() {
+        return true;
+    }
+    if depth > MAX_DEPTH
+        || !matches!(
+            value.kind(),
+            ValueKind::Seq | ValueKind::Map | ValueKind::Iterable
+        )
+    {
+        return false;
+    }
+    let Ok(items) = value.try_iter() else {
+        return false;
+    };
+    let is_map = value.kind() == ValueKind::Map;
+    items.take(MAX_ITEMS + 1).any(|item| {
+        let item = if is_map {
+            value.get_item(&item).unwrap_or(Value::UNDEFINED)
+        } else {
+            item
+        };
+        holds_shared(&item, depth + 1)
+    })
+}
+
+/// Whether a template can change `value` in place: a list or a dict. A
+/// lazy iterable, such as `range()`, is not a list.
+fn is_container(value: &Value) -> bool {
+    matches!(value.kind(), ValueKind::Seq | ValueKind::Map)
+}

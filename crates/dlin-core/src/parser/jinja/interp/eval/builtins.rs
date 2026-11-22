@@ -215,7 +215,10 @@ impl<'a> Interp<'a> {
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 };
                 if let Some(value) = self.vars.get(&name) {
-                    return Ok(AValue::Known(Value::from(minijinja::value::Serde(value))));
+                    // Each call gives a new copy of the configured value, as
+                    // in dbt; a default is returned as it is.
+                    let value = Value::from(minijinja::value::Serde(value));
+                    return Ok(self.adopt_result(st, value, span));
                 }
                 if let Some(default) = args.get(1).or_else(|| kwarg("default")) {
                     return Ok(default.clone());
@@ -333,15 +336,22 @@ impl<'a> Interp<'a> {
                 }
                 Ok(self.alloc(st, HeapObj::Namespace(attrs)))
             }
+            Builtin::Minijinja("dict")
+                if let Some(entries) = self.dict_entries(st, &args, &kwargs) =>
+            {
+                // A new dict with the entries in order, as in Fusion: a
+                // mapping argument first, then the keywords.
+                Ok(self.alloc(st, HeapObj::Map(entries)))
+            }
             Builtin::Minijinja(name) => {
-                let mut values = match self.freeze_all(st, &args, span) {
+                let mut values = match self.freeze_all_shared(st, &args, span) {
                     Ok(values) => values,
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 };
                 if !kwargs.is_empty() {
                     let mut pairs = Vec::new();
                     for (key, value) in &kwargs {
-                        match self.freeze(st, value, span) {
+                        match self.freeze_shared(st, value, span) {
                             Ok(value) if key.as_ref() != "**" => {
                                 pairs.push((key.to_string(), value))
                             }
@@ -354,11 +364,14 @@ impl<'a> Interp<'a> {
                     values.push(Value::from(minijinja::value::Kwargs::from_iter(pairs)));
                 }
                 match Ok::<_, Causes>(values) {
-                    Ok(values) => Ok(known::call_global(name, &values)
-                        .map(AValue::Known)
-                        .unwrap_or_else(|_| {
+                    Ok(values) => Ok(match known::call_global(name, &values) {
+                        // `range()` is an iterable, not a list.
+                        Ok(value) if name == "range" => AValue::Known(value),
+                        Ok(value) => self.adopt_result(st, value, span),
+                        Err(_) => {
                             AValue::Unknown(self.unsupported(format!("function:{name}"), span))
-                        })),
+                        }
+                    }),
                     Err(causes) => Ok(AValue::Unknown(causes)),
                 }
             }
@@ -416,5 +429,37 @@ impl<'a> Interp<'a> {
             line: span.line,
             outcome: DecisionOutcome::Accepted { conditional },
         });
+    }
+}
+
+impl<'a> Interp<'a> {
+    /// The entries of `dict(mapping, **kwargs)` when the mapping, if any, is
+    /// a dict of the heap. `None` for any other form, which minijinja
+    /// evaluates.
+    fn dict_entries(
+        &self,
+        st: &State,
+        args: &[AValue],
+        kwargs: &[(Arc<str>, AValue)],
+    ) -> Option<Vec<(Value, AValue)>> {
+        let mut entries = match args {
+            [] => Vec::new(),
+            [AValue::Heap(id)] => match st.heap.get(id)? {
+                HeapObj::Map(entries) => entries.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        for (key, value) in kwargs {
+            if key.as_ref() == "**" {
+                return None;
+            }
+            let key = Value::from(key.as_ref());
+            match entries.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => entry.1 = value.clone(),
+                None => entries.push((key, value.clone())),
+            }
+        }
+        Some(entries)
     }
 }
