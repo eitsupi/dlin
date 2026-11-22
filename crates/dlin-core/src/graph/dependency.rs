@@ -226,6 +226,16 @@ pub enum DependencyReason<L> {
         candidates: Vec<String>,
         at: L,
     },
+    /// The body of a generic test, the `test_<name>` macro, is not
+    /// analysed. The dependencies of its YAML arguments and of the tested
+    /// resource are known, but the body may add others, such as a `ref()`
+    /// written only inside the macro.
+    GenericTestBodyNotAnalyzed {
+        /// The test name as declared in YAML, with its package namespace
+        /// if it has one.
+        test_name: Option<String>,
+        at: L,
+    },
     /// The node's dependencies are not assessed at all.
     NotAssessed { scope: NotAssessedScope },
 }
@@ -256,6 +266,7 @@ impl<L> DependencyReason<L> {
             Self::DependencyTargetMissing { .. } => "dependency_target_missing",
             Self::UnsupportedRefPackage { .. } => "unsupported_ref_package",
             Self::AmbiguousRef { .. } => "ambiguous_ref",
+            Self::GenericTestBodyNotAnalyzed { .. } => "generic_test_body_not_analyzed",
             Self::NotAssessed { .. } => "not_assessed",
         }
     }
@@ -278,7 +289,8 @@ impl<L> DependencyReason<L> {
             | Self::UnsupportedDependencyExpression { at, .. }
             | Self::DependencyTargetMissing { at, .. }
             | Self::UnsupportedRefPackage { at, .. }
-            | Self::AmbiguousRef { at, .. } => Some(at),
+            | Self::AmbiguousRef { at, .. }
+            | Self::GenericTestBodyNotAnalyzed { at, .. } => Some(at),
             Self::NotAssessed { .. } => None,
         }
     }
@@ -363,6 +375,10 @@ impl<L> DependencyReason<L> {
             } => R::AmbiguousRef {
                 name,
                 candidates,
+                at: f(at),
+            },
+            R::GenericTestBodyNotAnalyzed { test_name, at } => R::GenericTestBodyNotAnalyzed {
+                test_name,
                 at: f(at),
             },
             R::NotAssessed { scope } => R::NotAssessed { scope },

@@ -428,6 +428,7 @@ Which nodes are analysed:
 | --- | --- |
 | Model, snapshot and singular test SQL | The Jinja extraction's reasons and the reasons raised while resolving its `ref()`/`source()` calls |
 | Exposure, YAML snapshot `relation`, YAML generic test arguments | The Jinja written in YAML, selected and interpreted as dbt evaluates it, with the same interpreter as SQL. An exposure entry that yields no dependency and no reason is `unsupported_dependency_expression` |
+| YAML generic test | The arguments as above, plus `generic_test_body_not_analyzed`: the body of the `test_<name>` macro is not analysed, so a dependency written only inside it is not known. Built-in names carry the reason too, since a project override or `adapter.dispatch()` can select another implementation |
 | Seed, YAML source | Complete: they have no dependencies |
 | Phantom | `not_assessed` (`phantom_dependencies`) |
 | Semantic model, metric, saved query | `not_assessed` (`semantic_dependencies`) |

@@ -34,6 +34,27 @@ fn analysis(graph: &LineageGraph, unique_id: &str) -> serde_json::Value {
     serde_json::to_value(&node(graph, unique_id).dependency_analysis).unwrap()
 }
 
+/// The reasons of a generic test node other than the one every such node
+/// has for its unanalysed body.
+fn argument_reasons(graph: &LineageGraph, unique_id: &str) -> serde_json::Value {
+    let analysis = analysis(graph, unique_id);
+    assert_eq!(analysis["status"], "partial", "{unique_id}: {analysis}");
+    let reasons = analysis["unresolved"].as_array().unwrap();
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|reason| reason["type"] == "generic_test_body_not_analyzed")
+            .count(),
+        1,
+        "{unique_id}: {analysis}"
+    );
+    reasons
+        .iter()
+        .filter(|reason| reason["type"] != "generic_test_body_not_analyzed")
+        .cloned()
+        .collect()
+}
+
 fn complete() -> serde_json::Value {
     json!({"status": "complete", "unresolved": []})
 }
@@ -336,16 +357,20 @@ models:
     for unique_id in ["test.relationships.b.a_id", "test.accepted_values.b.id"] {
         assert!(has_edge(&graph, "model.b", unique_id), "{unique_id}");
         assert!(has_edge(&graph, "model.a", unique_id), "{unique_id}");
-        assert_eq!(analysis(&graph, unique_id), complete(), "{unique_id}");
+        assert_eq!(
+            argument_reasons(&graph, unique_id),
+            json!([]),
+            "{unique_id}"
+        );
     }
     // Other strings are data, even when they mention `ref(`.
     let data = "test.accepted_values.b.a_id";
     assert!(!has_edge(&graph, "model.a", data));
-    assert_eq!(analysis(&graph, data), complete());
+    assert_eq!(argument_reasons(&graph, data), json!([]));
     // Expressions are interpreted as in SQL: vars resolve from the project
     // or their defaults, and arguments of other functions are evaluated.
     assert_eq!(
-        analysis(&graph, "test.relationships.b.id")["unresolved"],
+        argument_reasons(&graph, "test.relationships.b.id"),
         json!([{
             "type": "unresolved_var",
             "name": "target_model",
@@ -358,7 +383,10 @@ models:
         }])
     );
     assert!(has_edge(&graph, "model.a", "test.dbt_utils.equality.b.id"));
-    assert_eq!(analysis(&graph, "test.dbt_utils.equality.b.id"), complete());
+    assert_eq!(
+        argument_reasons(&graph, "test.dbt_utils.equality.b.id"),
+        json!([])
+    );
     // A macro that is not defined may hide a dependency; a branch known to
     // be false is not followed.
     // The test's name and description are not arguments; keys with these
@@ -371,7 +399,7 @@ models:
             .all(|idx| graph[idx].unique_id != "model.not_an_argument")
     );
     assert_eq!(
-        analysis(&graph, custom)["unresolved"][0]["type"],
+        argument_reasons(&graph, custom)[0]["type"],
         "unresolved_call"
     );
     assert!(
@@ -384,11 +412,76 @@ models:
     let template = "test.dbt_utils.expression_is_true.b.id";
     assert!(has_edge(&graph, "model.a", template));
     assert_eq!(
-        analysis(&graph, template)["unresolved"][0]["type"],
+        argument_reasons(&graph, template)[0]["type"],
         "unresolved_var"
     );
     assert!(has_edge(&graph, "model.a", "test.unique.b.id"));
-    assert_eq!(analysis(&graph, "test.unique.b.id"), complete());
+    assert_eq!(argument_reasons(&graph, "test.unique.b.id"), json!([]));
+}
+
+/// A generic test is not complete while its body is not analysed: the body
+/// may hold dependencies that no argument names. This holds for built-in
+/// names too, which a project can override.
+#[test]
+fn generic_test_body_is_reported_as_not_analysed() {
+    let (_tmp, graph) = build_project(&[
+        ("models/a.sql", "select 1 as id"),
+        ("models/thresholds.sql", "select 1 as limit_value"),
+        (
+            "macros/check_threshold.sql",
+            "{% test check_threshold(model) %}select * from {{ model }} cross join {{ ref('thresholds') }}{% endtest %}",
+        ),
+        (
+            "models/schema.yml",
+            r#"
+version: 2
+models:
+  - name: a
+    tests:
+      - check_threshold
+    columns:
+      - name: id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('thresholds')
+                field: limit_value
+"#,
+        ),
+    ]);
+    let at = |unique_id: &str| {
+        json!({
+            "unique_id": unique_id,
+            "path": "models/schema.yml",
+            "line": null,
+            "expr": null
+        })
+    };
+    for (unique_id, test_name) in [
+        ("test.check_threshold.a", "check_threshold"),
+        ("test.not_null.a.id", "not_null"),
+        ("test.relationships.a.id", "relationships"),
+    ] {
+        assert_eq!(
+            analysis(&graph, unique_id),
+            json!({
+                "status": "partial",
+                "unresolved": [{
+                    "type": "generic_test_body_not_analyzed",
+                    "test_name": test_name,
+                    "at": at(unique_id)
+                }]
+            }),
+            "{unique_id}"
+        );
+    }
+    // The dependencies of the arguments are still known.
+    assert!(has_edge(
+        &graph,
+        "model.thresholds",
+        "test.relationships.a.id"
+    ));
 }
 
 #[test]

@@ -84,6 +84,10 @@ fn every_reason() -> Vec<ExtractedDependencyReason> {
             candidates: vec!["model.a".into(), "seed.a".into()],
             at: site(),
         },
+        R::GenericTestBodyNotAnalyzed {
+            test_name: Some("dbt_utils.expression_is_true".into()),
+            at: site(),
+        },
         R::NotAssessed {
             scope: NotAssessedScope::SemanticDependencies,
         },
