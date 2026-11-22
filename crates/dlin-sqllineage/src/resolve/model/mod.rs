@@ -412,8 +412,10 @@ pub(super) struct OutputModel {
 pub(super) struct NameMatches {
     /// Enumerated columns, in output order.
     pub listed: Vec<usize>,
-    /// Unknown segments that can still publish the name. A segment the
-    /// analysis does not model (VALUES, a nested field) is not one.
+    /// Unknown segments that can still publish the name: those whose name
+    /// conditions admit it and whose provider may carry names it does not
+    /// list, a field or expression star among them. An ambiguous star and a
+    /// recursive cut are not.
     pub unknown: Vec<usize>,
 }
 
