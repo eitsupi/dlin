@@ -154,18 +154,22 @@ impl LineageBuilder {
 
     /// The ancestors of a projected expression and what decides its fields
     /// if it is a STRUCT: a STRUCT it builds whose fields are all named and
-    /// distinct, with a node for the value of each field, or a column it
-    /// reads as it is. The fields read the same reference nodes as the whole
-    /// value.
+    /// distinct, with a node for the value of each field, or the reference
+    /// to a column it reads as it is. The fields read the same reference
+    /// nodes as the whole value.
     fn projected_value(
         &mut self,
         expr: &Expr,
     ) -> (Vec<crate::graph::node::NodeId>, Option<StructValue>) {
-        if let Some(column) = self.read_column(expr) {
-            return (self.collect_ancestors(expr), Some(column));
-        }
         let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
-            return (self.collect_ancestors(expr), None);
+            let ancestors = self.collect_ancestors(expr);
+            let column = match ancestors.as_slice() {
+                [reference] if self.reads_whole_column(expr, *reference) => {
+                    Some(StructValue::Column(*reference))
+                }
+                _ => None,
+            };
+            return (ancestors, column);
         };
         let mut ancestors = Vec::new();
         let mut nodes = Vec::with_capacity(fields.len());
@@ -182,41 +186,29 @@ impl LineageBuilder {
         (ancestors, Some(StructValue::Fields(nodes)))
     }
 
-    /// The column `expr` reads as it is: a name that no range variable
-    /// takes, or a name qualified by a range variable. A longer path reads a
-    /// field, and a range variable alone is a whole row.
-    fn read_column(&self, expr: &Expr) -> Option<StructValue> {
-        let env = self.env();
-        match expr {
-            Expr::Nested(inner) => self.read_column(inner),
-            Expr::Identifier(ident) => {
-                let column = Ident::from_ast(ident);
-                self.graph
-                    .scopes
-                    .lookup(env, &column)
-                    .is_none()
-                    .then_some(StructValue::Column {
-                        qualifier: None,
-                        column,
-                        env,
-                    })
-            }
-            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                [qualifier, column] => {
-                    let qualifier = Ident::from_ast(qualifier);
-                    self.graph
-                        .scopes
-                        .lookup(env, &qualifier)
-                        .is_some()
-                        .then(|| StructValue::Column {
-                            qualifier: Some(qualifier),
-                            column: Ident::from_ast(column),
-                            env,
-                        })
-                }
-                _ => None,
-            },
-            _ => None,
+    /// Whether `expr` is a name whose reference node `reference` stands for
+    /// the whole column it names, rather than a field below it. How the name
+    /// binds is left to the reference.
+    fn reads_whole_column(&self, expr: &Expr, reference: crate::graph::node::NodeId) -> bool {
+        use crate::graph::node::RawNode;
+        match (expr, &self.graph.nodes[reference]) {
+            (Expr::Nested(inner), _) => self.reads_whole_column(inner, reference),
+            (
+                Expr::Identifier(_),
+                RawNode::Unqualified { .. }
+                | RawNode::RowValueCandidate { .. }
+                | RawNode::Ref {
+                    qualifier: None, ..
+                },
+            ) => true,
+            (
+                Expr::CompoundIdentifier(parts),
+                RawNode::Ref {
+                    qualifier: Some(qualifier),
+                    ..
+                },
+            ) => qualifier.len() + 1 == parts.len(),
+            _ => false,
         }
     }
 

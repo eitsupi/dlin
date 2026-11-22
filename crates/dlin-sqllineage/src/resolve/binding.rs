@@ -24,7 +24,56 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sou
     }
     let generation = cx.cut_generation();
 
-    let origin = match &graph.nodes[node_id] {
+    let origin = match reference_target(node_id, graph) {
+        ReferenceTarget::Bound { name, binding } => resolve_captured_binding(name, binding, cx),
+        // The qualifier names no relation in scope. Building a table out of
+        // its text would present a guess as a confident source, so the
+        // reference stays unresolved.
+        ReferenceTarget::Unbound { name } => Sources::one(ColumnOrigin::Ambiguous {
+            column: name.clone(),
+            candidates: Vec::new(),
+        }),
+        ReferenceTarget::Unqualified { name, env } => resolve_unqualified(name, env, cx),
+        ReferenceTarget::RowValueCandidate { name, binding } => {
+            resolve_row_value_candidate(name, binding, cx)
+        }
+        ReferenceTarget::None => match &graph.nodes[node_id] {
+            RawNode::Unsupported { what } => {
+                Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
+            }
+            _ => Sources::default(),
+        },
+    };
+
+    // An origin found while a cycle was cut depends on where the walk
+    // started, so it is returned and not kept.
+    if cx.cut_generation() == generation {
+        cx.resolved[node_id] = Some(origin.clone());
+    }
+    origin
+}
+
+/// What a reference node names, by the binding rules every reader of the
+/// node shares: the lineage of its value and the fields of a STRUCT it reads.
+pub(super) enum ReferenceTarget<'g> {
+    /// A column of the relation the reference is bound to.
+    Bound { name: &'g Ident, binding: Binding },
+    /// A qualified column whose qualifier names no relation in scope.
+    Unbound { name: &'g Ident },
+    /// An unqualified column, read from the FROM clauses around `env`.
+    Unqualified { name: &'g Ident, env: BindingEnv },
+    /// A relation alias that may also be a column of the same name, with the
+    /// relation it names.
+    RowValueCandidate {
+        name: &'g Ident,
+        binding: Option<Binding>,
+    },
+    /// Not a column reference.
+    None,
+}
+
+pub(super) fn reference_target(node_id: NodeId, graph: &RawGraph) -> ReferenceTarget<'_> {
+    match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
@@ -37,49 +86,39 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sou
                     _ => None,
                 })
             });
-            if let Some(binding) = binding {
-                resolve_captured_binding(name, binding, cx)
-            } else if qualifier.is_some() {
-                // The qualifier names no relation in scope. Building a table
-                // out of its text would present a guess as a confident
-                // source, so the reference stays unresolved.
-                Sources::one(ColumnOrigin::Ambiguous {
-                    column: name.clone(),
-                    candidates: Vec::new(),
-                })
-            } else {
-                resolve_unqualified(name, *env, cx)
+            match (binding, qualifier) {
+                (Some(binding), _) => ReferenceTarget::Bound { name, binding },
+                (None, Some(_)) => ReferenceTarget::Unbound { name },
+                (None, None) => ReferenceTarget::Unqualified { name, env: *env },
             }
         }
-
-        RawNode::Unqualified { name, env, binding } => {
-            if let Some(binding) = binding
+        RawNode::Unqualified { name, env, binding } => binding
+            .clone()
+            .or_else(|| lookup_virtual_binding(*env, name, graph))
+            .map_or(
+                ReferenceTarget::Unqualified { name, env: *env },
+                |binding| ReferenceTarget::Bound { name, binding },
+            ),
+        RawNode::RowValueCandidate { name, env, binding } => ReferenceTarget::RowValueCandidate {
+            name,
+            binding: binding
                 .clone()
-                .or_else(|| lookup_virtual_binding(*env, name, graph))
-            {
-                resolve_captured_binding(name, binding, cx)
-            } else {
-                resolve_unqualified(name, *env, cx)
-            }
+                .or_else(|| graph.scopes.lookup(*env, name).cloned()),
+        },
+        RawNode::Output { .. } | RawNode::Star { .. } | RawNode::Unsupported { .. } => {
+            ReferenceTarget::None
         }
-
-        RawNode::RowValueCandidate { name, env, binding } => {
-            resolve_row_value_candidate(name, *env, binding.clone(), cx)
-        }
-
-        RawNode::Unsupported { what } => {
-            Sources::one(ColumnOrigin::Unresolved(Unresolved::Unsupported { what }))
-        }
-
-        RawNode::Star { .. } | RawNode::Output { .. } => Sources::default(),
-    };
-
-    // An origin found while a cycle was cut depends on where the walk
-    // started, so it is returned and not kept.
-    if cx.cut_generation() == generation {
-        cx.resolved[node_id] = Some(origin.clone());
     }
-    origin
+}
+
+/// Whether the CTE or derived table `scope` lists an output column `name`,
+/// which a relation alias of the same name then denotes.
+pub(super) fn scope_lists_column(scope: usize, name: &Ident, graph: &RawGraph) -> bool {
+    graph
+        .scopes
+        .output_columns(scope)
+        .iter()
+        .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
 }
 
 pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Option<Origin> {
@@ -124,13 +163,11 @@ pub(super) fn lookup_virtual_binding(
 
 fn resolve_row_value_candidate(
     name: &Ident,
-    env: BindingEnv,
     binding: Option<Binding>,
     cx: &mut EvalContext<'_, '_>,
 ) -> Sources {
     let graph = cx.graph;
     let catalog = cx.catalog;
-    let binding = binding.or_else(|| graph.scopes.lookup(env, name).cloned());
     let row_value = || {
         Sources::one(ColumnOrigin::Unresolved(Unresolved::RowValue {
             alias: name.clone(),
@@ -158,14 +195,7 @@ fn resolve_row_value_candidate(
             }
         }
         Binding::Cte(target_scope) | Binding::DerivedTable(target_scope) => {
-            let is_named_column = graph
-                .scopes
-                .output_columns(target_scope)
-                .iter()
-                .any(|column| {
-                    column.name.column_key(graph.dialect) == name.column_key(graph.dialect)
-                });
-            if is_named_column {
+            if scope_lists_column(target_scope, name, graph) {
                 resolve_through_scope(name, target_scope, cx)
             } else {
                 row_value()

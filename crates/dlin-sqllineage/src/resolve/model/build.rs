@@ -5,6 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use super::super::binding::{
+    ReferenceTarget, ambiguous_qualified_origin, reference_target, scope_lists_column,
+};
 use super::super::target::{StarTarget, resolve_star_target};
 use super::choose::Choice;
 use super::input::{InputLookup, InputModel, Invalidity};
@@ -546,6 +549,36 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         Some((fields, evidence))
     }
 
+    /// The fields of the column a reference node names, bound the way the
+    /// lineage of its value binds it.
+    fn reference_struct_fields(
+        &mut self,
+        reference: NodeId,
+        walk: &mut ShapeWalk,
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
+        let graph = self.graph;
+        if ambiguous_qualified_origin(reference, graph).is_some() {
+            return None;
+        }
+        match reference_target(reference, graph) {
+            ReferenceTarget::Bound { name, binding } => {
+                self.binding_struct_fields(&binding, std::slice::from_ref(name), walk)
+            }
+            ReferenceTarget::Unqualified { name, env } => {
+                self.column_struct_fields(env, std::slice::from_ref(name), walk)
+            }
+            ReferenceTarget::RowValueCandidate {
+                name,
+                binding: Some(binding @ (Binding::Cte(scope) | Binding::DerivedTable(scope))),
+            } if scope_lists_column(scope, name, graph) => {
+                self.binding_struct_fields(&binding, std::slice::from_ref(name), walk)
+            }
+            ReferenceTarget::RowValueCandidate { .. }
+            | ReferenceTarget::Unbound { .. }
+            | ReferenceTarget::None => None,
+        }
+    }
+
     /// The fields of a value that is a STRUCT whose fields are known, as
     /// columns defined by the star that expands them, with the schemas that
     /// decide them. A forwarded column, and a column a projection reads as it
@@ -571,26 +604,8 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         };
         let fields = match self.graph.struct_values.get(&node)? {
             StructValue::Fields(fields) => fields,
-            StructValue::Column {
-                qualifier: None,
-                column,
-                env,
-            } => return self.column_struct_fields(*env, std::slice::from_ref(column), walk),
-            StructValue::Column {
-                qualifier: Some(qualifier),
-                column,
-                env,
-            } => {
-                if self
-                    .graph
-                    .scopes
-                    .ambiguous_binding_candidates(*env, qualifier)
-                    .is_some()
-                {
-                    return None;
-                }
-                let binding = self.graph.scopes.lookup(*env, qualifier)?.clone();
-                return self.binding_struct_fields(&binding, std::slice::from_ref(column), walk);
+            StructValue::Column(reference) => {
+                return self.reference_struct_fields(*reference, walk);
             }
         };
         let elements = fields

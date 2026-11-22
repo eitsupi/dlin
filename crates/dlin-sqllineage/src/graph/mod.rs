@@ -30,13 +30,9 @@ pub(crate) enum StructValue {
     /// A STRUCT built in place: its fields in order, each with the node of
     /// its value.
     Fields(Vec<(Ident, NodeId)>),
-    /// A column read as it is, whose fields are those of the column it
-    /// names at `env`.
-    Column {
-        qualifier: Option<Ident>,
-        column: Ident,
-        env: BindingEnv,
-    },
+    /// A column read as it is, through this reference node: its fields are
+    /// those of the column the reference names.
+    Column(NodeId),
 }
 
 impl RawGraph {

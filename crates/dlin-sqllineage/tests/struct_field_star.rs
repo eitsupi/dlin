@@ -366,3 +366,27 @@ fn replace_takes_the_place_of_an_expanded_field() {
         ["x#0 C[src.b]", "y#1 C[src.c]", "Closed"]
     );
 }
+
+#[test]
+fn struct_column_named_like_its_relation_binds_as_its_value_does() {
+    // item is both the CTE and its column. The value of renamed and the
+    // fields of renamed.* follow the same reading of the name.
+    let fields = render(
+        r#"
+        WITH item AS (SELECT STRUCT(src.a AS x) AS item FROM src),
+        fwd AS (SELECT item AS renamed FROM item)
+        SELECT renamed.* FROM fwd
+        "#,
+        Dialect::BigQuery,
+    );
+    let value = render(
+        r#"
+        WITH item AS (SELECT STRUCT(src.a AS x) AS item FROM src),
+        fwd AS (SELECT item AS renamed FROM item)
+        SELECT renamed FROM fwd
+        "#,
+        Dialect::BigQuery,
+    );
+    assert_eq!(value, ["renamed#0 C[src.a]", "Closed"]);
+    assert_eq!(fields, ["x#0 C[src.a]", "Closed"]);
+}
