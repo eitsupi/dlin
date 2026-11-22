@@ -1,4 +1,4 @@
-use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
+use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript};
 
 use crate::Ident;
 use crate::build::LineageBuilder;
@@ -299,6 +299,13 @@ impl LineageBuilder {
                             | ast::FunctionArg::ExprNamed { arg: arg_expr, .. } => arg_expr,
                         };
                         let ast::FunctionArgExpr::Expr(expr) = arg_expr else {
+                            // A wildcard argument reads every column it
+                            // expands to, which is not modelled yet. Only
+                            // `COUNT(*)` is known to read no column value.
+                            if !function_semantics::wildcard_argument_counts_rows(func) {
+                                ancestors
+                                    .push(self.graph.add_unsupported("wildcard function argument"));
+                            }
                             continue;
                         };
                         let is_static_syntax = semantics
@@ -346,13 +353,8 @@ impl LineageBuilder {
                 if let FunctionArguments::Subquery(q) = &func.args {
                     ancestors.extend(self.collect_subquery_value_inputs(q));
                 }
-                if let Some(WindowType::WindowSpec(spec)) = &func.over {
-                    for expr in &spec.partition_by {
-                        ancestors.extend(self.collect_ancestors(expr));
-                    }
-                    for order in &spec.order_by {
-                        ancestors.extend(self.collect_ancestors(&order.expr));
-                    }
+                if let Some(over) = &func.over {
+                    ancestors.extend(self.collect_window_inputs(over));
                 }
                 ancestors
             }

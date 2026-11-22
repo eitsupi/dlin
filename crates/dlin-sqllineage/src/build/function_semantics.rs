@@ -963,6 +963,22 @@ fn expression_is_static_normalization_mode(expr: &Expr) -> bool {
             .any(|mode| mode.eq_ignore_ascii_case(&ident.value))
 }
 
+/// Whether a bare `*` argument of `function` stands for the rows rather than
+/// for the values of their columns, as in `COUNT(*)`. A wildcard argument of
+/// any other function (`OBJECT_CONSTRUCT(*)`, `HASH(t.*)`) reads the values
+/// of every column it expands to.
+pub(crate) fn wildcard_argument_counts_rows(function: &Function) -> bool {
+    let FunctionArguments::List(list) = &function.args else {
+        return false;
+    };
+    list.duplicate_treatment.is_none()
+        && matches!(
+            list.args.as_slice(),
+            [FunctionArg::Unnamed(FunctionArgExpr::Wildcard)]
+        )
+        && simple_function_name(function).is_some_and(|name| name.eq_ignore_ascii_case("COUNT"))
+}
+
 fn simple_function_name(function: &Function) -> Option<&str> {
     let [ObjectNamePart::Identifier(ident)] = function.name.0.as_slice() else {
         return None;

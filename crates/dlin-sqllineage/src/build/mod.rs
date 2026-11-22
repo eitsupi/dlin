@@ -4,11 +4,13 @@ pub(crate) mod query;
 pub(crate) mod relation;
 pub(crate) mod select;
 pub(crate) mod statement;
+pub(crate) mod window;
 
 use crate::graph::RawGraph;
 use crate::graph::scope::{Binding, BindingEnv, ScopeId, ScopeKind, ScopeTree};
 use crate::types::{Dialect, SemanticError, StatementType, Warning};
 use sqlparser::ast::Statement;
+use std::collections::HashMap;
 
 pub(crate) struct LineageBuilder {
     pub(crate) graph: RawGraph,
@@ -25,6 +27,8 @@ pub(crate) struct LineageBuilder {
     /// First unsupported construct met while walking the statement. Once set,
     /// the walk stops adding to the graph and `build` reports the error.
     pub(crate) error: Option<SemanticError>,
+    /// The `WINDOW` clause definitions of each SELECT scope.
+    pub(crate) named_windows: HashMap<ScopeId, Vec<window::NamedWindow>>,
 }
 
 impl LineageBuilder {
@@ -40,6 +44,7 @@ impl LineageBuilder {
             inner_statement_type: None,
             dialect,
             error: None,
+            named_windows: HashMap::new(),
         }
     }
 

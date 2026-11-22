@@ -999,3 +999,53 @@ fn revisiting_an_output_on_an_impact_path_is_reported_as_a_cycle() {
     );
     assert!(!report.proves_no_impact());
 }
+
+fn window_manifest(child_sql: &str) -> Manifest {
+    let root = "model.proj.t";
+    let child = "model.proj.child";
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        root.to_string(),
+        model(root, "t", &[], "SELECT dept, id FROM raw", &["dept", "id"]),
+    );
+    nodes.insert(
+        child.to_string(),
+        model(child, "child", &[root], child_sql, &["rn"]),
+    );
+    Manifest {
+        nodes,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn partition_column_of_a_named_or_inherited_window_has_a_confirmed_impact() {
+    for sql in [
+        "SELECT ROW_NUMBER() OVER (PARTITION BY dept ORDER BY id) AS rn FROM t",
+        "SELECT ROW_NUMBER() OVER w AS rn FROM t WINDOW w AS (PARTITION BY dept ORDER BY id)",
+        "SELECT ROW_NUMBER() OVER (w ORDER BY id) AS rn FROM t WINDOW w AS (PARTITION BY dept)",
+    ] {
+        let manifest = window_manifest(sql);
+        let report = impact(&manifest, "model.proj.t", "dept", ImpactScope::ValueOnly);
+        assert!(
+            report
+                .confirmed
+                .iter()
+                .any(|path| path.target.model == "child" && path.target.column == "rn"),
+            "{sql}: {report:?}"
+        );
+    }
+}
+
+#[test]
+fn wildcard_function_argument_does_not_prove_no_impact() {
+    let manifest = window_manifest("SELECT OBJECT_CONSTRUCT(*) AS rn FROM t");
+    let report = impact_with_dialect(
+        &manifest,
+        "model.proj.t",
+        "dept",
+        ImpactScope::ValueOnly,
+        DlinDialect::Snowflake,
+    );
+    assert!(!report.proves_no_impact(), "{report:?}");
+}
