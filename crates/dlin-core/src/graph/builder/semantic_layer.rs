@@ -69,9 +69,29 @@ pub(super) fn process_semantic_layer(
         if let Some(model_ref) = &sm.model
             && let Some((model_name, version)) = parse_exposure_ref(model_ref)
         {
-            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version.clone());
             gb.graph
                 .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
+            // The semantic model's dependencies are not assessed, but a
+            // target that does not exist is still reported on it, as on any
+            // node that references it.
+            if gb.graph[dep_idx].node_type == NodeType::Phantom {
+                let at = NodeCallSite {
+                    unique_id: sem_id.clone(),
+                    path: gb.display_path(yaml_path),
+                    line: None,
+                    expr: Some(model_ref.trim().to_string()),
+                };
+                gb.add_reasons(
+                    sem_idx,
+                    [DependencyReason::UnresolvedRef {
+                        name: model_name,
+                        package: None,
+                        version,
+                        at,
+                    }],
+                );
+            }
         }
     }
 

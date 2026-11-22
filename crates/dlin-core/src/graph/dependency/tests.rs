@@ -349,3 +349,13 @@ fn relative_display_path_on_windows() {
         "//server/share/models"
     );
 }
+
+#[test]
+fn reason_codes_match_their_serialised_names() {
+    for code in DependencyReasonCode::ALL {
+        assert_eq!(
+            serde_json::to_value(code).unwrap(),
+            serde_json::Value::from(code.as_str())
+        );
+    }
+}

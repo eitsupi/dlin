@@ -26,7 +26,11 @@ expression: output
         "label": "dashboard",
         "node_type": "exposure",
         "severity": "critical",
-        "distance": 2
+        "distance": 2,
+        "dependency_analysis": {
+          "status": "complete",
+          "unresolved": []
+        }
       },
       {
         "unique_id": "model.orders",
@@ -34,14 +38,36 @@ expression: output
         "node_type": "model",
         "file_path": "models/marts/orders.sql",
         "severity": "high",
-        "distance": 1
+        "distance": 1,
+        "dependency_analysis": {
+          "status": "complete",
+          "unresolved": []
+        }
       },
       {
         "unique_id": "test.orders_positive",
         "label": "orders_positive",
         "node_type": "test",
         "severity": "low",
-        "distance": 2
+        "distance": 2,
+        "dependency_analysis": {
+          "status": "complete",
+          "unresolved": []
+        }
+      }
+    ],
+    "source_node": {
+      "unique_id": "model.stg_orders",
+      "dependency_analysis": {
+        "status": "complete",
+        "unresolved": []
+      }
+    },
+    "exploration": [
+      {
+        "kind": "model_dependency",
+        "status": "complete",
+        "gaps": []
       }
     ]
   }

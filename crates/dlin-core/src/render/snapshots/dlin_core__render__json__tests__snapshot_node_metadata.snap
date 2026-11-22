@@ -9,6 +9,10 @@ expression: output
         "order_id",
         "customer_id"
       ],
+      "dependency_analysis": {
+        "status": "complete",
+        "unresolved": []
+      },
       "description": "Orders mart model",
       "exposure": null,
       "file_path": "models/orders.sql",

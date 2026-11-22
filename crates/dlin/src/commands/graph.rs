@@ -20,7 +20,12 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
+    let DagBuild {
+        build,
+        project: project_opt,
+        manifest_context,
+        ..
+    } = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -28,7 +33,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
+    let dag = build.graph();
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -39,7 +44,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
     };
@@ -54,7 +59,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Filter graph
     let transitive = !args.no_transitive;
     let filtered = graph::filter::filter_graph(
-        &dag,
+        dag,
         &models,
         args.upstream,
         args.downstream,
@@ -94,7 +99,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             let focus_unique_ids: std::collections::HashSet<String> = models
                 .iter()
                 .filter_map(|name| {
-                    graph::filter::try_resolve_node_quiet(&dag, name)
+                    graph::filter::try_resolve_node_quiet(dag, name)
                         .map(|idx| dag[idx].unique_id.clone())
                 })
                 .collect();
@@ -198,7 +203,12 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
+    let DagBuild {
+        build,
+        project: project_opt,
+        manifest_context,
+        ..
+    } = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -206,7 +216,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
+    let dag = build.graph();
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -217,7 +227,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
     };
@@ -237,7 +247,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
     };
     // List output doesn't render edges, so transitive edge completion is unnecessary.
     let filtered =
-        graph::filter::filter_graph(&dag, &models, upstream, downstream, &selectors, false)?;
+        graph::filter::filter_graph(dag, &models, upstream, downstream, &selectors, false)?;
 
     // Apply node-type filter (default: all types; use --node-type to restrict)
     let type_names = graph::filter::resolve_node_types(args.node_types);
@@ -418,7 +428,11 @@ pub(crate) fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, project_opt, manifest_diagnostics, _manifest_context) = build_dag(
+    let DagBuild {
+        build,
+        project: project_opt,
+        ..
+    } = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -426,7 +440,7 @@ pub(crate) fn run_impact_command(
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
+    let dag = build.graph();
 
     // Resolve file paths to model names (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {
@@ -434,7 +448,7 @@ pub(crate) fn run_impact_command(
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
     } else {
         raw_inputs
     };
@@ -449,8 +463,8 @@ pub(crate) fn run_impact_command(
     let reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
-            let source_idx = graph::filter::try_resolve_node(&dag, model)?;
-            Some(graph::impact::compute_impact(&dag, source_idx))
+            let source_idx = graph::filter::try_resolve_node(dag, model)?;
+            graph::impact::compute_impact(&build, source_idx)
         })
         .collect();
 

@@ -66,7 +66,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Analyse the downstream impact of changing a model: returns downstream nodes with their distance and a DAG severity based on node type and materialization.",
+            "description": "Analyse the downstream impact of changing a model: returns the downstream nodes reached through the lineage edges, with their distance and a DAG severity based on node type and materialization. `exploration` says whether the reached set can miss nodes; dependencies read from a manifest are not assessed, so it is incomplete. An empty page of impacted nodes does not show that there is no impact; `proves_no_impact` does.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
@@ -175,8 +175,8 @@ pub(super) fn get_project_summary(state: &McpState) -> Result<Value> {
     let mut value = json!({
         "project_name": project_name,
         "source_mode": "manifest",
-        "node_counts": render::summary::count_nodes(&state.dag),
-        "edge_count": state.dag.edge_count(),
+        "node_counts": render::summary::count_nodes(state.dag()),
+        "edge_count": state.dag().edge_count(),
         "manifest_status": manifest_status,
     });
     value["skipped_unit_tests"] = json!(state.manifest.skipped_unit_test_count());
@@ -214,7 +214,7 @@ pub(super) fn list_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let type_filter = parse_node_type_filter(args)?;
 
     let mut nodes: Vec<_> = state
-        .dag
+        .dag()
         .node_weights()
         .filter(|node| {
             node.node_type != NodeType::Phantom
@@ -277,10 +277,10 @@ pub(super) fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
 
     for name in names {
         match resolve_node_unique_id(state, &name)
-            .and_then(|id| graph::filter::try_resolve_node_quiet(&state.dag, &id))
+            .and_then(|id| graph::filter::try_resolve_node_quiet(state.dag(), &id))
         {
             Some(idx) => {
-                let node = &state.dag[idx];
+                let node = &state.dag()[idx];
                 if type_filter
                     .as_ref()
                     .is_none_or(|f| f.contains(&node.node_type))
@@ -413,7 +413,7 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
         Default::default()
     } else {
         graph::filter::filter_graph(
-            &state.dag,
+            state.dag(),
             &resolved_models,
             upstream,
             downstream,
@@ -473,11 +473,14 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
 pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let model = required_string(args, "model")?;
     let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
-    let idx = graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
+    let idx = graph::filter::try_resolve_node_quiet(state.dag(), &normalized)
         .with_context(|| format!("model not found: {model}"))?;
-    let mut report = graph::impact::compute_impact(&state.dag, idx);
+    let report = graph::impact::compute_impact(&state.build, idx)
+        .with_context(|| format!("model not found: {model}"))?;
     let detail = column_result::Detail::parse(args)?;
-    report.impacted_nodes.sort_by_key(|node| {
+    // Page through a reordered view; the report itself stays as computed.
+    let mut ordered: Vec<&graph::impact::ImpactedNode> = report.impacted_nodes().iter().collect();
+    ordered.sort_by_key(|node| {
         (
             node.distance,
             std::cmp::Reverse(node.severity),
@@ -487,15 +490,17 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let page = Page::new(
         args,
         20,
-        report.impacted_nodes.len(),
+        ordered.len(),
         state.manifest_hash,
         ("get_impact", &normalized, detail),
     )?;
-    let nodes = &report.impacted_nodes[page.range()];
+    let nodes = &ordered[page.range()];
     let mut value = json!({
         "source_model":report.source_model, "overall_severity":report.overall_severity,
         "affected_models":report.affected_models, "affected_tests":report.affected_tests,
-        "affected_exposures":report.affected_exposures, "page":page.metadata(),
+        "affected_exposures":report.affected_exposures,
+        "source_node":report.source_node(), "exploration":report.exploration(), "proves_no_impact":report.proves_no_impact(),
+        "page":page.metadata(),
     });
     if detail.full() {
         let ids: HashSet<_> = nodes.iter().map(|node| node.unique_id.as_str()).collect();
@@ -644,9 +649,9 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
 }
 
 pub(super) fn resolve_node_unique_id(state: &McpState, name: &str) -> Option<String> {
-    graph::filter::resolve_node_by_name(&state.dag, name)
+    graph::filter::resolve_node_by_name(state.dag(), name)
         .ok()
-        .map(|idx| state.dag[idx].unique_id.clone())
+        .map(|idx| state.dag()[idx].unique_id.clone())
 }
 
 pub(super) fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {

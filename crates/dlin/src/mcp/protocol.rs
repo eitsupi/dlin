@@ -51,14 +51,21 @@ pub(super) struct McpState {
     pub(super) dialect_warning: Option<String>,
     pub(super) manifest_warnings: Vec<parser::manifest::ManifestDiagnostic>,
     pub(super) manifest: parser::manifest::Manifest,
-    pub(super) dag: LineageGraph,
+    /// The manifest graph, with its dependencies recorded as not assessed.
+    pub(super) build: graph::builder::GraphBuild,
     pub(super) column_lineage_cache: RefCell<graph::column_lineage::ColumnLineageCache>,
+}
+
+impl McpState {
+    pub(super) fn dag(&self) -> &LineageGraph {
+        self.build.graph()
+    }
 }
 
 pub fn run(args: McpArgs) -> Result<()> {
     let state = McpState::load(args)?;
 
-    let counts = render::summary::count_nodes(&state.dag);
+    let counts = render::summary::count_nodes(state.dag());
     let project_name = state
         .manifest
         .metadata
@@ -145,7 +152,7 @@ impl McpState {
                 .filter(|diagnostic| diagnostic.kind.is_user_visible_warning())
                 .collect(),
             manifest,
-            dag,
+            build: graph::builder::GraphBuild::from_manifest(dag),
             column_lineage_cache: RefCell::new(
                 graph::column_lineage::ColumnLineageCache::disabled(),
             ),

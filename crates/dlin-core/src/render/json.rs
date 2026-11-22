@@ -20,6 +20,7 @@ pub const GRAPH_NODE_FIELDS: &[&str] = &[
     "columns",
     "sql_content",
     "exposure",
+    "dependency_analysis",
 ];
 
 /// Default node fields when neither --json-fields nor --json-full is specified.
@@ -135,6 +136,13 @@ pub fn build_node_value(
                     .map(|c| Value::String(c.clone()))
                     .collect(),
             ),
+        );
+    }
+    if fields.contains("dependency_analysis") {
+        map.insert(
+            "dependency_analysis".into(),
+            serde_json::to_value(&node.dependency_analysis)
+                .expect("a dependency analysis serialises to JSON"),
         );
     }
     if fields.contains("sql_content") {

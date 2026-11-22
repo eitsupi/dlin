@@ -76,9 +76,10 @@ Error format (--error-format):
                   Error: <what>
                     Why: <why>     (when available)
                     Hint: <hint>   (when available)
-  json            Structured JSON on stderr (fixed schema):
+  json            One JSON object per diagnostic on stderr, with at least
                   {\"level\":\"error\",\"what\":\"...\",\"why\":...,\"hint\":...}
-                  why and hint are strings or null.
+                  why and hint are strings or null. Typed diagnostics add
+                  a \"code\" and fields of their own.
                   Also settable via DLIN_ERROR_FORMAT=json",
     after_long_help = "\
 Examples:
@@ -109,11 +110,30 @@ pub struct Cli {
         long_help = "\
 Error/warning output format on stderr: text (default) or json.
 
-When json, diagnostics are emitted as structured JSON objects with a
-fixed schema: {\"level\":\"error\"|\"warning\",\"what\":\"...\",\"why\":...,\"hint\":...}
-where why and hint are either strings or null."
+When json, each diagnostic is one JSON object on its own line. Every
+object has {\"level\":\"error\"|\"warning\"|\"info\",\"what\":\"...\",\"why\":...,\"hint\":...},
+where why and hint are either strings or null. Typed diagnostics add a
+\"code\" and fields of their own; for example dependency_analysis_summary
+adds counts by reason type and namespace. Read code and the typed fields,
+not the text of what, why and hint."
     )]
     pub error_format: ErrorFormat,
+
+    /// Show each reason of the dependency analysis on stderr
+    #[arg(
+        long,
+        global = true,
+        long_help = "\
+Show the details of the model dependency analysis on stderr.
+
+By default, a command that builds the lineage graph prints at most one
+configuration warning and one dependency_analysis_summary diagnostic, which
+counts the reasons of the whole project by type and namespace. With
+--verbose it also prints one diagnostic per reason (with the node and the
+call site) and per skipped input, and the info diagnostics for default
+paths that do not exist. It changes no analysis. --quiet takes precedence."
+    )]
+    pub verbose: bool,
 
     #[command(subcommand)]
     pub command: Command,

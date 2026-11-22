@@ -226,3 +226,53 @@ metrics:
         );
     }
 }
+
+/// A semantic model whose `model` names no model keeps the missing target
+/// visible as a reason, next to its unassessed scope.
+#[test]
+fn semantic_model_with_a_missing_model_has_an_unresolved_ref() {
+    let (_tmp, project_dir) = setup_temp_project();
+    fs::write(
+        project_dir.join("models/semantic.yml"),
+        r#"
+semantic_models:
+  - name: lost
+    model: ref('missing_model')
+    measures:
+      - name: lost_count
+"#,
+    )
+    .unwrap();
+    let files = DiscoveredFiles {
+        model_sql_files: vec![project_dir.join("models/orders.sql")],
+        yaml_files: vec![project_dir.join("models/semantic.yml")],
+        ..Default::default()
+    };
+    let graph = build_graph(&project_dir, "test_project", &files, &HashMap::new()).unwrap();
+    let node = graph
+        .node_indices()
+        .map(|idx| &graph[idx])
+        .find(|node| node.unique_id == "semantic_model.lost")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&node.dependency_analysis).unwrap(),
+        serde_json::json!({
+            "status": "partial",
+            "unresolved": [
+                {
+                    "type": "unresolved_ref",
+                    "name": "missing_model",
+                    "package": null,
+                    "version": null,
+                    "at": {
+                        "unique_id": "semantic_model.lost",
+                        "path": "models/semantic.yml",
+                        "line": null,
+                        "expr": "ref('missing_model')"
+                    }
+                },
+                {"type": "not_assessed", "scope": "semantic_dependencies"}
+            ]
+        })
+    );
+}

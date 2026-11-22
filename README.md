@@ -92,7 +92,7 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 - `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported)
 - `env_var()` uses its default and never reads the environment. A different value at run time can select a different dependency or branch than the one shown
 - Values known only at run time (`target`, `env_var()` without a default, `run_query()` results) do not select dependencies; `execute` is false, as when dbt parses the project
-- Dependencies selected through `adapter.dispatch()` or namespaced package macros (e.g. `dbt_utils.*`) may be missed
+- Dependencies selected through `adapter.dispatch()` or namespaced package macros (e.g. `dbt_utils.*`) may be missed. The nodes concerned are reported as partial (see [Completeness of model-level dependencies](#completeness-of-model-level-dependencies))
 - Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
 
 When these limitations matter, use `--source manifest`.
@@ -412,6 +412,91 @@ Impacted Nodes:
   [high    ] customers (model, distance: 1) [models/marts/customers.sql]
   [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
+
+### Completeness of model-level dependencies
+
+dlin reports where it could not analyse the model-level dependencies (`ref()`, `source()`, tests, exposures), so a program can tell whether a result may be missing something.
+
+- **Each node** has `dependency_analysis` in `list` JSON (by default), in `graph` JSON (with `--json-full` or `--json-fields dependency_analysis`) and in `impact` JSON. Its `status` is `complete` or `partial`; `unresolved` lists a typed reason for each part that could not be analysed. `complete` means that, under dlin's evaluation rules, no part was left unresolved. In particular, `env_var()` is evaluated with its default, so a different value at run time can select another dependency; check run-time dependencies with a manifest generated for that environment.
+- **Each impact report** has `exploration`, which says whether the reached nodes can be missing a node. It is `complete` only when no node outside the reached set has reasons (phantom nodes, which stand for unresolved targets, are left out; the nodes referencing them carry the reasons), no input was skipped and no scope went unassessed. Otherwise `gaps` lists why. An empty `exploration` means the search did not run, as for an input that is an unresolved reference. Manifest mode takes the manifest's dependencies as they are, so its exploration is always incomplete with `not_assessed` (`manifest_dependencies`).
+- `complete` concerns the reached set only. It does not confirm that each reached node is affected, nor the distances or paths. It is relative to the project and the paths it configures: a configured path that does not exist is a warning, not a gap.
+- A node whose analysis is `complete` says nothing about the project as a whole: an input that could not be read is not attributed to any node. Do not conclude that a project is fully analysed because every listed node is `complete`.
+- A reason states that something was not analysed, not that a dependency is missing.
+
+On stderr, a command that builds the graph prints, once and before any filtering:
+
+- at most one configuration warning, such as a path in `dbt_project.yml` that does not exist;
+- one `dependency_analysis_summary` when any node has reasons or any project gap remains. It counts the whole project: `partial_nodes` (as in node JSON), `not_assessed_nodes` (the partial nodes whose only reasons are `not_assessed`), reasons by type and namespace, and project gaps. It is a warning when a node is partially analysed or an input was skipped, and info when only scopes are not assessed, as in manifest mode. It is not the exploration of any impact report.
+
+`--verbose` adds one diagnostic per reason, with its node and call site, one per project gap, and the info diagnostics for default paths that do not exist. `--quiet` suppresses all of them. With `--error-format json`, these diagnostics carry a `code` and typed fields next to `level`, `what`, `why` and `hint`; read the code and the fields, not the text.
+
+#### Using impact in CI
+
+To accept "no impact" only when it is proved, check every condition, not only an empty `impacted_nodes`. The first definition rejects an exploration whose `status` and `gaps` disagree:
+
+```sh
+dlin impact orders -o json -q > impact.json && jq -e --arg id model.orders '
+  def consistent:
+    (.gaps | type == "array")
+    and ((.status == "complete" and (.gaps | length == 0))
+         or (.status == "incomplete" and (.gaps | length > 0)));
+  def model_explorations: [.exploration[] | select(.kind == "model_dependency")];
+  length == 1
+  and (.[0] | .source_node.unique_id == $id
+      and (.impacted_nodes | type == "array" and length == 0)
+      and (model_explorations | length > 0
+           and all(.[]; consistent and .status == "complete")))
+' impact.json
+```
+
+Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds as long as one input is found, and its exit code does not depend on completeness.
+
+You may decide, after checking them, that some reasons do not hide a dependency in your project. To proceed despite them, accept a gap only when every one of its reasons matches a rule you have checked, and reject everything else, including reason and gap types you do not know. For example, to accept calls through the `dbt` namespace:
+
+```sh
+jq -e --arg id model.orders '
+  def consistent:
+    (.gaps | type == "array")
+    and ((.status == "complete" and (.gaps | length == 0))
+         or (.status == "incomplete" and (.gaps | length > 0)));
+  def accepted:
+    .type == "unresolved_dependencies"
+    and (.reasons | type == "array" and length > 0)
+    and all(.reasons[]; .type == "unsupported_macro_namespace" and .namespace == "dbt");
+  def model_explorations: [.exploration[] | select(.kind == "model_dependency")];
+  length == 1
+  and (.[0] | .source_node.unique_id == $id
+      and (model_explorations | length > 0
+           and all(.[]; consistent and all(.gaps[]; accepted))))
+' impact.json
+```
+
+Accepting gaps is a decision to take the risk; it does not prove that the change has no impact. The `namespace` is the name written in the call, not the package that owns the macro, so a namespace alone does not make a call safe. Before accepting a rule, check that the macro and the macros it calls read no `ref()` or `source()`, and that no argument, branch or dispatch inside them selects a dependency.
+
+In the table, *miss* means the graph may lack a dependency, and *wrong edge* that an edge dlin kept may not be the one dbt uses.
+
+| Reason `type` | Meaning | May | Check |
+| --- | --- | --- | --- |
+| `unresolved_ref`, `unresolved_source` | The target could not be resolved in the searched paths | miss | The name, or that its file is in a searched path |
+| `invalid_dependency_call` | `ref()` or `source()` with arguments that are not valid | miss | The call |
+| `generic_test_body_not_analyzed` | The body of a generic test macro is not analysed; its YAML arguments are evaluated, and may carry reasons of their own | miss | Whether the test macro reads other models |
+| `unsupported_dependency_expression`, `dependency_target_missing` | An exposure `depends_on` entry that is not supported or names nothing | miss | The entry |
+| `unresolved_var` | A `var()` without a value or default selects a dependency | miss, wrong edge | Set the variable or give a default |
+| `runtime_value_unknown` | A value known only when dbt runs (`target`, `env_var()` without a default, `run_query()`, ...) selects a dependency | miss, wrong edge | A manifest generated for that environment |
+| `unsupported_dispatch` | `adapter.dispatch()` is not resolved | miss, wrong edge | The dispatched implementations |
+| `unsupported_macro_namespace` | A macro called through a namespace (`dbt_utils.star()`, `dbt.type_string()`) is not analysed | miss, wrong edge | That macro, as described above |
+| `unresolved_call` | A call whose callee could not be identified | miss, wrong edge | That the macro is defined in a searched path |
+| `macro_reachability_unknown` | The macros a call can reach could not be determined | miss, wrong edge | Which macro the call selects |
+| `unsupported_jinja_construct` | A Jinja construct the analysis does not model | miss, wrong edge | That part of the template |
+| `jinja_render_failed` | The template could not be interpreted | miss, wrong edge | The template syntax |
+| `analysis_limit_reached` | The analysis stopped at a recursion or work limit | miss, wrong edge | Deeply recursive macros |
+| `unsupported_ref_package` | A `ref()` naming a package, resolved by name only | miss, wrong edge | That the edge goes to the intended node |
+| `ambiguous_ref` | A `ref()` matching several nodes (`candidates`); the edge goes to one of them | miss, wrong edge | Rename one of them |
+| `not_assessed` | The node's dependencies are not assessed at all (`scope`: `manifest_dependencies`, `semantic_dependencies`, or `phantom_dependencies` on phantom nodes, which is never a gap) | anything | |
+
+A reason does not establish that an edge is wrong or that one is missing. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
+
+A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is a gap of every exploration that ran.
 
 ## Filtering
 

@@ -12,6 +12,8 @@ Summary:
   Affected tests:     1
   Affected exposures: 1
 
+Exploration: complete
+
 Exposure Paths:
   stg_orders -> orders -> dashboard
 

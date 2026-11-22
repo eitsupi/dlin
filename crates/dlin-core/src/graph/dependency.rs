@@ -240,6 +240,77 @@ pub enum DependencyReason<L> {
     NotAssessed { scope: NotAssessedScope },
 }
 
+/// The type of a [`DependencyReason`], which is also its diagnostic code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyReasonCode {
+    UnresolvedRef,
+    UnresolvedSource,
+    UnresolvedVar,
+    UnsupportedDispatch,
+    UnsupportedMacroNamespace,
+    UnresolvedCall,
+    UnsupportedJinjaConstruct,
+    InvalidDependencyCall,
+    AnalysisLimitReached,
+    RuntimeValueUnknown,
+    JinjaRenderFailed,
+    MacroReachabilityUnknown,
+    UnsupportedDependencyExpression,
+    DependencyTargetMissing,
+    UnsupportedRefPackage,
+    AmbiguousRef,
+    GenericTestBodyNotAnalyzed,
+    NotAssessed,
+}
+
+impl DependencyReasonCode {
+    /// Every reason type.
+    pub const ALL: &'static [Self] = &[
+        Self::UnresolvedRef,
+        Self::UnresolvedSource,
+        Self::UnresolvedVar,
+        Self::UnsupportedDispatch,
+        Self::UnsupportedMacroNamespace,
+        Self::UnresolvedCall,
+        Self::UnsupportedJinjaConstruct,
+        Self::InvalidDependencyCall,
+        Self::AnalysisLimitReached,
+        Self::RuntimeValueUnknown,
+        Self::JinjaRenderFailed,
+        Self::MacroReachabilityUnknown,
+        Self::UnsupportedDependencyExpression,
+        Self::DependencyTargetMissing,
+        Self::UnsupportedRefPackage,
+        Self::AmbiguousRef,
+        Self::GenericTestBodyNotAnalyzed,
+        Self::NotAssessed,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnresolvedRef => "unresolved_ref",
+            Self::UnresolvedSource => "unresolved_source",
+            Self::UnresolvedVar => "unresolved_var",
+            Self::UnsupportedDispatch => "unsupported_dispatch",
+            Self::UnsupportedMacroNamespace => "unsupported_macro_namespace",
+            Self::UnresolvedCall => "unresolved_call",
+            Self::UnsupportedJinjaConstruct => "unsupported_jinja_construct",
+            Self::InvalidDependencyCall => "invalid_dependency_call",
+            Self::AnalysisLimitReached => "analysis_limit_reached",
+            Self::RuntimeValueUnknown => "runtime_value_unknown",
+            Self::JinjaRenderFailed => "jinja_render_failed",
+            Self::MacroReachabilityUnknown => "macro_reachability_unknown",
+            Self::UnsupportedDependencyExpression => "unsupported_dependency_expression",
+            Self::DependencyTargetMissing => "dependency_target_missing",
+            Self::UnsupportedRefPackage => "unsupported_ref_package",
+            Self::AmbiguousRef => "ambiguous_ref",
+            Self::GenericTestBodyNotAnalyzed => "generic_test_body_not_analyzed",
+            Self::NotAssessed => "not_assessed",
+        }
+    }
+}
+
 /// A reason attached to a node, located at the node's call site.
 pub type NodeDependencyReason = DependencyReason<NodeCallSite>;
 
@@ -249,25 +320,50 @@ pub type ExtractedDependencyReason = DependencyReason<ExtractionSite>;
 impl<L> DependencyReason<L> {
     /// The `type` tag, which is also the diagnostic code.
     pub fn code(&self) -> &'static str {
+        self.reason_code().as_str()
+    }
+
+    /// The type of the reason.
+    pub fn reason_code(&self) -> DependencyReasonCode {
         match self {
-            Self::UnresolvedRef { .. } => "unresolved_ref",
-            Self::UnresolvedSource { .. } => "unresolved_source",
-            Self::UnresolvedVar { .. } => "unresolved_var",
-            Self::UnsupportedDispatch { .. } => "unsupported_dispatch",
-            Self::UnsupportedMacroNamespace { .. } => "unsupported_macro_namespace",
-            Self::UnresolvedCall { .. } => "unresolved_call",
-            Self::UnsupportedJinjaConstruct { .. } => "unsupported_jinja_construct",
-            Self::InvalidDependencyCall { .. } => "invalid_dependency_call",
-            Self::AnalysisLimitReached { .. } => "analysis_limit_reached",
-            Self::RuntimeValueUnknown { .. } => "runtime_value_unknown",
-            Self::JinjaRenderFailed { .. } => "jinja_render_failed",
-            Self::MacroReachabilityUnknown { .. } => "macro_reachability_unknown",
-            Self::UnsupportedDependencyExpression { .. } => "unsupported_dependency_expression",
-            Self::DependencyTargetMissing { .. } => "dependency_target_missing",
-            Self::UnsupportedRefPackage { .. } => "unsupported_ref_package",
-            Self::AmbiguousRef { .. } => "ambiguous_ref",
-            Self::GenericTestBodyNotAnalyzed { .. } => "generic_test_body_not_analyzed",
-            Self::NotAssessed { .. } => "not_assessed",
+            Self::UnresolvedRef { .. } => DependencyReasonCode::UnresolvedRef,
+            Self::UnresolvedSource { .. } => DependencyReasonCode::UnresolvedSource,
+            Self::UnresolvedVar { .. } => DependencyReasonCode::UnresolvedVar,
+            Self::UnsupportedDispatch { .. } => DependencyReasonCode::UnsupportedDispatch,
+            Self::UnsupportedMacroNamespace { .. } => {
+                DependencyReasonCode::UnsupportedMacroNamespace
+            }
+            Self::UnresolvedCall { .. } => DependencyReasonCode::UnresolvedCall,
+            Self::UnsupportedJinjaConstruct { .. } => {
+                DependencyReasonCode::UnsupportedJinjaConstruct
+            }
+            Self::InvalidDependencyCall { .. } => DependencyReasonCode::InvalidDependencyCall,
+            Self::AnalysisLimitReached { .. } => DependencyReasonCode::AnalysisLimitReached,
+            Self::RuntimeValueUnknown { .. } => DependencyReasonCode::RuntimeValueUnknown,
+            Self::JinjaRenderFailed { .. } => DependencyReasonCode::JinjaRenderFailed,
+            Self::MacroReachabilityUnknown { .. } => DependencyReasonCode::MacroReachabilityUnknown,
+            Self::UnsupportedDependencyExpression { .. } => {
+                DependencyReasonCode::UnsupportedDependencyExpression
+            }
+            Self::DependencyTargetMissing { .. } => DependencyReasonCode::DependencyTargetMissing,
+            Self::UnsupportedRefPackage { .. } => DependencyReasonCode::UnsupportedRefPackage,
+            Self::AmbiguousRef { .. } => DependencyReasonCode::AmbiguousRef,
+            Self::GenericTestBodyNotAnalyzed { .. } => {
+                DependencyReasonCode::GenericTestBodyNotAnalyzed
+            }
+            Self::NotAssessed { .. } => DependencyReasonCode::NotAssessed,
+        }
+    }
+
+    /// The namespace the reason names, for the reasons that have a
+    /// `namespace` field: the namespace of a namespaced macro call, or the
+    /// namespace an `adapter.dispatch()` call searches. It is the name as
+    /// written; it does not identify the package that owns the macro.
+    pub fn namespace(&self) -> Option<&str> {
+        match self {
+            Self::UnsupportedMacroNamespace { namespace, .. } => Some(namespace),
+            Self::UnsupportedDispatch { namespace, .. } => namespace.as_deref(),
+            _ => None,
         }
     }
 

@@ -10,4 +10,6 @@ pub(crate) use graph::{run_graph_command, run_impact_command, run_list_command};
 pub(crate) use manifest::{
     check_loaded_manifest_freshness, run_check_manifest_command, run_summary_command,
 };
-pub(crate) use shared::{read_seed_schemas, resolve_dialect, resolve_manifest_path_or_default};
+pub(crate) use shared::{
+    read_seed_schemas, resolve_dialect, resolve_manifest_path_or_default, set_verbose,
+};

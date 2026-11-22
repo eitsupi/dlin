@@ -25,6 +25,25 @@ Finds all downstream dependents and assigns severity levels:
 Text output: human-readable report with severity and distance (degree).
 JSON output: structured array of impact reports for CI/programmatic use.
 
+Completeness:
+  impacted_nodes are the nodes reached through the edges dlin found. They
+  may include nodes reached through an edge that is only a guess, and they
+  can miss nodes whose dependencies dlin could not analyse.
+  exploration says whether the reached set can miss a node:
+    complete    no gap: no node outside the reached set may depend on it
+    incomplete  gaps lists why it may: a node outside the reached set
+                whose dependencies are partial (unresolved_dependencies,
+                with the node's reasons), an input skipped while reading
+                the project (input_skipped), or a scope not assessed at
+                all (not_assessed, e.g. manifest_dependencies: manifest
+                mode takes the manifest's dependencies as they are)
+  An input that is an unresolved reference has an empty exploration.
+  source_node and each impacted node carry their own dependency_analysis.
+  The report proves that nothing is affected only when impacted_nodes is
+  empty and every exploration is complete with no gaps. Do not read an
+  empty impacted_nodes alone as \"no impact\". The exit code does not
+  depend on completeness.
+
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
   File paths (detected by extension or path separator) are resolved to model names \

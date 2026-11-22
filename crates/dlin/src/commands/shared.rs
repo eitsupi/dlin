@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
 use crate::cli::{DialectArg, SourceType};
 use dlin_core::graph;
 use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, SeedSchemas};
+use dlin_core::graph::dependency::ConfigDiagnostic;
 use dlin_core::parser;
+use dlin_core::render::dependency_diagnostics::DependencyDiagnostics;
 
 #[cfg(not(tarpaulin_include))]
 pub(crate) struct ManifestDagContext {
@@ -15,15 +18,33 @@ pub(crate) struct ManifestDagContext {
     pub(crate) referenced_files: Vec<parser::manifest::ManifestFile>,
 }
 
+/// The lineage DAG and what was learnt while building it.
 #[cfg(not(tarpaulin_include))]
-type DagBuildResult = Result<(
-    graph::types::LineageGraph,
-    Option<parser::project::DbtProject>,
-    Vec<parser::manifest::ManifestDiagnostic>,
-    Option<ManifestDagContext>,
-)>;
+pub(crate) struct DagBuild {
+    /// The graph with the gaps of its dependency analysis.
+    pub(crate) build: graph::builder::GraphBuild,
+    /// The project configuration, loaded in SQL mode.
+    pub(crate) project: Option<parser::project::DbtProject>,
+    pub(crate) manifest_diagnostics: Vec<parser::manifest::ManifestDiagnostic>,
+    pub(crate) manifest_context: Option<ManifestDagContext>,
+    /// Configuration that may not mean what the user intended (SQL mode).
+    pub(crate) config_diagnostics: Vec<ConfigDiagnostic>,
+}
 
-/// Build the lineage DAG from either a manifest file or by parsing SQL files.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Show the details of the dependency analysis on stderr (`--verbose`).
+pub(crate) fn set_verbose(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
+}
+
+fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Build the lineage DAG from either a manifest file or by parsing SQL
+/// files, and report the manifest load warnings and the dependency
+/// analysis on stderr once.
 #[cfg(not(tarpaulin_include))]
 pub(crate) fn build_dag(
     project_dir: &Path,
@@ -32,7 +53,55 @@ pub(crate) fn build_dag(
     cache_dir: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
-) -> DagBuildResult {
+) -> Result<DagBuild> {
+    let build = build_dag_quietly(
+        project_dir,
+        source,
+        manifest_path,
+        cache_dir,
+        no_cache,
+        refresh_cache,
+    )?;
+    warn_manifest_diagnostics(&build.manifest_diagnostics);
+    emit_dependency_diagnostics(&build, project_dir);
+    Ok(build)
+}
+
+/// Print the dependency analysis diagnostics of a freshly built graph,
+/// before any filtering.
+fn emit_dependency_diagnostics(build: &DagBuild, project_dir: &Path) {
+    if dlin_core::is_quiet() {
+        return;
+    }
+    let diagnostics = DependencyDiagnostics::collect(
+        build.build.graph(),
+        build.build.project_gaps(),
+        &build.config_diagnostics,
+        Some(project_dir.display().to_string()),
+    );
+    let list = if is_verbose() {
+        diagnostics.verbose_diagnostics()
+    } else {
+        diagnostics.default_diagnostics()
+    };
+    for diagnostic in list {
+        if dlin_core::is_error_format_json() {
+            eprintln!("{}", diagnostic.to_json());
+        } else {
+            eprintln!("{}", diagnostic.to_text());
+        }
+    }
+}
+
+#[cfg(not(tarpaulin_include))]
+fn build_dag_quietly(
+    project_dir: &Path,
+    source: &SourceType,
+    manifest_path: Option<&PathBuf>,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
+) -> Result<DagBuild> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
@@ -55,7 +124,13 @@ pub(crate) fn build_dag(
                     project_name,
                     referenced_files,
                 };
-                return Ok((graph, None, diagnostics, Some(context)));
+                return Ok(DagBuild {
+                    build: graph::builder::GraphBuild::from_manifest(graph),
+                    project: None,
+                    manifest_diagnostics: diagnostics,
+                    manifest_context: Some(context),
+                    config_diagnostics: Vec::new(),
+                });
             }
 
             let load_report =
@@ -81,25 +156,38 @@ pub(crate) fn build_dag(
                 cache.save();
             }
 
-            Ok((
-                graph,
-                None,
-                diagnostics,
-                Some(ManifestDagContext {
+            Ok(DagBuild {
+                build: graph::builder::GraphBuild::from_manifest(graph),
+                project: None,
+                manifest_diagnostics: diagnostics,
+                manifest_context: Some(ManifestDagContext {
                     project_name,
                     referenced_files,
                     manifest: Some(manifest),
                     manifest_bytes: None,
                 }),
-            ))
+                config_diagnostics: Vec::new(),
+            })
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            let graph =
-                graph::builder::build_graph(project_dir, &project.name, &files, &project.vars)?;
-            Ok((graph, Some(project), Vec::new(), None))
+            let config_diagnostics =
+                parser::discovery::config_diagnostics(&paths, &files, project_dir, &project.name);
+            let build = graph::builder::build_graph_report(
+                project_dir,
+                &project.name,
+                &files,
+                &project.vars,
+            )?;
+            Ok(DagBuild {
+                build,
+                project: Some(project),
+                manifest_diagnostics: Vec::new(),
+                manifest_context: None,
+                config_diagnostics,
+            })
         }
     }
 }
