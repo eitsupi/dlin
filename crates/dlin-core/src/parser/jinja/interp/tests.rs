@@ -1044,3 +1044,22 @@ fn copies_ranges_and_negative_inserts() {
     assert!(ref_names(&e).is_empty(), "{:?}", ref_names(&e));
     assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
 }
+
+/// A lazy result that holds a container of the template still shares it;
+/// two ranges concatenate into an iterable, not a list; `dict()` keeps the
+/// order of its entries.
+#[test]
+fn lazy_results_concatenations_and_dict_order() {
+    let e = extract(
+        r#"{% set x = {'n': 'old'} %}{% for y in [x] | chain(range(0)) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["new"]);
+    let e = extract(
+        r#"{% set r = range(1) + range(1) %}{% do r.append(9) %}{{ ref('m' ~ (r | last)) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["m0"]);
+    let e =
+        extract(r#"{{ ref(dict({'z': 1, 'a': 2}) | first) }}{{ ref(dict(z=1, a=2) | first) }}"#);
+    assert_eq!(ref_names(&e), vec!["z"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}

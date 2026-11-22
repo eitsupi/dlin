@@ -91,6 +91,16 @@ impl<'a> Interp<'a> {
     /// Take a value computed by minijinja into the state. Its inputs must
     /// have been frozen with [`Interp::freeze_shared`].
     pub(super) fn adopt_result(&mut self, st: &mut State, value: Value, span: Span) -> AValue {
+        if value.kind() == ValueKind::Iterable {
+            // A lazy result stays an iterable, unless it holds a container
+            // of the heap: a known value never holds one, which would leave
+            // a copy that changes to the container do not reach.
+            let items = super::expressions::computed_list(value.clone());
+            if !holds_shared(&items, 0) {
+                return AValue::Known(value);
+            }
+            return self.adopt_result(st, items, span);
+        }
         if !is_container(&value) {
             return AValue::Known(value);
         }
@@ -167,6 +177,33 @@ impl<'a> Interp<'a> {
             at: self.site(span),
         })
     }
+}
+
+/// Whether `value` holds a container frozen with [`Interp::freeze_shared`].
+fn holds_shared(value: &Value, depth: usize) -> bool {
+    if shared_id(value).is_some() {
+        return true;
+    }
+    if depth > MAX_DEPTH
+        || !matches!(
+            value.kind(),
+            ValueKind::Seq | ValueKind::Map | ValueKind::Iterable
+        )
+    {
+        return false;
+    }
+    let Ok(items) = value.try_iter() else {
+        return false;
+    };
+    let is_map = value.kind() == ValueKind::Map;
+    items.take(MAX_ITEMS + 1).any(|item| {
+        let item = if is_map {
+            value.get_item(&item).unwrap_or(Value::UNDEFINED)
+        } else {
+            item
+        };
+        holds_shared(&item, depth + 1)
+    })
 }
 
 /// Whether a template can change `value` in place: a list or a dict. A

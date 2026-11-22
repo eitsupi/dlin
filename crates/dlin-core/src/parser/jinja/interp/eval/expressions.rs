@@ -445,7 +445,16 @@ impl<'a> Interp<'a> {
         match self.freeze_all_shared(st, &inputs, span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
                 Ok(value) => {
-                    let value = computed_list(value);
+                    // Fusion concatenates two immutable sequences, such as
+                    // ranges, into an immutable one.
+                    let mutable_input = inputs.iter().any(|input| {
+                        matches!(input, AValue::Heap(id) if matches!(st.heap.get(id), Some(HeapObj::List(_))))
+                    });
+                    let value = if mutable_input {
+                        computed_list(value)
+                    } else {
+                        value
+                    };
                     self.adopt_result(st, value, span)
                 }
                 Err(_) => {
@@ -828,7 +837,7 @@ impl<'a> Interp<'a> {
 
 /// A slice or a concatenation of sequences is a new list in Fusion, which
 /// minijinja computes lazily.
-fn computed_list(value: Value) -> Value {
+pub(super) fn computed_list(value: Value) -> Value {
     if value.kind() != ValueKind::Iterable {
         return value;
     }

@@ -336,6 +336,13 @@ impl<'a> Interp<'a> {
                 }
                 Ok(self.alloc(st, HeapObj::Namespace(attrs)))
             }
+            Builtin::Minijinja("dict")
+                if let Some(entries) = self.dict_entries(st, &args, &kwargs) =>
+            {
+                // A new dict with the entries in order, as in Fusion: a
+                // mapping argument first, then the keywords.
+                Ok(self.alloc(st, HeapObj::Map(entries)))
+            }
             Builtin::Minijinja(name) => {
                 let mut values = match self.freeze_all_shared(st, &args, span) {
                     Ok(values) => values,
@@ -422,5 +429,37 @@ impl<'a> Interp<'a> {
             line: span.line,
             outcome: DecisionOutcome::Accepted { conditional },
         });
+    }
+}
+
+impl<'a> Interp<'a> {
+    /// The entries of `dict(mapping, **kwargs)` when the mapping, if any, is
+    /// a dict of the heap. `None` for any other form, which minijinja
+    /// evaluates.
+    fn dict_entries(
+        &self,
+        st: &State,
+        args: &[AValue],
+        kwargs: &[(Arc<str>, AValue)],
+    ) -> Option<Vec<(Value, AValue)>> {
+        let mut entries = match args {
+            [] => Vec::new(),
+            [AValue::Heap(id)] => match st.heap.get(id)? {
+                HeapObj::Map(entries) => entries.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        for (key, value) in kwargs {
+            if key.as_ref() == "**" {
+                return None;
+            }
+            let key = Value::from(key.as_ref());
+            match entries.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => entry.1 = value.clone(),
+                None => entries.push((key, value.clone())),
+            }
+        }
+        Some(entries)
     }
 }
