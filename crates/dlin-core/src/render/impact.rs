@@ -63,9 +63,9 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
         writeln!(w)?;
     }
 
-    if !report.impacted_nodes.is_empty() {
+    if !report.impacted_nodes().is_empty() {
         writeln!(w, "{}", "Impacted Nodes:".bold())?;
-        for node in &report.impacted_nodes {
+        for node in report.impacted_nodes() {
             let sev = node.severity.label().color(severity_color(node.severity));
             if let Some(ref path) = node.file_path {
                 writeln!(
@@ -99,7 +99,7 @@ const LISTED_GAP_NODES: usize = 10;
 
 /// Whether the impacted nodes can be missing a node, and why.
 fn write_exploration<W: Write>(report: &ImpactReport, w: &mut W) -> io::Result<()> {
-    if report.exploration.is_empty() {
+    if report.exploration().is_empty() {
         writeln!(
             w,
             "{} {} (the input is an unresolved reference)",
@@ -109,7 +109,7 @@ fn write_exploration<W: Write>(report: &ImpactReport, w: &mut W) -> io::Result<(
         writeln!(w)?;
         return Ok(());
     }
-    for exploration in &report.exploration {
+    for exploration in report.exploration() {
         if exploration.status() == ExplorationStatus::Complete {
             writeln!(w, "{} {}", "Exploration:".bold(), "complete".green())?;
             continue;
@@ -197,12 +197,12 @@ mod tests {
     use super::*;
     use crate::graph::dependency::DependencyAnalysis;
     use crate::graph::impact::{
-        Exploration, ExplorationKind, ExposurePath, ImpactReport, ImpactSeverity, ImpactSource,
-        ImpactedNode,
+        Exploration, ExplorationKind, ExposurePath, ImpactReport, ImpactReportParts,
+        ImpactSeverity, ImpactSource, ImpactedNode,
     };
 
     fn make_report() -> ImpactReport {
-        ImpactReport {
+        ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: ImpactSeverity::Critical,
             affected_models: 1,
@@ -255,7 +255,7 @@ mod tests {
                     dependency_analysis: DependencyAnalysis::new([]),
                 },
             ],
-        }
+        })
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_render_impact_text_empty() {
-        let report = ImpactReport {
+        let report = ImpactReport::from(ImpactReportParts {
             source_model: "isolated".to_string(),
             overall_severity: ImpactSeverity::Low,
             affected_models: 0,
@@ -315,7 +315,7 @@ mod tests {
             },
             exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
-        };
+        });
         let mut buf = Vec::new();
         render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_render_impact_text_medium_severity() {
-        let report = ImpactReport {
+        let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_payments".to_string(),
             overall_severity: ImpactSeverity::Medium,
             affected_models: 2,
@@ -362,7 +362,7 @@ mod tests {
                 sql_content: None,
                 dependency_analysis: DependencyAnalysis::new([]),
             }],
-        };
+        });
         let mut buf = Vec::new();
         render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn test_render_impact_json_multiple() {
         let report1 = make_report();
-        let report2 = ImpactReport {
+        let report2 = ImpactReport::from(ImpactReportParts {
             source_model: "orders".to_string(),
             overall_severity: ImpactSeverity::Low,
             affected_models: 0,
@@ -409,7 +409,7 @@ mod tests {
             },
             exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
-        };
+        });
         let mut buf = Vec::new();
         render_impact_json_to_writer(&[report1, report2], &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -443,7 +443,7 @@ mod tests {
     }
 
     fn make_report_with_sql() -> ImpactReport {
-        ImpactReport {
+        ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: ImpactSeverity::Critical,
             affected_models: 1,
@@ -496,7 +496,7 @@ mod tests {
                     dependency_analysis: DependencyAnalysis::new([]),
                 },
             ],
-        }
+        })
     }
 
     #[test]
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_render_impact_text_truncated_paths() {
-        let report = ImpactReport {
+        let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: ImpactSeverity::Critical,
             affected_models: 1,
@@ -542,7 +542,7 @@ mod tests {
             },
             exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
-        };
+        });
         let mut buf = Vec::new();
         render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
@@ -576,7 +576,7 @@ mod tests {
             }],
         };
         let mut report = make_report();
-        report.exploration = vec![Exploration::new(
+        report.set_exploration(vec![Exploration::new(
             ExplorationKind::ModelDependency,
             (0..12).map(node_gap).chain([
                 ExplorationGap::InputSkipped {
@@ -592,7 +592,7 @@ mod tests {
                     scope: ProjectScope::SemanticDependencies,
                 },
             ]),
-        )];
+        )]);
         let output = text(&report);
         assert!(output.contains(
             "Exploration: incomplete (12 node(s) with unresolved dependencies; \
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn text_says_an_unresolved_input_was_not_explored() {
         let mut report = make_report();
-        report.exploration = vec![];
+        report.set_exploration(vec![]);
         assert!(
             text(&report)
                 .contains("Exploration: not explored (the input is an unresolved reference)")

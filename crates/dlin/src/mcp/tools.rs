@@ -475,10 +475,12 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
     let idx = graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
         .with_context(|| format!("model not found: {model}"))?;
-    let mut report = graph::impact::compute_impact(&state.dag, idx, &manifest_project_gaps())
+    let report = graph::impact::compute_impact(&state.dag, idx, &manifest_project_gaps())
         .with_context(|| format!("model not found: {model}"))?;
     let detail = column_result::Detail::parse(args)?;
-    report.impacted_nodes.sort_by_key(|node| {
+    // Page through a reordered view; the report itself stays as computed.
+    let mut ordered: Vec<&graph::impact::ImpactedNode> = report.impacted_nodes().iter().collect();
+    ordered.sort_by_key(|node| {
         (
             node.distance,
             std::cmp::Reverse(node.severity),
@@ -488,16 +490,16 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let page = Page::new(
         args,
         20,
-        report.impacted_nodes.len(),
+        ordered.len(),
         state.manifest_hash,
         ("get_impact", &normalized, detail),
     )?;
-    let nodes = &report.impacted_nodes[page.range()];
+    let nodes = &ordered[page.range()];
     let mut value = json!({
         "source_model":report.source_model, "overall_severity":report.overall_severity,
         "affected_models":report.affected_models, "affected_tests":report.affected_tests,
         "affected_exposures":report.affected_exposures,
-        "exploration":report.exploration, "proves_no_impact":report.proves_no_impact(),
+        "exploration":report.exploration(), "proves_no_impact":report.proves_no_impact(),
         "page":page.metadata(),
     });
     if detail.full() {

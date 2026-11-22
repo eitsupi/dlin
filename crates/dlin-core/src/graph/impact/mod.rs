@@ -84,8 +84,12 @@ pub struct ImpactReport {
     /// The nodes reached from the source through the edges of the graph.
     /// The set may contain nodes reached through an edge that is only a
     /// guess; `exploration` states whether it can miss a node.
-    pub impacted_nodes: Vec<ImpactedNode>,
-    pub source_node: ImpactSource,
+    ///
+    /// This field, `source_node` and `exploration` are what the judgements
+    /// rely on, so they are read-only: a copy reordered or cut for display
+    /// cannot turn into a proof.
+    impacted_nodes: Vec<ImpactedNode>,
+    source_node: ImpactSource,
     /// Whether the search may have missed a node, per dependency kind.
     /// Empty when the source is not a node the search can start from, such
     /// as a phantom node standing for an unresolved reference. Such a report
@@ -93,10 +97,63 @@ pub struct ImpactReport {
     /// that reference it), but claims nothing about them: neither
     /// [`ImpactReport::proves_no_impact`] nor
     /// [`ImpactReport::is_acceptable_under`] holds for it.
+    exploration: Vec<Exploration>,
+}
+
+/// Every field of an [`ImpactReport`], for building one in tests.
+#[cfg(test)]
+pub(crate) struct ImpactReportParts {
+    pub source_model: String,
+    pub overall_severity: ImpactSeverity,
+    pub affected_models: usize,
+    pub affected_tests: usize,
+    pub affected_exposures: usize,
+    pub exposure_paths: Vec<ExposurePath>,
+    pub exposure_paths_truncated: bool,
+    pub impacted_nodes: Vec<ImpactedNode>,
+    pub source_node: ImpactSource,
     pub exploration: Vec<Exploration>,
 }
 
+#[cfg(test)]
+impl From<ImpactReportParts> for ImpactReport {
+    fn from(parts: ImpactReportParts) -> Self {
+        Self {
+            source_model: parts.source_model,
+            overall_severity: parts.overall_severity,
+            affected_models: parts.affected_models,
+            affected_tests: parts.affected_tests,
+            affected_exposures: parts.affected_exposures,
+            exposure_paths: parts.exposure_paths,
+            exposure_paths_truncated: parts.exposure_paths_truncated,
+            impacted_nodes: parts.impacted_nodes,
+            source_node: parts.source_node,
+            exploration: parts.exploration,
+        }
+    }
+}
+
 impl ImpactReport {
+    /// The nodes reached from the source, most severe first.
+    pub fn impacted_nodes(&self) -> &[ImpactedNode] {
+        &self.impacted_nodes
+    }
+
+    /// The node the search started from.
+    pub fn source_node(&self) -> &ImpactSource {
+        &self.source_node
+    }
+
+    /// Whether the search may have missed a node, per dependency kind.
+    pub fn exploration(&self) -> &[Exploration] {
+        &self.exploration
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_exploration(&mut self, exploration: Vec<Exploration>) {
+        self.exploration = exploration;
+    }
+
     /// Whether the report proves that the source affects no node: nothing
     /// was reached and the model dependency exploration is complete.
     ///
