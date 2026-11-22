@@ -88,7 +88,11 @@ pub struct ImpactReport {
     pub source_node: ImpactSource,
     /// Whether the search may have missed a node, per dependency kind.
     /// Empty when the source is not a node the search can start from, such
-    /// as a phantom node standing for an unresolved reference.
+    /// as a phantom node standing for an unresolved reference. Such a report
+    /// still lists the nodes reached through the phantom's edges (the nodes
+    /// that reference it), but claims nothing about them: neither
+    /// [`ImpactReport::proves_no_impact`] nor
+    /// [`ImpactReport::is_acceptable_under`] holds for it.
     pub exploration: Vec<Exploration>,
 }
 
@@ -272,7 +276,8 @@ pub fn compute_impact(
         .unwrap_or(ImpactSeverity::Low);
 
     // A phantom node stands for a reference that resolved to nothing; the
-    // search from it is not a search from a node of the project.
+    // search from it is not a search from a node of the project. Its reached
+    // nodes are kept as before, without an exploration.
     let exploration = if source_node.node_type == NodeType::Phantom {
         Vec::new()
     } else {
