@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0-beta.1] - 2026-11-22
+
+### Breaking Changes
+
+- SQL mode no longer prints `unresolved ref '...'` or `unresolved source '...'` warnings when a reference names a missing target. Every referencing node carries an `unresolved_ref` or `unresolved_source` reason instead, and the stderr summary counts them. Use `--verbose` to see each one with its node and call site (#281)
+- Commands that build the lineage graph print a `dependency_analysis_summary` on stderr when the dependency analysis is incomplete, and a configuration warning when a path set in `dbt_project.yml` does not exist. In manifest mode the summary is printed at the `info` level, since manifest dependencies are not assessed. `--quiet` suppresses both (#281)
+- Rust API: `compute_impact` takes a `GraphBuild`, which holds the graph together with its project gaps, and returns `Option<ImpactReport>`. Build one with `build_graph_report` or `GraphBuild::from_manifest`. `ImpactReport` exposes `impacted_nodes`, `source_node` and `exploration` through accessors (#281)
+
+### Features
+
+- Impact reports say whether they can miss downstream nodes. JSON reports include `source_node`, the `dependency_analysis` of each impacted node, and an `exploration` that is `complete` or `incomplete` with typed gaps: nodes outside the result whose dependencies are not fully analysed, skipped inputs, and unassessed scopes such as manifest dependencies. Text output shows an `Exploration:` line. The MCP `get_impact` result includes the same information. The README describes how to check “no impact” in CI (#281)
+- `list` JSON includes each node's `dependency_analysis` by default, and `graph` JSON includes it with `--json-full` or `--json-fields dependency_analysis` (#281)
+- New global `--verbose` flag prints one diagnostic per dependency analysis reason and skipped input. With `--error-format json`, these diagnostics carry a `code` and typed fields (#281)
+
+### Bug Fixes
+
+- Report YAML generic tests as partially analysed: the body of the test macro is not analysed, so a `ref()` written only inside it has no edge. An impact report for a model read only inside such a test no longer claims “no impact” (#278, #281)
+- Apply in-place changes, such as `update()`, `pop()` and `append()`, to dicts and lists produced by `dict()`, `var()`, filters and methods, so the changed value selects the dependency. Changes that are not modelled make the value unknown instead of keeping its old value (#280)
+- Column lineage no longer reports window functions that use a named or inherited window (`OVER w`) without the window's `PARTITION BY` and `ORDER BY` columns. Wildcard function arguments such as `OBJECT_CONSTRUCT(*)` make lineage partial instead of complete with no inputs (#277)
+
 ## [0.3.0-alpha.2] - 2026-11-19
 
 ### Breaking Changes
