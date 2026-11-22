@@ -198,7 +198,11 @@ impl DependencyDiagnostics {
                 }
             }
         }
-        let not_assessed_nodes = reasoned_nodes.len() - partial_nodes.len();
+        // `partial_nodes` counts every node whose status is `partial`, as
+        // in node JSON; `not_assessed_nodes` is the subset whose only
+        // reasons are `not_assessed`.
+        let analysed_partial = partial_nodes.len();
+        let not_assessed_nodes = reasoned_nodes.len() - analysed_partial;
         let mut gap_counts: BTreeMap<&str, usize> = BTreeMap::new();
         for gap in &self.project_gaps {
             *gap_counts.entry(gap.code()).or_default() += 1;
@@ -209,11 +213,8 @@ impl DependencyDiagnostics {
         let skipped = gap_counts.get("input_skipped").copied().unwrap_or(0);
 
         let mut parts = Vec::new();
-        if !partial_nodes.is_empty() {
-            parts.push(format!(
-                "{} node(s) partially analysed",
-                partial_nodes.len()
-            ));
+        if analysed_partial > 0 {
+            parts.push(format!("{analysed_partial} node(s) partially analysed"));
         }
         if not_assessed_nodes > 0 {
             parts.push(format!("{not_assessed_nodes} node(s) not assessed"));
@@ -262,13 +263,13 @@ impl DependencyDiagnostics {
             ));
         }
 
-        let level = if partial_nodes.is_empty() && skipped == 0 {
+        let level = if analysed_partial == 0 && skipped == 0 {
             Level::Info
         } else {
             Level::Warning
         };
         let mut fields = Map::new();
-        fields.insert("partial_nodes".into(), partial_nodes.len().into());
+        fields.insert("partial_nodes".into(), reasoned_nodes.len().into());
         fields.insert("not_assessed_nodes".into(), not_assessed_nodes.into());
         fields.insert("node_reason_count".into(), self.reasons.len().into());
         fields.insert("project_gap_count".into(), self.project_gaps.len().into());
@@ -311,8 +312,9 @@ impl DependencyDiagnostics {
                 if *all_model_paths_missing {
                     "no model-paths directory exists, so no model is read; dbt treats a \
                      missing directory as empty"
+                        .to_string()
                 } else {
-                    "dbt treats a missing directory as empty"
+                    "dbt treats a missing directory as empty".to_string()
                 },
                 "check the paths in dbt_project.yml and the --project-dir",
             ),
@@ -321,7 +323,7 @@ impl DependencyDiagnostics {
                     "none of the default model-paths exist: {}",
                     paths.join(", ")
                 ),
-                "no model is read; dbt treats a missing directory as empty",
+                "no model is read; dbt treats a missing directory as empty".to_string(),
                 "check the --project-dir, or set model-paths in dbt_project.yml",
             ),
             ConfigDiagnostic::ProjectInputsEmpty {
@@ -335,9 +337,12 @@ impl DependencyDiagnostics {
                     None => format!("no input file was found for project '{project_name}'"),
                 },
                 if searched.is_empty() {
-                    "no path was searched"
+                    "no path was searched".to_string()
                 } else {
-                    "the searched paths hold no SQL, YAML, CSV or macro file"
+                    format!(
+                        "the searched paths hold no SQL, YAML, CSV or macro file: {}",
+                        setting_paths(searched)
+                    )
                 },
                 "check the --project-dir and the paths in dbt_project.yml",
             ),
@@ -347,7 +352,7 @@ impl DependencyDiagnostics {
                     setting_name(*setting),
                     path
                 ),
-                "this is normal for optional directories",
+                "this is normal for optional directories".to_string(),
                 "",
             ),
         };
@@ -356,11 +361,13 @@ impl DependencyDiagnostics {
             "config".into(),
             serde_json::to_value(diagnostic).expect("a config diagnostic serialises"),
         );
+        // The configured paths are relative to the project directory.
+        fields.insert("project_dir".into(), self.project_dir.clone().into());
         Diagnostic {
             level,
             code: diagnostic.code(),
             what,
-            why: Some(why.to_string()),
+            why: Some(why),
             hint: (!hint.is_empty()).then(|| hint.to_string()),
             fields,
         }
@@ -472,7 +479,8 @@ fn describe(reason: &NodeDependencyReason) -> (String, &'static str, &'static st
                 "{namespace}.{macro_name}() is called through a namespace, which is not analysed"
             ),
             MAY_OMIT_OR_ADD,
-            "check whether the macro reads ref() or source()",
+            "check that the macro and the macros it calls read no ref() or source(), \
+             and that no argument, branch or dispatch inside it selects a dependency",
         ),
         R::UnresolvedCall { callee, .. } => (
             format!("the call {} could not be identified", quoted(callee)),

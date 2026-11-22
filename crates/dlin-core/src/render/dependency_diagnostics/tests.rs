@@ -97,7 +97,7 @@ fn summary_counts_reasons_by_type_and_namespace() {
             "hint": "run with --verbose to list each reason. These counts cover the whole \
                      project; the `exploration` of an impact report says whether its own \
                      result can miss nodes",
-            "partial_nodes": 2,
+            "partial_nodes": 3,
             "not_assessed_nodes": 1,
             "node_reason_count": 5,
             "project_gap_count": 1,
@@ -159,7 +159,9 @@ fn manifest_summary_reports_unassessed_nodes() {
         Some("not assessed: manifest_dependencies")
     );
     let json = summary.to_json();
-    assert_eq!(json["partial_nodes"], 0);
+    // Both nodes are partial in node JSON, and only not assessed.
+    assert_eq!(json["partial_nodes"], 2);
+    assert_eq!(json["not_assessed_nodes"], 2);
     assert_eq!(json["node_reason_count"], 2);
     // One diagnostic per node reason and per gap: the scope of each node is
     // kept apart by its owner.
@@ -258,4 +260,31 @@ fn text_summary_keeps_every_reason_type() {
              2 more namespace(s)), runtime_value_unknown 1"
         )
     );
+}
+
+#[test]
+fn empty_project_names_the_searched_paths_and_the_project_directory() {
+    let config = [ConfigDiagnostic::ProjectInputsEmpty {
+        project_name: "p".to_string(),
+        searched: vec![SettingPath {
+            setting: PathSetting::ModelPaths,
+            path: "models".to_string(),
+        }],
+    }];
+    let diagnostics = DependencyDiagnostics::collect(
+        &LineageGraph::new(),
+        &[],
+        &config,
+        Some("/w/p".to_string()),
+    );
+    let diagnostic = &diagnostics.default_diagnostics()[0];
+    assert_eq!(
+        diagnostic.to_text(),
+        "Warning: [project_inputs_empty] no input file was found for project 'p' in /w/p\n  \
+         Why: the searched paths hold no SQL, YAML, CSV or macro file: model-paths 'models'\n  \
+         Hint: check the --project-dir and the paths in dbt_project.yml"
+    );
+    let json = diagnostic.to_json();
+    assert_eq!(json["project_dir"], "/w/p");
+    assert_eq!(json["config"]["searched"][0]["path"], "models");
 }

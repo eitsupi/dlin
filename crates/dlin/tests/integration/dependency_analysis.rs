@@ -110,6 +110,7 @@ fn default_stderr_has_the_config_warning_and_one_summary() {
     let summary = &lines[1];
     assert_eq!(summary["level"], "warning");
     assert_eq!(summary["partial_nodes"], 6);
+    assert_eq!(summary["not_assessed_nodes"], 0);
     assert_eq!(
         summary["reason_counts"],
         serde_json::json!({
@@ -229,4 +230,94 @@ fn list_json_shows_the_dependency_analysis_of_each_node() {
     assert_eq!(analysis["unresolved"][0]["type"], "runtime_value_unknown");
     assert_eq!(analysis["unresolved"][0]["source"], "env_var");
     assert_eq!(analysis["unresolved"][0]["name"], "DLIN_REVIEW_UPSTREAM");
+}
+
+fn small_project(extra: &[(&str, &str)]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut files = vec![
+        ("dbt_project.yml", "name: shop\n"),
+        ("models/orders.sql", "select 1 as id\n"),
+        (
+            "models/customers.sql",
+            "select * from {{ ref('orders') }}\n",
+        ),
+    ];
+    files.extend_from_slice(extra);
+    for (path, content) in files {
+        let path = tmp.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    tmp
+}
+
+fn exploration(output: &Output) -> serde_json::Value {
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    reports[0]["exploration"][0].clone()
+}
+
+/// A YAML file that cannot be parsed is skipped; the gap reaches both the
+/// impact report and stderr.
+#[test]
+fn skipped_yaml_reaches_the_report_and_stderr() {
+    let tmp = small_project(&[("models/broken.yml", "version: 2\nmodels: [\n")]);
+    let output = run(
+        tmp.path(),
+        &[
+            "--error-format",
+            "json",
+            "impact",
+            "customers",
+            "-o",
+            "json",
+        ],
+    );
+    assert_eq!(
+        exploration(&output)["gaps"],
+        serde_json::json!([{
+            "type": "input_skipped",
+            "location": {"path": "models/broken.yml", "line": null},
+            "kind": "yaml",
+            "stage": "parse",
+            "failure": "parse_error"
+        }])
+    );
+    let lines = json_lines(&output);
+    let summary = lines
+        .iter()
+        .find(|line| line["code"] == "dependency_analysis_summary")
+        .unwrap();
+    assert_eq!(summary["level"], "warning");
+    assert_eq!(
+        summary["project_gap_counts"],
+        serde_json::json!({"input_skipped": 1})
+    );
+}
+
+/// A configured path that does not exist holds no input to miss: it is a
+/// warning, and the report stays complete.
+#[test]
+fn missing_configured_path_keeps_the_report_complete() {
+    let tmp = small_project(&[(
+        "dbt_project.yml",
+        "name: shop\nmodel-paths: [\"models\", \"gone\"]\n",
+    )]);
+    let output = run(
+        tmp.path(),
+        &[
+            "--error-format",
+            "json",
+            "impact",
+            "customers",
+            "-o",
+            "json",
+        ],
+    );
+    let exploration = exploration(&output);
+    assert_eq!(exploration["status"], "complete");
+    assert_eq!(exploration["gaps"], serde_json::json!([]));
+    assert_eq!(
+        codes(&json_lines(&output)),
+        ["configured_input_path_missing"]
+    );
 }
