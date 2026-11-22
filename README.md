@@ -496,7 +496,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 
 A reason does not establish that an edge is wrong or that one is missing. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
 
-A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is a gap for every impact report.
+A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is a gap of every exploration that ran.
 
 ## Filtering
 
