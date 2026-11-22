@@ -16,6 +16,10 @@ pub(crate) struct RawGraph {
     pub edges: Vec<RawEdge>,
     pub target_columns: Vec<Ident>,
     pub output_names: HashMap<NodeId, crate::OutputName>,
+    /// The fields of an output column whose value is a STRUCT built in place,
+    /// in order, each with the node of its value. A star over the column
+    /// expands these.
+    pub struct_fields: HashMap<NodeId, Vec<(Ident, NodeId)>>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
@@ -28,6 +32,7 @@ impl RawGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
             output_names: HashMap::new(),
+            struct_fields: HashMap::new(),
             target_columns: Vec::new(),
             empty_projection: None,
             scopes: ScopeTree::new(dialect),

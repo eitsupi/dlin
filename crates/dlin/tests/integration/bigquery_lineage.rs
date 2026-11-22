@@ -685,3 +685,52 @@ fn seed_csv_settles_a_join_and_header_changes_refresh_cached_lineage() {
         "{medium}"
     );
 }
+
+/// A STRUCT built in a CTE and expanded with `item.*` next to a column of
+/// its own: the column is defined once, so it is not ambiguous, and each
+/// field keeps the column it was built from.
+#[test]
+fn struct_field_star_next_to_a_listed_column() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "constant_struct",
+            r#"with packed as (select struct(1 as col_a) as item), expanded as (select item.*, 2 as flag from packed) select flag from expanded"#,
+            &[],
+        ),
+        (
+            "external_struct",
+            r#"with packed as (
+  select struct(id as col_a, name_col as col_b) as item
+  from `p`.`d`.`external_table_a`
+), expanded as (
+  select item.*, 2 as flag from packed
+)
+select col_a, col_b, flag from expanded"#,
+            &[],
+        ),
+    ]);
+    let (status, reports) = column_upstream_json(&tmp, &["constant_struct", "external_struct"]);
+    assert!(status.success(), "reports: {reports}");
+
+    for (model, column, expected) in [
+        ("constant_struct", "flag", vec![]),
+        ("external_struct", "flag", vec![]),
+        (
+            "external_struct",
+            "col_a",
+            vec!["p.d.external_table_a.id".to_string()],
+        ),
+        (
+            "external_struct",
+            "col_b",
+            vec!["p.d.external_table_a.name_col".to_string()],
+        ),
+    ] {
+        let lineage = column_lineage(&reports, model, column);
+        assert_eq!(lineage["status"], "complete", "{model}.{column}: {lineage}");
+        assert_eq!(known_sources(lineage), expected, "{model}.{column}");
+    }
+    for report in reports.as_array().unwrap() {
+        assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    }
+}

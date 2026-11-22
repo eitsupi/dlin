@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::super::target::{StarTarget, resolve_star_target};
-use super::input::{InputModel, Invalidity};
+use super::choose::Choice;
+use super::input::{InputLookup, InputModel, Invalidity};
 use super::options::apply_options;
 use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
@@ -14,12 +15,12 @@ use super::{
     OutputModel, OutputRef, PositionRange, RangeRef, SetOperationModel, SlotMatch, SlotMatchKind,
     SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
-use crate::OutputName;
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
 use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, ScopeKind, SetCorrespondence};
 use crate::types::{Dialect, Evidence, TableRef};
+use crate::{Ident, OutputName};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CacheKey {
@@ -466,9 +467,22 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 schema.add(&table);
                 self.relation_part(&Rc::new(table), &Rc::from([]))
             }
-            StarTarget::FieldPath { .. } | StarTarget::ColumnField { .. } => {
-                opaque(OpaqueReason::FieldPath(node_id))
+            StarTarget::FieldPath { binding, path } => {
+                match self.binding_struct_fields(&binding, &path) {
+                    Some((fields, evidence)) => {
+                        schema.extend(&evidence);
+                        fields
+                    }
+                    None => opaque(OpaqueReason::FieldPath(node_id)),
+                }
             }
+            StarTarget::ColumnField { path } => match self.column_struct_fields(env, &path) {
+                Some((fields, evidence)) => {
+                    schema.extend(&evidence);
+                    fields
+                }
+                None => opaque(OpaqueReason::FieldPath(node_id)),
+            },
             StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
@@ -481,6 +495,92 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         model.reads = reads;
         model.schema = schema;
         model
+    }
+
+    /// The fields a star over the column `path` of a CTE or derived table
+    /// publishes, when the column is a STRUCT its scope builds in place, with
+    /// the schemas that decide which column it is. Only a direct field of the
+    /// column is expanded.
+    fn binding_struct_fields(
+        &mut self,
+        binding: &Binding,
+        path: &[Ident],
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
+        let [column] = path else {
+            return None;
+        };
+        let (Binding::Cte(child) | Binding::DerivedTable(child)) = binding else {
+            return None;
+        };
+        let model = self.scope(*child);
+        let Choice::Column(_, slot) = model.choose(column) else {
+            return None;
+        };
+        let fields = self.struct_fields(&slot.value)?;
+        Some((fields, model.schema.clone()))
+    }
+
+    /// The fields a star over the unqualified column `path` publishes, when
+    /// the FROM clause settles the name on one column that is a STRUCT built
+    /// in place. A name no clause publishes is never taken to be a column of
+    /// the only relation it could belong to.
+    fn column_struct_fields(
+        &mut self,
+        env: BindingEnv,
+        path: &[Ident],
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
+        let [column] = path else {
+            return None;
+        };
+        let (lookup, mut evidence) = self.lookup_input(env, column);
+        let fields = match lookup {
+            InputLookup::Column { value, .. } => self.struct_fields(&value)?,
+            InputLookup::Scope { scope, .. } => {
+                let model = self.scope(scope);
+                let Choice::Column(_, slot) = model.choose(column) else {
+                    return None;
+                };
+                evidence.extend(&model.schema);
+                self.struct_fields(&slot.value)?
+            }
+            _ => return None,
+        };
+        Some((fields, evidence))
+    }
+
+    /// The fields of a value that is a STRUCT built in place, as columns
+    /// defined by the star that expands them. A forwarded column is followed
+    /// to its definition; any other value has fields that are not known.
+    fn struct_fields(&self, value: &ValueId) -> Option<Vec<OutputElement>> {
+        let mut value = value.clone();
+        let node = loop {
+            match value {
+                ValueId::Expr(node) => break node,
+                ValueId::Forward(id) => value = self.store.arena.slot(id).value.clone(),
+                _ => return None,
+            }
+        };
+        let fields = self.graph.struct_fields.get(&node)?;
+        Some(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, (name, node))| {
+                    OutputElement::Column(ColumnSlot {
+                        id: None,
+                        name: name.clone(),
+                        output_name: OutputName::Explicit(name.clone()),
+                        ordinal: Some(index),
+                        position: PositionRange::exact(index),
+                        ranges: Rc::from([]),
+                        candidate_ranges: Rc::from([]),
+                        value: ValueId::Expr(*node),
+                        origin: SlotOrigin::Defined,
+                        structure: Evidence::default(),
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// The schemas that decide what a binding publishes: a physical

@@ -59,13 +59,16 @@ impl LineageBuilder {
         for item in items {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
-                    let ancestors = self.collect_ancestors(expr);
+                    let (ancestors, fields) = self.projected_value(expr);
                     let kind = determine_edge_kind(expr);
                     let (name, output_name) = infer_output_name(expr);
                     let output = self.graph.add_output(name.clone(), kind.clone());
                     self.graph.set_output_name(output, output_name);
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
+                    }
+                    if let Some(fields) = fields {
+                        self.graph.struct_fields.insert(output, fields);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -76,12 +79,15 @@ impl LineageBuilder {
                     );
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
-                    let ancestors = self.collect_ancestors(expr);
+                    let (ancestors, fields) = self.projected_value(expr);
                     let kind = determine_edge_kind(expr);
                     let name = Ident::from_ast(alias);
                     let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
+                    }
+                    if let Some(fields) = fields {
+                        self.graph.struct_fields.insert(output, fields);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -143,6 +149,34 @@ impl LineageBuilder {
                 }
             }
         }
+    }
+
+    /// The ancestors of a projected expression and, when it builds a STRUCT
+    /// whose fields are all named and distinct, a node for the value of each
+    /// field. The fields read the same reference nodes as the whole value.
+    fn projected_value(
+        &mut self,
+        expr: &Expr,
+    ) -> (
+        Vec<crate::graph::node::NodeId>,
+        Option<Vec<(Ident, crate::graph::node::NodeId)>>,
+    ) {
+        let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
+            return (self.collect_ancestors(expr), None);
+        };
+        let mut ancestors = Vec::new();
+        let mut nodes = Vec::with_capacity(fields.len());
+        for (name, value) in fields {
+            let field_ancestors = self.collect_ancestors(value);
+            let kind = determine_edge_kind(value);
+            let node = self.graph.add_output(name.clone(), kind.clone());
+            for &ancestor in &field_ancestors {
+                self.graph.add_edge(ancestor, node, kind.clone());
+            }
+            ancestors.extend(field_ancestors);
+            nodes.push((name, node));
+        }
+        (ancestors, Some(nodes))
     }
 
     fn object_name_parts(name: &ObjectName) -> Vec<Ident> {
@@ -1013,6 +1047,25 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
         },
         Expr::Function(function) if is_series_generator(function) => ElementShape::Scalar,
         _ => ElementShape::Unknown,
+    }
+}
+
+/// The fields of a STRUCT that `expr` builds in place, with the expression
+/// of each: a STRUCT literal or a `DuckDB` struct literal (`{'a': 1}`).
+fn struct_value_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Ident, &Expr)>> {
+    match expr {
+        Expr::Nested(inner) => struct_value_fields(inner, dialect),
+        Expr::Struct { .. } => struct_literal_fields(expr, dialect),
+        Expr::Dictionary(fields) => {
+            let names = distinct_names(fields.iter().map(|field| Some(&field.key)), dialect)?;
+            Some(
+                names
+                    .into_iter()
+                    .zip(fields.iter().map(|field| &*field.value))
+                    .collect(),
+            )
+        }
+        _ => None,
     }
 }
 

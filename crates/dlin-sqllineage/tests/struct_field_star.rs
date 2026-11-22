@@ -132,3 +132,166 @@ fn name_read_through_field_star_of_unknown_type_is_not_complete() {
         ]
     );
 }
+
+#[test]
+fn field_star_over_struct_built_in_place_expands_its_fields() {
+    let expected = ["col_a#0 C[]", "flag#1 C[]", "Closed"];
+    for dialect in [Dialect::BigQuery, Dialect::Databricks, Dialect::Spark] {
+        assert_eq!(
+            render(
+                r#"
+                WITH packed AS (SELECT STRUCT(1 AS col_a) AS item),
+                expanded AS (SELECT item.*, 2 AS flag FROM packed)
+                SELECT * FROM expanded
+                "#,
+                dialect,
+            ),
+            expected,
+            "{dialect}"
+        );
+    }
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT {'col_a': 1} AS item),
+            expanded AS (SELECT item.*, 2 AS flag FROM packed)
+            SELECT * FROM expanded
+            "#,
+            Dialect::DuckDb,
+        ),
+        expected
+    );
+}
+
+#[test]
+fn each_expanded_field_keeps_its_own_value() {
+    let expected = [
+        "col_a#0 C[src.a]",
+        "col_b#1 C[src.b]",
+        "flag#2 C[]",
+        "Closed",
+    ];
+    for sql in [
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src),
+        e AS (SELECT item.*, 2 AS flag FROM packed)
+        SELECT col_a, col_b, flag FROM e
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src)
+        SELECT p.item.*, 2 AS flag FROM packed AS p
+        "#,
+        r#"
+        SELECT item.*, 2 AS flag
+        FROM (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src) AS p
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT<col_a INT64, col_b INT64>(src.a, src.b) AS item FROM src)
+        SELECT item.*, 2 AS flag FROM packed
+        "#,
+        // A column forwarded by another CTE keeps its fields.
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src),
+        fwd AS (SELECT * FROM packed)
+        SELECT item.*, 2 AS flag FROM fwd
+        "#,
+    ] {
+        assert_eq!(render(sql, Dialect::BigQuery), expected, "{sql}");
+    }
+}
+
+#[test]
+fn expanded_field_is_not_a_column_of_the_struct_owner() {
+    // packed also has a column col_a; the field is the value inside item.
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT STRUCT(src.a AS col_a) AS item, src.z AS col_a FROM src)
+            SELECT item.* FROM packed
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["col_a#0 C[src.a]", "Closed"]
+    );
+}
+
+#[test]
+fn field_of_the_same_name_as_a_listed_column_is_ambiguous() {
+    for sql in [
+        r#"
+        WITH packed AS (SELECT STRUCT(1 AS flag) AS item),
+        e AS (SELECT item.*, 2 AS flag FROM packed)
+        SELECT flag FROM e
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(1 AS FLAG) AS item),
+        e AS (SELECT item.*, 2 AS flag FROM packed)
+        SELECT flag FROM e
+        "#,
+    ] {
+        assert_eq!(
+            render(sql, Dialect::BigQuery),
+            ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"],
+            "{sql}"
+        );
+    }
+    // Excluding the field leaves one flag.
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT STRUCT(1 AS flag, 3 AS b) AS item),
+            e AS (SELECT item.* EXCEPT (flag), 2 AS flag FROM packed)
+            SELECT * FROM e
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["b#0 C[]", "flag#1 C[]", "Closed"]
+    );
+}
+
+#[test]
+fn struct_whose_field_names_are_not_all_known_stays_open() {
+    // BigQuery infers the name of the second field from src.a.
+    for sql in [
+        r#"
+        WITH packed AS (SELECT STRUCT(1, src.a) AS item FROM src),
+        e AS (SELECT item.*, 2 AS flag FROM packed)
+        SELECT flag FROM e
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(1 AS a, 2 AS a) AS item),
+        e AS (SELECT item.*, 2 AS flag FROM packed)
+        SELECT flag FROM e
+        "#,
+    ] {
+        assert_eq!(
+            render(sql, Dialect::BigQuery),
+            ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn struct_value_of_a_set_operation_or_of_several_relations_stays_open() {
+    for sql in [
+        r#"
+        WITH packed AS (
+            SELECT STRUCT(src.a AS col_a) AS item FROM src
+            UNION ALL SELECT STRUCT(src.b AS col_a) FROM src
+        )
+        SELECT item.* FROM packed
+        "#,
+        r#"
+        WITH p1 AS (SELECT STRUCT(1 AS a) AS item), p2 AS (SELECT STRUCT(2 AS b) AS item)
+        SELECT item.* FROM p1, p2
+        "#,
+        // Only a direct field of the column is expanded.
+        r#"
+        WITH packed AS (SELECT STRUCT(STRUCT(src.a AS x) AS inner_s) AS item FROM src)
+        SELECT p.item.inner_s.* FROM packed AS p
+        "#,
+    ] {
+        assert_eq!(render(sql, Dialect::BigQuery), ["Open[? after -]"], "{sql}");
+    }
+}
