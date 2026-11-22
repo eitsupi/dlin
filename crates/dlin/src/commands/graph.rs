@@ -20,7 +20,13 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Validate flag combinations before building DAG
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
+    let DagBuild {
+        dag,
+        project: project_opt,
+        manifest_diagnostics,
+        manifest_context,
+        project_gaps: _,
+    } = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -198,7 +204,13 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
+    let DagBuild {
+        dag,
+        project: project_opt,
+        manifest_diagnostics,
+        manifest_context,
+        project_gaps: _,
+    } = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
@@ -418,7 +430,13 @@ pub(crate) fn run_impact_command(
         .unwrap_or_else(|_| project_dir.to_path_buf());
 
     validate_source_flags(source, manifest_path)?;
-    let (dag, project_opt, manifest_diagnostics, _manifest_context) = build_dag(
+    let DagBuild {
+        dag,
+        project: project_opt,
+        manifest_diagnostics,
+        manifest_context: _,
+        project_gaps,
+    } = build_dag(
         &project_dir,
         source,
         manifest_path,
@@ -450,7 +468,7 @@ pub(crate) fn run_impact_command(
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(&dag, model)?;
-            Some(graph::impact::compute_impact(&dag, source_idx))
+            graph::impact::compute_impact(&dag, source_idx, &project_gaps)
         })
         .collect();
 

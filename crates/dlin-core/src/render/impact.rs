@@ -117,7 +117,10 @@ pub fn render_impact_json_to_writer<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::impact::{ExposurePath, ImpactReport, ImpactSeverity, ImpactedNode};
+    use crate::graph::dependency::DependencyAnalysis;
+    use crate::graph::impact::{
+        ExposurePath, ImpactReport, ImpactSeverity, ImpactSource, ImpactedNode,
+    };
 
     fn make_report() -> ImpactReport {
         ImpactReport {
@@ -136,6 +139,11 @@ mod tests {
                 ],
             }],
             exposure_paths_truncated: false,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -145,6 +153,7 @@ mod tests {
                     severity: ImpactSeverity::Critical,
                     distance: 2,
                     sql_content: None,
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
                 ImpactedNode {
                     unique_id: "model.orders".to_string(),
@@ -154,6 +163,7 @@ mod tests {
                     severity: ImpactSeverity::High,
                     distance: 1,
                     sql_content: None,
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
                 ImpactedNode {
                     unique_id: "test.orders_positive".to_string(),
@@ -163,6 +173,7 @@ mod tests {
                     severity: ImpactSeverity::Low,
                     distance: 2,
                     sql_content: None,
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
             ],
         }
@@ -219,6 +230,11 @@ mod tests {
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -252,6 +268,11 @@ mod tests {
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![ImpactedNode {
                 unique_id: "model.payments".to_string(),
                 label: "payments".to_string(),
@@ -260,6 +281,7 @@ mod tests {
                 severity: ImpactSeverity::Medium,
                 distance: 1,
                 sql_content: None,
+                dependency_analysis: DependencyAnalysis::new([]),
             }],
         };
         let mut buf = Vec::new();
@@ -302,6 +324,11 @@ mod tests {
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -353,6 +380,11 @@ mod tests {
                 ],
             }],
             exposure_paths_truncated: false,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -362,6 +394,7 @@ mod tests {
                     severity: ImpactSeverity::Critical,
                     distance: 2,
                     sql_content: None,
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
                 ImpactedNode {
                     unique_id: "model.orders".to_string(),
@@ -371,6 +404,7 @@ mod tests {
                     severity: ImpactSeverity::High,
                     distance: 1,
                     sql_content: Some("SELECT\n    o.id,\n    o.status,\n    s.total\nFROM {{ ref('stg_orders') }} o\nJOIN {{ ref('stg_payments') }} s ON o.id = s.order_id".to_string()),
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
                 ImpactedNode {
                     unique_id: "test.orders_positive".to_string(),
@@ -380,6 +414,7 @@ mod tests {
                     severity: ImpactSeverity::Low,
                     distance: 2,
                     sql_content: None,
+                    dependency_analysis: DependencyAnalysis::new([]),
                 },
             ],
         }
@@ -422,6 +457,11 @@ mod tests {
                 ],
             }],
             exposure_paths_truncated: true,
+            source_node: ImpactSource {
+                unique_id: "model.stg_orders".to_string(),
+                dependency_analysis: DependencyAnalysis::new([]),
+            },
+            exploration: vec![],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();

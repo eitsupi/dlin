@@ -506,6 +506,30 @@ fn impact_resolves_manifest_unique_id() {
     assert_eq!(value["source_model"], json!("orders"));
 }
 
+/// Manifest dependencies are not assessed, so no detail level or page of an
+/// impact claims that nothing is affected.
+#[test]
+fn impact_reports_unassessed_manifest_exploration() {
+    let state = state();
+    for detail in ["summary", "full"] {
+        let value = get_impact(
+            &json!({ "model": "model.simple_project.orders", "detail": detail }),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(value["proves_no_impact"], json!(false), "{detail}");
+        assert_eq!(
+            value["exploration"],
+            json!([{
+                "kind": "model_dependency",
+                "status": "incomplete",
+                "gaps": [{"type": "not_assessed", "scope": "manifest_dependencies"}]
+            }]),
+            "{detail}"
+        );
+    }
+}
+
 #[test]
 fn explicit_null_id_gets_response() {
     let state = state();

@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::cli::{DialectArg, SourceType};
 use dlin_core::graph;
 use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, SeedSchemas};
+use dlin_core::graph::dependency::{ProjectGap, ProjectScope};
 use dlin_core::parser;
 
 #[cfg(not(tarpaulin_include))]
@@ -15,13 +16,25 @@ pub(crate) struct ManifestDagContext {
     pub(crate) referenced_files: Vec<parser::manifest::ManifestFile>,
 }
 
+/// The lineage DAG and what was learnt while building it.
 #[cfg(not(tarpaulin_include))]
-type DagBuildResult = Result<(
-    graph::types::LineageGraph,
-    Option<parser::project::DbtProject>,
-    Vec<parser::manifest::ManifestDiagnostic>,
-    Option<ManifestDagContext>,
-)>;
+pub(crate) struct DagBuild {
+    pub(crate) dag: graph::types::LineageGraph,
+    /// The project configuration, loaded in SQL mode.
+    pub(crate) project: Option<parser::project::DbtProject>,
+    pub(crate) manifest_diagnostics: Vec<parser::manifest::ManifestDiagnostic>,
+    pub(crate) manifest_context: Option<ManifestDagContext>,
+    /// Gaps of the dependency analysis that are not attributed to a node.
+    pub(crate) project_gaps: Vec<ProjectGap>,
+}
+
+/// The project gaps of a graph read from a manifest: its dependencies are
+/// taken as they are, not assessed.
+pub(crate) fn manifest_project_gaps() -> Vec<ProjectGap> {
+    vec![ProjectGap::NotAssessed {
+        scope: ProjectScope::ManifestDependencies,
+    }]
+}
 
 /// Build the lineage DAG from either a manifest file or by parsing SQL files.
 #[cfg(not(tarpaulin_include))]
@@ -32,7 +45,7 @@ pub(crate) fn build_dag(
     cache_dir: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
-) -> DagBuildResult {
+) -> Result<DagBuild> {
     match source {
         SourceType::Manifest => {
             let resolved = resolve_manifest_path_or_default(manifest_path, project_dir)?;
@@ -55,7 +68,13 @@ pub(crate) fn build_dag(
                     project_name,
                     referenced_files,
                 };
-                return Ok((graph, None, diagnostics, Some(context)));
+                return Ok(DagBuild {
+                    dag: graph,
+                    project: None,
+                    manifest_diagnostics: diagnostics,
+                    manifest_context: Some(context),
+                    project_gaps: manifest_project_gaps(),
+                });
             }
 
             let load_report =
@@ -81,25 +100,36 @@ pub(crate) fn build_dag(
                 cache.save();
             }
 
-            Ok((
-                graph,
-                None,
-                diagnostics,
-                Some(ManifestDagContext {
+            Ok(DagBuild {
+                dag: graph,
+                project: None,
+                manifest_diagnostics: diagnostics,
+                manifest_context: Some(ManifestDagContext {
                     project_name,
                     referenced_files,
                     manifest: Some(manifest),
                     manifest_bytes: None,
                 }),
-            ))
+                project_gaps: manifest_project_gaps(),
+            })
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
-            let graph =
-                graph::builder::build_graph(project_dir, &project.name, &files, &project.vars)?;
-            Ok((graph, Some(project), Vec::new(), None))
+            let build = graph::builder::build_graph_report(
+                project_dir,
+                &project.name,
+                &files,
+                &project.vars,
+            )?;
+            Ok(DagBuild {
+                dag: build.graph,
+                project: Some(project),
+                manifest_diagnostics: Vec::new(),
+                manifest_context: None,
+                project_gaps: build.project_gaps,
+            })
         }
     }
 }

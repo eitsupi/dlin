@@ -5,7 +5,7 @@ use path_slash::PathExt as _;
 use serde_json::{Value, json};
 
 use super::{column_result, page::Page, protocol::McpState};
-use crate::commands::{check_loaded_manifest_freshness, read_seed_schemas};
+use crate::commands::{check_loaded_manifest_freshness, manifest_project_gaps, read_seed_schemas};
 use dlin_core::graph;
 use dlin_core::graph::types::NodeType;
 use dlin_core::render;
@@ -66,7 +66,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Analyse the downstream impact of changing a model: returns downstream nodes with their distance and a DAG severity based on node type and materialization.",
+            "description": "Analyse the downstream impact of changing a model: returns the downstream nodes reached through the lineage edges, with their distance and a DAG severity based on node type and materialization. `exploration` says whether the reached set can miss nodes; dependencies read from a manifest are not assessed, so it is incomplete. An empty page of impacted nodes does not show that there is no impact; `proves_no_impact` does.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
@@ -475,7 +475,8 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
     let idx = graph::filter::try_resolve_node_quiet(&state.dag, &normalized)
         .with_context(|| format!("model not found: {model}"))?;
-    let mut report = graph::impact::compute_impact(&state.dag, idx);
+    let mut report = graph::impact::compute_impact(&state.dag, idx, &manifest_project_gaps())
+        .with_context(|| format!("model not found: {model}"))?;
     let detail = column_result::Detail::parse(args)?;
     report.impacted_nodes.sort_by_key(|node| {
         (
@@ -495,7 +496,9 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let mut value = json!({
         "source_model":report.source_model, "overall_severity":report.overall_severity,
         "affected_models":report.affected_models, "affected_tests":report.affected_tests,
-        "affected_exposures":report.affected_exposures, "page":page.metadata(),
+        "affected_exposures":report.affected_exposures,
+        "exploration":report.exploration, "proves_no_impact":report.proves_no_impact(),
+        "page":page.metadata(),
     });
     if detail.full() {
         let ids: HashSet<_> = nodes.iter().map(|node| node.unique_id.as_str()).collect();

@@ -22,7 +22,13 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
 
     validate_source_flags(&args.source, args.manifest_path.as_ref())?;
 
-    let (dag, project_opt, manifest_diagnostics, manifest_context) = build_dag(
+    let DagBuild {
+        dag,
+        project: project_opt,
+        manifest_diagnostics,
+        manifest_context,
+        project_gaps: _,
+    } = build_dag(
         &project_dir,
         &args.source,
         args.manifest_path.as_ref(),
