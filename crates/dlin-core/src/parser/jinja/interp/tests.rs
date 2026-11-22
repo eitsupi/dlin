@@ -986,9 +986,9 @@ fn mutating_methods_change_the_container() {
     assert_eq!(ref_names(&e), vec!["default", "gone", "new"]);
     assert!(e.reasons.is_empty(), "{:?}", e.reasons);
     let e = extract(
-        r#"{% set xs = ['a', 'b', 'c'] %}{% do xs.pop(0) %}{% do xs.insert(-1, 'x') %}{{ ref(xs[0] ~ xs[1] ~ xs | length) }}{% do xs.clear() %}{{ ref('n' ~ xs | length) }}"#,
+        r#"{% set xs = ['a', 'b', 'c'] %}{% do xs.pop(0) %}{% set ys = xs.insert(1, 'x') %}{{ ref(ys[0] ~ xs[1] ~ xs | length) }}{{ ref(xs.clear() | default('cleared')) }}{{ ref('n' ~ xs | length) }}"#,
     );
-    assert_eq!(ref_names(&e), vec!["bx3", "n0"]);
+    assert_eq!(ref_names(&e), vec!["bx3", "cleared", "n0"]);
     assert!(e.reasons.is_empty(), "{:?}", e.reasons);
 }
 
@@ -1027,4 +1027,20 @@ fn oversized_vars_reach_the_analysis_limit() {
     );
     assert!(ref_names(&e).is_empty(), "{:?}", ref_names(&e));
     assert_eq!(codes(&e), vec!["analysis_limit_reached"]);
+}
+
+/// `copy()` is a new outer container holding the same items; `range()` is
+/// an iterable, not a list; a negative `insert` index is not modelled.
+#[test]
+fn copies_ranges_and_negative_inserts() {
+    let e = extract(
+        r#"{% set child = {'n': 'old'} %}{% set a = [child] %}{% set b = a.copy() %}{% do b.append('x') %}{% do b[0].update(n='new') %}{{ ref(a | length ~ child.n) }}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["1new"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+    let e = extract(r#"{% set r = range(2) %}{% do r.append(9) %}{{ ref('m' ~ (r | last)) }}"#);
+    assert_eq!(ref_names(&e), vec!["m1"]);
+    let e = extract(r#"{% set xs = ['a', 'b'] %}{% do xs.insert(-1, 'x') %}{{ ref(xs[0]) }}"#);
+    assert!(ref_names(&e).is_empty(), "{:?}", ref_names(&e));
+    assert_eq!(codes(&e), vec!["unsupported_jinja_construct"]);
 }

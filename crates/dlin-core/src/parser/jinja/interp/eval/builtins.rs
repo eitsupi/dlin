@@ -358,6 +358,8 @@ impl<'a> Interp<'a> {
                 }
                 match Ok::<_, Causes>(values) {
                     Ok(values) => Ok(match known::call_global(name, &values) {
+                        // `range()` is an iterable, not a list.
+                        Ok(value) if name == "range" => AValue::Known(value),
                         Ok(value) => self.adopt_result(st, value, span),
                         Err(_) => {
                             AValue::Unknown(self.unsupported(format!("function:{name}"), span))

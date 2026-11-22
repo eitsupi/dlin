@@ -13,8 +13,6 @@
 //! again, while a new container gets a new one. Telling them apart by value
 //! would take a new container equal to an input for the input.
 
-use std::fmt;
-
 use minijinja::value::{Enumerator, Object, ObjectRepr};
 
 use super::*;
@@ -44,22 +42,25 @@ impl Object for SharedList {
     fn enumerate(self: &Arc<Self>) -> Enumerator {
         Enumerator::Seq(self.items.len())
     }
-
-    fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&Value::from(self.items.clone()), f)
-    }
 }
 
-/// A frozen heap dict or namespace, with its entries in order.
+/// A frozen heap dict or namespace. It keeps the insertion order of its
+/// entries, as Fusion's dicts do.
 #[derive(Debug)]
 pub(super) struct SharedMap {
     id: HeapId,
-    entries: Vec<(Value, Value)>,
+    keys: Vec<Value>,
+    values: HashMap<Value, Value>,
 }
 
 impl SharedMap {
     pub(super) fn value(id: HeapId, entries: Vec<(Value, Value)>) -> Value {
-        Value::from_object(Self { id, entries })
+        let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+        Value::from_object(Self {
+            id,
+            keys,
+            values: entries.into_iter().collect(),
+        })
     }
 }
 
@@ -69,18 +70,11 @@ impl Object for SharedMap {
     }
 
     fn get_value(self: &Arc<Self>, key: &Value) -> Option<Value> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
+        self.values.get(key).cloned()
     }
 
     fn enumerate(self: &Arc<Self>) -> Enumerator {
-        Enumerator::Values(self.entries.iter().map(|(k, _)| k.clone()).collect())
-    }
-
-    fn render(self: &Arc<Self>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&Value::from_pairs(self.entries.clone()), f)
+        Enumerator::Values(self.keys.clone())
     }
 }
 
@@ -176,10 +170,7 @@ impl<'a> Interp<'a> {
 }
 
 /// Whether a template can change `value` in place: a list or a dict. A
-/// lazy sequence, such as a slice, is a list once dbt has computed it.
+/// lazy iterable, such as `range()`, is not a list.
 fn is_container(value: &Value) -> bool {
-    matches!(
-        value.kind(),
-        ValueKind::Seq | ValueKind::Map | ValueKind::Iterable
-    )
+    matches!(value.kind(), ValueKind::Seq | ValueKind::Map)
 }

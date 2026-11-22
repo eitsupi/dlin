@@ -162,7 +162,10 @@ impl<'a> Interp<'a> {
                 match self.freeze_all_shared(st, &parts, span) {
                     Ok(values) => {
                         match known::slice(&values[0], &values[1], &values[2], &values[3]) {
-                            Ok(value) => self.adopt_result(st, value, span),
+                            Ok(value) => {
+                                let value = computed_list(value);
+                                self.adopt_result(st, value, span)
+                            }
                             Err(_) => AValue::Unknown(self.unsupported("slice", span)),
                         }
                     }
@@ -441,7 +444,10 @@ impl<'a> Interp<'a> {
         let inputs = [left.clone(), right.clone()];
         match self.freeze_all_shared(st, &inputs, span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
-                Ok(value) => self.adopt_result(st, value, span),
+                Ok(value) => {
+                    let value = computed_list(value);
+                    self.adopt_result(st, value, span)
+                }
                 Err(_) => {
                     AValue::Unknown(self.unsupported(format!("operator {}", op.symbol()), span))
                 }
@@ -817,5 +823,17 @@ impl<'a> Interp<'a> {
                 AValue::Unknown(self.unsupported(format!("filter:{name}"), span))
             }
         })
+    }
+}
+
+/// A slice or a concatenation of sequences is a new list in Fusion, which
+/// minijinja computes lazily.
+fn computed_list(value: Value) -> Value {
+    if value.kind() != ValueKind::Iterable {
+        return value;
+    }
+    match value.try_iter() {
+        Ok(items) => Value::from(items.take(MAX_ITEMS + 1).collect::<Vec<_>>()),
+        Err(_) => value,
     }
 }

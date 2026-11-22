@@ -51,7 +51,7 @@ impl<'a> Interp<'a> {
                     && match name {
                         "append" | "extend" => args.len() == 1,
                         "insert" => args.len() == 2,
-                        "keys" | "values" | "items" | "clear" => args.is_empty(),
+                        "keys" | "values" | "items" | "clear" | "copy" => args.is_empty(),
                         "pop" => args.len() <= 2,
                         "get" => matches!(args.len(), 1 | 2),
                         _ => true,
@@ -60,7 +60,8 @@ impl<'a> Interp<'a> {
         };
         let method = if arity_ok { name } else { "" };
         // The methods that change a container in place return it, as
-        // Fusion's minijinja does, except `append`, `pop` and `clear`.
+        // Fusion's minijinja does, except `append` (none), `clear`
+        // (undefined) and `pop` (the value).
         let receiver = AValue::Heap(id);
         match (obj, method) {
             (HeapObj::Clobbered(causes), _) => Some(AValue::Unknown(causes)),
@@ -84,14 +85,11 @@ impl<'a> Interp<'a> {
                 let index = args
                     .first()
                     .and_then(|value| self.freeze(st, value, span).ok())
-                    .and_then(|value| value.as_i64());
+                    .and_then(|value| value.as_usize());
+                // Fusion takes no negative index here.
                 match (index, args.get(1)) {
                     (Some(index), Some(value)) => {
-                        // A negative index counts from the end, as in Python.
-                        let len = items.len() as i64;
-                        let index = if index < 0 { index + len } else { index };
-                        let index = usize::try_from(index.max(0)).unwrap_or(0).min(items.len());
-                        items.insert(index, value.clone());
+                        items.insert(index.min(items.len()), value.clone());
                         st.heap.insert(id, HeapObj::List(items));
                         Some(receiver)
                     }
@@ -126,8 +124,9 @@ impl<'a> Interp<'a> {
             }
             (HeapObj::List(_), "clear") => {
                 st.heap.insert(id, HeapObj::List(Vec::new()));
-                Some(AValue::none())
+                Some(AValue::undefined())
             }
+            (HeapObj::List(items), "copy") => Some(self.alloc(st, HeapObj::List(items))),
             (HeapObj::Map(entries), "get") => {
                 let key = args.first()?;
                 match self.freeze(st, key, span) {
@@ -174,8 +173,9 @@ impl<'a> Interp<'a> {
             }
             (HeapObj::Map(_), "clear") => {
                 st.heap.insert(id, HeapObj::Map(Vec::new()));
-                Some(AValue::none())
+                Some(AValue::undefined())
             }
+            (HeapObj::Map(entries), "copy") => Some(self.alloc(st, HeapObj::Map(entries))),
             (HeapObj::Map(mut entries), "update") => {
                 let mut updates = match args.first() {
                     None => Vec::new(),
