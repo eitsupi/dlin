@@ -140,6 +140,15 @@ pub(crate) fn filter(name: &str, args: &[Value]) -> Option<Result<Value, minijin
     }
 }
 
+/// Whether minijinja has a filter of this name.
+pub(crate) fn has_filter(name: &str) -> bool {
+    let mut state = environment().empty_state();
+    !matches!(
+        state.apply_filter(name, &[]),
+        Err(error) if error.kind() == minijinja::ErrorKind::UnknownFilter
+    )
+}
+
 /// Perform a built-in test on known arguments. `None` when the test does
 /// not exist.
 pub(crate) fn test(name: &str, args: &[Value]) -> Option<Result<bool, minijinja::Error>> {

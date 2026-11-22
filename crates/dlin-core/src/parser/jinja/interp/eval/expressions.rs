@@ -763,11 +763,12 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        if name == "chain" {
-            // minijinja's `chain` gives a view that reads its inputs when it
-            // is used, so later changes to them show through it. Fusion has no
-            // such filter, so it is not modelled.
-            let causes = self.unsupported("filter:chain", span);
+        // minijinja's `chain` gives a view that reads its inputs when it is
+        // used, so later changes to them show through it. Fusion has no such
+        // filter, so it is not modelled, like a filter minijinja does not
+        // know, whether or not its arguments are known.
+        if name == "chain" || !known::has_filter(name) {
+            let causes = self.unsupported(format!("filter:{name}"), span);
             return Ok(self.unmodelled_filter(st, &values, &kwargs, causes));
         }
         if name == "default" || name == "d" {
@@ -836,10 +837,8 @@ impl<'a> Interp<'a> {
         }
         Ok(match known::filter(name, &frozen) {
             Some(Ok(value)) => self.adopt_result(st, value, span),
-            Some(Err(_)) => AValue::Unknown(self.unsupported(format!("filter:{name}"), span)),
-            None => {
-                let causes = self.unsupported(format!("filter:{name}"), span);
-                self.unmodelled_filter(st, &values, &kwargs, causes)
+            Some(Err(_)) | None => {
+                AValue::Unknown(self.unsupported(format!("filter:{name}"), span))
             }
         })
     }

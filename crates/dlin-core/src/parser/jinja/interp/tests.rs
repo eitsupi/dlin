@@ -1059,6 +1059,9 @@ fn views_concatenations_and_dict_order() {
         r#"{% set x = {'n': 'old'} %}{% set args = [[x]] %}{% for y in [] | chain(*args) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
         // Nor is a filter minijinja does not know.
         r#"{% set x = {'n': 'old'} %}{% for y in [x] | no_such_filter %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // Also when another argument is unknown.
+        r#"{% set x = {'n': 'old'} %}{% set ignored = x | no_such_filter(target.name) %}{{ ref(x.n) }}"#,
+        r#"{% set x = {'n': 'old'} %}{% set ignored = x | no_such_filter(sep=target.name) %}{{ ref(x.n) }}"#,
     ] {
         let e = extract(sql);
         assert!(
