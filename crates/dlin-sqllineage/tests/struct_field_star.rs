@@ -316,3 +316,53 @@ fn struct_value_of_a_set_operation_or_of_several_relations_stays_open() {
         assert_eq!(render(sql, Dialect::BigQuery), ["Open[? after -]"], "{sql}");
     }
 }
+
+#[test]
+fn columns_that_forward_each_other_have_no_known_fields() {
+    assert_eq!(
+        render(
+            r#"
+            WITH RECURSIVE
+              a AS (SELECT item FROM b),
+              b AS (SELECT item FROM a)
+            SELECT item.* FROM a
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["Open[? after -]"]
+    );
+}
+
+#[test]
+fn recursive_struct_column_has_no_known_fields() {
+    // The anchor alone does not decide what the recursive term adds.
+    assert_eq!(
+        render(
+            r#"
+            WITH RECURSIVE r AS (
+              SELECT STRUCT(src.a AS x) AS item, 1 AS n FROM src
+              UNION ALL
+              SELECT item, n + 1 FROM r WHERE n < 3
+            )
+            SELECT item.* FROM r
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["Open[? after -]"]
+    );
+}
+
+#[test]
+fn replace_takes_the_place_of_an_expanded_field() {
+    // x keeps its position but no longer reads src.a.
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT STRUCT(src.a AS x, src.c AS y) AS item, src.b AS other FROM src)
+            SELECT item.* REPLACE (other AS x) FROM packed
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["x#0 C[src.b]", "y#1 C[src.c]", "Closed"]
+    );
+}

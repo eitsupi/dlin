@@ -2,7 +2,7 @@
 //! built once, the builder that walks scopes and stars, and the re-expression
 //! of a scope's output under a reading star's range variables.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::super::target::{StarTarget, resolve_star_target};
@@ -468,21 +468,15 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 self.relation_part(&Rc::new(table), &Rc::from([]))
             }
             StarTarget::FieldPath { binding, path } => {
-                match self.binding_struct_fields(&binding, &path) {
-                    Some((fields, evidence)) => {
-                        schema.extend(&evidence);
-                        fields
-                    }
-                    None => opaque(OpaqueReason::FieldPath(node_id)),
-                }
+                let fields = self.binding_struct_fields(&binding, &path, &mut ShapeWalk::default());
+                field_elements(fields, &mut schema)
+                    .unwrap_or_else(|| opaque(OpaqueReason::FieldPath(node_id)))
             }
-            StarTarget::ColumnField { path } => match self.column_struct_fields(env, &path) {
-                Some((fields, evidence)) => {
-                    schema.extend(&evidence);
-                    fields
-                }
-                None => opaque(OpaqueReason::FieldPath(node_id)),
-            },
+            StarTarget::ColumnField { path } => {
+                let fields = self.column_struct_fields(env, &path, &mut ShapeWalk::default());
+                field_elements(fields, &mut schema)
+                    .unwrap_or_else(|| opaque(OpaqueReason::FieldPath(node_id)))
+            }
             StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
@@ -505,6 +499,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         &mut self,
         binding: &Binding,
         path: &[Ident],
+        walk: &mut ShapeWalk,
     ) -> Option<(Vec<OutputElement>, Evidence)> {
         let [column] = path else {
             return None;
@@ -516,7 +511,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let Choice::Column(_, slot) = model.choose(column) else {
             return None;
         };
-        let (fields, mut evidence) = self.struct_fields(&slot.value)?;
+        let (fields, mut evidence) = self.struct_fields(&slot.value, walk)?;
         evidence.extend(&model.schema);
         Some((fields, evidence))
     }
@@ -529,20 +524,21 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         &mut self,
         env: BindingEnv,
         path: &[Ident],
+        walk: &mut ShapeWalk,
     ) -> Option<(Vec<OutputElement>, Evidence)> {
         let [column] = path else {
             return None;
         };
         let (lookup, mut evidence) = self.lookup_input(env, column);
         let (fields, inner) = match lookup {
-            InputLookup::Column { value, .. } => self.struct_fields(&value)?,
+            InputLookup::Column { value, .. } => self.struct_fields(&value, walk)?,
             InputLookup::Scope { scope, .. } => {
                 let model = self.scope(scope);
                 let Choice::Column(_, slot) = model.choose(column) else {
                     return None;
                 };
                 evidence.extend(&model.schema);
-                self.struct_fields(&slot.value)?
+                self.struct_fields(&slot.value, walk)?
             }
             _ => return None,
         };
@@ -555,12 +551,21 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     /// decide them. A forwarded column, and a column a projection reads as it
     /// is, are followed to their definition; any other value has fields that
     /// are not known.
-    fn struct_fields(&mut self, value: &ValueId) -> Option<(Vec<OutputElement>, Evidence)> {
+    ///
+    /// Columns can forward each other, so a value met again on the way has no
+    /// known fields.
+    fn struct_fields(
+        &mut self,
+        value: &ValueId,
+        walk: &mut ShapeWalk,
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
         let mut value = value.clone();
         let node = loop {
             match value {
-                ValueId::Expr(node) => break node,
-                ValueId::Forward(id) => value = self.store.arena.slot(id).value.clone(),
+                ValueId::Expr(node) if walk.nodes.insert(node) => break node,
+                ValueId::Forward(id) if walk.slots.insert(id) => {
+                    value = self.store.arena.slot(id).value.clone();
+                }
                 _ => return None,
             }
         };
@@ -570,7 +575,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 qualifier: None,
                 column,
                 env,
-            } => return self.column_struct_fields(*env, std::slice::from_ref(column)),
+            } => return self.column_struct_fields(*env, std::slice::from_ref(column), walk),
             StructValue::Column {
                 qualifier: Some(qualifier),
                 column,
@@ -585,7 +590,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     return None;
                 }
                 let binding = self.graph.scopes.lookup(*env, qualifier)?.clone();
-                return self.binding_struct_fields(&binding, std::slice::from_ref(column));
+                return self.binding_struct_fields(&binding, std::slice::from_ref(column), walk);
             }
         };
         let elements = fields
@@ -1227,4 +1232,27 @@ pub(super) fn forward_scope(
             }
         })
         .collect()
+}
+
+/// The values a search for the fields of a STRUCT has met.
+#[derive(Default)]
+struct ShapeWalk {
+    nodes: HashSet<NodeId>,
+    slots: HashSet<super::SlotId>,
+}
+
+/// The columns of the fields a star expands, each established by the schemas
+/// that decide them, which the star's model also relies on.
+fn field_elements(
+    fields: Option<(Vec<OutputElement>, Evidence)>,
+    schema: &mut Evidence,
+) -> Option<Vec<OutputElement>> {
+    let (mut fields, evidence) = fields?;
+    for field in &mut fields {
+        if let OutputElement::Column(slot) = field {
+            slot.structure.extend(&evidence);
+        }
+    }
+    schema.extend(&evidence);
+    Some(fields)
 }
