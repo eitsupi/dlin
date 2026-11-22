@@ -636,11 +636,15 @@ mod tests;
 impl OpaqueReason {
     /// Whether a segment for this reason may publish a name that is not
     /// listed, so a lookup of any admitted name has to consider it. A star
-    /// over a field path or an expression, an ambiguous star and a recursive
-    /// cut do not stand for the columns of one relation.
+    /// over a field path or an expression publishes the fields of a value
+    /// whose type is not known, which may carry any name. An ambiguous star
+    /// and a recursive cut do not stand for the columns of one relation.
     fn publishes_names(self) -> bool {
         match self {
-            Self::UnmodelledSource(_) | Self::ArrayElement => true,
+            Self::UnmodelledSource(_)
+            | Self::ArrayElement
+            | Self::FieldPath(_)
+            | Self::Expression(_) => true,
             Self::Unsupported(what) => matches!(
                 what,
                 "BY NAME set operation"
@@ -649,9 +653,7 @@ impl OpaqueReason {
                     | "column alias output shape unknown"
                     | "column aliases unsupported by dialect"
             ),
-            Self::FieldPath(_) | Self::Expression(_) | Self::Ambiguous(_) | Self::Recursive => {
-                false
-            }
+            Self::Ambiguous(_) | Self::Recursive => false,
         }
     }
 }

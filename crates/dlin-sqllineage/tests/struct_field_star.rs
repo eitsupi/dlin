@@ -102,3 +102,33 @@ fn qualifier_without_range_variable_stays_a_relation_elsewhere() {
         Some("item")
     );
 }
+
+#[test]
+fn column_next_to_field_star_of_unknown_type_is_not_complete() {
+    // Without the type of item, its fields may include another flag.
+    for sql in [
+        r#"WITH e AS (SELECT p.item.*, 2 AS flag FROM src AS p) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT item.*, 2 AS flag FROM src) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT (src.item).*, 2 AS flag FROM src) SELECT flag FROM e"#,
+    ] {
+        assert_eq!(
+            render(sql, Dialect::BigQuery),
+            ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn name_read_through_field_star_of_unknown_type_is_not_complete() {
+    assert_eq!(
+        render(
+            r#"WITH e AS (SELECT p.item.* FROM src AS p) SELECT col_a FROM e"#,
+            Dialect::BigQuery,
+        ),
+        [
+            r#"col_a#0 P[ | Unsupported { what: "star expansion" }]"#,
+            "Closed"
+        ]
+    );
+}
