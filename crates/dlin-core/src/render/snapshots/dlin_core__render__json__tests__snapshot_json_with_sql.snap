@@ -6,6 +6,10 @@ expression: output
   "nodes": [
     {
       "columns": [],
+      "dependency_analysis": {
+        "status": "complete",
+        "unresolved": []
+      },
       "description": null,
       "exposure": null,
       "file_path": "models/orders.sql",
@@ -18,6 +22,10 @@ expression: output
     },
     {
       "columns": [],
+      "dependency_analysis": {
+        "status": "complete",
+        "unresolved": []
+      },
       "description": null,
       "exposure": null,
       "file_path": null,

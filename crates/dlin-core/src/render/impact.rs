@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Write};
 
 use colored::Colorize;
 
-use crate::graph::impact::{ImpactReport, ImpactSeverity};
+use crate::graph::impact::{ExplorationGap, ExplorationStatus, ImpactReport, ImpactSeverity};
 
 /// Render impact report as colored text to stdout
 pub fn render_impact_text(report: &ImpactReport) {
@@ -44,6 +44,8 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     writeln!(w, "  Affected tests:     {}", report.affected_tests)?;
     writeln!(w, "  Affected exposures: {}", report.affected_exposures)?;
     writeln!(w)?;
+
+    write_exploration(report, w)?;
 
     if !report.exposure_paths.is_empty() {
         writeln!(w, "{}", "Exposure Paths:".bold())?;
@@ -92,6 +94,82 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     Ok(())
 }
 
+/// The number of nodes with unresolved dependencies listed by name.
+const LISTED_GAP_NODES: usize = 10;
+
+/// Whether the impacted nodes can be missing a node, and why.
+fn write_exploration<W: Write>(report: &ImpactReport, w: &mut W) -> io::Result<()> {
+    if report.exploration.is_empty() {
+        writeln!(
+            w,
+            "{} {} (the input is an unresolved reference)",
+            "Exploration:".bold(),
+            "not explored".yellow().bold()
+        )?;
+        writeln!(w)?;
+        return Ok(());
+    }
+    for exploration in &report.exploration {
+        if exploration.status() == ExplorationStatus::Complete {
+            writeln!(w, "{} {}", "Exploration:".bold(), "complete".green())?;
+            continue;
+        }
+        let mut nodes = Vec::new();
+        let mut skipped = 0usize;
+        let mut scopes = Vec::new();
+        for gap in exploration.gaps() {
+            match gap {
+                ExplorationGap::UnresolvedDependencies { unique_id, .. } => nodes.push(unique_id),
+                ExplorationGap::InputSkipped { .. } => skipped += 1,
+                ExplorationGap::NotAssessed { scope } => scopes.push(
+                    serde_json::to_value(scope)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ),
+            }
+        }
+        let mut parts = Vec::new();
+        if !nodes.is_empty() {
+            parts.push(format!(
+                "{} node(s) with unresolved dependencies",
+                nodes.len()
+            ));
+        }
+        if skipped > 0 {
+            parts.push(format!("{skipped} skipped input(s)"));
+        }
+        if !scopes.is_empty() {
+            parts.push(format!("not assessed: {}", scopes.join(", ")));
+        }
+        writeln!(
+            w,
+            "{} {} ({})",
+            "Exploration:".bold(),
+            "incomplete".yellow().bold(),
+            parts.join("; ")
+        )?;
+        writeln!(
+            w,
+            "  Nodes not listed below may still depend on {}.",
+            report.source_model
+        )?;
+        for unique_id in nodes.iter().take(LISTED_GAP_NODES) {
+            writeln!(w, "  {unique_id}")?;
+        }
+        if nodes.len() > LISTED_GAP_NODES {
+            writeln!(
+                w,
+                "  {} and {} more; use -o json for every gap",
+                "...".dimmed(),
+                nodes.len() - LISTED_GAP_NODES
+            )?;
+        }
+    }
+    writeln!(w)?;
+    Ok(())
+}
+
 /// Render impact reports as a JSON array to stdout.
 /// Pretty-prints when stdout is a terminal, compact otherwise.
 pub fn render_impact_json(reports: &[ImpactReport]) {
@@ -119,7 +197,8 @@ mod tests {
     use super::*;
     use crate::graph::dependency::DependencyAnalysis;
     use crate::graph::impact::{
-        ExposurePath, ImpactReport, ImpactSeverity, ImpactSource, ImpactedNode,
+        Exploration, ExplorationKind, ExposurePath, ImpactReport, ImpactSeverity, ImpactSource,
+        ImpactedNode,
     };
 
     fn make_report() -> ImpactReport {
@@ -143,7 +222,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -234,7 +313,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -272,7 +351,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![ImpactedNode {
                 unique_id: "model.payments".to_string(),
                 label: "payments".to_string(),
@@ -328,7 +407,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -384,7 +463,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![
                 ImpactedNode {
                     unique_id: "exposure.dashboard".to_string(),
@@ -461,7 +540,7 @@ mod tests {
                 unique_id: "model.stg_orders".to_string(),
                 dependency_analysis: DependencyAnalysis::new([]),
             },
-            exploration: vec![],
+            exploration: vec![Exploration::new(ExplorationKind::ModelDependency, [])],
             impacted_nodes: vec![],
         };
         let mut buf = Vec::new();
@@ -469,5 +548,69 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("(truncated)"));
         assert!(output.contains("dlin graph stg_orders"));
+    }
+
+    fn text(report: &ImpactReport) -> String {
+        colored::control::set_override(false);
+        let mut buf = Vec::new();
+        render_impact_text_to_writer(report, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn text_lists_the_gaps_of_an_incomplete_exploration() {
+        use crate::graph::dependency::{
+            DependencyReason, InputFailure, InputKind, InputLocation, InputStage, NodeCallSite,
+            ProjectScope,
+        };
+        use crate::graph::impact::ExplorationGap;
+        let node_gap = |i: usize| ExplorationGap::UnresolvedDependencies {
+            unique_id: format!("model.m{i:02}"),
+            reasons: vec![DependencyReason::JinjaRenderFailed {
+                at: NodeCallSite {
+                    unique_id: format!("model.m{i:02}"),
+                    path: "models/m.sql".to_string(),
+                    line: None,
+                    expr: None,
+                },
+            }],
+        };
+        let mut report = make_report();
+        report.exploration = vec![Exploration::new(
+            ExplorationKind::ModelDependency,
+            (0..12).map(node_gap).chain([
+                ExplorationGap::InputSkipped {
+                    location: InputLocation {
+                        path: "models/broken.yml".to_string(),
+                        line: None,
+                    },
+                    kind: InputKind::Yaml,
+                    stage: InputStage::Parse,
+                    failure: InputFailure::ParseError,
+                },
+                ExplorationGap::NotAssessed {
+                    scope: ProjectScope::SemanticDependencies,
+                },
+            ]),
+        )];
+        let output = text(&report);
+        assert!(output.contains(
+            "Exploration: incomplete (12 node(s) with unresolved dependencies; \
+             1 skipped input(s); not assessed: semantic_dependencies)"
+        ));
+        assert!(output.contains("Nodes not listed below may still depend on stg_orders."));
+        assert!(output.contains("  model.m09\n"));
+        assert!(!output.contains("model.m10"));
+        assert!(output.contains("and 2 more; use -o json for every gap"));
+    }
+
+    #[test]
+    fn text_says_an_unresolved_input_was_not_explored() {
+        let mut report = make_report();
+        report.exploration = vec![];
+        assert!(
+            text(&report)
+                .contains("Exploration: not explored (the input is an unresolved reference)")
+        );
     }
 }

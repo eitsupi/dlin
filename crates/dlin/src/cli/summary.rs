@@ -246,14 +246,20 @@ Only the specified fields are emitted; unspecified fields are omitted.
 
 Available fields:
   unique_id, label, node_type, file_path, description,
-  materialization, tags, columns, sql_content, exposure
+  materialization, tags, columns, sql_content, exposure,
+  dependency_analysis
 
 Default (when neither --json-fields nor --json-full is given):
-  unique_id, label, node_type, file_path
+  unique_id, label, node_type, file_path, dependency_analysis
 
 The exposure field is an object containing label, type, url, maturity,
 and owner; it is non-null only for exposure nodes and must be explicitly
 requested via --json-fields or --json-full.
+
+dependency_analysis has a status, complete or partial, and unresolved,
+a typed reason for each part of the node's own dependencies that could
+not be analysed. It does not say whether the project as
+a whole was analysed; see `dlin impact --help`.
 
 Note: sql_content reads raw SQL files on disk in sql mode, or
 compiled_code from manifest.json in manifest mode (requires prior

@@ -63,6 +63,12 @@ expression: output
         "unresolved": []
       }
     },
-    "exploration": []
+    "exploration": [
+      {
+        "kind": "model_dependency",
+        "status": "complete",
+        "gaps": []
+      }
+    ]
   }
 ]

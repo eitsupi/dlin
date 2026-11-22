@@ -5,6 +5,10 @@ expression: output
 [
   {
     "columns": [],
+    "dependency_analysis": {
+      "status": "complete",
+      "unresolved": []
+    },
     "description": null,
     "exposure": null,
     "file_path": null,
@@ -17,6 +21,10 @@ expression: output
   },
   {
     "columns": [],
+    "dependency_analysis": {
+      "status": "complete",
+      "unresolved": []
+    },
     "description": null,
     "exposure": null,
     "file_path": null,
@@ -29,6 +37,10 @@ expression: output
   },
   {
     "columns": [],
+    "dependency_analysis": {
+      "status": "complete",
+      "unresolved": []
+    },
     "description": null,
     "exposure": null,
     "file_path": null,
@@ -41,6 +53,10 @@ expression: output
   },
   {
     "columns": [],
+    "dependency_analysis": {
+      "status": "complete",
+      "unresolved": []
+    },
     "description": null,
     "exposure": null,
     "file_path": null,
@@ -53,6 +69,10 @@ expression: output
   },
   {
     "columns": [],
+    "dependency_analysis": {
+      "status": "complete",
+      "unresolved": []
+    },
     "description": null,
     "exposure": null,
     "file_path": null,

@@ -7,13 +7,28 @@ use super::json::build_node_value;
 use crate::ListOutputFormat;
 use crate::graph::types::*;
 
+/// Default node fields of list JSON: the graph defaults plus the dependency
+/// analysis, so that a listed node shows whether its dependencies are known.
+pub const LIST_DEFAULT_FIELDS: &[&str] = &[
+    "unique_id",
+    "label",
+    "node_type",
+    "file_path",
+    "dependency_analysis",
+];
+
 /// Resolve which fields to emit for list JSON, and validate field names.
-/// Uses the same field set as graph JSON output.
+/// Uses the same field set as graph JSON output, with its own defaults.
 pub fn resolve_list_fields(
     json_fields: Option<&[String]>,
     json_full: bool,
 ) -> Result<HashSet<String>, String> {
-    // Delegate to the same logic as graph, sharing the field set
+    if json_fields.is_none() && !json_full {
+        return Ok(LIST_DEFAULT_FIELDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect());
+    }
     super::json::resolve_graph_fields(json_fields, json_full)
 }
 
@@ -239,5 +254,33 @@ mod tests {
         render_list_json(&graph, &all_fields(), None, &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn default_list_fields_include_dependency_analysis() {
+        let list = resolve_list_fields(None, false).unwrap();
+        assert!(list.contains("dependency_analysis"));
+        let graph = super::super::json::resolve_graph_fields(None, false).unwrap();
+        assert!(!graph.contains("dependency_analysis"));
+        let selected = resolve_list_fields(Some(&["unique_id".to_string()]), false).unwrap();
+        assert_eq!(selected, HashSet::from(["unique_id".to_string()]));
+        assert!(
+            resolve_list_fields(None, true)
+                .unwrap()
+                .contains("dependency_analysis")
+        );
+    }
+
+    #[test]
+    fn json_emits_the_dependency_analysis() {
+        let graph = make_test_graph();
+        let mut buf = Vec::new();
+        let fields = resolve_list_fields(None, false).unwrap();
+        render_list_json(&graph, &fields, None, &mut buf, false).unwrap();
+        let parsed: Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(
+            parsed[0]["dependency_analysis"],
+            serde_json::json!({"status": "complete", "unresolved": []})
+        );
     }
 }
