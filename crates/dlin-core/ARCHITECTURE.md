@@ -380,8 +380,9 @@ completely tracing reached the end, nor of impact exploration.
 
 This section describes how `dlin-core` reports how completely it analysed the
 model-level dependencies (`ref`, `source`, exposure `depends_on`) of a project
-in SQL mode. It is the target design; parts of it are not implemented yet.
-The vocabulary lives in `src/graph/dependency.rs`.
+in SQL mode. The vocabulary lives in `src/graph/dependency.rs`, the impact
+exploration in `src/graph/impact/exploration.rs`, and the stderr diagnostics
+in `src/render/dependency_diagnostics.rs`.
 
 ### Kinds of records
 
@@ -431,7 +432,7 @@ Which nodes are analysed:
 | YAML generic test | The arguments as above, plus `generic_test_body_not_analyzed`: the body of the `test_<name>` macro is not analysed, so a dependency written only inside it is not known. Built-in names carry the reason too, since a project override or `adapter.dispatch()` can select another implementation |
 | Seed, YAML source | Complete: they have no dependencies |
 | Phantom | `not_assessed` (`phantom_dependencies`) |
-| Semantic model, metric, saved query | `not_assessed` (`semantic_dependencies`) |
+| Semantic model, metric, saved query | `not_assessed` (`semantic_dependencies`). A semantic model whose `model: ref()` names no model also carries `unresolved_ref` |
 | Any node in manifest mode | `not_assessed` (`manifest_dependencies`) |
 
 A reason raised by a call carries the call site in the node that uses it
@@ -487,3 +488,54 @@ test SQL file that cannot be read) stay fatal.
 
 A complete result is relative to the project and the search settings given.
 It does not prove that the settings are what the user intended.
+
+### Impact exploration
+
+An impact report lists the nodes reached from the input through the graph's
+edges (`impacted_nodes`). They are reached through observed edges: some
+edges are guesses (a literal `ref()` under a condition that cannot be
+evaluated, `unsupported_ref_package`, `ambiguous_ref`), so the set may hold
+nodes that are not affected. Its `exploration` judges only whether the set
+can miss a node; it does not confirm individual impacts, distances or paths.
+Separating confirmed from possible impacts needs edge-level certainty.
+
+Let R be the input and the nodes reached from it. The `model_dependency`
+exploration has these gaps:
+
+- `unresolved_dependencies`: a node outside R whose analysis has reasons,
+  with those reasons (never empty). A dependency hidden in a node of R is an
+  edge into R and adds no node to it; a hidden dependency that would leave R
+  ends at a node outside R, which carries the reason. Nodes in R are never
+  gaps.
+- `input_skipped`: every skipped input, since it is not attributed to a node.
+- `not_assessed`: a scope that is not assessed, from the project gaps or from
+  a node outside R. Manifest mode passes `manifest_dependencies` as a project
+  gap, so a manifest whose nodes are all in R does not look complete.
+  `phantom_dependencies` is never a gap.
+
+Each input is judged with its own R, on the graph before any filtering or
+collapsing. The status is derived from the gaps. An input that is a phantom
+node is not a node of the project: its report keeps the reached nodes but
+has no exploration.
+
+`ImpactReport::proves_no_impact()` holds when `impacted_nodes` is empty and
+at least one `model_dependency` exploration exists and all are complete. An
+empty exploration never counts as complete.
+`ImpactReport::is_acceptable_under(&DependencyPolicy)` holds when every gap
+is accepted by the policy: an `unresolved_dependencies` gap only when it has
+reasons and each of them matches a rule (a reason type and a namespace
+condition: any, none, or exactly one name); skipped inputs and unassessed
+scopes only through their own permissions. The default policy accepts
+nothing. Accepting gaps does not change `proves_no_impact()`.
+
+### Stderr diagnostics
+
+Commands that build the graph collect one normalised set of diagnostics from
+the node reasons (phantoms left out), the project gaps and the configuration
+diagnostics, once per command and before filtering. By default they print
+the configuration warning, if any, and one `dependency_analysis_summary`
+with counts by reason type and namespace, partially analysed and unassessed
+nodes, and skipped inputs. `--verbose` adds one diagnostic per reason and
+per project gap, and the info configuration diagnostics. The summary counts
+the project; it is not the exploration of any report. The wording of `what`,
+`why` and `hint` is not a contract; `code` and the typed fields are.
