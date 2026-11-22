@@ -796,7 +796,9 @@ fn dedup_unique_id(
 
 /// Add a generic test node to the graph and connect it to the parent and to
 /// the `ref()`/`source()` calls in its arguments, such as the `to` of a
-/// `relationships` test. Arguments are read as dbt evaluates them: a string
+/// `relationships` test. The body of the test macro is not analysed, which
+/// the node's analysis records: even a built-in test name can reach another
+/// implementation through a project override or `adapter.dispatch()`. Arguments are read as dbt evaluates them: a string
 /// that looks like a call to `ref`, `source`, `var`, `env_var` or `doc` is
 /// an expression, one holding Jinja is a template, and any other string is
 /// data. Both are interpreted like SQL.
@@ -819,8 +821,18 @@ fn add_generic_test_node(
         columns: vec![],
         exposure: None,
         aliases: vec![],
-        // Filled in below once its dependencies are resolved.
-        dependency_analysis: DependencyAnalysis::new([]),
+        // The argument reasons are added below once they are resolved.
+        dependency_analysis: DependencyAnalysis::new([
+            DependencyReason::GenericTestBodyNotAnalyzed {
+                test_name: test_def.test_name().map(str::to_string),
+                at: NodeCallSite {
+                    unique_id: unique_id.clone(),
+                    path: gb.display_path(yaml_path),
+                    line: None,
+                    expr: None,
+                },
+            },
+        ]),
     });
     gb.graph
         .add_edge(parent_idx, idx, EdgeData::direct(EdgeType::Test));
