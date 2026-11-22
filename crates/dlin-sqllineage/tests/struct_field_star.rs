@@ -189,11 +189,26 @@ fn each_expanded_field_keeps_its_own_value() {
         WITH packed AS (SELECT STRUCT<col_a INT64, col_b INT64>(src.a, src.b) AS item FROM src)
         SELECT item.*, 2 AS flag FROM packed
         "#,
-        // A column forwarded by another CTE keeps its fields.
+        // A column forwarded by another CTE keeps its fields, whether a
+        // star or the column itself forwards it.
         r#"
         WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src),
         fwd AS (SELECT * FROM packed)
         SELECT item.*, 2 AS flag FROM fwd
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src),
+        fwd AS (SELECT item FROM packed)
+        SELECT item.*, 2 AS flag FROM fwd
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src),
+        fwd AS (SELECT p.item AS renamed FROM packed AS p)
+        SELECT f.renamed.*, 2 AS flag FROM fwd AS f
+        "#,
+        r#"
+        WITH packed AS (SELECT STRUCT(src.a AS col_a, src.b AS col_b) AS item FROM src)
+        SELECT item.*, 2 AS flag FROM (SELECT (item) FROM packed)
         "#,
     ] {
         assert_eq!(render(sql, Dialect::BigQuery), expected, "{sql}");
@@ -285,6 +300,12 @@ fn struct_value_of_a_set_operation_or_of_several_relations_stays_open() {
         r#"
         WITH p1 AS (SELECT STRUCT(1 AS a) AS item), p2 AS (SELECT STRUCT(2 AS b) AS item)
         SELECT item.* FROM p1, p2
+        "#,
+        // A conversion may rename the fields.
+        r#"
+        WITH packed AS (SELECT STRUCT(1 AS a) AS item),
+        fwd AS (SELECT CAST(item AS STRUCT<b INT64>) AS item FROM packed)
+        SELECT item.* FROM fwd
         "#,
         // Only a direct field of the column is expanded.
         r#"

@@ -8,6 +8,7 @@ use std::ops::ControlFlow;
 
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
+use crate::graph::StructValue;
 use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{
     AnonymousRange, Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns, ScopeColumn,
@@ -67,8 +68,8 @@ impl LineageBuilder {
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
-                    if let Some(fields) = fields {
-                        self.graph.struct_fields.insert(output, fields);
+                    if let Some(value) = fields {
+                        self.graph.struct_values.insert(output, value);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -86,8 +87,8 @@ impl LineageBuilder {
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
-                    if let Some(fields) = fields {
-                        self.graph.struct_fields.insert(output, fields);
+                    if let Some(value) = fields {
+                        self.graph.struct_values.insert(output, value);
                     }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -151,16 +152,18 @@ impl LineageBuilder {
         }
     }
 
-    /// The ancestors of a projected expression and, when it builds a STRUCT
-    /// whose fields are all named and distinct, a node for the value of each
-    /// field. The fields read the same reference nodes as the whole value.
+    /// The ancestors of a projected expression and what decides its fields
+    /// if it is a STRUCT: a STRUCT it builds whose fields are all named and
+    /// distinct, with a node for the value of each field, or a column it
+    /// reads as it is. The fields read the same reference nodes as the whole
+    /// value.
     fn projected_value(
         &mut self,
         expr: &Expr,
-    ) -> (
-        Vec<crate::graph::node::NodeId>,
-        Option<Vec<(Ident, crate::graph::node::NodeId)>>,
-    ) {
+    ) -> (Vec<crate::graph::node::NodeId>, Option<StructValue>) {
+        if let Some(column) = self.read_column(expr) {
+            return (self.collect_ancestors(expr), Some(column));
+        }
         let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
             return (self.collect_ancestors(expr), None);
         };
@@ -176,7 +179,45 @@ impl LineageBuilder {
             ancestors.extend(field_ancestors);
             nodes.push((name, node));
         }
-        (ancestors, Some(nodes))
+        (ancestors, Some(StructValue::Fields(nodes)))
+    }
+
+    /// The column `expr` reads as it is: a name that no range variable
+    /// takes, or a name qualified by a range variable. A longer path reads a
+    /// field, and a range variable alone is a whole row.
+    fn read_column(&self, expr: &Expr) -> Option<StructValue> {
+        let env = self.env();
+        match expr {
+            Expr::Nested(inner) => self.read_column(inner),
+            Expr::Identifier(ident) => {
+                let column = Ident::from_ast(ident);
+                self.graph
+                    .scopes
+                    .lookup(env, &column)
+                    .is_none()
+                    .then_some(StructValue::Column {
+                        qualifier: None,
+                        column,
+                        env,
+                    })
+            }
+            Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+                [qualifier, column] => {
+                    let qualifier = Ident::from_ast(qualifier);
+                    self.graph
+                        .scopes
+                        .lookup(env, &qualifier)
+                        .is_some()
+                        .then(|| StructValue::Column {
+                            qualifier: Some(qualifier),
+                            column: Ident::from_ast(column),
+                            env,
+                        })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn object_name_parts(name: &ObjectName) -> Vec<Ident> {

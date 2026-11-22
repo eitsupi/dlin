@@ -16,9 +16,9 @@ use super::{
     SlotOrigin, UnknownProvider, UnknownSegment, ValueId,
 };
 use crate::catalog::{CatalogContext, CatalogUnknownSegment, SchemaCoverage};
-use crate::graph::RawGraph;
 use crate::graph::node::{NodeId, RawNode, StarBase, StarOptions};
 use crate::graph::scope::{Binding, BindingEnv, OutputPlan, ScopeId, ScopeKind, SetCorrespondence};
+use crate::graph::{RawGraph, StructValue};
 use crate::types::{Dialect, Evidence, TableRef};
 use crate::{Ident, OutputName};
 
@@ -498,7 +498,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     }
 
     /// The fields a star over the column `path` of a CTE or derived table
-    /// publishes, when the column is a STRUCT its scope builds in place, with
+    /// publishes, when the column is a STRUCT whose fields are known, with
     /// the schemas that decide which column it is. Only a direct field of the
     /// column is expanded.
     fn binding_struct_fields(
@@ -516,14 +516,15 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         let Choice::Column(_, slot) = model.choose(column) else {
             return None;
         };
-        let fields = self.struct_fields(&slot.value)?;
-        Some((fields, model.schema.clone()))
+        let (fields, mut evidence) = self.struct_fields(&slot.value)?;
+        evidence.extend(&model.schema);
+        Some((fields, evidence))
     }
 
     /// The fields a star over the unqualified column `path` publishes, when
-    /// the FROM clause settles the name on one column that is a STRUCT built
-    /// in place. A name no clause publishes is never taken to be a column of
-    /// the only relation it could belong to.
+    /// the FROM clause settles the name on one column that is a STRUCT whose
+    /// fields are known. A name no clause publishes is never taken to be a
+    /// column of the only relation it could belong to.
     fn column_struct_fields(
         &mut self,
         env: BindingEnv,
@@ -533,7 +534,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             return None;
         };
         let (lookup, mut evidence) = self.lookup_input(env, column);
-        let fields = match lookup {
+        let (fields, inner) = match lookup {
             InputLookup::Column { value, .. } => self.struct_fields(&value)?,
             InputLookup::Scope { scope, .. } => {
                 let model = self.scope(scope);
@@ -545,13 +546,16 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             _ => return None,
         };
+        evidence.extend(&inner);
         Some((fields, evidence))
     }
 
-    /// The fields of a value that is a STRUCT built in place, as columns
-    /// defined by the star that expands them. A forwarded column is followed
-    /// to its definition; any other value has fields that are not known.
-    fn struct_fields(&self, value: &ValueId) -> Option<Vec<OutputElement>> {
+    /// The fields of a value that is a STRUCT whose fields are known, as
+    /// columns defined by the star that expands them, with the schemas that
+    /// decide them. A forwarded column, and a column a projection reads as it
+    /// is, are followed to their definition; any other value has fields that
+    /// are not known.
+    fn struct_fields(&mut self, value: &ValueId) -> Option<(Vec<OutputElement>, Evidence)> {
         let mut value = value.clone();
         let node = loop {
             match value {
@@ -560,27 +564,49 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 _ => return None,
             }
         };
-        let fields = self.graph.struct_fields.get(&node)?;
-        Some(
-            fields
-                .iter()
-                .enumerate()
-                .map(|(index, (name, node))| {
-                    OutputElement::Column(ColumnSlot {
-                        id: None,
-                        name: name.clone(),
-                        output_name: OutputName::Explicit(name.clone()),
-                        ordinal: Some(index),
-                        position: PositionRange::exact(index),
-                        ranges: Rc::from([]),
-                        candidate_ranges: Rc::from([]),
-                        value: ValueId::Expr(*node),
-                        origin: SlotOrigin::Defined,
-                        structure: Evidence::default(),
-                    })
+        let fields = match self.graph.struct_values.get(&node)? {
+            StructValue::Fields(fields) => fields,
+            StructValue::Column {
+                qualifier: None,
+                column,
+                env,
+            } => return self.column_struct_fields(*env, std::slice::from_ref(column)),
+            StructValue::Column {
+                qualifier: Some(qualifier),
+                column,
+                env,
+            } => {
+                if self
+                    .graph
+                    .scopes
+                    .ambiguous_binding_candidates(*env, qualifier)
+                    .is_some()
+                {
+                    return None;
+                }
+                let binding = self.graph.scopes.lookup(*env, qualifier)?.clone();
+                return self.binding_struct_fields(&binding, std::slice::from_ref(column));
+            }
+        };
+        let elements = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, node))| {
+                OutputElement::Column(ColumnSlot {
+                    id: None,
+                    name: name.clone(),
+                    output_name: OutputName::Explicit(name.clone()),
+                    ordinal: Some(index),
+                    position: PositionRange::exact(index),
+                    ranges: Rc::from([]),
+                    candidate_ranges: Rc::from([]),
+                    value: ValueId::Expr(*node),
+                    origin: SlotOrigin::Defined,
+                    structure: Evidence::default(),
                 })
-                .collect(),
-        )
+            })
+            .collect();
+        Some((elements, Evidence::default()))
     }
 
     /// The schemas that decide what a binding publishes: a physical
