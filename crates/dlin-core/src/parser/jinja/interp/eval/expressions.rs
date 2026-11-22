@@ -757,24 +757,18 @@ impl<'a> Interp<'a> {
                 Arg::Pos(e) => values.push(self.eval(st, e)?),
                 Arg::Kw(key, e) => kwargs.push((key.clone(), self.eval(st, e)?)),
                 Arg::PosSplat(e) | Arg::KwSplat(e) => {
-                    self.eval(st, e)?;
-                    return Ok(AValue::Unknown(self.unsupported("splat argument", span)));
+                    values.push(self.eval(st, e)?);
+                    let causes = self.unsupported("splat argument", span);
+                    return Ok(self.unmodelled_filter(st, &values, &kwargs, causes));
                 }
             }
         }
         if name == "chain" {
             // minijinja's `chain` gives a view that reads its inputs when it
             // is used, so later changes to them show through it. Fusion has no
-            // such filter, so it is not modelled, and a change made through
-            // the view may reach any of the inputs.
+            // such filter, so it is not modelled.
             let causes = self.unsupported("filter:chain", span);
-            let inputs: Vec<AValue> = values
-                .iter()
-                .cloned()
-                .chain(kwargs.iter().map(|(_, value)| value.clone()))
-                .collect();
-            st.clobber_reachable(&inputs, &causes);
-            return Ok(AValue::Unknown(causes));
+            return Ok(self.unmodelled_filter(st, &values, &kwargs, causes));
         }
         if name == "default" || name == "d" {
             // Jinja2 also accepts `default_value=` and `boolean=`; minijinja
@@ -842,10 +836,31 @@ impl<'a> Interp<'a> {
         }
         Ok(match known::filter(name, &frozen) {
             Some(Ok(value)) => self.adopt_result(st, value, span),
-            Some(Err(_)) | None => {
-                AValue::Unknown(self.unsupported(format!("filter:{name}"), span))
+            Some(Err(_)) => AValue::Unknown(self.unsupported(format!("filter:{name}"), span)),
+            None => {
+                let causes = self.unsupported(format!("filter:{name}"), span);
+                self.unmodelled_filter(st, &values, &kwargs, causes)
             }
         })
+    }
+
+    /// The unknown result of a filter that is not modelled. Like an unknown
+    /// call, it may return or change any container of its arguments, so
+    /// those become unknown too.
+    fn unmodelled_filter(
+        &self,
+        st: &mut State,
+        values: &[AValue],
+        kwargs: &[(Arc<str>, AValue)],
+        causes: Causes,
+    ) -> AValue {
+        let inputs: Vec<AValue> = values
+            .iter()
+            .cloned()
+            .chain(kwargs.iter().map(|(_, value)| value.clone()))
+            .collect();
+        st.clobber_reachable(&inputs, &causes);
+        AValue::Unknown(causes)
     }
 }
 

@@ -1055,6 +1055,10 @@ fn views_concatenations_and_dict_order() {
         r#"{% set d = {'n': 'a'} %}{% set merged = d | chain({}) %}{% do d.update({'n': 'b'}) %}{{ ref(merged.n) }}"#,
         r#"{% set xs = ['a'] %}{% set merged = xs | chain([]) %}{% do xs.append('b') %}{{ ref(merged | last) }}"#,
         r#"{% set x = {'n': 'old'} %}{% for y in [x] | chain(range(0)) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // A splat argument is not modelled either.
+        r#"{% set x = {'n': 'old'} %}{% set args = [[x]] %}{% for y in [] | chain(*args) %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
+        // Nor is a filter minijinja does not know.
+        r#"{% set x = {'n': 'old'} %}{% for y in [x] | no_such_filter %}{% do y.update({'n': 'new'}) %}{% endfor %}{{ ref(x.n) }}"#,
     ] {
         let e = extract(sql);
         assert!(
