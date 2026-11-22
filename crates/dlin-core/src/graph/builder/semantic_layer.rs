@@ -44,7 +44,7 @@ pub(super) fn process_semantic_layer(
 
     // Pass 2: build measure_name → semantic_model_name map and add model edges
     let mut measure_to_sem: HashMap<String, String> = HashMap::new();
-    for (sm, yaml_path) in semantic_models {
+    for (sm, _) in semantic_models {
         let sem_id = format!("semantic_model.{}", sm.name);
         let Some(&sem_idx) = gb.node_map.get(&sem_id) else {
             continue;
@@ -69,7 +69,7 @@ pub(super) fn process_semantic_layer(
         if let Some(model_ref) = &sm.model
             && let Some((model_name, version)) = parse_exposure_ref(model_ref)
         {
-            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version, yaml_path.as_path());
+            let dep_idx = gb.get_or_create_phantom_ref(&model_name, version);
             gb.graph
                 .add_edge(dep_idx, sem_idx, EdgeData::direct(EdgeType::Ref));
         }

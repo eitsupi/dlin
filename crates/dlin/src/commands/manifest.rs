@@ -25,9 +25,8 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
     let DagBuild {
         dag,
         project: project_opt,
-        manifest_diagnostics,
         manifest_context,
-        project_gaps: _,
+        ..
     } = build_dag(
         &project_dir,
         &args.source,
@@ -36,7 +35,6 @@ pub(crate) fn run_summary_command(args: SummaryArgs) -> Result<()> {
         args.no_cache,
         args.refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
 
     let (project_name, vars_count, manifest_status) = match args.source {
         SourceType::Manifest => {

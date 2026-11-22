@@ -12,4 +12,5 @@ pub(crate) use manifest::{
 };
 pub(crate) use shared::{
     manifest_project_gaps, read_seed_schemas, resolve_dialect, resolve_manifest_path_or_default,
+    set_verbose,
 };

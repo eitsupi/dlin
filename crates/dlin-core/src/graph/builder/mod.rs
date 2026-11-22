@@ -151,16 +151,16 @@ impl<'a> GraphBuilder<'a> {
 
     /// Add the dependencies interpreted from YAML to the node at `owner`,
     /// creating phantoms for missing targets as for SQL.
-    fn link_yaml(&mut self, owner: NodeIndex, deps: YamlDependencies, origin: &Path) {
+    fn link_yaml(&mut self, owner: NodeIndex, deps: YamlDependencies) {
         let (ref_edge, source_edge) = match self.graph[owner].node_type {
             NodeType::Test => (EdgeType::Test, EdgeType::Test),
             _ => (EdgeType::Ref, EdgeType::Source),
         };
         for (call, at) in &deps.refs {
-            self.link_ref(owner, call, at.clone(), origin, ref_edge);
+            self.link_ref(owner, call, at.clone(), ref_edge);
         }
         for (call, at) in &deps.sources {
-            self.link_source(owner, call, at.clone(), origin, source_edge);
+            self.link_source(owner, call, at.clone(), source_edge);
         }
         self.add_reasons(owner, deps.reasons);
     }
@@ -182,7 +182,6 @@ impl<'a> GraphBuilder<'a> {
         owner: NodeIndex,
         call: &RefCall,
         at: NodeCallSite,
-        origin: &Path,
         edge_type: EdgeType,
     ) {
         let mut reasons = Vec::new();
@@ -205,7 +204,7 @@ impl<'a> GraphBuilder<'a> {
                 });
             }
         }
-        let dep_idx = self.get_or_create_phantom_ref(&call.name, call.version.clone(), origin);
+        let dep_idx = self.get_or_create_phantom_ref(&call.name, call.version.clone());
         if self.graph[dep_idx].node_type == NodeType::Phantom {
             reasons.push(DependencyReason::UnresolvedRef {
                 name: call.name.clone(),
@@ -226,11 +225,9 @@ impl<'a> GraphBuilder<'a> {
         owner: NodeIndex,
         call: &SourceCall,
         at: NodeCallSite,
-        origin: &Path,
         edge_type: EdgeType,
     ) {
-        let dep_idx =
-            self.get_or_create_phantom_source(&call.source_name, &call.table_name, origin);
+        let dep_idx = self.get_or_create_phantom_source(&call.source_name, &call.table_name);
         if self.graph[dep_idx].node_type == NodeType::Phantom {
             self.add_reasons(
                 owner,
@@ -290,12 +287,7 @@ impl<'a> GraphBuilder<'a> {
     /// When `version` is `Some(N)`, resolves only `model.{name}.v{N}` — never
     /// falls back to the unversioned alias so that version-pinned refs don't
     /// silently link to the wrong version.
-    fn get_or_create_phantom_ref(
-        &mut self,
-        ref_name: &str,
-        version: Option<String>,
-        sql_path: &Path,
-    ) -> NodeIndex {
+    fn get_or_create_phantom_ref(&mut self, ref_name: &str, version: Option<String>) -> NodeIndex {
         let dep_id = if let Some(ref v) = version {
             format!("model.{}.v{}", ref_name, v)
         } else {
@@ -308,11 +300,6 @@ impl<'a> GraphBuilder<'a> {
             Some(v) => format!("{}.v{}", ref_name, v),
             None => ref_name.to_string(),
         };
-        crate::warn!(
-            "unresolved ref '{}' in {}",
-            display_name,
-            sql_path.display()
-        );
         let phantom_id = match version.as_deref() {
             Some(v) => format!("model.{}.v{}", ref_name, v),
             None => format!("model.{}", ref_name),
@@ -335,22 +322,11 @@ impl<'a> GraphBuilder<'a> {
     }
 
     /// Get or create a phantom source node, returning its index
-    fn get_or_create_phantom_source(
-        &mut self,
-        source_name: &str,
-        table_name: &str,
-        sql_path: &Path,
-    ) -> NodeIndex {
+    fn get_or_create_phantom_source(&mut self, source_name: &str, table_name: &str) -> NodeIndex {
         let source_id = format!("source.{}.{}", source_name, table_name);
         if let Some(&idx) = self.node_map.get(&source_id) {
             return idx;
         }
-        crate::warn!(
-            "unresolved source '{}.{}' in {}",
-            source_name,
-            table_name,
-            sql_path.display()
-        );
         let label = format!("{}.{}", source_name, table_name);
         self.add_node(NodeData {
             unique_id: source_id,
@@ -651,10 +627,10 @@ fn process_sql_edges(
             (EdgeType::Ref, EdgeType::Source)
         };
         for (call, site) in extraction.refs.iter().zip(&extraction.ref_sites) {
-            gb.link_ref(current_idx, call, at(site), sql_path, ref_edge);
+            gb.link_ref(current_idx, call, at(site), ref_edge);
         }
         for (call, site) in extraction.sources.iter().zip(&extraction.source_sites) {
-            gb.link_source(current_idx, call, at(site), sql_path, source_edge);
+            gb.link_source(current_idx, call, at(site), source_edge);
         }
     }
 
@@ -854,7 +830,7 @@ fn add_generic_test_node(
             continue;
         };
         let deps = gb.evaluate_yaml(&template, text, &unique_id, yaml_path);
-        gb.link_yaml(idx, deps, yaml_path);
+        gb.link_yaml(idx, deps);
     }
 }
 
@@ -1057,7 +1033,7 @@ fn process_yaml_snapshot_nodes(
                 relation.clone()
             };
             let deps = gb.evaluate_yaml(&template, relation, &unique_id, yaml_path);
-            gb.link_yaml(snap_idx, deps, yaml_path);
+            gb.link_yaml(snap_idx, deps);
         }
     }
 }

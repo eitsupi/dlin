@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
 use crate::cli::{DialectArg, SourceType};
 use dlin_core::graph;
 use dlin_core::graph::column_lineage::{DialectClassification, DlinDialect, SeedSchemas};
-use dlin_core::graph::dependency::{ProjectGap, ProjectScope};
+use dlin_core::graph::dependency::{ConfigDiagnostic, ProjectGap, ProjectScope};
 use dlin_core::parser;
+use dlin_core::render::dependency_diagnostics::DependencyDiagnostics;
 
 #[cfg(not(tarpaulin_include))]
 pub(crate) struct ManifestDagContext {
@@ -26,6 +28,8 @@ pub(crate) struct DagBuild {
     pub(crate) manifest_context: Option<ManifestDagContext>,
     /// Gaps of the dependency analysis that are not attributed to a node.
     pub(crate) project_gaps: Vec<ProjectGap>,
+    /// Configuration that may not mean what the user intended (SQL mode).
+    pub(crate) config_diagnostics: Vec<ConfigDiagnostic>,
 }
 
 /// The project gaps of a graph read from a manifest: its dependencies are
@@ -36,9 +40,70 @@ pub(crate) fn manifest_project_gaps() -> Vec<ProjectGap> {
     }]
 }
 
-/// Build the lineage DAG from either a manifest file or by parsing SQL files.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Show the details of the dependency analysis on stderr (`--verbose`).
+pub(crate) fn set_verbose(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
+}
+
+fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Build the lineage DAG from either a manifest file or by parsing SQL
+/// files, and report the manifest load warnings and the dependency
+/// analysis on stderr once.
 #[cfg(not(tarpaulin_include))]
 pub(crate) fn build_dag(
+    project_dir: &Path,
+    source: &SourceType,
+    manifest_path: Option<&PathBuf>,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
+) -> Result<DagBuild> {
+    let build = build_dag_quietly(
+        project_dir,
+        source,
+        manifest_path,
+        cache_dir,
+        no_cache,
+        refresh_cache,
+    )?;
+    warn_manifest_diagnostics(&build.manifest_diagnostics);
+    emit_dependency_diagnostics(&build, project_dir);
+    Ok(build)
+}
+
+/// Print the dependency analysis diagnostics of a freshly built graph,
+/// before any filtering.
+fn emit_dependency_diagnostics(build: &DagBuild, project_dir: &Path) {
+    if dlin_core::is_quiet() {
+        return;
+    }
+    let diagnostics = DependencyDiagnostics::collect(
+        &build.dag,
+        &build.project_gaps,
+        &build.config_diagnostics,
+        Some(project_dir.display().to_string()),
+    );
+    let list = if is_verbose() {
+        diagnostics.verbose_diagnostics()
+    } else {
+        diagnostics.default_diagnostics()
+    };
+    for diagnostic in list {
+        if dlin_core::is_error_format_json() {
+            eprintln!("{}", diagnostic.to_json());
+        } else {
+            eprintln!("{}", diagnostic.to_text());
+        }
+    }
+}
+
+#[cfg(not(tarpaulin_include))]
+fn build_dag_quietly(
     project_dir: &Path,
     source: &SourceType,
     manifest_path: Option<&PathBuf>,
@@ -74,6 +139,7 @@ pub(crate) fn build_dag(
                     manifest_diagnostics: diagnostics,
                     manifest_context: Some(context),
                     project_gaps: manifest_project_gaps(),
+                    config_diagnostics: Vec::new(),
                 });
             }
 
@@ -111,12 +177,15 @@ pub(crate) fn build_dag(
                     manifest_bytes: None,
                 }),
                 project_gaps: manifest_project_gaps(),
+                config_diagnostics: Vec::new(),
             })
         }
         SourceType::Sql => {
             let project = parser::project::DbtProject::load(project_dir)?;
             let paths = project.resolve_paths(project_dir);
             let files = parser::discovery::discover_files(&paths)?;
+            let config_diagnostics =
+                parser::discovery::config_diagnostics(&paths, &files, project_dir, &project.name);
             let build = graph::builder::build_graph_report(
                 project_dir,
                 &project.name,
@@ -129,6 +198,7 @@ pub(crate) fn build_dag(
                 manifest_diagnostics: Vec::new(),
                 manifest_context: None,
                 project_gaps: build.project_gaps,
+                config_diagnostics,
             })
         }
     }

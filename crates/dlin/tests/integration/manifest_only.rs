@@ -129,16 +129,19 @@ fn test_manifest_forward_compatibility_warnings_cli_contract() {
         .expect("failed to run forward-compatible manifest command");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    insta::assert_snapshot!(stderr.as_ref(), @r###"
-Warning: [future_schema_version] manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json
-  Hint: Some resource types may not be understood by this version of dlin
-Warning: [unknown_top_level_key] unknown top-level manifest key: future_resources
-  Hint: The key is retained in Manifest::extra for forward compatibility
-Warning: [unsupported_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'
-  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
-Warning: [unsupported_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'
-  Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
-"###);
+    insta::assert_snapshot!(stderr.as_ref(), @"
+    Warning: [future_schema_version] manifest uses a future dbt schema version: https://schemas.getdbt.com/dbt/manifest/v99/manifest.json
+      Hint: Some resource types may not be understood by this version of dlin
+    Warning: [unknown_top_level_key] unknown top-level manifest key: future_resources
+      Hint: The key is retained in Manifest::extra for forward compatibility
+    Warning: [unsupported_resource_type] manifest resource 'operation.test_project.refresh' in 'nodes' uses unsupported resource type 'operation'
+      Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+    Warning: [unsupported_resource_type] manifest resource 'future.test_project.item' in 'future_resources' uses unsupported resource type 'future_resource'
+      Hint: Upgrade dlin when support for this dbt resource type is available; the resource will be omitted from graph results
+    Info: [dependency_analysis_summary] model dependency analysis is incomplete: 1 node(s) not assessed
+      Why: not assessed: manifest_dependencies
+      Hint: run with --verbose to list each reason. These counts cover the whole project; the `exploration` of an impact report says whether its own result can miss nodes
+    ");
 
     let mut json_args = vec!["--error-format", "json"];
     json_args.extend(common_args);
@@ -149,7 +152,11 @@ Warning: [unsupported_resource_type] manifest resource 'future.test_project.item
     assert!(output.status.success());
     let mut warnings: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
         .lines()
-        .map(|line| serde_json::from_str(line).expect("warning should be JSON"))
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("warning should be JSON")
+        })
+        // The dependency analysis summary is covered by its own tests.
+        .filter(|warning| warning["code"] != "dependency_analysis_summary")
         .collect();
     warnings.sort_by_key(|warning| {
         (
@@ -224,7 +231,13 @@ Warning: [unsupported_resource_type] manifest resource 'future.test_project.item
         .output()
         .expect("failed to run old manifest command");
     assert!(old_output.status.success());
-    insta::assert_snapshot!(String::from_utf8_lossy(&old_output.stderr).as_ref(), @r###""###);
+    // An older manifest raises no load warning; only the summary saying
+    // that manifest dependencies are not assessed remains.
+    insta::assert_snapshot!(String::from_utf8_lossy(&old_output.stderr).as_ref(), @r###"
+Info: [dependency_analysis_summary] model dependency analysis is incomplete: 11 node(s) not assessed
+  Why: not assessed: manifest_dependencies
+  Hint: run with --verbose to list each reason. These counts cover the whole project; the `exploration` of an impact report says whether its own result can miss nodes
+"###);
 }
 
 #[test]

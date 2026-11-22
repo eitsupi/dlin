@@ -70,6 +70,8 @@ mod bigquery_lineage;
 mod cli;
 #[path = "integration/column_source_relation.rs"]
 mod column_source_relation;
+#[path = "integration/dependency_analysis.rs"]
+mod dependency_analysis;
 #[path = "integration/error_format.rs"]
 mod error_format;
 #[path = "integration/freshness.rs"]

@@ -23,9 +23,8 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     let DagBuild {
         dag,
         project: project_opt,
-        manifest_diagnostics,
         manifest_context,
-        project_gaps: _,
+        ..
     } = build_dag(
         &project_dir,
         &args.source,
@@ -34,7 +33,6 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -207,9 +205,8 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
     let DagBuild {
         dag,
         project: project_opt,
-        manifest_diagnostics,
         manifest_context,
-        project_gaps: _,
+        ..
     } = build_dag(
         &project_dir,
         &args.source,
@@ -218,7 +215,6 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Merge CLI positional args and stdin, then resolve file paths to node names
     let stdin_lines = input::read_stdin_lines();
@@ -433,9 +429,9 @@ pub(crate) fn run_impact_command(
     let DagBuild {
         dag,
         project: project_opt,
-        manifest_diagnostics,
         manifest_context: _,
         project_gaps,
+        ..
     } = build_dag(
         &project_dir,
         source,
@@ -444,7 +440,6 @@ pub(crate) fn run_impact_command(
         no_cache,
         refresh_cache,
     )?;
-    warn_manifest_diagnostics(&manifest_diagnostics);
 
     // Resolve file paths to model names (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {

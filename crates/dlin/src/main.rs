@@ -29,6 +29,7 @@ fn main() {
 
     // Set error format before anything else so warnings/errors use it
     dlin_core::set_error_format_json(cli.error_format == ErrorFormat::Json);
+    commands::set_verbose(cli.verbose);
 
     let result = match cli.command {
         Command::Graph(args) => {

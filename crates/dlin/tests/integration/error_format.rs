@@ -85,7 +85,9 @@ fn test_error_format_json_warning() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     // stderr may contain multiple lines; find the JSON warning
-    let warning_line = stderr.lines().find(|l| l.contains("\"warning\""));
+    let warning_line = stderr
+        .lines()
+        .find(|l| l.contains("\"warning\"") && l.contains("bogus_type"));
     assert!(
         warning_line.is_some(),
         "Expected JSON warning in stderr, got: {stderr}"
