@@ -390,3 +390,62 @@ fn struct_column_named_like_its_relation_binds_as_its_value_does() {
     assert_eq!(value, ["renamed#0 C[src.a]", "Closed"]);
     assert_eq!(fields, ["x#0 C[src.a]", "Closed"]);
 }
+
+#[test]
+fn duckdb_struct_pack_expands_like_a_struct_literal() {
+    for sql in [
+        r#"
+        WITH packed AS (SELECT struct_pack(col_a := src.a, col_b := src.b) AS item FROM src),
+        e AS (SELECT item.*, 3 AS flag FROM packed)
+        SELECT * FROM e
+        "#,
+        r#"
+        WITH packed AS (SELECT {'col_a': src.a, 'col_b': src.b} AS item FROM src),
+        e AS (SELECT item.*, 3 AS flag FROM packed)
+        SELECT * FROM e
+        "#,
+    ] {
+        assert_eq!(
+            render(sql, Dialect::DuckDb),
+            [
+                "col_a#0 C[src.a]",
+                "col_b#1 C[src.b]",
+                "flag#2 C[]",
+                "Closed"
+            ],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn duckdb_struct_pack_with_a_field_of_the_listed_name_is_ambiguous() {
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT struct_pack(FLAG := 1) AS item),
+            e AS (SELECT item.*, 2 AS flag FROM packed)
+            SELECT flag FROM e
+            "#,
+            Dialect::DuckDb,
+        ),
+        ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"]
+    );
+}
+
+#[test]
+fn struct_constructor_of_another_dialect_is_not_assumed() {
+    // struct_pack is a DuckDB function; elsewhere it may be a user function
+    // that returns anything.
+    assert_eq!(
+        render(
+            r#"
+            WITH packed AS (SELECT struct_pack(col_a := 1) AS item),
+            e AS (SELECT item.*, 2 AS flag FROM packed)
+            SELECT flag FROM e
+            "#,
+            Dialect::BigQuery,
+        ),
+        ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"]
+    );
+}

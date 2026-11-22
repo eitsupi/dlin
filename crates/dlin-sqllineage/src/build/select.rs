@@ -1084,12 +1084,16 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
 }
 
 /// The fields of a STRUCT that `expr` builds in place, with the expression
-/// of each: a STRUCT literal or a `DuckDB` struct literal (`{'a': 1}`).
+/// of each: a STRUCT literal, or in `DuckDB` a struct literal (`{'a': 1}`)
+/// or `struct_pack(a := 1)`.
 fn struct_value_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Ident, &Expr)>> {
     match expr {
         Expr::Nested(inner) => struct_value_fields(inner, dialect),
         Expr::Struct { .. } => struct_literal_fields(expr, dialect),
-        Expr::Dictionary(fields) => {
+        Expr::Function(function) if dialect == crate::Dialect::DuckDb => {
+            struct_pack_fields(function, dialect)
+        }
+        Expr::Dictionary(fields) if dialect == crate::Dialect::DuckDb => {
             let names = distinct_names(fields.iter().map(|field| Some(&field.key)), dialect)?;
             Some(
                 names
@@ -1100,6 +1104,52 @@ fn struct_value_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Iden
         }
         _ => None,
     }
+}
+
+/// The fields of a `DuckDB` `struct_pack` call, each named by its argument
+/// (`struct_pack(a := 1)`). A call with an unnamed argument, or any other
+/// clause, is not one whose fields are known.
+fn struct_pack_fields(
+    function: &sqlparser::ast::Function,
+    dialect: crate::Dialect,
+) -> Option<Vec<(Ident, &Expr)>> {
+    use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArgOperator, FunctionArguments};
+    let [sqlparser::ast::ObjectNamePart::Identifier(name)] = function.name.0.as_slice() else {
+        return None;
+    };
+    if name.quote_style.is_some()
+        || !name.value.eq_ignore_ascii_case("struct_pack")
+        || function.over.is_some()
+        || function.filter.is_some()
+        || !function.within_group.is_empty()
+    {
+        return None;
+    }
+    let FunctionArguments::List(list) = &function.args else {
+        return None;
+    };
+    if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+        return None;
+    }
+    let pairs: Vec<(&sqlparser::ast::Ident, &Expr)> = list
+        .args
+        .iter()
+        .map(|arg| match arg {
+            FunctionArg::Named {
+                name,
+                arg: FunctionArgExpr::Expr(expr),
+                operator: FunctionArgOperator::Assignment,
+            } => Some((name, expr)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let names = distinct_names(pairs.iter().map(|(name, _)| Some(*name)), dialect)?;
+    Some(
+        names
+            .into_iter()
+            .zip(pairs.into_iter().map(|(_, expr)| expr))
+            .collect(),
+    )
 }
 
 /// The fields of a STRUCT literal with the expression of each: named by its
