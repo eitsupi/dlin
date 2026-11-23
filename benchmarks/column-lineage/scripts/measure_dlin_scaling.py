@@ -117,9 +117,24 @@ def run_output(command: list[str]) -> str:
 
 
 def json_value(text: str) -> object:
-    """The JSON value of an output. Comparing values ignores formatting, key
-    order and number spelling; array order still counts."""
     return json.loads(text)
+
+
+def same_json(left: object, right: object) -> bool:
+    """Whether two parsed JSON values are equal.
+
+    Key order and number spelling (`1` and `1.0`) do not count; array order
+    does, and a boolean never equals a number.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(same_json(left[key], right[key]) for key in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(same_json(a, b) for a, b in zip(left, right))
+    if isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
+        return False
+    return left == right
 
 
 def measure(binaries: list[tuple[str, str]], profiles: list[str], runs: int, warmup: int) -> dict:
@@ -150,11 +165,14 @@ def measure(binaries: list[tuple[str, str]], profiles: list[str], runs: int, war
                 finally:
                     shutil.rmtree(cache, ignore_errors=True)
                 values = {mode: json_value(text) for mode, text in outputs.items()}
-                if not values["no_cache"] == values["fill"] == values["warm"]:
+                if not (
+                    same_json(values["no_cache"], values["fill"])
+                    and same_json(values["no_cache"], values["warm"])
+                ):
                     mismatches.append(f"{name} {label} {binary_label}: outputs differ between cache modes")
                 if reference is None:
                     reference = (binary_label, values["no_cache"])
-                elif values["no_cache"] != reference[1]:
+                elif not same_json(values["no_cache"], reference[1]):
                     mismatches.append(f"{name} {label}: {binary_label} output differs from {reference[0]}")
             rows.append(row)
             print(f"measured {name} {label}", file=sys.stderr)
