@@ -367,14 +367,14 @@ Results are split into `confirmed` impacts, `possible` impacts reached through a
 
 ### Performance benchmark
 
-Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
+Correctness-gated medians from the synthetic scalability run (10 runs after 2 warmups, 60-second timeout per run):
 
 | Workload | dlin 0.3.0-rc.2, no cache / warm cache | [Parrant 0.21.1](https://pypi.org/project/parrant/0.21.1/) | [dbt-meta 0.3.10](https://pypi.org/project/dbt-meta/0.3.10/) with `sqlglot[c]`, build + query |
 | --- | ---: | ---: | ---: |
-| Volume, 100,150 columns, single upstream | 83.3 ms / 82.5 ms | 25.2 s | build >120 s timeout; query not run |
-| Deep 64, single upstream | 113 ms / 62.6 ms | 938 ms | 1.57 s + 367 ms |
-| Fan-out 128, downstream | 57.1 ms / 29.6 ms | 1.17 s | 2.61 s + 369 ms |
-| Wide 200 columns × 8 models, single upstream | 50.5 ms / 24.9 ms | 931 ms | 5.39 s + 369 ms |
+| Volume, 100,150 columns, single upstream | 76.2 ms / 74.6 ms | 24.5 s | build >60 s timeout; query not run |
+| Deep 64, single upstream | 87.2 ms / 54.5 ms | 823 ms | 1.42 s + 341 ms |
+| Fan-out 128, downstream | 59.7 ms / 31.2 ms | 1.14 s | 2.51 s + 346 ms |
+| Wide 200 columns × 8 models, single upstream | 47.0 ms / 22.3 ms | 813 ms | 4.89 s + 339 ms |
 
 These synthetic results use artifacts derived from the real dbt fixture. Each time is a separate process, so it includes reading the artifacts. dlin "no cache" uses `--no-cache` and includes SQL analysis; "warm cache" reuses a cache filled once by the same query. Parrant has no persistent cache and includes parsing. dbt-meta builds a lineage artifact once and then queries it, so its end-to-end time is build plus query; for repeated queries over one build, compare its query time with dlin's warm cache. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 

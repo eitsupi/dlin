@@ -347,9 +347,9 @@ def metadata(path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="append", required=True)
-    parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--runs", type=int, default=10)
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--allow-manual", action="store_true")
     args = parser.parse_args()
     if args.runs < 1 or args.warmup < 0 or args.timeout < 1:

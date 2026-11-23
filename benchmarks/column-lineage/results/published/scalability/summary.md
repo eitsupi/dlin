@@ -1,10 +1,10 @@
 # Synthetic scalability results
 
-These are three-run, one-warmup measurements with a 120-second inner timeout. They use synthetic artifacts derived from the real dbt fixture and do not represent real projects. No single winner is declared.
+Each time is the median of ten runs after two warmups, with a 60-second timeout on every run, and each ratio compares the medians of consecutive profiles. They use synthetic artifacts derived from the real dbt fixture and do not represent real projects. No single winner is declared.
 
 ## Run context
 
-Tools: dlin 0.3.0-rc.2, parrant 0.21.1, dbt-meta 0.3.10. Runs/warmup/timeout: 3/1/120 seconds. Environment: Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.41, x86_64, AMD Ryzen 7 7735HS with Radeon Graphics.
+Tools: dlin 0.3.0-rc.2, parrant 0.21.1, dbt-meta 0.3.10. Runs/warmup/timeout: 10/2/60 seconds. Environment: Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.41, x86_64, AMD Ryzen 7 7735HS with Radeon Graphics.
 
 ## Reproduce
 
@@ -34,35 +34,35 @@ uv run --locked python scripts/summarize_scalability_results.py
 
 | Profile | background models | Columns | Edges | dlin_upstream | dlin_upstream_warm | parrant_upstream | dbt_meta_build | dbt_meta_upstream |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| volume-1k | 20 | 1150 | 1050 | 0.007492s | 0.006014s | 1.115308s | 1.327084s | 0.339674s |
-| volume-10k | 200 | 10150 | 10050 | 0.012925s; 1.73x | 0.012207s; 2.03x | 2.495647s; 2.24x | 9.538371s; 7.19x | 0.464381s; 1.37x |
-| volume-100k | 2000 | 100150 | 100050 | 0.083276s; 6.44x | 0.082528s; 6.76x | 25.174748s; 10.09x | timeout | not-run |
+| volume-1k | 20 | 1150 | 1050 | 0.006159s | 0.004963s | 0.671533s | 1.224555s | 0.336573s |
+| volume-10k | 200 | 10150 | 10050 | 0.012701s; 2.06x | 0.014786s; 2.98x | 2.357241s; 3.51x | 7.822864s; 6.39x | 0.371212s; 1.10x |
+| volume-100k | 2000 | 100150 | 100050 | 0.076240s; 6.00x | 0.074587s; 5.04x | 24.514628s; 10.40x | timeout | not-run |
 
 ## wide
 
 | Profile | width | Columns | Edges | dlin_upstream | dlin_upstream_warm | dlin_whole_model | parrant_upstream | parrant_whole_model | dbt_meta_build | dbt_meta_upstream | dbt_meta_whole_model |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| wide-25 | 25 | 225 | 200 | 0.012048s | 0.007154s | 0.016839s | 0.624431s | not_benchmarked | 0.824282s | 0.390332s | unsupported |
-| wide-50 | 50 | 450 | 400 | 0.018910s; 1.57x | 0.013532s; 1.89x | 0.023000s; 1.37x | 0.643397s; 1.03x | not_benchmarked | 1.090446s; 1.32x | 0.392545s; 1.01x | unsupported |
-| wide-100 | 100 | 900 | 800 | 0.036022s; 1.90x | 0.016559s; 1.22x | 0.036996s; 1.61x | 0.751878s; 1.17x | not_benchmarked | 1.825581s; 1.67x | 0.421972s; 1.07x | unsupported |
-| wide-200 | 200 | 1800 | 1600 | 0.050524s; 1.40x | 0.024868s; 1.50x | 0.063122s; 1.71x | 0.930807s; 1.24x | not_benchmarked | 5.392553s; 2.95x | 0.369244s; 0.88x | unsupported |
+| wide-25 | 25 | 225 | 200 | 0.011778s | 0.008105s | 0.011490s | 0.553009s | not_benchmarked | 0.738950s | 0.332710s | unsupported |
+| wide-50 | 50 | 450 | 400 | 0.015797s; 1.34x | 0.009083s; 1.12x | 0.018379s; 1.60x | 0.573694s; 1.04x | not_benchmarked | 0.884138s; 1.20x | 0.334235s; 1.00x | unsupported |
+| wide-100 | 100 | 900 | 800 | 0.028010s; 1.77x | 0.013119s; 1.44x | 0.032970s; 1.79x | 0.669007s; 1.17x | not_benchmarked | 1.602577s; 1.81x | 0.342903s; 1.03x | unsupported |
+| wide-200 | 200 | 1800 | 1600 | 0.047008s; 1.68x | 0.022275s; 1.70x | 0.054895s; 1.66x | 0.813441s; 1.22x | not_benchmarked | 4.893203s; 3.05x | 0.339338s; 0.99x | unsupported |
 
 ## deep
 
 | Profile | depth | Columns | Edges | dlin_upstream | dlin_upstream_warm | parrant_upstream | dbt_meta_build | dbt_meta_upstream |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| deep-8 | 8 | 225 | 200 | 0.011333s | 0.008212s | 0.609147s | 0.829950s | 0.382406s |
-| deep-16 | 16 | 425 | 400 | 0.020917s; 1.85x | 0.010962s; 1.33x | 0.668580s; 1.10x | 0.909379s; 1.10x | 0.417846s; 1.09x |
-| deep-32 | 32 | 825 | 800 | 0.044724s; 2.14x | 0.022282s; 2.03x | 0.773363s; 1.16x | 1.124643s; 1.24x | 0.392436s; 0.94x |
-| deep-64 | 64 | 1625 | 1600 | 0.113077s; 2.53x | 0.062594s; 2.81x | 0.937985s; 1.21x | 1.573464s; 1.40x | 0.366985s; 0.94x |
+| deep-8 | 8 | 225 | 200 | 0.010581s | 0.006273s | 0.541961s | 0.736368s | 0.333303s |
+| deep-16 | 16 | 425 | 400 | 0.018395s; 1.74x | 0.010346s; 1.65x | 0.589945s; 1.09x | 0.788199s; 1.07x | 0.339883s; 1.02x |
+| deep-32 | 32 | 825 | 800 | 0.037271s; 2.03x | 0.019197s; 1.86x | 0.676518s; 1.15x | 0.938882s; 1.19x | 0.332720s; 0.98x |
+| deep-64 | 64 | 1625 | 1600 | 0.087243s; 2.34x | 0.054455s; 2.84x | 0.822737s; 1.22x | 1.416833s; 1.51x | 0.340525s; 1.02x |
 
 ## fanout
 
 | Profile | branches | Columns | Edges | dlin_downstream | dlin_downstream_warm | parrant_downstream | dbt_meta_build | dbt_meta_upstream | dbt_meta_downstream |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fanout-8 | 8 | 250 | 225 | 0.012378s | 0.009485s | 0.614660s | 0.817926s | 0.407835s | 0.375949s |
-| fanout-32 | 32 | 850 | 825 | 0.023851s; 1.93x | 0.011630s; 1.23x | 0.781886s; 1.27x | 1.067700s; 1.31x | 0.375307s; 0.92x | 0.376379s; 1.00x |
-| fanout-128 | 128 | 3250 | 3225 | 0.057059s; 2.39x | 0.029600s; 2.55x | 1.165360s; 1.49x | 2.611746s; 2.45x | 0.351889s; 0.94x | 0.368657s; 0.98x |
+| fanout-8 | 8 | 250 | 225 | 0.008460s | 0.005121s | 0.548366s | 0.755769s | 0.350458s | 0.341921s |
+| fanout-32 | 32 | 850 | 825 | 0.020852s; 2.46x | 0.011427s; 2.23x | 0.685644s; 1.25x | 0.962933s; 1.27x | 0.334387s; 0.95x | 0.335741s; 0.98x |
+| fanout-128 | 128 | 3250 | 3225 | 0.059685s; 2.86x | 0.031244s; 2.73x | 1.143352s; 1.67x | 2.507205s; 2.60x | 0.347852s; 1.04x | 0.345718s; 1.03x |
 
 ## Method and limitations
 
@@ -71,4 +71,5 @@ uv run --locked python scripts/summarize_scalability_results.py
 - Parrant is installed with SQLGlot 26.33.0. dbt-meta is installed with `sqlglot[c]` 30.33.0, the compiled SQLGlot its documentation recommends; the preflight checks both.
 - A build-then-query tool answers repeated queries from its artifact, so for repeated use compare dbt-meta's query time with dlin's warm-cache time; for a single query, compare the end-to-end times.
 - Peak RSS is N/A. Canva is excluded. `unsupported` means the tool has no such query; `not_benchmarked` means the tool runs it but its output cannot be validated (Parrant's whole-model selection returns text, not per-column JSON). Invalid results and timeouts are also shown as non-numeric statuses.
+- The median keeps a single slow run, such as one disturbed by other work on the machine, from moving the reported time. `results.json` also keeps every run time with the mean, standard deviation, minimum and maximum.
 - volume-100k dbt_meta_build timed out; scenarios that depend on it are not-run and have null ratios.
