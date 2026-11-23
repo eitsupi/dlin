@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -444,7 +445,7 @@ pub(super) fn compute_column_impact(
     let initial_uid = initial_node.unique_id.clone();
     let original_input_uid = initial_uid.clone();
     let input_reachable = downstream_model_ids(manifest, &initial_uid);
-    let mut lineage_cache: HashMap<String, InternalModelColumnLineage> = HashMap::new();
+    let mut lineage_cache: HashMap<String, Arc<InternalModelColumnLineage>> = HashMap::new();
     ensure_lineage(analysis, &mut lineage_cache, &initial_uid);
 
     // The requested column is looked up in the output slots of its model like
@@ -1273,7 +1274,7 @@ fn downstream_model_ids(manifest: &Manifest, start: &str) -> BTreeSet<String> {
 
 fn ensure_lineage(
     analysis: &mut ColumnLineageAnalysis<'_>,
-    cache: &mut HashMap<String, InternalModelColumnLineage>,
+    cache: &mut HashMap<String, Arc<InternalModelColumnLineage>>,
     unique_id: &str,
 ) {
     if !cache.contains_key(unique_id) {

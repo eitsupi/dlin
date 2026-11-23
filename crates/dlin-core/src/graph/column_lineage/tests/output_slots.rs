@@ -368,12 +368,14 @@ fn mixed_case_outputs(dialect: DlinDialect) -> ModelColumnLineage {
     single(&manifest, "m", dialect)
 }
 
+/// Look `name` up in the output, and check that the name index built for
+/// repeated lookups gives the same answer.
 fn lookup(result: &ModelColumnLineage, name: &str, dialect: DlinDialect) -> SlotLookup {
-    result
-        .output
-        .as_ref()
-        .unwrap()
-        .lookup(&Ident::parse_reference(name), dialect)
+    let output = result.output.as_ref().unwrap();
+    let name = Ident::parse_reference(name);
+    let found = output.lookup(&name, dialect);
+    assert_eq!(output.name_index(dialect).lookup(&name), found, "{name}");
+    found
 }
 
 fn unique(slot: usize) -> SlotLookup {
@@ -1009,4 +1011,27 @@ fn cache_file_path(project_dir: &std::path::Path) -> std::path::PathBuf {
     project_dir
         .join(CACHE_DIR)
         .join(COLUMN_LINEAGE_CACHE_FILENAME)
+}
+
+#[test]
+fn a_session_shares_one_lineage_per_model() {
+    // The cross-model trace enters an upstream model once for every root slot
+    // that reaches it, so the session hands out the same result each time
+    // rather than a copy.
+    let manifest = project(&[
+        ("base", &[], "SELECT a, b FROM raw.t"),
+        ("top", &["base"], "SELECT a, b FROM base"),
+    ]);
+    let mut cache = ColumnLineageCache::disabled();
+    let mut analysis = ColumnLineageAnalysis::new(&manifest, CACHE_DIALECT, &mut cache);
+    let first = analysis.compute_column_lineage_internal("base");
+    let again = analysis.compute_column_lineage_internal(&model_id("base"));
+    assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+    let report = analysis.compute_cross_model_column_lineage("top");
+    assert_eq!(report.names(), ["a", "b"]);
+    assert!(std::sync::Arc::ptr_eq(
+        &first,
+        &analysis.compute_column_lineage_internal("base")
+    ));
 }
