@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+import bounded_run
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "local" / "preflight"
@@ -58,14 +60,7 @@ def run_command(
     stdout_file = result_path(tool, command, "stdout")
     stderr_file = result_path(tool, command, "stderr")
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
+        completed = bounded_run.run(argv, ROOT, 30)
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
         stderr = error.stderr or ""
