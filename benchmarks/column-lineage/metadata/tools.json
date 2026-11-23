@@ -33,7 +33,7 @@
       "version": "0.21.1",
       "binary": "parrant",
       "version_command": "parrant --version",
-      "install": "uv tool install --reinstall parrant==0.21.1",
+      "install": "uv tool install --reinstall --with sqlglot==26.33.0 parrant==0.21.1",
       "commands": {
         "upstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select +i01_deep_08.amount_double --format json",
         "downstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select i05_fanout_base.amount+ --format json"
@@ -55,7 +55,7 @@
       "version": "0.3.10",
       "binary": "meta",
       "version_command": "meta --version",
-      "install": "uv tool install --reinstall dbt-meta==0.3.10",
+      "install": "uv tool install --reinstall --with 'sqlglot[c]==30.33.0' dbt-meta==0.3.10",
       "commands": {
         "build": "meta lineage build --manifest artifacts/manifest.json --catalog artifacts/catalog.json --output results/local/preflight/dbt-meta-lineage.json --json --no-compile",
         "upstream": "meta lineage column --artifact results/local/preflight/dbt-meta-lineage.json --json i01_deep_08.amount_double",

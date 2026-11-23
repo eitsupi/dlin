@@ -123,8 +123,32 @@ def reported_version(stdout: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+SQLGLOT_PROBE = (
+    "import sqlglot, sqlglot.parser; "
+    "print(sqlglot.__version__, 'compiled' if sqlglot.parser.__file__.endswith('.so') else 'pure')"
+)
+
+
+def check_sqlglot(path: Path, expected: tuple[str, str]) -> None:
+    """Check the SQLGlot in the tool's environment, found through its script's shebang."""
+    shebang = path.read_text(errors="replace").splitlines()[0]
+    assert shebang.startswith("#!"), f"{path} is not a Python script"
+    completed = subprocess.run(
+        [shebang[2:].strip(), "-c", SQLGLOT_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    actual = tuple(completed.stdout.split())
+    assert actual == expected, f"expected SQLGlot {' '.join(expected)}, got {completed.stdout.strip()!r}"
+
+
 def executable(
-    binary: str, expected_version: str, label: str | None = None
+    binary: str,
+    expected_version: str,
+    label: str | None = None,
+    sqlglot: tuple[str, str] | None = None,
 ) -> tuple[str | None, dict[str, object]]:
     tool = label or binary
     path = shutil.which(binary)
@@ -140,7 +164,10 @@ def executable(
         assert actual_version == expected_version, (
             f"expected version {expected_version!r}, got {stdout.strip()!r}"
         )
-        return f"version {expected_version}"
+        if sqlglot is None:
+            return f"version {expected_version}"
+        check_sqlglot(resolved, sqlglot)
+        return f"version {expected_version}; SQLGlot {' '.join(sqlglot)}"
 
     status = run_command(tool, "version", [path, "--version"], check_version)
     return (path if status["valid"] else None), status
@@ -331,7 +358,7 @@ def main() -> int:
             ]
         )
 
-    parrant, status = executable("parrant", "0.21.1")
+    parrant, status = executable("parrant", "0.21.1", sqlglot=("26.33.0", "pure"))
     statuses.append(status)
     if parrant:
         statuses.append(
@@ -378,7 +405,7 @@ def main() -> int:
             ]
         )
 
-    meta, status = executable("meta", "0.3.10", "dbt-meta")
+    meta, status = executable("meta", "0.3.10", "dbt-meta", sqlglot=("30.33.0", "compiled"))
     statuses.append(status)
     if meta:
         statuses.append(

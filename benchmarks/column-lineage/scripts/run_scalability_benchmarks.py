@@ -273,11 +273,12 @@ def probe_and_record(name: str, tool: str, kind: str, argv: list[str], validator
     return record["status"] == "valid"
 
 
-def probe_unsupported(name: str, tool: str, kind: str, argv: list[str], reason: str, benchmark_dir: Path, timeout: int, records: list[dict]) -> None:
+def probe_not_benchmarked(name: str, tool: str, kind: str, argv: list[str], reason: str, benchmark_dir: Path, timeout: int, records: list[dict]) -> None:
+    """Record a query the tool runs but whose output cannot be validated against the workload."""
     stdout = benchmark_dir / f"{name}.probe.stdout"
     stderr = benchmark_dir / f"{name}.probe.stderr"
     exit_code = run_capture(argv, ROOT, timeout, stdout, stderr)
-    records.append({"name": name, "tool": tool, "kind": kind, "command": command_string(argv), "status": "unsupported", "exit_code": exit_code, "reason": reason, "probe_stdout": rel(stdout), "probe_stderr": rel(stderr), "raw_stdout": None, "raw_stderr": None, "hyperfine_json": None})
+    records.append({"name": name, "tool": tool, "kind": kind, "command": command_string(argv), "status": "not_benchmarked", "exit_code": exit_code, "reason": reason, "probe_stdout": rel(stdout), "probe_stderr": rel(stderr), "raw_stdout": None, "raw_stderr": None, "hyperfine_json": None})
 
 
 def record_unsupported(name: str, tool: str, kind: str, reason: str, records: list[dict]) -> None:
@@ -395,7 +396,7 @@ def main() -> int:
                 measure(records[-1], parrant_up, benchmark_dir, args.runs, args.warmup, args.timeout)
             if workload["family"] == "wide":
                 whole = ["parrant", "--manifest", rel(manifest_path), "--catalog", rel(catalog_path), "--select", f"+{model_name_value}", "--format", "json"]
-                probe_unsupported("parrant_whole_model", "parrant", "whole_model_parse_included", whole, "Parrant whole-model selection returns text rather than the JSON column schema; not benchmarked", benchmark_dir, args.timeout, records)
+                probe_not_benchmarked("parrant_whole_model", "parrant", "whole_model_parse_included", whole, "Parrant selects a whole model, but returns text rather than per-column JSON, so the result cannot be validated", benchmark_dir, args.timeout, records)
         else:
             downstream = workload["selected_queries"]["downstream"]
             parrant_down = ["parrant", "--manifest", rel(manifest_path), "--catalog", rel(catalog_path), "--select", f"{model_name(downstream['model'])}.{downstream['column']}+", "--format", "json"]

@@ -114,6 +114,7 @@ def scenario_record(scenario: dict, runs: int) -> dict:
         "status": status,
         "reason": reason,
         "command": scenario.get("command"),
+        "cache_fill_command": scenario.get("cache_fill_command"),
         "sample_count": stats["sample_count"],
         "raw_times": stats["raw_times"],
         "mean": stats["mean"],
@@ -273,7 +274,9 @@ def markdown(result: dict) -> str:
         "",
         "- dlin scenarios without a suffix use `--no-cache` and include manifest loading, SQL analysis and the query. `_warm` scenarios reuse a cache filled once by the same query with `--refresh-cache`. OS cache drop is not performed.",
         "- Parrant has no persistent cache; its timings include project parsing. dbt-meta build and query are separate scenarios; its end-to-end time is build plus query.",
-        "- Peak RSS is N/A. Canva is excluded. Whole-model unsupported scenarios and invalid/timeouts are shown as non-numeric statuses.",
+        "- Parrant is installed with SQLGlot 26.33.0. dbt-meta is installed with `sqlglot[c]` 30.33.0, the compiled SQLGlot its documentation recommends; the preflight checks both.",
+        "- A build-then-query tool can answer repeated queries from its artifact: dbt-meta's query alone can be faster than a dlin query without a cache. Compare dlin's warm-cache time with it for repeated use, and the end-to-end times for a single query.",
+        "- Peak RSS is N/A. Canva is excluded. `unsupported` means the tool has no such query; `not_benchmarked` means the tool runs it but its output cannot be validated (Parrant's whole-model selection returns text, not per-column JSON). Invalid results and timeouts are also shown as non-numeric statuses.",
     ])
     for profile in result["profiles"]:
         for scenario in profile["scenarios"]:

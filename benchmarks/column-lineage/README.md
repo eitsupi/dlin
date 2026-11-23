@@ -9,12 +9,12 @@ From `benchmarks/column-lineage`:
 ```sh
 uv sync --locked
 uv tool install --reinstall dlin-cli==0.3.0rc1
-uv tool install --reinstall parrant==0.21.1
-uv tool install --reinstall dbt-meta==0.3.10
+uv tool install --reinstall --with sqlglot==26.33.0 parrant==0.21.1
+uv tool install --reinstall --with 'sqlglot[c]==30.33.0' dbt-meta==0.3.10
 cargo install hyperfine --version 1.19.0 --locked
 ```
 
-The comparison CLIs are intentionally installed as isolated `uv tool` environments rather than project dependencies: Parrant 0.21.1 requires `sqlglot>=26.8,<27` (it resolves SQLGlot 26.33.0), while dbt-meta 0.3.10 requires `sqlglot>=30` (it resolves SQLGlot 30.33.0) and the pinned dbt environment resolves SQLGlot 30.x.
+The comparison CLIs are intentionally installed as isolated `uv tool` environments rather than project dependencies: Parrant 0.21.1 requires `sqlglot>=26.8,<27`, while dbt-meta 0.3.10 requires `sqlglot>=30` and the pinned dbt environment resolves SQLGlot 30.x. SQLGlot affects both speed and results, so the install commands pin it. dbt-meta is installed with `sqlglot[c]`, the compiled SQLGlot that its documentation recommends; Parrant does not recommend an accelerator. The preflight checks each tool's SQLGlot version and whether it is compiled.
 
 Run the small benchmark with these four commands:
 
