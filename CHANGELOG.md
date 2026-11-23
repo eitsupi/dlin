@@ -1,21 +1,20 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0-rc.2] - 2026-11-23
 
 ### Changes
 
-- Column-level lineage is no longer Experimental. Results that cannot be traced completely are still reported as partial with the reason and the place where tracing stopped
+- Column-level lineage is no longer Experimental. Results that cannot be traced completely are still reported as partial with the reason and the place where tracing stopped (#290)
 
 ### Performance
 
-- Look up each relation's columns once per SQL analysis and find a column by an index of its names, instead of rebuilding and scanning the column list for every column reference. Column lineage without a cache no longer grows with the square of a model's width; a single-column upstream query on 8 chained models of 200 columns took about half the time
-- Share each model's own column lineage within a run instead of copying it at every model boundary, and find an upstream output by an index of its names. Tracing no longer grows with the square of the width; on 8 chained models of 200 columns, a single-column upstream query took about 45 ms instead of 490 ms without a cache, and 21 ms instead of 200 ms with a warm cache
+- Column lineage of wide models no longer grows with the square of the width. Each SQL analysis looks up a relation's columns once and finds them by name through an index, and a run shares each model's lineage instead of copying it at every model boundary. On 8 chained models of 200 columns, a single-column upstream query takes about 50 ms instead of 490 ms without a cache, and about 23 ms instead of 200 ms with a warm cache (#292, #293)
 
 ### Bug Fixes
 
-- Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT.
-- Trace named STRUCT field references to the selected field when its binding and shape are known.
-- Report the diagnostics of `dlin column downstream` and the MCP `get_column_lineage` tool with `direction: downstream` in the same order on every run. The dependents of a model were visited in the manifest's hash order, so the order of `errors` changed between runs
+- Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT. One field was dropped while the result was reported as complete (#288)
+- Trace a named STRUCT field reference, such as `s.x` in an expression, to the field it selects when its binding and shape are known, instead of to every field of the STRUCT (#289)
+- Report the diagnostics of `dlin column downstream` and the MCP `get_column_lineage` tool with `direction: downstream` in the same order on every run (#294)
 
 ## [0.3.0-rc.1] - 2026-11-23
 
