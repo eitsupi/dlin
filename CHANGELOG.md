@@ -1,21 +1,21 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0-rc.1] - 2026-11-23
 
 ### Breaking Changes
 
-- Impact reports exclude tests by default. Completeness and no-impact proofs apply to the reported `node_types`. JSON uses null for each affected count whose type is outside the selection and for `overall_severity` when the result is empty.
-- Rust API: `compute_impact` takes an `ImpactScope` with at least one selected node type.
+- `dlin impact` and the MCP `get_impact` tool leave tests out by default and report every other node type. A test is the end of a path in dbt, so an unanalysed test body no longer makes every impact exploration incomplete. Completeness and `proves_no_impact` apply to the reported `node_types`. In JSON, `affected_models`, `affected_tests` and `affected_exposures` are null when their type is not selected, and `overall_severity` is null when no selected node was reached. Use `--node-type model,test` to include tests (#284)
+- Rust API: `compute_impact` takes an `ImpactScope`, which holds at least one node type (#284)
 
 ### Features
 
-- Expand fields of a single indexed element of an array aggregate over a known row or STRUCT, preserving each field's value lineage, including known STRUCT values from BigQuery value tables.
-
-- Select downstream resource types with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. Traversal uses the full graph in both SQL and manifest mode.
+- Select the node types an impact report covers with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. The search still walks the whole graph, so paths and distances pass through nodes of any type (#284)
+- Expand the fields of an aggregated row or STRUCT taken by a single subscript, such as `array_agg(t order by ts desc limit 1)[offset(0)]` in BigQuery, so `item.*` traces each field to its source column. A range variable used alone is a row value with the columns of its relation, and a BigQuery value table made with `SELECT AS STRUCT` or `SELECT AS VALUE STRUCT(...)` publishes its fields. Supported in BigQuery, DuckDB, PostgreSQL, Spark and Databricks (#286)
 
 ### Bug Fixes
 
-- Column references that may overlap an unexpanded star now report partial lineage with a nonfatal diagnostic. Known duplicate names still cause an ambiguity error, including repeated star projections and join keys exposed by qualified stars.
+- Expand stars over STRUCT columns (`item.*`) in BigQuery, Databricks, Spark and DuckDB instead of reading them as relations, so a column listed next to such a star is no longer reported as ambiguous. Fields built with a STRUCT constructor are traced to the values they were built from (#283)
+- A column that may overlap a star whose fields are not known is reported as partial with a nonfatal `unverified` reason, and column commands exit with 0. A name that two providers are known to publish, including through repeated star projections and USING keys exposed by qualified stars, is still ambiguous and fatal (#285)
 
 ## [0.3.0-beta.1] - 2026-11-22
 

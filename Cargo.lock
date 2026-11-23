@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "dlin"
-version = "0.3.0-beta.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "dlin-core"
-version = "0.3.0-beta.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "dlin-sqllineage"
-version = "0.3.0-beta.1"
+version = "0.3.0-rc.1"
 dependencies = [
  "indexmap",
  "serde",
