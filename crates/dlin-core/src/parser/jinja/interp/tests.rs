@@ -326,6 +326,29 @@ fn alias_sees_updates_merged_from_unknown_branches() {
 }
 
 #[test]
+fn change_on_one_branch_is_not_seen_on_the_other() {
+    // Both branches start from the same containers; a change on one must
+    // not reach the other, directly or through an alias.
+    for sql in [
+        r#"{% set l = ['a'] %}{% if target.name == 'x' %}{% do l.append('b') %}{% else %}{% for n in l %}{{ ref(n) }}{% endfor %}{% endif %}"#,
+        r#"{% set l = ['a'] %}{% set alias = l %}{% if target.name == 'x' %}{% do alias.append('b') %}{% else %}{% for n in l %}{{ ref(n) }}{% endfor %}{% endif %}"#,
+    ] {
+        let e = extract(sql);
+        assert_eq!(ref_names(&e), vec!["a"], "{sql}");
+        assert_eq!(codes(&e), vec!["runtime_value_unknown"], "{sql}");
+    }
+}
+
+#[test]
+fn alias_on_the_same_branch_sees_the_change() {
+    let e = extract(
+        r#"{% set l = ['a'] %}{% set alias = l %}{% if target.name == 'x' %}{% do alias.append('b') %}{% for n in l %}{{ ref(n) }}{% endfor %}{% endif %}"#,
+    );
+    assert_eq!(ref_names(&e), vec!["a", "b"]);
+    assert_eq!(codes(&e), vec!["runtime_value_unknown"]);
+}
+
+#[test]
 fn return_on_one_branch_does_not_run_the_rest() {
     let e = extract_with(
         "{{ ref(pick()) }}",
@@ -358,6 +381,43 @@ fn unknown_loop_reaches_a_fixed_point() {
     );
     assert_eq!(ref_names(&e), vec!["fixed"]);
     assert_eq!(codes(&e), vec!["runtime_value_unknown"]);
+}
+
+#[test]
+fn return_in_a_loop_filter_returns_with_the_state_before_the_loop() {
+    // The returned list lives in the macro's heap, so the state the macro
+    // returns with must still hold it.
+    let e = extract_with(
+        r#"{% for n in pick() %}{{ ref(n) }}{% endfor %}"#,
+        &[
+            r#"{% macro pick() %}{% set xs = ['a'] %}{% for x in ['z'] if return(xs) %}{% endfor %}{{ return([]) }}{% endmacro %}"#,
+        ],
+        &[],
+    );
+    assert_eq!(ref_names(&e), vec!["a"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn break_and_continue_carry_the_loop_state() {
+    for (sql, expected) in [
+        (
+            r#"{% for x in ['a', 'b', 'c'] %}{% if x == 'b' %}{% break %}{% endif %}{{ ref(x) }}{% endfor %}"#,
+            vec!["a"],
+        ),
+        (
+            r#"{% for x in ['a', 'b', 'c'] %}{% if x == 'b' %}{% continue %}{% endif %}{{ ref(x) }}{% endfor %}"#,
+            vec!["a", "c"],
+        ),
+        (
+            r#"{% set ns = namespace(v='a') %}{% for x in ['b', 'c'] %}{% set ns.v = x %}{% break %}{% endfor %}{{ ref(ns.v) }}"#,
+            vec!["b"],
+        ),
+    ] {
+        let e = extract(sql);
+        assert_eq!(ref_names(&e), expected, "{sql}");
+        assert!(e.reasons.is_empty(), "{sql}: {:?}", e.reasons);
+    }
 }
 
 #[test]
