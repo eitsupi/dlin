@@ -6,6 +6,10 @@
 
 - Column-level lineage is no longer Experimental. Results that cannot be traced completely are still reported as partial with the reason and the place where tracing stopped
 
+### Performance
+
+- Look up each relation's columns once per SQL analysis and find a column by an index of its names, instead of rebuilding and scanning the column list for every column reference. Column lineage without a cache no longer grows with the square of a model's width; a single-column upstream query on 8 chained models of 200 columns took about half the time
+
 ### Bug Fixes
 
 - Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT.

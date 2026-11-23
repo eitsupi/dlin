@@ -30,7 +30,7 @@ fn references(evidence: &Evidence, catalog: Option<&CatalogContext<'_>>) -> Vec<
     let mut references: Vec<EvidenceRef> = evidence
         .relations()
         .filter_map(|table| catalog.entry(table))
-        .flat_map(|entry| entry.evidence.into_owned())
+        .flat_map(|entry| entry.evidence.to_vec())
         .collect();
     references.sort_by(|left, right| left.0.cmp(&right.0));
     references.dedup();
@@ -56,7 +56,7 @@ pub(super) fn assemble(
         .map(|table| {
             catalog
                 .and_then(|catalog| catalog.entry(table))
-                .map_or_else(|| plain_relation(table), |entry| entry.relation)
+                .map_or_else(|| plain_relation(table), |entry| entry.relation.clone())
         })
         .collect::<Vec<_>>();
     let mut columns = Vec::new();
@@ -224,7 +224,7 @@ fn contribute(
             SourceColumn {
                 relation: catalog
                     .and_then(|catalog| catalog.entry(table))
-                    .map_or_else(|| plain_relation(table), |entry| entry.relation),
+                    .map_or_else(|| plain_relation(table), |entry| entry.relation.clone()),
                 column: catalog
                     .and_then(|catalog| catalog.column(table, column))
                     .unwrap_or_else(|| column.clone()),

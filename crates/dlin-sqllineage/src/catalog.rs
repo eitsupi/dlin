@@ -3,6 +3,10 @@
 use super::{Ident, Relation};
 use serde::Serialize;
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::rc::Rc;
 
 /// Catalog that can look up relation metadata without requiring a clone.
 ///
@@ -95,24 +99,87 @@ pub struct CatalogColumn {
 }
 
 /// Catalog access shared by the resolver and the transitional result conversion.
-#[derive(Clone, Copy)]
+///
+/// One context serves one analysis. Each relation is looked up in the catalog
+/// once, and its entry is kept with an index of its column keys, so the many
+/// lookups of an analysis do not rebuild or rescan the column list. The
+/// [`Catalog`] contract makes the repeated answers equal.
 pub(crate) struct CatalogContext<'a> {
     catalog: &'a dyn Catalog,
     pub(crate) dialect: crate::Dialect,
+    entries: RefCell<HashMap<crate::types::TableRef, Option<Rc<IndexedEntry>>>>,
+}
+
+/// A catalog entry, owned so that the context stays covariant in its
+/// lifetime, and the positions of its columns by column key.
+pub(crate) struct IndexedEntry {
+    entry: CatalogEntry<'static>,
+    keys: HashMap<String, KeyedColumn>,
+}
+
+/// The columns listed under one column key.
+#[derive(Clone, Copy)]
+enum KeyedColumn {
+    /// Listed once, at this index of `columns`.
+    One(usize),
+    /// Listed more than once.
+    Many,
+}
+
+impl IndexedEntry {
+    fn new(entry: CatalogEntry<'_>, dialect: crate::Dialect) -> Self {
+        let entry = CatalogEntry {
+            relation: entry.relation,
+            columns: Cow::Owned(entry.columns.into_owned()),
+            coverage: entry.coverage,
+            order: entry.order,
+            unknown_segments: Cow::Owned(entry.unknown_segments.into_owned()),
+            evidence: Cow::Owned(entry.evidence.into_owned()),
+        };
+        let mut keys = HashMap::with_capacity(entry.columns.len());
+        for (index, column) in entry.columns.iter().enumerate() {
+            keys.entry(column.name.column_key(dialect).into_owned())
+                .and_modify(|keyed| *keyed = KeyedColumn::Many)
+                .or_insert(KeyedColumn::One(index));
+        }
+        Self { entry, keys }
+    }
+}
+
+impl Deref for IndexedEntry {
+    type Target = CatalogEntry<'static>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
 }
 
 impl<'a> CatalogContext<'a> {
     pub(crate) fn new(catalog: &'a dyn Catalog, dialect: crate::Dialect) -> Self {
-        Self { catalog, dialect }
+        Self {
+            catalog,
+            dialect,
+            entries: RefCell::new(HashMap::new()),
+        }
     }
 
-    pub(crate) fn entry(&self, table: &crate::types::TableRef) -> Option<CatalogEntry<'_>> {
-        self.catalog.lookup(&Relation {
-            catalog: table.catalog.clone(),
-            schema: table.schema.clone(),
-            namespace: table.namespace,
-            name: table.table.clone(),
-        })
+    pub(crate) fn entry(&self, table: &crate::types::TableRef) -> Option<Rc<IndexedEntry>> {
+        if let Some(entry) = self.entries.borrow().get(table) {
+            return entry.clone();
+        }
+        let entry = self
+            .catalog
+            .lookup(&Relation {
+                catalog: table.catalog.clone(),
+                schema: table.schema.clone(),
+                namespace: table.namespace,
+                name: table.table.clone(),
+            })
+            .map(|entry| Rc::new(IndexedEntry::new(entry, self.dialect)));
+        self.entries
+            .borrow_mut()
+            .insert(table.clone(), entry.clone());
+        entry
     }
 
     pub(crate) fn resolve_column(
@@ -144,16 +211,12 @@ impl<'a> CatalogContext<'a> {
         let Some(entry) = self.entry(table) else {
             return ColumnPresence::Possible;
         };
-        let mut listed = entry
-            .columns
-            .iter()
-            .filter(|column| column.name.column_key(self.dialect) == name.column_key(self.dialect));
-        if let Some(column) = listed.next() {
-            return if listed.next().is_some() {
-                ColumnPresence::Duplicate
-            } else {
-                ColumnPresence::Present(column.name.clone())
-            };
+        match entry.keys.get(name.column_key(self.dialect).as_ref()) {
+            Some(KeyedColumn::One(index)) => {
+                return ColumnPresence::Present(entry.columns[*index].name.clone());
+            }
+            Some(KeyedColumn::Many) => return ColumnPresence::Duplicate,
+            None => {}
         }
         match entry.coverage {
             SchemaCoverage::Exhaustive => ColumnPresence::Absent,
