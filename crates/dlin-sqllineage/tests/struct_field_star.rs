@@ -976,3 +976,55 @@ fn named_struct_fields_narrow_only_for_a_unique_proven_path() {
         common::expect_rendered_in(sql, Dialect::BigQuery, &[expected, "Closed"]);
     }
 }
+
+#[test]
+fn subscript_keeps_the_named_struct_field_and_index_inputs() {
+    common::expect_rendered_in(
+        r#"WITH q AS (
+            SELECT STRUCT([a] AS x, b AS y,
+                STRUCT([c] AS x, d AS y) AS nested) AS s, i FROM src
+        )
+        SELECT q.s.x[OFFSET(0)] AS fixed,
+            s.x[OFFSET(i)] AS dynamic,
+            s.nested.x[SAFE_OFFSET(i)] AS nested
+        FROM q"#,
+        Dialect::BigQuery,
+        &[
+            "fixed#0 C[src.a] Expression",
+            "dynamic#1 C[src.a, src.i] Expression",
+            "nested#2 C[src.c, src.i] Expression",
+            "Closed",
+        ],
+    );
+}
+
+#[test]
+fn subscript_preserves_unknown_and_missing_struct_field_results() {
+    common::expect_rendered_in(
+        "SELECT q.s.x[OFFSET(i)] AS item FROM src AS q",
+        Dialect::BigQuery,
+        &["item#0 C[src.i, src.s] Expression", "Closed"],
+    );
+    common::expect_rendered_in(
+        r#"WITH q AS (SELECT STRUCT([a] AS x, b AS y) AS s, i FROM src)
+        SELECT s.missing[OFFSET(i)] AS item FROM q"#,
+        Dialect::BigQuery,
+        &[
+            "item#0 P[src.a, src.b, src.i | Unbound(missing)] Expression",
+            "Closed",
+        ],
+    );
+}
+
+#[test]
+fn field_after_a_subscript_reads_the_selected_array_field_as_a_whole() {
+    common::expect_rendered_in(
+        r#"WITH q AS (
+            SELECT STRUCT([STRUCT(a AS x, b AS y)] AS arr, c AS other) AS s
+            FROM src
+        )
+        SELECT s.arr[OFFSET(0)].x AS item FROM q"#,
+        Dialect::BigQuery,
+        &["item#0 C[src.a, src.b] Expression", "Closed"],
+    );
+}

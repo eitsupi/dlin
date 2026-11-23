@@ -227,10 +227,14 @@ impl LineageBuilder {
         use crate::graph::node::RawNode;
         match (expr, &self.graph.nodes[reference]) {
             (Expr::Nested(inner), _) => self.reads_named_value(inner, reference),
-            (Expr::CompoundIdentifier(_) | Expr::CompoundFieldAccess { .. }, _)
-                if self.graph.field_paths.contains_key(&reference) =>
-            {
+            (Expr::CompoundIdentifier(_), _) if self.graph.field_paths.contains_key(&reference) => {
                 true
+            }
+            (Expr::CompoundFieldAccess { access_chain, .. }, _) => {
+                self.graph.field_paths.contains_key(&reference)
+                    && access_chain
+                        .iter()
+                        .all(|access| matches!(access, AccessExpr::Dot(Expr::Identifier(_))))
             }
             (
                 Expr::Identifier(_),

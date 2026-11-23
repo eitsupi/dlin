@@ -509,12 +509,30 @@ impl LineageBuilder {
         root: &Expr,
         access_chain: &[AccessExpr],
     ) -> Vec<NodeId> {
-        if self.dialect.supports_column_field_star()
-            && let Some(parts) = dotted_identifiers(root, access_chain)
-        {
-            return self.collect_compound_identifier_ancestors(&parts);
+        let prefix = self
+            .dialect
+            .supports_column_field_star()
+            .then(|| dotted_identifier_prefix(root, access_chain))
+            .flatten();
+        let mut ancestors = if let Some(parts) = prefix {
+            self.collect_compound_identifier_ancestors(&parts)
+        } else {
+            self.collect_field_root_ancestors(root, access_chain.first())
+        };
+        for access in access_chain {
+            if let AccessExpr::Subscript(subscript) = access {
+                ancestors.extend(self.collect_subscript_ancestors(subscript));
+            }
         }
-        let mut ancestors = match (root, access_chain.first()) {
+        ancestors
+    }
+
+    fn collect_field_root_ancestors(
+        &mut self,
+        root: &Expr,
+        first_access: Option<&AccessExpr>,
+    ) -> Vec<NodeId> {
+        match (root, first_access) {
             (Expr::Identifier(binding_name), Some(AccessExpr::Dot(Expr::Identifier(field))))
                 if self
                     .graph
@@ -553,14 +571,7 @@ impl LineageBuilder {
                 )]
             }
             _ => self.collect_ancestors(root),
-        };
-
-        for access in access_chain {
-            if let AccessExpr::Subscript(subscript) = access {
-                ancestors.extend(self.collect_subscript_ancestors(subscript));
-            }
         }
-        ancestors
     }
 
     /// Resolve a plain dotted identifier by separating its relation binding
@@ -740,7 +751,8 @@ impl LineageBuilder {
     }
 }
 
-fn dotted_identifiers(root: &Expr, access_chain: &[AccessExpr]) -> Option<Vec<ast::Ident>> {
+/// The named value before the first access whose shape is not modelled.
+fn dotted_identifier_prefix(root: &Expr, access_chain: &[AccessExpr]) -> Option<Vec<ast::Ident>> {
     let mut parts = match root {
         Expr::Identifier(identifier) => vec![identifier.clone()],
         Expr::CompoundIdentifier(parts) => parts.clone(),
@@ -748,11 +760,11 @@ fn dotted_identifiers(root: &Expr, access_chain: &[AccessExpr]) -> Option<Vec<as
     };
     for access in access_chain {
         let AccessExpr::Dot(Expr::Identifier(field)) = access else {
-            return None;
+            break;
         };
         parts.push(field.clone());
     }
-    Some(parts)
+    (parts.len() > 1).then_some(parts)
 }
 
 fn table_parts(table: &TableRef) -> Vec<&Ident> {
