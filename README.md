@@ -369,12 +369,12 @@ Results are split into `confirmed` impacts, `possible` impacts reached through a
 
 Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
 
-| Workload | dlin 0.3.0-rc.1, no cache / warm cache | [Parrant 0.21.1](https://pypi.org/project/parrant/0.21.1/) | [dbt-meta 0.3.10](https://pypi.org/project/dbt-meta/0.3.10/) with `sqlglot[c]`, build + query |
+| Workload | dlin 0.3.0-rc.2, no cache / warm cache | [Parrant 0.21.1](https://pypi.org/project/parrant/0.21.1/) | [dbt-meta 0.3.10](https://pypi.org/project/dbt-meta/0.3.10/) with `sqlglot[c]`, build + query |
 | --- | ---: | ---: | ---: |
-| Volume, 100,150 columns, single upstream | 78.0 ms / 75.7 ms | 24.4 s | build >120 s timeout; query not run |
-| Deep 64, single upstream | 174 ms / 135 ms | 898 ms | 2.16 s + 463 ms |
-| Fan-out 128, downstream | 125 ms / 34.4 ms | 1.29 s | 3.28 s + 431 ms |
-| Wide 200 columns × 8 models, single upstream | 487 ms / 223 ms | 939 ms | 5.23 s + 381 ms |
+| Volume, 100,150 columns, single upstream | 83.3 ms / 82.5 ms | 25.2 s | build >120 s timeout; query not run |
+| Deep 64, single upstream | 113 ms / 62.6 ms | 938 ms | 1.57 s + 367 ms |
+| Fan-out 128, downstream | 57.1 ms / 29.6 ms | 1.17 s | 2.61 s + 369 ms |
+| Wide 200 columns × 8 models, single upstream | 50.5 ms / 24.9 ms | 931 ms | 5.39 s + 369 ms |
 
 These synthetic results use artifacts derived from the real dbt fixture. Each time is a separate process, so it includes reading the artifacts. dlin "no cache" uses `--no-cache` and includes SQL analysis; "warm cache" reuses a cache filled once by the same query. Parrant has no persistent cache and includes parsing. dbt-meta builds a lineage artifact once and then queries it, so its end-to-end time is build plus query; for repeated queries over one build, compare its query time with dlin's warm cache. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 

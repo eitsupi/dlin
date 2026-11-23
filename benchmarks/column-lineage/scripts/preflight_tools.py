@@ -302,7 +302,7 @@ def main() -> int:
     META_ARTIFACT_PATH.unlink(missing_ok=True)
     statuses: list[dict[str, object]] = []
 
-    dlin, status = executable("dlin", "0.3.0-rc.1")
+    dlin, status = executable("dlin", "0.3.0-rc.2")
     statuses.append(status)
     if dlin:
         statuses.append(

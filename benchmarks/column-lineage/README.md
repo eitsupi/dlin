@@ -8,7 +8,7 @@ From `benchmarks/column-lineage`:
 
 ```sh
 uv sync --locked
-uv tool install --reinstall dlin-cli==0.3.0rc1
+uv tool install --reinstall dlin-cli==0.3.0rc2
 uv tool install --reinstall --with sqlglot==26.33.0 parrant==0.21.1
 uv tool install --reinstall --with 'sqlglot[c]==30.33.0' dbt-meta==0.3.10
 cargo install hyperfine --version 1.19.0 --locked
