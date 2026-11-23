@@ -6,7 +6,7 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::graph::impact::Exploration;
+use crate::graph::exploration::Exploration;
 use crate::graph::types::*;
 
 /// All available node fields for graph JSON output.

@@ -42,7 +42,7 @@ fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
-pub(super) fn warn_upstream_exploration(exploration: Option<&graph::impact::Exploration>) {
+pub(super) fn warn_upstream_exploration(exploration: Option<&graph::exploration::Exploration>) {
     let Some(exploration) = exploration.filter(|_| !dlin_core::is_quiet()) else {
         return;
     };
@@ -52,7 +52,7 @@ pub(super) fn warn_upstream_exploration(exploration: Option<&graph::impact::Expl
     );
     if is_verbose() {
         for gap in exploration.gaps() {
-            if let graph::impact::ExplorationGap::UnresolvedDependencies {
+            if let graph::exploration::ExplorationGap::UnresolvedDependencies {
                 unique_id,
                 depth: Some(depth),
                 reasons,

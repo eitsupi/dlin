@@ -8,14 +8,12 @@ use serde::Serialize;
 
 use super::builder::GraphBuild;
 use super::dependency::DependencyAnalysis;
+use super::exploration::{Exploration, ExplorationGap, ExplorationKind};
 use super::types::*;
 
 mod exploration;
 
-pub use exploration::{
-    DependencyPolicy, Exploration, ExplorationGap, ExplorationKind, ExplorationStatus,
-    NamespaceMatch, ReasonRule,
-};
+pub use exploration::{DependencyPolicy, NamespaceMatch, ReasonRule};
 
 /// Severity level of impact
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]

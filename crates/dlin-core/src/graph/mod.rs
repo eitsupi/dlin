@@ -2,6 +2,7 @@ pub mod builder;
 #[cfg(feature = "column-lineage")]
 pub mod column_lineage;
 pub mod dependency;
+pub mod exploration;
 pub mod filter;
 pub mod impact;
 pub mod types;

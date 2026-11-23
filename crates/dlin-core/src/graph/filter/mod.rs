@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::error::DbtLineageError;
 
 use super::dependency::{DependencyReason, NotAssessedScope};
-use super::impact::{Exploration, ExplorationGap, ExplorationKind};
+use super::exploration::{Exploration, ExplorationGap, ExplorationKind};
 use super::types::*;
 
 /// Resolve a name with canonical ID, alias, label, and ID suffix precedence.

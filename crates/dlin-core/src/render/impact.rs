@@ -2,7 +2,8 @@ use std::io::{self, IsTerminal, Write};
 
 use colored::Colorize;
 
-use crate::graph::impact::{ExplorationGap, ExplorationStatus, ImpactReport, ImpactSeverity};
+use crate::graph::exploration::{ExplorationGap, ExplorationStatus};
+use crate::graph::impact::{ImpactReport, ImpactSeverity};
 
 /// Render impact report as colored text to stdout
 pub fn render_impact_text(report: &ImpactReport) {
@@ -205,9 +206,9 @@ pub fn render_impact_json_to_writer<W: Write>(
 mod tests {
     use super::*;
     use crate::graph::dependency::DependencyAnalysis;
+    use crate::graph::exploration::{Exploration, ExplorationKind};
     use crate::graph::impact::{
-        Exploration, ExplorationKind, ExposurePath, ImpactReport, ImpactReportParts,
-        ImpactSeverity, ImpactSource, ImpactedNode,
+        ExposurePath, ImpactReport, ImpactReportParts, ImpactSeverity, ImpactSource, ImpactedNode,
     };
 
     fn make_report() -> ImpactReport {
@@ -573,7 +574,6 @@ mod tests {
             DependencyReason, InputFailure, InputKind, InputLocation, InputStage, NodeCallSite,
             ProjectScope,
         };
-        use crate::graph::impact::ExplorationGap;
         let node_gap = |i: usize| ExplorationGap::UnresolvedDependencies {
             unique_id: format!("model.m{i:02}"),
             depth: None,

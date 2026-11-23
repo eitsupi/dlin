@@ -346,9 +346,8 @@ mod exploration {
         InputLocation, InputStage, NodeCallSite, NodeDependencyReason, NotAssessedScope,
         ProjectGap, ProjectScope, RuntimeValueSource,
     };
-    use crate::graph::impact::{
-        DependencyPolicy, ExplorationGap, ExplorationStatus, NamespaceMatch,
-    };
+    use crate::graph::exploration::{ExplorationGap, ExplorationStatus};
+    use crate::graph::impact::{DependencyPolicy, NamespaceMatch};
     use serde_json::json;
 
     fn at(unique_id: &str) -> NodeCallSite {
@@ -769,7 +768,7 @@ mod exploration {
 mod projects {
     use super::*;
     use crate::graph::builder::build_graph_report;
-    use crate::graph::impact::ExplorationGap;
+    use crate::graph::exploration::{ExplorationGap, ExplorationStatus};
     use crate::parser::discovery::discover_files;
     use crate::parser::project::DbtProject;
     use serde_json::json;
@@ -953,7 +952,7 @@ models:
         assert!(!from_base.proves_no_impact());
         assert_eq!(
             from_base.exploration[0].status(),
-            crate::graph::impact::ExplorationStatus::Complete
+            crate::graph::exploration::ExplorationStatus::Complete
         );
     }
 }
