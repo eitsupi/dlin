@@ -114,6 +114,7 @@ def scenario_record(scenario: dict, runs: int) -> dict:
         "status": status,
         "reason": reason,
         "command": scenario.get("command"),
+        "cache_fill_command": scenario.get("cache_fill_command"),
         "sample_count": stats["sample_count"],
         "raw_times": stats["raw_times"],
         "mean": stats["mean"],
@@ -155,11 +156,6 @@ def profile_result(profile: dict) -> dict:
     if dbt_index.get("path") and (ROOT / dbt_index["path"]).is_file():
         dbt_index = file_metadata(ROOT / dbt_index["path"], dbt_index)
     boundaries = run.get("boundaries", {})
-    if "dlin_cache" in boundaries:
-        boundaries["dlin_cache"] = {
-            **boundaries["dlin_cache"],
-            "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-        }
     scenarios = [scenario_record(scenario, run["runs"]) for scenario in run.get("scenarios", [])]
     return {
         "name": name,
@@ -276,12 +272,17 @@ def markdown(result: dict) -> str:
     lines.extend([
         "## Method and limitations",
         "",
-        "- dlin uses `--no-cache`; its cold/warm cache distinction is not used here and OS cache drop is not performed.",
-        "- Parrant timings include project parsing. dbt-meta build and query are separate scenarios.",
-        "- Peak RSS is N/A. Canva is excluded. Whole-model unsupported scenarios and invalid/timeouts are shown as non-numeric statuses.",
-        "- volume-100k dbt-meta build timed out; its dependent query is not-run and has null ratios.",
-        "",
+        "- dlin scenarios without a suffix use `--no-cache` and include manifest loading, SQL analysis and the query. `_warm` scenarios reuse a cache filled once by the same query with `--refresh-cache`. OS cache drop is not performed.",
+        "- Parrant has no persistent cache; its timings include project parsing. dbt-meta build and query are separate scenarios; its end-to-end time is build plus query.",
+        "- Parrant is installed with SQLGlot 26.33.0. dbt-meta is installed with `sqlglot[c]` 30.33.0, the compiled SQLGlot its documentation recommends; the preflight checks both.",
+        "- A build-then-query tool can answer repeated queries from its artifact: dbt-meta's query alone can be faster than a dlin query without a cache. Compare dlin's warm-cache time with it for repeated use, and the end-to-end times for a single query.",
+        "- Peak RSS is N/A. Canva is excluded. `unsupported` means the tool has no such query; `not_benchmarked` means the tool runs it but its output cannot be validated (Parrant's whole-model selection returns text, not per-column JSON). Invalid results and timeouts are also shown as non-numeric statuses.",
     ])
+    for profile in result["profiles"]:
+        for scenario in profile["scenarios"]:
+            if scenario["status"] == "timeout":
+                lines.append(f"- {profile['name']} {scenario['name']} timed out; scenarios that depend on it are not-run and have null ratios.")
+    lines.append("")
     return "\n".join(lines)
 
 

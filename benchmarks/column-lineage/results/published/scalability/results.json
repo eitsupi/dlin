@@ -4,13 +4,13 @@
     "cpu_model": "AMD Ryzen 7 7735HS with Radeon Graphics",
     "os": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.41"
   },
-  "git_head": "a2a20dd607a5769d089a7329f0fddded30efd679",
+  "git_head": "9c73d729eacf1ca95cc6cc9b5b67979f7dbf3489",
   "profiles": [
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 29510
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -28,7 +28,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/volume-1k/benchmark/dbt-meta-lineage.json",
-        "sha256": "1838caea7f625c5186757b17952c8d9253e3079216405b6e9e609c0b23bc2bc7",
+        "sha256": "02a9e8649942100cdb72daa47e91a7d706ee029317ee84a176ce0846641b3bfc",
         "size_bytes": 361930
       },
       "family": "volume",
@@ -48,99 +48,128 @@
       "resolved_column_edges": 1050,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream volume-1k_query --column c0001 --manifest-path results/local/scalability/volume-1k/manifest.json -o json --no-cache > results/local/scalability/volume-1k/benchmark/dlin_upstream.stdout 2> results/local/scalability/volume-1k/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-1k/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.00972956854,
-          "mean": 0.009156660873333335,
-          "median": 0.008920635540000001,
-          "min": 0.008819778540000002,
+          "max": 0.008508619060000002,
+          "mean": 0.00804691106,
+          "median": 0.00817238806,
+          "min": 0.0074597260600000005,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/volume-1k/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-1k/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-1k/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-1k/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.00972956854,
-            0.008920635540000001,
-            0.008819778540000002
+            0.0074597260600000005,
+            0.008508619060000002,
+            0.00817238806
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.000498708762211306,
+          "stddev": 0.0005355861177336476,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream volume-1k_query --column c0001 --manifest-path results/local/scalability/volume-1k/manifest.json -o json --cache-dir results/local/scalability/volume-1k/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream volume-1k_query --column c0001 --manifest-path results/local/scalability/volume-1k/manifest.json -o json --cache-dir results/local/scalability/volume-1k/benchmark/dlin-cache > results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.0061859003800000005,
+          "mean": 0.00583277238,
+          "median": 0.00603885638,
+          "min": 0.00527356038,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/volume-1k/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.00603885638,
+            0.0061859003800000005,
+            0.00527356038
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0004898408212797296,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/volume-1k/manifest.json --catalog results/local/scalability/volume-1k/catalog.json --select +volume-1k_query.c0001 --format json > results/local/scalability/volume-1k/benchmark/parrant_upstream.stdout 2> results/local/scalability/volume-1k/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-1k/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.8277111820400003,
-          "mean": 1.5402949947066666,
-          "median": 1.4681908250400002,
-          "min": 1.3249829770400001,
+          "max": 0.8237325520200001,
+          "mean": 0.7756234343533334,
+          "median": 0.75959206402,
+          "min": 0.74354568702,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/volume-1k/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-1k/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-1k/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-1k/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            1.3249829770400001,
-            1.4681908250400002,
-            1.8277111820400003
+            0.8237325520200001,
+            0.74354568702,
+            0.75959206402
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.2590041900976124,
+          "stddev": 0.04242919932906369,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/volume-1k/manifest.json --catalog results/local/scalability/volume-1k/catalog.json --output results/local/scalability/volume-1k/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/volume-1k/benchmark/dbt_meta_build.stdout 2> results/local/scalability/volume-1k/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/volume-1k/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 4.06858087752,
-          "mean": 3.5487173851866665,
-          "median": 3.54347970652,
-          "min": 3.03409157152,
+          "max": 1.36631014852,
+          "mean": 1.31000323552,
+          "median": 1.2831848015199998,
+          "min": 1.28051475652,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/volume-1k/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-1k/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-1k/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/volume-1k/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            3.03409157152,
-            3.54347970652,
-            4.06858087752
+            1.36631014852,
+            1.28051475652,
+            1.2831848015199998
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.5172645416181664,
+          "stddev": 0.04878148853579286,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/volume-1k/benchmark/dbt-meta-lineage.json --json volume-1k_query.c0001 > results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.53905723526,
-          "mean": 0.5120701129266667,
-          "median": 0.5054778642600001,
-          "min": 0.49167523926,
+          "max": 0.34195365136,
+          "mean": 0.32135284836000005,
+          "median": 0.31582903436000004,
+          "min": 0.30627585936,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-1k/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.5054778642600001,
-            0.49167523926,
-            0.53905723526
+            0.30627585936,
+            0.34195365136,
+            0.31582903436000004
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.02436917505986571,
+          "stddev": 0.018469179768705553,
           "tool": "dbt-meta"
         }
       ],
@@ -150,8 +179,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 29666
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -169,7 +198,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/volume-10k/benchmark/dbt-meta-lineage.json",
-        "sha256": "cc8f3146d326f5fd724ad4f6d954ddd01e529b4f747011627f83333f6417e6f5",
+        "sha256": "b0c126dd8373e1ebafae6c46c0eab3bbdf6b06484eabeb906a3bae46cb6f9c2e",
         "size_bytes": 3453232
       },
       "family": "volume",
@@ -189,99 +218,128 @@
       "resolved_column_edges": 10050,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream volume-10k_query --column c0001 --manifest-path results/local/scalability/volume-10k/manifest.json -o json --no-cache > results/local/scalability/volume-10k/benchmark/dlin_upstream.stdout 2> results/local/scalability/volume-10k/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-10k/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.02353470504,
-          "mean": 0.020569788373333335,
-          "median": 0.02020370004,
-          "min": 0.01797096004,
+          "max": 0.017448898600000002,
+          "mean": 0.016346666933333337,
+          "median": 0.016109251600000003,
+          "min": 0.015481850600000001,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/volume-10k/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-10k/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-10k/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-10k/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.01797096004,
-            0.02020370004,
-            0.02353470504
+            0.015481850600000001,
+            0.017448898600000002,
+            0.016109251600000003
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0027998803737139073,
+          "stddev": 0.0010047855437616197,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream volume-10k_query --column c0001 --manifest-path results/local/scalability/volume-10k/manifest.json -o json --cache-dir results/local/scalability/volume-10k/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream volume-10k_query --column c0001 --manifest-path results/local/scalability/volume-10k/manifest.json -o json --cache-dir results/local/scalability/volume-10k/benchmark/dlin-cache > results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.01230524134,
+          "mean": 0.01205571934,
+          "median": 0.01220457234,
+          "min": 0.01165734434,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/volume-10k/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.01230524134,
+            0.01220457234,
+            0.01165734434
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0003486553346200227,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/volume-10k/manifest.json --catalog results/local/scalability/volume-10k/catalog.json --select +volume-10k_query.c0001 --format json > results/local/scalability/volume-10k/benchmark/parrant_upstream.stdout 2> results/local/scalability/volume-10k/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-10k/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 7.1882041638,
-          "mean": 5.136934328133333,
-          "median": 4.5393196808,
-          "min": 3.6832791398,
+          "max": 2.5999841830199997,
+          "mean": 2.55019786502,
+          "median": 2.55142662602,
+          "min": 2.49918278602,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/volume-10k/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-10k/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-10k/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-10k/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            3.6832791398,
-            7.1882041638,
-            4.5393196808
+            2.49918278602,
+            2.55142662602,
+            2.5999841830199997
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 1.8272882383455156,
+          "stddev": 0.050411931122346695,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/volume-10k/manifest.json --catalog results/local/scalability/volume-10k/catalog.json --output results/local/scalability/volume-10k/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/volume-10k/benchmark/dbt_meta_build.stdout 2> results/local/scalability/volume-10k/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/volume-10k/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 27.46592317732,
-          "mean": 25.531998643319998,
-          "median": 25.51529773232,
-          "min": 23.61477502032,
+          "max": 9.28618228534,
+          "mean": 8.747535865673333,
+          "median": 8.51746119034,
+          "min": 8.43896412134,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/volume-10k/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-10k/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-10k/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/volume-10k/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            27.46592317732,
-            23.61477502032,
-            25.51529773232
+            8.51746119034,
+            9.28618228534,
+            8.43896412134
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 1.9256283966830927,
+          "stddev": 0.46812970587774827,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/volume-10k/benchmark/dbt-meta-lineage.json --json volume-10k_query.c0001 > results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.4218127829,
-          "mean": 0.4027376149,
-          "median": 0.3974465229,
-          "min": 0.3889535389,
+          "max": 0.41763109982,
+          "mean": 0.3892870604866667,
+          "median": 0.38614617182000005,
+          "min": 0.36408390982000005,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-10k/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.4218127829,
-            0.3974465229,
-            0.3889535389
+            0.38614617182000005,
+            0.36408390982000005,
+            0.41763109982
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.017056647383856895,
+          "stddev": 0.026911415336921995,
           "tool": "dbt-meta"
         }
       ],
@@ -291,8 +349,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 29821
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -330,54 +388,82 @@
       "resolved_column_edges": 100050,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream volume-100k_query --column c0001 --manifest-path results/local/scalability/volume-100k/manifest.json -o json --no-cache > results/local/scalability/volume-100k/benchmark/dlin_upstream.stdout 2> results/local/scalability/volume-100k/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-100k/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.08976265134,
-          "mean": 0.08891727300666667,
-          "median": 0.08873528634000001,
-          "min": 0.08825388134,
+          "max": 0.08029280722,
+          "mean": 0.07803843888666667,
+          "median": 0.07893310722,
+          "min": 0.07488940222,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/volume-100k/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-100k/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-100k/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-100k/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.08976265134,
-            0.08873528634000001,
-            0.08825388134
+            0.07488940222,
+            0.08029280722,
+            0.07893310722
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0007706724909832492,
+          "stddev": 0.0028106084694436437,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream volume-100k_query --column c0001 --manifest-path results/local/scalability/volume-100k/manifest.json -o json --cache-dir results/local/scalability/volume-100k/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream volume-100k_query --column c0001 --manifest-path results/local/scalability/volume-100k/manifest.json -o json --cache-dir results/local/scalability/volume-100k/benchmark/dlin-cache > results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.07834670176,
+          "mean": 0.07573985309333335,
+          "median": 0.07451749876000001,
+          "min": 0.07435535876,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/volume-100k/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.07834670176,
+            0.07435535876,
+            0.07451749876000001
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.002259052306405567,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/volume-100k/manifest.json --catalog results/local/scalability/volume-100k/catalog.json --select +volume-100k_query.c0001 --format json > results/local/scalability/volume-100k/benchmark/parrant_upstream.stdout 2> results/local/scalability/volume-100k/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/volume-100k/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 45.837283099699995,
-          "mean": 37.393285097699994,
-          "median": 34.1047819357,
-          "min": 32.2377902577,
+          "max": 26.28479988926,
+          "mean": 24.393733614593334,
+          "median": 24.14492838326,
+          "min": 22.75147257126,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/volume-100k/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/volume-100k/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/volume-100k/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/volume-100k/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            32.2377902577,
-            34.1047819357,
-            45.837283099699995
+            26.28479988926,
+            24.14492838326,
+            22.75147257126
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 7.372058136963197,
+          "stddev": 1.7797551843962685,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "meta lineage build --manifest results/local/scalability/volume-100k/manifest.json --catalog results/local/scalability/volume-100k/catalog.json --output results/local/scalability/volume-100k/benchmark/dbt-meta-lineage.json --json --no-compile",
           "hyperfine_json": null,
           "kind": "build",
@@ -404,8 +490,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 109622
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -423,7 +509,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/wide-25/benchmark/dbt-meta-lineage.json",
-        "sha256": "697aed8675a6418b3034f9ce12423f2aaddbc76f064e04e789b26f9148684acc",
+        "sha256": "b363f6d6b19f4c7a07aeedc0efaff13cf246324f7673892329e8e70443c6d72c",
         "size_bytes": 56228
       },
       "family": "wide",
@@ -443,78 +529,107 @@
       "resolved_column_edges": 200,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-25_m008 --column c0001 --manifest-path results/local/scalability/wide-25/manifest.json -o json --no-cache > results/local/scalability/wide-25/benchmark/dlin_upstream.stdout 2> results/local/scalability/wide-25/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-25/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.030625277620000002,
-          "mean": 0.02907706595333333,
-          "median": 0.029448505620000003,
-          "min": 0.02715741462,
+          "max": 0.026200785560000002,
+          "mean": 0.025790979226666667,
+          "median": 0.026054542560000005,
+          "min": 0.025117609560000004,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/wide-25/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-25/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-25/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-25/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.030625277620000002,
-            0.02715741462,
-            0.029448505620000003
+            0.025117609560000004,
+            0.026200785560000002,
+            0.026054542560000005
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0017635175122953377,
+          "stddev": 0.0005877216898773882,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream wide-25_m008 --column c0001 --manifest-path results/local/scalability/wide-25/manifest.json -o json --cache-dir results/local/scalability/wide-25/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream wide-25_m008 --column c0001 --manifest-path results/local/scalability/wide-25/manifest.json -o json --cache-dir results/local/scalability/wide-25/benchmark/dlin-cache > results/local/scalability/wide-25/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/wide-25/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/wide-25/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.013352736860000002,
+          "mean": 0.012934874193333334,
+          "median": 0.013062892860000001,
+          "min": 0.01238899286,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/wide-25/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/wide-25/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/wide-25/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/wide-25/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.013062892860000001,
+            0.013352736860000002,
+            0.01238899286
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0004944615340401461,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-25_m008 --manifest-path results/local/scalability/wide-25/manifest.json -o json --no-cache > results/local/scalability/wide-25/benchmark/dlin_whole_model.stdout 2> results/local/scalability/wide-25/benchmark/dlin_whole_model.stderr",
           "hyperfine_json": "results/local/scalability/wide-25/benchmark/dlin_whole_model.hyperfine.json",
           "kind": "whole_model_no_cache",
-          "max": 0.03245569206,
-          "mean": 0.03192464206,
-          "median": 0.03190215806,
-          "min": 0.03141607606,
+          "max": 0.02945683262,
+          "mean": 0.027624058953333336,
+          "median": 0.027686250620000002,
+          "min": 0.02572909362,
           "name": "dlin_whole_model",
           "probe_stderr": "results/local/scalability/wide-25/benchmark/dlin_whole_model.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-25/benchmark/dlin_whole_model.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-25/benchmark/dlin_whole_model.stderr",
           "raw_stdout": "results/local/scalability/wide-25/benchmark/dlin_whole_model.stdout",
           "raw_times": [
-            0.03190215806,
-            0.03245569206,
-            0.03141607606
+            0.02572909362,
+            0.02945683262,
+            0.027686250620000002
           ],
           "reason": "hyperfine completed; dlin whole-model columns and terminal sources found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0005201725718989805,
+          "stddev": 0.0018646475177851536,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/wide-25/manifest.json --catalog results/local/scalability/wide-25/catalog.json --select +wide-25_m008.c0001 --format json > results/local/scalability/wide-25/benchmark/parrant_upstream.stdout 2> results/local/scalability/wide-25/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-25/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 0.84069744278,
-          "mean": 0.8258213714466667,
-          "median": 0.8320881897800001,
-          "min": 0.8046784817800001,
+          "max": 0.53726705676,
+          "mean": 0.5312307810933333,
+          "median": 0.52932318076,
+          "min": 0.52710210576,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/wide-25/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-25/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-25/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-25/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            0.8320881897800001,
-            0.8046784817800001,
-            0.84069744278
+            0.52932318076,
+            0.52710210576,
+            0.53726705676
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.018809469607012602,
+          "stddev": 0.005344226930239775,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "parrant --manifest results/local/scalability/wide-25/manifest.json --catalog results/local/scalability/wide-25/catalog.json --select +wide-25_m008 --format json",
           "hyperfine_json": null,
           "kind": "whole_model_parse_included",
@@ -528,61 +643,64 @@
           "raw_stderr": null,
           "raw_stdout": null,
           "raw_times": null,
-          "reason": "Parrant whole-model selection returns text rather than the JSON column schema; not benchmarked",
+          "reason": "Parrant selects a whole model, but returns text rather than per-column JSON, so the result cannot be validated",
           "sample_count": null,
-          "status": "unsupported",
+          "status": "not_benchmarked",
           "stddev": null,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/wide-25/manifest.json --catalog results/local/scalability/wide-25/catalog.json --output results/local/scalability/wide-25/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/wide-25/benchmark/dbt_meta_build.stdout 2> results/local/scalability/wide-25/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/wide-25/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 1.1958492337400002,
-          "mean": 1.1432539107400002,
-          "median": 1.14353565474,
-          "min": 1.09037684374,
+          "max": 0.79135079264,
+          "mean": 0.7528963163066668,
+          "median": 0.73939080964,
+          "min": 0.72794734664,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/wide-25/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-25/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-25/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/wide-25/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            1.09037684374,
-            1.14353565474,
-            1.1958492337400002
+            0.73939080964,
+            0.79135079264,
+            0.72794734664
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.052736759455233706,
+          "stddev": 0.03379050567705756,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/wide-25/benchmark/dbt-meta-lineage.json --json wide-25_m008.c0001 > results/local/scalability/wide-25/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/wide-25/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-25/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.39645249606,
-          "mean": 0.3540714583933333,
-          "median": 0.33504584706,
-          "min": 0.33071603206,
+          "max": 0.33631759416,
+          "mean": 0.32441513216,
+          "median": 0.32516701916,
+          "min": 0.31176078316,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/wide-25/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-25/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-25/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-25/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.39645249606,
-            0.33071603206,
-            0.33504584706
+            0.32516701916,
+            0.33631759416,
+            0.31176078316
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.03676684769953932,
+          "stddev": 0.012295659484875432,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": null,
           "hyperfine_json": null,
           "kind": "whole_model",
@@ -609,8 +727,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 214973
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -628,7 +746,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/wide-50/benchmark/dbt-meta-lineage.json",
-        "sha256": "e37291552a7965a17213e4eb3fa993f07588dc946c485f34f40a30b2c4127517",
+        "sha256": "135b66b7dd63da3e626bd6f75c0ee2d60d63d695fdeecef550c55decf169080e",
         "size_bytes": 112228
       },
       "family": "wide",
@@ -648,78 +766,107 @@
       "resolved_column_edges": 400,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-50_m008 --column c0001 --manifest-path results/local/scalability/wide-50/manifest.json -o json --no-cache > results/local/scalability/wide-50/benchmark/dlin_upstream.stdout 2> results/local/scalability/wide-50/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-50/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.01875795408,
-          "mean": 0.01825518208,
-          "median": 0.018186767080000003,
-          "min": 0.01782082508,
+          "max": 0.05649044116,
+          "mean": 0.051976707493333336,
+          "median": 0.05370875916,
+          "min": 0.04573092216,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/wide-50/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-50/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-50/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-50/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.018186767080000003,
-            0.01782082508,
-            0.01875795408
+            0.04573092216,
+            0.05649044116,
+            0.05370875916
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.000472295616991095,
+          "stddev": 0.005584963250536421,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream wide-50_m008 --column c0001 --manifest-path results/local/scalability/wide-50/manifest.json -o json --cache-dir results/local/scalability/wide-50/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream wide-50_m008 --column c0001 --manifest-path results/local/scalability/wide-50/manifest.json -o json --cache-dir results/local/scalability/wide-50/benchmark/dlin-cache > results/local/scalability/wide-50/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/wide-50/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/wide-50/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.029050487660000002,
+          "mean": 0.023897682993333336,
+          "median": 0.022323171660000002,
+          "min": 0.020319389660000003,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/wide-50/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/wide-50/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/wide-50/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/wide-50/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.020319389660000003,
+            0.029050487660000002,
+            0.022323171660000002
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.00457354703982558,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-50_m008 --manifest-path results/local/scalability/wide-50/manifest.json -o json --no-cache > results/local/scalability/wide-50/benchmark/dlin_whole_model.stdout 2> results/local/scalability/wide-50/benchmark/dlin_whole_model.stderr",
           "hyperfine_json": "results/local/scalability/wide-50/benchmark/dlin_whole_model.hyperfine.json",
           "kind": "whole_model_no_cache",
-          "max": 0.01874661146,
-          "mean": 0.017754620793333335,
-          "median": 0.01762496746,
-          "min": 0.01689228346,
+          "max": 0.06040054736,
+          "mean": 0.05423808436,
+          "median": 0.05322616636,
+          "min": 0.04908753936,
           "name": "dlin_whole_model",
           "probe_stderr": "results/local/scalability/wide-50/benchmark/dlin_whole_model.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-50/benchmark/dlin_whole_model.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-50/benchmark/dlin_whole_model.stderr",
           "raw_stdout": "results/local/scalability/wide-50/benchmark/dlin_whole_model.stdout",
           "raw_times": [
-            0.01762496746,
-            0.01689228346,
-            0.01874661146
+            0.04908753936,
+            0.05322616636,
+            0.06040054736
           ],
           "reason": "hyperfine completed; dlin whole-model columns and terminal sources found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0009339382062156639,
+          "stddev": 0.005723986463214164,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/wide-50/manifest.json --catalog results/local/scalability/wide-50/catalog.json --select +wide-50_m008.c0001 --format json > results/local/scalability/wide-50/benchmark/parrant_upstream.stdout 2> results/local/scalability/wide-50/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-50/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 0.9206165367800001,
-          "mean": 0.8927893511133335,
-          "median": 0.8868102557800001,
-          "min": 0.8709412607800001,
+          "max": 0.64659896572,
+          "mean": 0.5881579677200001,
+          "median": 0.55908314372,
+          "min": 0.55879179372,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/wide-50/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-50/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-50/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-50/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            0.8709412607800001,
-            0.9206165367800001,
-            0.8868102557800001
+            0.64659896572,
+            0.55908314372,
+            0.55879179372
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.025371646520729797,
+          "stddev": 0.050611598538602066,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "parrant --manifest results/local/scalability/wide-50/manifest.json --catalog results/local/scalability/wide-50/catalog.json --select +wide-50_m008 --format json",
           "hyperfine_json": null,
           "kind": "whole_model_parse_included",
@@ -733,61 +880,64 @@
           "raw_stderr": null,
           "raw_stdout": null,
           "raw_times": null,
-          "reason": "Parrant whole-model selection returns text rather than the JSON column schema; not benchmarked",
+          "reason": "Parrant selects a whole model, but returns text rather than per-column JSON, so the result cannot be validated",
           "sample_count": null,
-          "status": "unsupported",
+          "status": "not_benchmarked",
           "stddev": null,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/wide-50/manifest.json --catalog results/local/scalability/wide-50/catalog.json --output results/local/scalability/wide-50/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/wide-50/benchmark/dbt_meta_build.stdout 2> results/local/scalability/wide-50/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/wide-50/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 1.82200761548,
-          "mean": 1.6935158191466666,
-          "median": 1.64611795148,
-          "min": 1.6124218904799998,
+          "max": 0.9084352104000001,
+          "mean": 0.8998139394000001,
+          "median": 0.9007281914,
+          "min": 0.8902784164,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/wide-50/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-50/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-50/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/wide-50/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            1.6124218904799998,
-            1.64611795148,
-            1.82200761548
+            0.9007281914,
+            0.9084352104000001,
+            0.8902784164
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.11254537940517174,
+          "stddev": 0.009112858203068742,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/wide-50/benchmark/dbt-meta-lineage.json --json wide-50_m008.c0001 > results/local/scalability/wide-50/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/wide-50/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-50/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.36409617946,
-          "mean": 0.35373325146,
-          "median": 0.36159497146,
-          "min": 0.33550860346,
+          "max": 0.36769929066,
+          "mean": 0.33260828899333333,
+          "median": 0.31826724566000003,
+          "min": 0.31185833066,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/wide-50/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-50/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-50/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-50/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.36159497146,
-            0.36409617946,
-            0.33550860346
+            0.31185833066,
+            0.31826724566000003,
+            0.36769929066
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.015832477898539577,
+          "stddev": 0.030558179696225492,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": null,
           "hyperfine_json": null,
           "kind": "whole_model",
@@ -814,8 +964,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 428110
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -833,7 +983,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/wide-100/benchmark/dbt-meta-lineage.json",
-        "sha256": "6b5ae9af6b90c7df070566fe89211057d9dac180afa3acfaa3ee9d0f14c55e94",
+        "sha256": "5a9d53758a2a23c3842a060500adc239f00e149c1f4d3f048f8495727f509d8c",
         "size_bytes": 227528
       },
       "family": "wide",
@@ -853,78 +1003,107 @@
       "resolved_column_edges": 800,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-100_m008 --column c0001 --manifest-path results/local/scalability/wide-100/manifest.json -o json --no-cache > results/local/scalability/wide-100/benchmark/dlin_upstream.stdout 2> results/local/scalability/wide-100/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-100/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.03319100156,
-          "mean": 0.03202773222666667,
-          "median": 0.03193600356,
-          "min": 0.030956191560000006,
+          "max": 0.13802547542000002,
+          "mean": 0.13648274775333336,
+          "median": 0.13628101542,
+          "min": 0.13514175242,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/wide-100/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-100/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-100/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-100/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.030956191560000006,
-            0.03319100156,
-            0.03193600356
+            0.13514175242,
+            0.13628101542,
+            0.13802547542000002
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0011202252207664894,
+          "stddev": 0.001452407152253231,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream wide-100_m008 --column c0001 --manifest-path results/local/scalability/wide-100/manifest.json -o json --cache-dir results/local/scalability/wide-100/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream wide-100_m008 --column c0001 --manifest-path results/local/scalability/wide-100/manifest.json -o json --cache-dir results/local/scalability/wide-100/benchmark/dlin-cache > results/local/scalability/wide-100/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/wide-100/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/wide-100/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.061077840280000004,
+          "mean": 0.05820924161333333,
+          "median": 0.05704879328,
+          "min": 0.05650109128,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/wide-100/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/wide-100/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/wide-100/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/wide-100/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.05704879328,
+            0.061077840280000004,
+            0.05650109128
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0024993275301573308,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-100_m008 --manifest-path results/local/scalability/wide-100/manifest.json -o json --no-cache > results/local/scalability/wide-100/benchmark/dlin_whole_model.stdout 2> results/local/scalability/wide-100/benchmark/dlin_whole_model.stderr",
           "hyperfine_json": "results/local/scalability/wide-100/benchmark/dlin_whole_model.hyperfine.json",
           "kind": "whole_model_no_cache",
-          "max": 0.032864199600000005,
-          "mean": 0.032162230933333334,
-          "median": 0.032153664600000006,
-          "min": 0.031468828600000005,
+          "max": 0.15450753718000002,
+          "mean": 0.14820146084666666,
+          "median": 0.14989835218000003,
+          "min": 0.14019849318000002,
           "name": "dlin_whole_model",
           "probe_stderr": "results/local/scalability/wide-100/benchmark/dlin_whole_model.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-100/benchmark/dlin_whole_model.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-100/benchmark/dlin_whole_model.stderr",
           "raw_stdout": "results/local/scalability/wide-100/benchmark/dlin_whole_model.stdout",
           "raw_times": [
-            0.032864199600000005,
-            0.031468828600000005,
-            0.032153664600000006
+            0.14989835218000003,
+            0.14019849318000002,
+            0.15450753718000002
           ],
           "reason": "hyperfine completed; dlin whole-model columns and terminal sources found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0006977249411195883,
+          "stddev": 0.007303886992303501,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/wide-100/manifest.json --catalog results/local/scalability/wide-100/catalog.json --select +wide-100_m008.c0001 --format json > results/local/scalability/wide-100/benchmark/parrant_upstream.stdout 2> results/local/scalability/wide-100/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-100/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.24185335834,
-          "mean": 1.0938271443399998,
-          "median": 1.0707392763399999,
-          "min": 0.9688887983400001,
+          "max": 0.6499457216400001,
+          "mean": 0.6364426199733334,
+          "median": 0.64050142464,
+          "min": 0.6188807136400001,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/wide-100/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-100/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-100/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-100/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            0.9688887983400001,
-            1.0707392763399999,
-            1.24185335834
+            0.6499457216400001,
+            0.64050142464,
+            0.6188807136400001
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.13793911697044992,
+          "stddev": 0.015925266151673327,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "parrant --manifest results/local/scalability/wide-100/manifest.json --catalog results/local/scalability/wide-100/catalog.json --select +wide-100_m008 --format json",
           "hyperfine_json": null,
           "kind": "whole_model_parse_included",
@@ -938,61 +1117,64 @@
           "raw_stderr": null,
           "raw_stdout": null,
           "raw_times": null,
-          "reason": "Parrant whole-model selection returns text rather than the JSON column schema; not benchmarked",
+          "reason": "Parrant selects a whole model, but returns text rather than per-column JSON, so the result cannot be validated",
           "sample_count": null,
-          "status": "unsupported",
+          "status": "not_benchmarked",
           "stddev": null,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/wide-100/manifest.json --catalog results/local/scalability/wide-100/catalog.json --output results/local/scalability/wide-100/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/wide-100/benchmark/dbt_meta_build.stdout 2> results/local/scalability/wide-100/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/wide-100/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 5.39080298784,
-          "mean": 4.9818590011733335,
-          "median": 4.80370156784,
-          "min": 4.75107244784,
+          "max": 1.7880594237,
+          "mean": 1.6865634930333335,
+          "median": 1.6531095777,
+          "min": 1.6185214777,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/wide-100/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-100/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-100/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/wide-100/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            4.80370156784,
-            4.75107244784,
-            5.39080298784
+            1.6185214777,
+            1.7880594237,
+            1.6531095777
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.3551321503906871,
+          "stddev": 0.08958321339303532,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/wide-100/benchmark/dbt-meta-lineage.json --json wide-100_m008.c0001 > results/local/scalability/wide-100/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/wide-100/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-100/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.45527252896,
-          "mean": 0.3798403026266666,
-          "median": 0.35262400996,
-          "min": 0.33162436895999997,
+          "max": 0.32171251402000006,
+          "mean": 0.31889348702000003,
+          "median": 0.31781778202000005,
+          "min": 0.31715016502000004,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/wide-100/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-100/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-100/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-100/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.45527252896,
-            0.35262400996,
-            0.33162436895999997
+            0.31715016502000004,
+            0.32171251402000006,
+            0.31781778202000005
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.06616465678694812,
+          "stddev": 0.002464064332504135,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": null,
           "hyperfine_json": null,
           "kind": "whole_model",
@@ -1019,8 +1201,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 853512
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1038,7 +1220,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/wide-200/benchmark/dbt-meta-lineage.json",
-        "sha256": "b0f5ef2fe7ca32ef64470f387f970e17c17ccc78473e5bc803033e6ee130d20f",
+        "sha256": "0cd2a200943a210730b37be085e3e8f18caf6ee7d21cbfd8daab96337f02c55e",
         "size_bytes": 454830
       },
       "family": "wide",
@@ -1058,78 +1240,107 @@
       "resolved_column_edges": 1600,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-200_m008 --column c0001 --manifest-path results/local/scalability/wide-200/manifest.json -o json --no-cache > results/local/scalability/wide-200/benchmark/dlin_upstream.stdout 2> results/local/scalability/wide-200/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-200/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.06882883254000001,
-          "mean": 0.06782787320666667,
-          "median": 0.06852925454,
-          "min": 0.06612553254,
+          "max": 0.5004349318800001,
+          "mean": 0.48666897654666674,
+          "median": 0.48308493888000004,
+          "min": 0.47648705888000004,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/wide-200/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-200/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-200/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-200/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.06612553254,
-            0.06852925454,
-            0.06882883254000001
+            0.47648705888000004,
+            0.48308493888000004,
+            0.5004349318800001
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0014818601666693578,
+          "stddev": 0.01236968673019237,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream wide-200_m008 --column c0001 --manifest-path results/local/scalability/wide-200/manifest.json -o json --cache-dir results/local/scalability/wide-200/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream wide-200_m008 --column c0001 --manifest-path results/local/scalability/wide-200/manifest.json -o json --cache-dir results/local/scalability/wide-200/benchmark/dlin-cache > results/local/scalability/wide-200/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/wide-200/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/wide-200/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.2532229427,
+          "mean": 0.22253847636666668,
+          "median": 0.23170917770000002,
+          "min": 0.18268330870000002,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/wide-200/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/wide-200/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/wide-200/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/wide-200/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.2532229427,
+            0.23170917770000002,
+            0.18268330870000002
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.036152957187792954,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream wide-200_m008 --manifest-path results/local/scalability/wide-200/manifest.json -o json --no-cache > results/local/scalability/wide-200/benchmark/dlin_whole_model.stdout 2> results/local/scalability/wide-200/benchmark/dlin_whole_model.stderr",
           "hyperfine_json": "results/local/scalability/wide-200/benchmark/dlin_whole_model.hyperfine.json",
           "kind": "whole_model_no_cache",
-          "max": 0.06820333206000001,
-          "mean": 0.06704813472666667,
-          "median": 0.06725949606,
-          "min": 0.06568157606000001,
+          "max": 0.53226041372,
+          "mean": 0.5129620480533333,
+          "median": 0.50905242972,
+          "min": 0.49757330072,
           "name": "dlin_whole_model",
           "probe_stderr": "results/local/scalability/wide-200/benchmark/dlin_whole_model.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-200/benchmark/dlin_whole_model.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-200/benchmark/dlin_whole_model.stderr",
           "raw_stdout": "results/local/scalability/wide-200/benchmark/dlin_whole_model.stdout",
           "raw_times": [
-            0.06820333206000001,
-            0.06725949606,
-            0.06568157606000001
+            0.49757330072,
+            0.53226041372,
+            0.50905242972
           ],
           "reason": "hyperfine completed; dlin whole-model columns and terminal sources found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0012740951851432972,
+          "stddev": 0.017670958907284692,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/wide-200/manifest.json --catalog results/local/scalability/wide-200/catalog.json --select +wide-200_m008.c0001 --format json > results/local/scalability/wide-200/benchmark/parrant_upstream.stdout 2> results/local/scalability/wide-200/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-200/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.39083125692,
-          "mean": 1.2810979285866668,
-          "median": 1.32040421692,
-          "min": 1.13205831192,
+          "max": 1.06627255568,
+          "mean": 0.93852344368,
+          "median": 0.9439162736800001,
+          "min": 0.80538150168,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/wide-200/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-200/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-200/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-200/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            1.32040421692,
-            1.39083125692,
-            1.13205831192
+            0.9439162736800001,
+            0.80538150168,
+            1.06627255568
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.13378937735448437,
+          "stddev": 0.13052910585713973,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "parrant --manifest results/local/scalability/wide-200/manifest.json --catalog results/local/scalability/wide-200/catalog.json --select +wide-200_m008 --format json",
           "hyperfine_json": null,
           "kind": "whole_model_parse_included",
@@ -1143,61 +1354,64 @@
           "raw_stderr": null,
           "raw_stdout": null,
           "raw_times": null,
-          "reason": "Parrant whole-model selection returns text rather than the JSON column schema; not benchmarked",
+          "reason": "Parrant selects a whole model, but returns text rather than per-column JSON, so the result cannot be validated",
           "sample_count": null,
-          "status": "unsupported",
+          "status": "not_benchmarked",
           "stddev": null,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/wide-200/manifest.json --catalog results/local/scalability/wide-200/catalog.json --output results/local/scalability/wide-200/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/wide-200/benchmark/dbt_meta_build.stdout 2> results/local/scalability/wide-200/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/wide-200/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 19.1749969232,
-          "mean": 15.993353084533334,
-          "median": 15.975791969200001,
-          "min": 12.8292703612,
+          "max": 5.40470910772,
+          "mean": 5.23025673172,
+          "median": 5.3330820147199995,
+          "min": 4.95297907272,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/wide-200/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-200/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-200/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/wide-200/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            15.975791969200001,
-            19.1749969232,
-            12.8292703612
+            4.95297907272,
+            5.3330820147199995,
+            5.40470910772
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 3.172899729663213,
+          "stddev": 0.24278547165820652,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/wide-200/benchmark/dbt-meta-lineage.json --json wide-200_m008.c0001 > results/local/scalability/wide-200/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/wide-200/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/wide-200/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.38619118192,
-          "mean": 0.38125470058666666,
-          "median": 0.38327425392000003,
-          "min": 0.37429866592,
+          "max": 0.42264623718,
+          "mean": 0.3814110958466667,
+          "median": 0.36325665618,
+          "min": 0.35833039418,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/wide-200/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/wide-200/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/wide-200/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/wide-200/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.38327425392000003,
-            0.38619118192,
-            0.37429866592
+            0.36325665618,
+            0.42264623718,
+            0.35833039418
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.006198139313713229,
+          "stddev": 0.035795525906293674,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": null,
           "hyperfine_json": null,
           "kind": "whole_model",
@@ -1224,8 +1438,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 108980
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1243,7 +1457,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/deep-8/benchmark/dbt-meta-lineage.json",
-        "sha256": "9e9d0ede8303d17ec6826bbe4a8f0912349327dbef9f2ccaff9c94c5f5e01dc5",
+        "sha256": "ab0bb799a45c0c14cd17249f8b3f8fa1fece3ffbb4abf827072e952717ce34be",
         "size_bytes": 55403
       },
       "family": "deep",
@@ -1263,99 +1477,128 @@
       "resolved_column_edges": 200,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream deep-8_m008 --column c0001 --manifest-path results/local/scalability/deep-8/manifest.json -o json --no-cache > results/local/scalability/deep-8/benchmark/dlin_upstream.stdout 2> results/local/scalability/deep-8/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-8/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.01447903766,
-          "mean": 0.014177590326666665,
-          "median": 0.014198532659999999,
-          "min": 0.01385520066,
+          "max": 0.024270508320000002,
+          "mean": 0.022467559986666674,
+          "median": 0.021689966320000004,
+          "min": 0.021442205320000005,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/deep-8/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-8/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-8/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-8/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.01447903766,
-            0.01385520066,
-            0.014198532659999999
+            0.021442205320000005,
+            0.024270508320000002,
+            0.021689966320000004
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.00031244533383670953,
+          "stddev": 0.0015663056527326744,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream deep-8_m008 --column c0001 --manifest-path results/local/scalability/deep-8/manifest.json -o json --cache-dir results/local/scalability/deep-8/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream deep-8_m008 --column c0001 --manifest-path results/local/scalability/deep-8/manifest.json -o json --cache-dir results/local/scalability/deep-8/benchmark/dlin-cache > results/local/scalability/deep-8/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/deep-8/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/deep-8/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.010357256260000001,
+          "mean": 0.010094526926666667,
+          "median": 0.01016728326,
+          "min": 0.00975904126,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/deep-8/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/deep-8/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/deep-8/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/deep-8/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.01016728326,
+            0.00975904126,
+            0.010357256260000001
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.000305672062161941,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/deep-8/manifest.json --catalog results/local/scalability/deep-8/catalog.json --select +deep-8_m008.c0001 --format json > results/local/scalability/deep-8/benchmark/parrant_upstream.stdout 2> results/local/scalability/deep-8/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-8/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.12133307728,
-          "mean": 0.9848539919466668,
-          "median": 0.9524210752800001,
-          "min": 0.8808078232800001,
+          "max": 0.59072612816,
+          "mean": 0.5881099421600001,
+          "median": 0.5889150131600001,
+          "min": 0.58468868516,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/deep-8/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-8/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-8/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-8/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            1.12133307728,
-            0.9524210752800001,
-            0.8808078232800001
+            0.58468868516,
+            0.59072612816,
+            0.5889150131600001
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.12349906888544278,
+          "stddev": 0.0030981904365036924,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/deep-8/manifest.json --catalog results/local/scalability/deep-8/catalog.json --output results/local/scalability/deep-8/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/deep-8/benchmark/dbt_meta_build.stdout 2> results/local/scalability/deep-8/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/deep-8/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 1.2240797287,
-          "mean": 1.1743428043666666,
-          "median": 1.1554946627,
-          "min": 1.1434540217,
+          "max": 0.8748699954200001,
+          "mean": 0.8356763260866668,
+          "median": 0.82930009542,
+          "min": 0.8028588874200001,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/deep-8/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-8/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-8/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/deep-8/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            1.1554946627,
-            1.1434540217,
-            1.2240797287
+            0.82930009542,
+            0.8028588874200001,
+            0.8748699954200001
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.04349213136335717,
+          "stddev": 0.03642653094905993,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/deep-8/benchmark/dbt-meta-lineage.json --json deep-8_m008.c0001 > results/local/scalability/deep-8/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/deep-8/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-8/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.49775507064,
-          "mean": 0.40902481463999996,
-          "median": 0.37193666964,
-          "min": 0.35738270364,
+          "max": 0.35264973530000004,
+          "mean": 0.35150297096666666,
+          "median": 0.3511027333,
+          "min": 0.3507564443,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/deep-8/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-8/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-8/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-8/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.49775507064,
-            0.37193666964,
-            0.35738270364
+            0.3511027333,
+            0.3507564443,
+            0.35264973530000004
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.07718645107110084,
+          "stddev": 0.0010081073082932965,
           "tool": "dbt-meta"
         }
       ],
@@ -1365,8 +1608,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 218377
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1384,7 +1627,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/deep-16/benchmark/dbt-meta-lineage.json",
-        "sha256": "71a569550faef07b7b5f1ddb90c1b7fbbea018ed89ff7b837401e7953cf8493d",
+        "sha256": "1cbd339a2df9c658a08ea8c77b0df4a0d7dcc2b133533dd6addb72b253150ef3",
         "size_bytes": 110228
       },
       "family": "deep",
@@ -1404,99 +1647,128 @@
       "resolved_column_edges": 400,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream deep-16_m016 --column c0001 --manifest-path results/local/scalability/deep-16/manifest.json -o json --no-cache > results/local/scalability/deep-16/benchmark/dlin_upstream.stdout 2> results/local/scalability/deep-16/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-16/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.02621223466,
-          "mean": 0.02191732766,
-          "median": 0.02023277866,
-          "min": 0.01930696966,
+          "max": 0.04139971976,
+          "mean": 0.040600844760000004,
+          "median": 0.04062868176,
+          "min": 0.039774132760000004,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/deep-16/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-16/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-16/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-16/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.01930696966,
-            0.02023277866,
-            0.02621223466
+            0.04139971976,
+            0.039774132760000004,
+            0.04062868176
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0037481929219434535,
+          "stddev": 0.000813150937753255,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream deep-16_m016 --column c0001 --manifest-path results/local/scalability/deep-16/manifest.json -o json --cache-dir results/local/scalability/deep-16/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream deep-16_m016 --column c0001 --manifest-path results/local/scalability/deep-16/manifest.json -o json --cache-dir results/local/scalability/deep-16/benchmark/dlin-cache > results/local/scalability/deep-16/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/deep-16/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/deep-16/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.021690033600000002,
+          "mean": 0.02142992926666667,
+          "median": 0.0213117126,
+          "min": 0.0212880416,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/deep-16/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/deep-16/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/deep-16/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/deep-16/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.0212880416,
+            0.021690033600000002,
+            0.0213117126
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.00022556767770301995,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/deep-16/manifest.json --catalog results/local/scalability/deep-16/catalog.json --select +deep-16_m016.c0001 --format json > results/local/scalability/deep-16/benchmark/parrant_upstream.stdout 2> results/local/scalability/deep-16/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-16/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.02803650244,
-          "mean": 0.9813717084399999,
-          "median": 0.99391858144,
-          "min": 0.92216004144,
+          "max": 0.6685951673000001,
+          "mean": 0.6404180009666667,
+          "median": 0.6349617953000001,
+          "min": 0.6176970403,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/deep-16/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-16/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-16/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-16/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            0.99391858144,
-            1.02803650244,
-            0.92216004144
+            0.6685951673000001,
+            0.6349617953000001,
+            0.6176970403
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.05404187510652946,
+          "stddev": 0.025884019553283417,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/deep-16/manifest.json --catalog results/local/scalability/deep-16/catalog.json --output results/local/scalability/deep-16/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/deep-16/benchmark/dbt_meta_build.stdout 2> results/local/scalability/deep-16/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/deep-16/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 1.45851370474,
-          "mean": 1.41609611274,
-          "median": 1.39959397574,
-          "min": 1.39018065774,
+          "max": 0.93719482718,
+          "mean": 0.8916920388466667,
+          "median": 0.87749872918,
+          "min": 0.86038256018,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/deep-16/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-16/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-16/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/deep-16/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            1.39959397574,
-            1.45851370474,
-            1.39018065774
+            0.86038256018,
+            0.93719482718,
+            0.87749872918
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.03703500671325891,
+          "stddev": 0.04032516112664947,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/deep-16/benchmark/dbt-meta-lineage.json --json deep-16_m016.c0001 > results/local/scalability/deep-16/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/deep-16/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-16/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.49587217870000005,
-          "mean": 0.4031520043666667,
-          "median": 0.3839248357,
-          "min": 0.32965899870000004,
+          "max": 0.35980449564000005,
+          "mean": 0.33474917830666673,
+          "median": 0.32894008664,
+          "min": 0.31550295264000006,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/deep-16/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-16/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-16/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-16/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.32965899870000004,
-            0.49587217870000005,
-            0.3839248357
+            0.35980449564000005,
+            0.31550295264000006,
+            0.32894008664
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.08475829347403378,
+          "stddev": 0.022714881411511144,
           "tool": "dbt-meta"
         }
       ],
@@ -1506,8 +1778,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 435885
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1525,7 +1797,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/deep-32/benchmark/dbt-meta-lineage.json",
-        "sha256": "487baa61f905344d283e77a52ab0d05a6fcbc05b7dc3fda9ab2f1952c68119dc",
+        "sha256": "8acc160a89e6200dc2f341c2bf5f86214a60fd4af394ff758409b89fb2f5f6a8",
         "size_bytes": 218228
       },
       "family": "deep",
@@ -1545,99 +1817,128 @@
       "resolved_column_edges": 800,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream deep-32_m032 --column c0001 --manifest-path results/local/scalability/deep-32/manifest.json -o json --no-cache > results/local/scalability/deep-32/benchmark/dlin_upstream.stdout 2> results/local/scalability/deep-32/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-32/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.03510693956000001,
-          "mean": 0.03486059156000001,
-          "median": 0.03481893056,
-          "min": 0.034655904560000006,
+          "max": 0.09017407108000002,
+          "mean": 0.08184351508000003,
+          "median": 0.07783647608000001,
+          "min": 0.07751999808000001,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/deep-32/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-32/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-32/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-32/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.03481893056,
-            0.03510693956000001,
-            0.034655904560000006
+            0.07751999808000001,
+            0.07783647608000001,
+            0.09017407108000002
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.00022838535854340737,
+          "stddev": 0.007216208286418362,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream deep-32_m032 --column c0001 --manifest-path results/local/scalability/deep-32/manifest.json -o json --cache-dir results/local/scalability/deep-32/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream deep-32_m032 --column c0001 --manifest-path results/local/scalability/deep-32/manifest.json -o json --cache-dir results/local/scalability/deep-32/benchmark/dlin-cache > results/local/scalability/deep-32/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/deep-32/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/deep-32/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.03723392958,
+          "mean": 0.036070573579999994,
+          "median": 0.03652003058,
+          "min": 0.034457760579999996,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/deep-32/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/deep-32/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/deep-32/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/deep-32/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.034457760579999996,
+            0.03723392958,
+            0.03652003058
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0014416266074393205,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/deep-32/manifest.json --catalog results/local/scalability/deep-32/catalog.json --select +deep-32_m032.c0001 --format json > results/local/scalability/deep-32/benchmark/parrant_upstream.stdout 2> results/local/scalability/deep-32/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-32/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.32088668906,
-          "mean": 1.1724052050599998,
-          "median": 1.17768329406,
-          "min": 1.01864563206,
+          "max": 0.96961503358,
+          "mean": 0.8925105932466667,
+          "median": 0.87981862158,
+          "min": 0.8280981245800001,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/deep-32/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-32/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-32/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-32/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            1.17768329406,
-            1.01864563206,
-            1.32088668906
+            0.96961503358,
+            0.8280981245800001,
+            0.87981862158
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.15118964184671602,
+          "stddev": 0.07160707710707906,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/deep-32/manifest.json --catalog results/local/scalability/deep-32/catalog.json --output results/local/scalability/deep-32/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/deep-32/benchmark/dbt_meta_build.stdout 2> results/local/scalability/deep-32/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/deep-32/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 2.16426697948,
-          "mean": 2.1254833908133333,
-          "median": 2.12053529748,
-          "min": 2.09164789548,
+          "max": 1.163001657,
+          "mean": 1.121522416333333,
+          "median": 1.159384907,
+          "min": 1.042180685,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/deep-32/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-32/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-32/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/deep-32/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            2.16426697948,
-            2.09164789548,
-            2.12053529748
+            1.159384907,
+            1.042180685,
+            1.163001657
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.03656153116290797,
+          "stddev": 0.06873574738350316,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/deep-32/benchmark/dbt-meta-lineage.json --json deep-32_m032.c0001 > results/local/scalability/deep-32/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/deep-32/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-32/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.49584964954000005,
-          "mean": 0.4408951288733334,
-          "median": 0.44774930454,
-          "min": 0.37908643254,
+          "max": 0.38803823714,
+          "mean": 0.36952418214,
+          "median": 0.36507447514,
+          "min": 0.35545983414,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/deep-32/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-32/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-32/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-32/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.44774930454,
-            0.37908643254,
-            0.49584964954000005
+            0.36507447514,
+            0.38803823714,
+            0.35545983414
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.05868259541038909,
+          "stddev": 0.016738817305801193,
           "tool": "dbt-meta"
         }
       ],
@@ -1647,8 +1948,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 870912
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1666,7 +1967,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/deep-64/benchmark/dbt-meta-lineage.json",
-        "sha256": "dc31c695f4c9f0260920dda0fa500a3989e6997ad4d88fd984d9a669fe9d1396",
+        "sha256": "e64ac19511bd84176705552beedbe62974fd816d6532fdbb9baabed67864bd4a",
         "size_bytes": 434230
       },
       "family": "deep",
@@ -1686,99 +1987,128 @@
       "resolved_column_edges": 1600,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column upstream deep-64_m064 --column c0001 --manifest-path results/local/scalability/deep-64/manifest.json -o json --no-cache > results/local/scalability/deep-64/benchmark/dlin_upstream.stdout 2> results/local/scalability/deep-64/benchmark/dlin_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-64/benchmark/dlin_upstream.hyperfine.json",
           "kind": "upstream_no_cache",
-          "max": 0.1638803001,
-          "mean": 0.11533334876666668,
-          "median": 0.0914943091,
-          "min": 0.09062543710000001,
+          "max": 0.17633171390000002,
+          "mean": 0.1736511295666667,
+          "median": 0.1747603849,
+          "min": 0.16986128990000002,
           "name": "dlin_upstream",
           "probe_stderr": "results/local/scalability/deep-64/benchmark/dlin_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-64/benchmark/dlin_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-64/benchmark/dlin_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-64/benchmark/dlin_upstream.stdout",
           "raw_times": [
-            0.1638803001,
-            0.0914943091,
-            0.09062543710000001
+            0.17633171390000002,
+            0.16986128990000002,
+            0.1747603849
           ],
           "reason": "hyperfine completed; dlin upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.04204513761969238,
+          "stddev": 0.0033748232888316286,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column upstream deep-64_m064 --column c0001 --manifest-path results/local/scalability/deep-64/manifest.json -o json --cache-dir results/local/scalability/deep-64/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column upstream deep-64_m064 --column c0001 --manifest-path results/local/scalability/deep-64/manifest.json -o json --cache-dir results/local/scalability/deep-64/benchmark/dlin-cache > results/local/scalability/deep-64/benchmark/dlin_upstream_warm.stdout 2> results/local/scalability/deep-64/benchmark/dlin_upstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/deep-64/benchmark/dlin_upstream_warm.hyperfine.json",
+          "kind": "upstream_warm_cache",
+          "max": 0.22122506164,
+          "mean": 0.13478951364,
+          "median": 0.09780679164,
+          "min": 0.08533668764,
+          "name": "dlin_upstream_warm",
+          "probe_stderr": "results/local/scalability/deep-64/benchmark/dlin_upstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/deep-64/benchmark/dlin_upstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/deep-64/benchmark/dlin_upstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/deep-64/benchmark/dlin_upstream_warm.stdout",
+          "raw_times": [
+            0.08533668764,
+            0.09780679164,
+            0.22122506164
+          ],
+          "reason": "hyperfine completed; dlin upstream terminal source found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.07511460471830982,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/deep-64/manifest.json --catalog results/local/scalability/deep-64/catalog.json --select +deep-64_m064.c0001 --format json > results/local/scalability/deep-64/benchmark/parrant_upstream.stdout 2> results/local/scalability/deep-64/benchmark/parrant_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-64/benchmark/parrant_upstream.hyperfine.json",
           "kind": "upstream_parse_included",
-          "max": 1.6346243278600001,
-          "mean": 1.42404560686,
-          "median": 1.34635830586,
-          "min": 1.29115418686,
+          "max": 0.92152768458,
+          "mean": 0.8978935349133333,
+          "median": 0.89052628658,
+          "min": 0.88162663358,
           "name": "parrant_upstream",
           "probe_stderr": "results/local/scalability/deep-64/benchmark/parrant_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-64/benchmark/parrant_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-64/benchmark/parrant_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-64/benchmark/parrant_upstream.stdout",
           "raw_times": [
-            1.29115418686,
-            1.34635830586,
-            1.6346243278600001
+            0.88162663358,
+            0.89052628658,
+            0.92152768458
           ],
           "reason": "hyperfine completed; Parrant upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.18444354689752213,
+          "stddev": 0.020945900045830017,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/deep-64/manifest.json --catalog results/local/scalability/deep-64/catalog.json --output results/local/scalability/deep-64/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/deep-64/benchmark/dbt_meta_build.stdout 2> results/local/scalability/deep-64/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/deep-64/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 5.6854193163,
-          "mean": 4.864931113633333,
-          "median": 5.2615302133,
-          "min": 3.6478438113000005,
+          "max": 2.2032059609199997,
+          "mean": 2.1592154819199996,
+          "median": 2.14419726492,
+          "min": 2.1302432199199997,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/deep-64/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-64/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-64/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/deep-64/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            5.6854193163,
-            5.2615302133,
-            3.6478438113000005
+            2.2032059609199997,
+            2.14419726492,
+            2.1302432199199997
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 1.0751263270129277,
+          "stddev": 0.03873048573091466,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/deep-64/benchmark/dbt-meta-lineage.json --json deep-64_m064.c0001 > results/local/scalability/deep-64/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/deep-64/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/deep-64/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.41276162596000004,
-          "mean": 0.41080427929333335,
-          "median": 0.41243089896,
-          "min": 0.40722031296000005,
+          "max": 0.52611036006,
+          "mean": 0.46262660639333336,
+          "median": 0.44938589406000007,
+          "min": 0.41238356506000007,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/deep-64/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/deep-64/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/deep-64/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/deep-64/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.40722031296000005,
-            0.41243089896,
-            0.41276162596000004
+            0.44938589406000007,
+            0.52611036006,
+            0.41238356506000007
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0031082078591983284,
+          "stddev": 0.05800804532617494,
           "tool": "dbt-meta"
         }
       ],
@@ -1788,8 +2118,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 124103
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1807,7 +2137,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/fanout-8/benchmark/dbt-meta-lineage.json",
-        "sha256": "2b845ae5a28217f425aaa148094b9a11f8683826ce5781cb26d5ee414423127a",
+        "sha256": "81a0b49884a7e7fed51217d0a25113634a3f94a4f6ffc152b1f68298daa6979a",
         "size_bytes": 68103
       },
       "family": "fanout",
@@ -1827,123 +2157,153 @@
       "resolved_column_edges": 225,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column downstream fanout-8_base --column c0001 --manifest-path results/local/scalability/fanout-8/manifest.json -o json --no-cache > results/local/scalability/fanout-8/benchmark/dlin_downstream.stdout 2> results/local/scalability/fanout-8/benchmark/dlin_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-8/benchmark/dlin_downstream.hyperfine.json",
           "kind": "downstream_no_cache",
-          "max": 0.01984740902,
-          "mean": 0.016572260353333337,
-          "median": 0.014974606020000003,
-          "min": 0.014894766020000002,
+          "max": 0.0149940025,
+          "mean": 0.013928619833333334,
+          "median": 0.013414045500000001,
+          "min": 0.013377811500000001,
           "name": "dlin_downstream",
           "probe_stderr": "results/local/scalability/fanout-8/benchmark/dlin_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-8/benchmark/dlin_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-8/benchmark/dlin_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-8/benchmark/dlin_downstream.stdout",
           "raw_times": [
-            0.01984740902,
-            0.014894766020000002,
-            0.014974606020000003
+            0.0149940025,
+            0.013414045500000001,
+            0.013377811500000001
           ],
           "reason": "hyperfine completed; dlin downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.0028366428569660176,
+          "stddev": 0.000922826308421218,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column downstream fanout-8_base --column c0001 --manifest-path results/local/scalability/fanout-8/manifest.json -o json --cache-dir results/local/scalability/fanout-8/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column downstream fanout-8_base --column c0001 --manifest-path results/local/scalability/fanout-8/manifest.json -o json --cache-dir results/local/scalability/fanout-8/benchmark/dlin-cache > results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.stdout 2> results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.hyperfine.json",
+          "kind": "downstream_warm_cache",
+          "max": 0.00789876958,
+          "mean": 0.007252264580000001,
+          "median": 0.006979162580000001,
+          "min": 0.00687886158,
+          "name": "dlin_downstream_warm",
+          "probe_stderr": "results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/fanout-8/benchmark/dlin_downstream_warm.stdout",
+          "raw_times": [
+            0.006979162580000001,
+            0.00687886158,
+            0.00789876958
+          ],
+          "reason": "hyperfine completed; dlin downstream targets found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0005621313093210511,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/fanout-8/manifest.json --catalog results/local/scalability/fanout-8/catalog.json --select fanout-8_base.c0001+ --format json > results/local/scalability/fanout-8/benchmark/parrant_downstream.stdout 2> results/local/scalability/fanout-8/benchmark/parrant_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-8/benchmark/parrant_downstream.hyperfine.json",
           "kind": "downstream_parse_included",
-          "max": 1.14566974168,
-          "mean": 1.04934481168,
-          "median": 1.09976234968,
-          "min": 0.90260234368,
+          "max": 1.21056528652,
+          "mean": 0.9192865171866668,
+          "median": 0.8280474125200001,
+          "min": 0.7192468525200001,
           "name": "parrant_downstream",
           "probe_stderr": "results/local/scalability/fanout-8/benchmark/parrant_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-8/benchmark/parrant_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-8/benchmark/parrant_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-8/benchmark/parrant_downstream.stdout",
           "raw_times": [
-            1.14566974168,
-            1.09976234968,
-            0.90260234368
+            1.21056528652,
+            0.8280474125200001,
+            0.7192468525200001
           ],
           "reason": "hyperfine completed; Parrant downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.12913901848825035,
+          "stddev": 0.25805402837842756,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/fanout-8/manifest.json --catalog results/local/scalability/fanout-8/catalog.json --output results/local/scalability/fanout-8/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/fanout-8/benchmark/dbt_meta_build.stdout 2> results/local/scalability/fanout-8/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/fanout-8/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 1.75595487682,
-          "mean": 1.42415041982,
-          "median": 1.31267446482,
-          "min": 1.20382191782,
+          "max": 0.8904678315600001,
+          "mean": 0.8699512972266668,
+          "median": 0.86682097556,
+          "min": 0.85256508456,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            1.20382191782,
-            1.31267446482,
-            1.75595487682
+            0.85256508456,
+            0.8904678315600001,
+            0.86682097556
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.29246002720183045,
+          "stddev": 0.01914428747274512,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/fanout-8/benchmark/dbt-meta-lineage.json --json fanout-8_base.c0001 > results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.37740500824,
-          "mean": 0.35475346357333337,
-          "median": 0.35675609924,
-          "min": 0.33009928324,
+          "max": 0.39683626944000006,
+          "mean": 0.37940087744,
+          "median": 0.38787098844,
+          "min": 0.35349537444,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.37740500824,
-            0.35675609924,
-            0.33009928324
+            0.35349537444,
+            0.39683626944000006,
+            0.38787098844
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.023716361792103798,
+          "stddev": 0.02287827310166783,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage downstream --artifact results/local/scalability/fanout-8/benchmark/dbt-meta-lineage.json --json fanout-8_base.c0001 > results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.stdout 2> results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.hyperfine.json",
           "kind": "query",
-          "max": 0.399403713,
-          "mean": 0.358405504,
-          "median": 0.351527698,
-          "min": 0.324285101,
+          "max": 0.4101495854,
+          "mean": 0.38677752373333335,
+          "median": 0.39820411540000006,
+          "min": 0.35197887040000003,
           "name": "dbt_meta_downstream",
           "probe_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-8/benchmark/dbt_meta_downstream.stdout",
           "raw_times": [
-            0.399403713,
-            0.324285101,
-            0.351527698
+            0.35197887040000003,
+            0.39820411540000006,
+            0.4101495854
           ],
           "reason": "hyperfine completed; dbt-meta downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.03802866851116223,
+          "stddev": 0.030722683293299077,
           "tool": "dbt-meta"
         }
       ],
@@ -1953,8 +2313,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 455431
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -1972,7 +2332,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/fanout-32/benchmark/dbt-meta-lineage.json",
-        "sha256": "9da1b79e5c76f22f2cce5a15e6d6b914ada07d061d30f4224e216b6e446f3b3f",
+        "sha256": "310f99d447432e36a66b32423e29218265ab857ccf968f725e1bc0c91cc554e5",
         "size_bytes": 248428
       },
       "family": "fanout",
@@ -1992,123 +2352,153 @@
       "resolved_column_edges": 825,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column downstream fanout-32_base --column c0001 --manifest-path results/local/scalability/fanout-32/manifest.json -o json --no-cache > results/local/scalability/fanout-32/benchmark/dlin_downstream.stdout 2> results/local/scalability/fanout-32/benchmark/dlin_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-32/benchmark/dlin_downstream.hyperfine.json",
           "kind": "downstream_no_cache",
-          "max": 0.050291053960000005,
-          "mean": 0.04139661796,
-          "median": 0.043491369960000005,
-          "min": 0.03040742996,
+          "max": 0.0403714469,
+          "mean": 0.03827352956666667,
+          "median": 0.040111632900000006,
+          "min": 0.03433750890000001,
           "name": "dlin_downstream",
           "probe_stderr": "results/local/scalability/fanout-32/benchmark/dlin_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-32/benchmark/dlin_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-32/benchmark/dlin_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-32/benchmark/dlin_downstream.stdout",
           "raw_times": [
-            0.043491369960000005,
-            0.03040742996,
-            0.050291053960000005
+            0.040111632900000006,
+            0.0403714469,
+            0.03433750890000001
           ],
           "reason": "hyperfine completed; dlin downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.010105969290447703,
+          "stddev": 0.003411168398799643,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column downstream fanout-32_base --column c0001 --manifest-path results/local/scalability/fanout-32/manifest.json -o json --cache-dir results/local/scalability/fanout-32/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column downstream fanout-32_base --column c0001 --manifest-path results/local/scalability/fanout-32/manifest.json -o json --cache-dir results/local/scalability/fanout-32/benchmark/dlin-cache > results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.stdout 2> results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.hyperfine.json",
+          "kind": "downstream_warm_cache",
+          "max": 0.013238080240000002,
+          "mean": 0.01285564890666667,
+          "median": 0.01277053424,
+          "min": 0.012558332240000001,
+          "name": "dlin_downstream_warm",
+          "probe_stderr": "results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/fanout-32/benchmark/dlin_downstream_warm.stdout",
+          "raw_times": [
+            0.012558332240000001,
+            0.01277053424,
+            0.013238080240000002
+          ],
+          "reason": "hyperfine completed; dlin downstream targets found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0003477753811547529,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/fanout-32/manifest.json --catalog results/local/scalability/fanout-32/catalog.json --select fanout-32_base.c0001+ --format json > results/local/scalability/fanout-32/benchmark/parrant_downstream.stdout 2> results/local/scalability/fanout-32/benchmark/parrant_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-32/benchmark/parrant_downstream.hyperfine.json",
           "kind": "downstream_parse_included",
-          "max": 1.05211327554,
-          "mean": 1.0341473322066665,
-          "median": 1.03004557254,
-          "min": 1.02028314854,
+          "max": 0.7871158314800001,
+          "mean": 0.7653216571466667,
+          "median": 0.76184374048,
+          "min": 0.7470053994800001,
           "name": "parrant_downstream",
           "probe_stderr": "results/local/scalability/fanout-32/benchmark/parrant_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-32/benchmark/parrant_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-32/benchmark/parrant_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-32/benchmark/parrant_downstream.stdout",
           "raw_times": [
-            1.05211327554,
-            1.03004557254,
-            1.02028314854
+            0.76184374048,
+            0.7470053994800001,
+            0.7871158314800001
           ],
           "reason": "hyperfine completed; Parrant downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.01630667257540158,
+          "stddev": 0.020280128625377702,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/fanout-32/manifest.json --catalog results/local/scalability/fanout-32/catalog.json --output results/local/scalability/fanout-32/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/fanout-32/benchmark/dbt_meta_build.stdout 2> results/local/scalability/fanout-32/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/fanout-32/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 2.60583345252,
-          "mean": 2.290983729186667,
-          "median": 2.16177323452,
-          "min": 2.10534450052,
+          "max": 1.21642647026,
+          "mean": 1.1377355675933334,
+          "median": 1.10998347226,
+          "min": 1.08679676026,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            2.10534450052,
-            2.16177323452,
-            2.60583345252
+            1.21642647026,
+            1.08679676026,
+            1.10998347226
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.2741237160800176,
+          "stddev": 0.06912741514922897,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/fanout-32/benchmark/dbt-meta-lineage.json --json fanout-32_base.c0001 > results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.43586877700000004,
-          "mean": 0.4230888686666667,
-          "median": 0.41983412800000003,
-          "min": 0.413563701,
+          "max": 0.36842475276000003,
+          "mean": 0.36559307809333336,
+          "median": 0.36488001176,
+          "min": 0.36347446976000003,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.41983412800000003,
-            0.43586877700000004,
-            0.413563701
+            0.36842475276000003,
+            0.36488001176,
+            0.36347446976000003
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.011503221568190568,
+          "stddev": 0.002551014139871111,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage downstream --artifact results/local/scalability/fanout-32/benchmark/dbt-meta-lineage.json --json fanout-32_base.c0001 > results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.stdout 2> results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.hyperfine.json",
           "kind": "query",
-          "max": 0.42733834904,
-          "mean": 0.38634401004,
-          "median": 0.38682794604000004,
-          "min": 0.34486573504,
+          "max": 0.37474069042,
+          "mean": 0.3616004237533333,
+          "median": 0.35618886242000003,
+          "min": 0.35387171842000004,
           "name": "dbt_meta_downstream",
           "probe_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-32/benchmark/dbt_meta_downstream.stdout",
           "raw_times": [
-            0.42733834904,
-            0.38682794604000004,
-            0.34486573504
+            0.35387171842000004,
+            0.35618886242000003,
+            0.37474069042
           ],
           "reason": "hyperfine completed; dbt-meta downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.041238436688814,
+          "stddev": 0.011438629512861984,
           "tool": "dbt-meta"
         }
       ],
@@ -2118,8 +2508,8 @@
     {
       "boundaries": {
         "dlin_cache": {
-          "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-          "size_bytes": null
+          "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache",
+          "size_bytes": 1788184
         },
         "parrant_cache": {
           "reason": "no persistent cache; project parsing is included",
@@ -2137,7 +2527,7 @@
       },
       "dbt_meta_index": {
         "path": "results/local/scalability/fanout-128/benchmark/dbt-meta-lineage.json",
-        "sha256": "483c2db6027d0d460c9e6ca195a585d395ad9a6a1902939cb9b291ad78d3c2bd",
+        "sha256": "d440b1a33bbda1792751397dca3a553dbbf4625df4d6d3ea33b8fb8e43337514",
         "size_bytes": 978955
       },
       "family": "fanout",
@@ -2157,123 +2547,153 @@
       "resolved_column_edges": 3225,
       "scenarios": [
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s dlin column downstream fanout-128_base --column c0001 --manifest-path results/local/scalability/fanout-128/manifest.json -o json --no-cache > results/local/scalability/fanout-128/benchmark/dlin_downstream.stdout 2> results/local/scalability/fanout-128/benchmark/dlin_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-128/benchmark/dlin_downstream.hyperfine.json",
           "kind": "downstream_no_cache",
-          "max": 0.1269964535,
-          "mean": 0.11405472016666666,
-          "median": 0.1100604205,
-          "min": 0.10510728650000001,
+          "max": 0.13519232022,
+          "mean": 0.12509894955333334,
+          "median": 0.12526649022,
+          "min": 0.11483803822000001,
           "name": "dlin_downstream",
           "probe_stderr": "results/local/scalability/fanout-128/benchmark/dlin_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-128/benchmark/dlin_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-128/benchmark/dlin_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-128/benchmark/dlin_downstream.stdout",
           "raw_times": [
-            0.1269964535,
-            0.1100604205,
-            0.10510728650000001
+            0.11483803822000001,
+            0.12526649022,
+            0.13519232022
           ],
           "reason": "hyperfine completed; dlin downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.011478228537488795,
+          "stddev": 0.010178175246090097,
           "tool": "dlin"
         },
         {
+          "cache_fill_command": "dlin column downstream fanout-128_base --column c0001 --manifest-path results/local/scalability/fanout-128/manifest.json -o json --cache-dir results/local/scalability/fanout-128/benchmark/dlin-cache --refresh-cache",
+          "command": "/usr/bin/timeout 120s dlin column downstream fanout-128_base --column c0001 --manifest-path results/local/scalability/fanout-128/manifest.json -o json --cache-dir results/local/scalability/fanout-128/benchmark/dlin-cache > results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.stdout 2> results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.stderr",
+          "hyperfine_json": "results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.hyperfine.json",
+          "kind": "downstream_warm_cache",
+          "max": 0.03470706472,
+          "mean": 0.034353846386666664,
+          "median": 0.03442413572,
+          "min": 0.03393033872,
+          "name": "dlin_downstream_warm",
+          "probe_stderr": "results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.probe.stderr",
+          "probe_stdout": "results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.probe.stdout",
+          "raw_stderr": "results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.stderr",
+          "raw_stdout": "results/local/scalability/fanout-128/benchmark/dlin_downstream_warm.stdout",
+          "raw_times": [
+            0.03442413572,
+            0.03470706472,
+            0.03393033872
+          ],
+          "reason": "hyperfine completed; dlin downstream targets found",
+          "sample_count": 3,
+          "status": "valid",
+          "stddev": 0.0003931046458060914,
+          "tool": "dlin"
+        },
+        {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s parrant --manifest results/local/scalability/fanout-128/manifest.json --catalog results/local/scalability/fanout-128/catalog.json --select fanout-128_base.c0001+ --format json > results/local/scalability/fanout-128/benchmark/parrant_downstream.stdout 2> results/local/scalability/fanout-128/benchmark/parrant_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-128/benchmark/parrant_downstream.hyperfine.json",
           "kind": "downstream_parse_included",
-          "max": 1.8109466133799998,
-          "mean": 1.7771598127133332,
-          "median": 1.79814577738,
-          "min": 1.72238704738,
+          "max": 1.31442060446,
+          "mean": 1.2913541921266665,
+          "median": 1.2997986524599998,
+          "min": 1.2598433194599998,
           "name": "parrant_downstream",
           "probe_stderr": "results/local/scalability/fanout-128/benchmark/parrant_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-128/benchmark/parrant_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-128/benchmark/parrant_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-128/benchmark/parrant_downstream.stdout",
           "raw_times": [
-            1.79814577738,
-            1.8109466133799998,
-            1.72238704738
+            1.2997986524599998,
+            1.31442060446,
+            1.2598433194599998
           ],
           "reason": "hyperfine completed; Parrant downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.04786446716793178,
+          "stddev": 0.02825157857950135,
           "tool": "parrant"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage build --manifest results/local/scalability/fanout-128/manifest.json --catalog results/local/scalability/fanout-128/catalog.json --output results/local/scalability/fanout-128/benchmark/dbt-meta-lineage.json --json --no-compile > results/local/scalability/fanout-128/benchmark/dbt_meta_build.stdout 2> results/local/scalability/fanout-128/benchmark/dbt_meta_build.stderr",
           "hyperfine_json": "results/local/scalability/fanout-128/benchmark/dbt_meta_build.hyperfine.json",
           "kind": "build",
-          "max": 7.45535805556,
-          "mean": 6.46946299756,
-          "median": 6.20850656656,
-          "min": 5.74452437056,
+          "max": 4.00706776124,
+          "mean": 3.2789689919066674,
+          "median": 2.9452519282400003,
+          "min": 2.88458728624,
           "name": "dbt_meta_build",
           "probe_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_build.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_build.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_build.stderr",
           "raw_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_build.stdout",
           "raw_times": [
-            7.45535805556,
-            6.20850656656,
-            5.74452437056
+            4.00706776124,
+            2.88458728624,
+            2.9452519282400003
           ],
           "reason": "hyperfine completed; dbt-meta graph counts match workload",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.8847664486139056,
+          "stddev": 0.6312811680430385,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage column --artifact results/local/scalability/fanout-128/benchmark/dbt-meta-lineage.json --json fanout-128_base.c0001 > results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.stdout 2> results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.hyperfine.json",
           "kind": "query",
-          "max": 0.38232265014,
-          "mean": 0.3587790508066666,
-          "median": 0.35009542614,
-          "min": 0.34391907614,
+          "max": 0.49340520136000005,
+          "mean": 0.4401596456933334,
+          "median": 0.42542145036,
+          "min": 0.40165228536,
           "name": "dbt_meta_upstream",
           "probe_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_upstream.stdout",
           "raw_times": [
-            0.34391907614,
-            0.35009542614,
-            0.38232265014
+            0.42542145036,
+            0.40165228536,
+            0.49340520136000005
           ],
           "reason": "hyperfine completed; dbt-meta upstream terminal source found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.02062189678489894,
+          "stddev": 0.047618905908140954,
           "tool": "dbt-meta"
         },
         {
+          "cache_fill_command": null,
           "command": "/usr/bin/timeout 120s meta lineage downstream --artifact results/local/scalability/fanout-128/benchmark/dbt-meta-lineage.json --json fanout-128_base.c0001 > results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.stdout 2> results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.stderr",
           "hyperfine_json": "results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.hyperfine.json",
           "kind": "query",
-          "max": 0.38701420044,
-          "mean": 0.36265085244,
-          "median": 0.35690106744,
-          "min": 0.34403728944,
+          "max": 0.44397003222000003,
+          "mean": 0.4307885908866667,
+          "median": 0.43603534722000004,
+          "min": 0.41236039322,
           "name": "dbt_meta_downstream",
           "probe_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.probe.stderr",
           "probe_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.probe.stdout",
           "raw_stderr": "results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.stderr",
           "raw_stdout": "results/local/scalability/fanout-128/benchmark/dbt_meta_downstream.stdout",
           "raw_times": [
-            0.35690106744,
-            0.34403728944,
-            0.38701420044
+            0.44397003222000003,
+            0.41236039322,
+            0.43603534722000004
           ],
           "reason": "hyperfine completed; dbt-meta downstream targets found",
           "sample_count": 3,
           "status": "valid",
-          "stddev": 0.02205784985974719,
+          "stddev": 0.01644501925944785,
           "tool": "dbt-meta"
         }
       ],
@@ -2285,7 +2705,7 @@
     {
       "family": "volume",
       "from_profile": "volume-1k",
-      "mean_ratio": 2.246428982997296,
+      "mean_ratio": 2.0314213505589978,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "volume-10k"
@@ -2293,7 +2713,7 @@
     {
       "family": "volume",
       "from_profile": "volume-10k",
-      "mean_ratio": 4.3227120956644836,
+      "mean_ratio": 4.773966411925507,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "volume-100k"
@@ -2301,7 +2721,23 @@
     {
       "family": "volume",
       "from_profile": "volume-1k",
-      "mean_ratio": 3.3350327994226907,
+      "mean_ratio": 2.0668935035657947,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "volume-10k"
+    },
+    {
+      "family": "volume",
+      "from_profile": "volume-10k",
+      "mean_ratio": 6.282483106755317,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "volume-100k"
+    },
+    {
+      "family": "volume",
+      "from_profile": "volume-1k",
+      "mean_ratio": 3.2879329737454315,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "volume-10k"
@@ -2309,7 +2745,7 @@
     {
       "family": "volume",
       "from_profile": "volume-10k",
-      "mean_ratio": 7.279299813686351,
+      "mean_ratio": 9.565427823931625,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "volume-100k"
@@ -2317,7 +2753,7 @@
     {
       "family": "volume",
       "from_profile": "volume-1k",
-      "mean_ratio": 7.194711742867342,
+      "mean_ratio": 6.677491801919892,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "volume-10k"
@@ -2333,7 +2769,7 @@
     {
       "family": "volume",
       "from_profile": "volume-1k",
-      "mean_ratio": 0.7864892028128887,
+      "mean_ratio": 1.211400684553953,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "volume-10k"
@@ -2349,7 +2785,7 @@
     {
       "family": "wide",
       "from_profile": "wide-25",
-      "mean_ratio": 0.6278206373813059,
+      "mean_ratio": 2.015305701909598,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "wide-50"
@@ -2357,7 +2793,7 @@
     {
       "family": "wide",
       "from_profile": "wide-50",
-      "mean_ratio": 1.7544460573611909,
+      "mean_ratio": 2.62584442792647,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "wide-100"
@@ -2365,7 +2801,7 @@
     {
       "family": "wide",
       "from_profile": "wide-100",
-      "mean_ratio": 2.117785696677968,
+      "mean_ratio": 3.5657911681718812,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "wide-200"
@@ -2373,7 +2809,31 @@
     {
       "family": "wide",
       "from_profile": "wide-25",
-      "mean_ratio": 0.556141577404841,
+      "mean_ratio": 1.8475388810236948,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "wide-50"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-50",
+      "mean_ratio": 2.4357692597048755,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "wide-100"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-100",
+      "mean_ratio": 3.8230780920480556,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "wide-200"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-25",
+      "mean_ratio": 1.963436454129606,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_whole_model",
       "to_profile": "wide-50"
@@ -2381,7 +2841,7 @@
     {
       "family": "wide",
       "from_profile": "wide-50",
-      "mean_ratio": 1.8114850949342662,
+      "mean_ratio": 2.7324243213125654,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_whole_model",
       "to_profile": "wide-100"
@@ -2389,7 +2849,7 @@
     {
       "family": "wide",
       "from_profile": "wide-100",
-      "mean_ratio": 2.084685445659715,
+      "mean_ratio": 3.461248257087412,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_whole_model",
       "to_profile": "wide-200"
@@ -2397,7 +2857,7 @@
     {
       "family": "wide",
       "from_profile": "wide-25",
-      "mean_ratio": 1.0810925727792111,
+      "mean_ratio": 1.107160933915584,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "wide-50"
@@ -2405,7 +2865,7 @@
     {
       "family": "wide",
       "from_profile": "wide-50",
-      "mean_ratio": 1.2251794255565063,
+      "mean_ratio": 1.0820947005793515,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "wide-100"
@@ -2413,9 +2873,81 @@
     {
       "family": "wide",
       "from_profile": "wide-100",
-      "mean_ratio": 1.1712069271783008,
+      "mean_ratio": 1.4746395263713226,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
+      "to_profile": "wide-200"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-25",
+      "mean_ratio": null,
+      "reason": "wide-25:not_benchmarked; wide-50:not_benchmarked",
+      "scenario": "parrant_whole_model",
+      "to_profile": "wide-50"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-50",
+      "mean_ratio": null,
+      "reason": "wide-50:not_benchmarked; wide-100:not_benchmarked",
+      "scenario": "parrant_whole_model",
+      "to_profile": "wide-100"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-100",
+      "mean_ratio": null,
+      "reason": "wide-100:not_benchmarked; wide-200:not_benchmarked",
+      "scenario": "parrant_whole_model",
+      "to_profile": "wide-200"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-25",
+      "mean_ratio": 1.1951365943906298,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_build",
+      "to_profile": "wide-50"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-50",
+      "mean_ratio": 1.8743469279415048,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_build",
+      "to_profile": "wide-100"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-100",
+      "mean_ratio": 3.1011324230155313,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_build",
+      "to_profile": "wide-200"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-25",
+      "mean_ratio": 1.025255162355659,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_upstream",
+      "to_profile": "wide-50"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-50",
+      "mean_ratio": 0.9587659044371916,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_upstream",
+      "to_profile": "wide-100"
+    },
+    {
+      "family": "wide",
+      "from_profile": "wide-100",
+      "mean_ratio": 1.196045423852591,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dbt_meta_upstream",
       "to_profile": "wide-200"
     },
     {
@@ -2423,78 +2955,6 @@
       "from_profile": "wide-25",
       "mean_ratio": null,
       "reason": "wide-25:unsupported; wide-50:unsupported",
-      "scenario": "parrant_whole_model",
-      "to_profile": "wide-50"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-50",
-      "mean_ratio": null,
-      "reason": "wide-50:unsupported; wide-100:unsupported",
-      "scenario": "parrant_whole_model",
-      "to_profile": "wide-100"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-100",
-      "mean_ratio": null,
-      "reason": "wide-100:unsupported; wide-200:unsupported",
-      "scenario": "parrant_whole_model",
-      "to_profile": "wide-200"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-25",
-      "mean_ratio": 1.481312071830566,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_build",
-      "to_profile": "wide-50"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-50",
-      "mean_ratio": 2.941725695649897,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_build",
-      "to_profile": "wide-100"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-100",
-      "mean_ratio": 3.2103182929839162,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_build",
-      "to_profile": "wide-200"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-25",
-      "mean_ratio": 0.9990448059980096,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_upstream",
-      "to_profile": "wide-50"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-50",
-      "mean_ratio": 1.0738043456726567,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_upstream",
-      "to_profile": "wide-100"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-100",
-      "mean_ratio": 1.0037236647881207,
-      "reason": "both consecutive measurements valid",
-      "scenario": "dbt_meta_upstream",
-      "to_profile": "wide-200"
-    },
-    {
-      "family": "wide",
-      "from_profile": "wide-25",
-      "mean_ratio": null,
-      "reason": "wide-25:unsupported; wide-50:unsupported",
       "scenario": "dbt_meta_whole_model",
       "to_profile": "wide-50"
     },
@@ -2517,7 +2977,7 @@
     {
       "family": "deep",
       "from_profile": "deep-8",
-      "mean_ratio": 1.5459134560247267,
+      "mean_ratio": 1.8070874088728144,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "deep-16"
@@ -2525,7 +2985,7 @@
     {
       "family": "deep",
       "from_profile": "deep-16",
-      "mean_ratio": 1.5905493635349524,
+      "mean_ratio": 2.0158081824108334,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "deep-32"
@@ -2533,7 +2993,7 @@
     {
       "family": "deep",
       "from_profile": "deep-32",
-      "mean_ratio": 3.308416283417385,
+      "mean_ratio": 2.121745741210247,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_upstream",
       "to_profile": "deep-64"
@@ -2541,7 +3001,31 @@
     {
       "family": "deep",
       "from_profile": "deep-8",
-      "mean_ratio": 0.9964641626726986,
+      "mean_ratio": 2.1229255637582503,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "deep-16"
+    },
+    {
+      "family": "deep",
+      "from_profile": "deep-16",
+      "mean_ratio": 1.683186777294044,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "deep-32"
+    },
+    {
+      "family": "deep",
+      "from_profile": "deep-32",
+      "mean_ratio": 3.7368275650248206,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_upstream_warm",
+      "to_profile": "deep-64"
+    },
+    {
+      "family": "deep",
+      "from_profile": "deep-8",
+      "mean_ratio": 1.0889426535020823,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "deep-16"
@@ -2549,7 +3033,7 @@
     {
       "family": "deep",
       "from_profile": "deep-16",
-      "mean_ratio": 1.1946596737781132,
+      "mean_ratio": 1.393637580298311,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "deep-32"
@@ -2557,7 +3041,7 @@
     {
       "family": "deep",
       "from_profile": "deep-32",
-      "mean_ratio": 1.2146360325883423,
+      "mean_ratio": 1.0060312356036978,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_upstream",
       "to_profile": "deep-64"
@@ -2565,7 +3049,7 @@
     {
       "family": "deep",
       "from_profile": "deep-8",
-      "mean_ratio": 1.2058626386387348,
+      "mean_ratio": 1.067030393241259,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "deep-16"
@@ -2573,7 +3057,7 @@
     {
       "family": "deep",
       "from_profile": "deep-16",
-      "mean_ratio": 1.5009457138475877,
+      "mean_ratio": 1.2577463602612555,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "deep-32"
@@ -2581,7 +3065,7 @@
     {
       "family": "deep",
       "from_profile": "deep-32",
-      "mean_ratio": 2.2888586825285557,
+      "mean_ratio": 1.9252539677087015,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "deep-64"
@@ -2589,7 +3073,7 @@
     {
       "family": "deep",
       "from_profile": "deep-8",
-      "mean_ratio": 0.9856419218024653,
+      "mean_ratio": 0.9523366968594166,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "deep-16"
@@ -2597,7 +3081,7 @@
     {
       "family": "deep",
       "from_profile": "deep-16",
-      "mean_ratio": 1.0936200839828625,
+      "mean_ratio": 1.1038837615950041,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "deep-32"
@@ -2605,7 +3089,7 @@
     {
       "family": "deep",
       "from_profile": "deep-32",
-      "mean_ratio": 0.9317505510734618,
+      "mean_ratio": 1.2519521827073825,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "deep-64"
@@ -2613,7 +3097,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-8",
-      "mean_ratio": 2.4979463921874427,
+      "mean_ratio": 2.747833599067168,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_downstream",
       "to_profile": "fanout-32"
@@ -2621,7 +3105,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-32",
-      "mean_ratio": 2.7551700063245135,
+      "mean_ratio": 3.268550117266556,
       "reason": "both consecutive measurements valid",
       "scenario": "dlin_downstream",
       "to_profile": "fanout-128"
@@ -2629,7 +3113,23 @@
     {
       "family": "fanout",
       "from_profile": "fanout-8",
-      "mean_ratio": 0.985517172902392,
+      "mean_ratio": 1.7726392583799897,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_downstream_warm",
+      "to_profile": "fanout-32"
+    },
+    {
+      "family": "fanout",
+      "from_profile": "fanout-32",
+      "mean_ratio": 2.67227633829137,
+      "reason": "both consecutive measurements valid",
+      "scenario": "dlin_downstream_warm",
+      "to_profile": "fanout-128"
+    },
+    {
+      "family": "fanout",
+      "from_profile": "fanout-8",
+      "mean_ratio": 0.8325170040444131,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_downstream",
       "to_profile": "fanout-32"
@@ -2637,7 +3137,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-32",
-      "mean_ratio": 1.718478361222694,
+      "mean_ratio": 1.6873352270484496,
       "reason": "both consecutive measurements valid",
       "scenario": "parrant_downstream",
       "to_profile": "fanout-128"
@@ -2645,7 +3145,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-8",
-      "mean_ratio": 1.608666961932453,
+      "mean_ratio": 1.3078152434743655,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "fanout-32"
@@ -2653,7 +3153,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-32",
-      "mean_ratio": 2.8238799408046233,
+      "mean_ratio": 2.8820132597618553,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_build",
       "to_profile": "fanout-128"
@@ -2661,7 +3161,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-8",
-      "mean_ratio": 1.1926278729036488,
+      "mean_ratio": 0.963606306237786,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "fanout-32"
@@ -2669,7 +3169,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-32",
-      "mean_ratio": 0.8479992677125548,
+      "mean_ratio": 1.2039605563346134,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_upstream",
       "to_profile": "fanout-128"
@@ -2677,7 +3177,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-8",
-      "mean_ratio": 1.0779522237470998,
+      "mean_ratio": 0.9349054729525633,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_downstream",
       "to_profile": "fanout-32"
@@ -2685,7 +3185,7 @@
     {
       "family": "fanout",
       "from_profile": "fanout-32",
-      "mean_ratio": 0.9386734180308711,
+      "mean_ratio": 1.191338733553394,
       "reason": "both consecutive measurements valid",
       "scenario": "dbt_meta_downstream",
       "to_profile": "fanout-128"
@@ -2697,21 +3197,21 @@
   "tool_versions": [
     {
       "binary": "dlin",
-      "install": "uv tool install --reinstall dlin-cli==0.2.4",
+      "install": "uv tool install --reinstall dlin-cli==0.3.0rc1",
       "name": "dlin",
-      "version": "0.2.4"
+      "version": "0.3.0-rc.1"
     },
     {
       "binary": "parrant",
-      "install": "uv tool install --reinstall --with jinja2 parrant==0.17.2",
+      "install": "uv tool install --reinstall --with sqlglot==26.33.0 parrant==0.21.1",
       "name": "parrant",
-      "version": "0.17.2"
+      "version": "0.21.1"
     },
     {
       "binary": "meta",
-      "install": "uv tool install --reinstall dbt-meta==0.3.8",
+      "install": "uv tool install --reinstall --with 'sqlglot[c]==30.33.0' dbt-meta==0.3.10",
       "name": "dbt-meta",
-      "version": "0.3.8"
+      "version": "0.3.10"
     }
   ],
   "warmup": 1

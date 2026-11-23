@@ -8,7 +8,7 @@ dbt model lineage CLI. Parses SQL files directly or reads a compiled `manifest.j
 
 Works for developers navigating live SQL files, analysts exploring a shared manifest, AI agents via CLI prompt or MCP server, and CI pipelines.
 
-Column-level lineage (`dlin column upstream` / `dlin column downstream`) requires a compiled `manifest.json` and is usable in practice while remaining Experimental for coverage reasons.
+Column-level lineage (`dlin column upstream` / `dlin column downstream`) requires a compiled `manifest.json`.
 
 ## Motivation
 
@@ -147,7 +147,7 @@ The SQL dialect for column lineage is detected from the manifest's `adapter_type
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
-- **Column-level lineage** (experimental): traces columns across models with transformation classification, reports partial results, where tracing stopped and the assumptions it relied on; requires `manifest.json`
+- **Column-level lineage**: traces columns across models with transformation classification, reports partial results, where tracing stopped and the assumptions it relied on; requires `manifest.json`
 
 ## Mermaid diagrams
 
@@ -281,9 +281,9 @@ dlin graph -o dot | dot -Tsvg > out.svg                # Graphviz rendering
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
-## Column-level lineage (Experimental)
+## Column-level lineage
 
-`dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. Regression fixtures and real dbt project validation show that column-level lineage is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
+`dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. When a column cannot be traced completely, for example because of SQL syntax that is not supported yet or `SELECT *` over a relation whose columns are not known, the result is marked partial and says where and why tracing stopped instead of guessing; see [Known limitations](#known-limitations).
 
 Output is JSON by default; `-o plain` is easier to read, and `-o mermaid` / `-o dot` draw diagrams.
 
@@ -369,13 +369,14 @@ Results are split into `confirmed` impacts, `possible` impacts reached through a
 
 Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
 
-| Workload | dlin 0.2.4 | [Parrant 0.17.2](https://pypi.org/project/parrant/0.17.2/) | [dbt-meta 0.3.8](https://pypi.org/project/dbt-meta/0.3.8/) |
+| Workload | dlin 0.3.0-rc.1, no cache / warm cache | [Parrant 0.21.1](https://pypi.org/project/parrant/0.21.1/) | [dbt-meta 0.3.10](https://pypi.org/project/dbt-meta/0.3.10/) with `sqlglot[c]`, build + query |
 | --- | ---: | ---: | ---: |
-| Volume, 100,150 columns, single upstream | 88.9 ms | 37.4 s | build >120 s timeout; query not run |
-| Deep 64, single upstream | 115 ms | 1.42 s | build 4.86 s; query 411 ms |
-| Fan-out 128, downstream | 114 ms | 1.78 s | build 6.47 s; query 363 ms |
+| Volume, 100,150 columns, single upstream | 78.0 ms / 75.7 ms | 24.4 s | build >120 s timeout; query not run |
+| Deep 64, single upstream | 174 ms / 135 ms | 898 ms | 2.16 s + 463 ms |
+| Fan-out 128, downstream | 125 ms / 34.4 ms | 1.29 s | 3.28 s + 431 ms |
+| Wide 200 columns × 8 models, single upstream | 487 ms / 223 ms | 939 ms | 5.23 s + 381 ms |
 
-These synthetic results use artifacts derived from the real dbt fixture. Native Rust avoids Python startup and dlin showed lower latency here; dlin uses `--no-cache`, Parrant includes parsing, and dbt-meta query excludes build. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
+These synthetic results use artifacts derived from the real dbt fixture. Each time is a separate process, so it includes reading the artifacts. dlin "no cache" uses `--no-cache` and includes SQL analysis; "warm cache" reuses a cache filled once by the same query. Parrant has no persistent cache and includes parsing. dbt-meta builds a lineage artifact once and then queries it, so its end-to-end time is build plus query; for repeated queries over one build, compare its query time with dlin's warm cache. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 
 ### Known limitations
 

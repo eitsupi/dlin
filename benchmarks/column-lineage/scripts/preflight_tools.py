@@ -118,13 +118,37 @@ def skipped_status(tool: str, command: str, reason: str) -> dict[str, object]:
 
 def reported_version(stdout: str) -> str | None:
     matches = re.findall(
-        r"(?<![0-9A-Za-z.])v?(\d+\.\d+\.\d+)(?![0-9A-Za-z.+-])", stdout
+        r"(?<![0-9A-Za-z.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)(?![0-9A-Za-z.+-])", stdout
     )
     return matches[0] if len(matches) == 1 else None
 
 
+SQLGLOT_PROBE = (
+    "import sqlglot, sqlglot.parser; "
+    "print(sqlglot.__version__, 'compiled' if sqlglot.parser.__file__.endswith('.so') else 'pure')"
+)
+
+
+def check_sqlglot(path: Path, expected: tuple[str, str]) -> None:
+    """Check the SQLGlot in the tool's environment, found through its script's shebang."""
+    shebang = path.read_text(errors="replace").splitlines()[0]
+    assert shebang.startswith("#!"), f"{path} is not a Python script"
+    completed = subprocess.run(
+        [shebang[2:].strip(), "-c", SQLGLOT_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    actual = tuple(completed.stdout.split())
+    assert actual == expected, f"expected SQLGlot {' '.join(expected)}, got {completed.stdout.strip()!r}"
+
+
 def executable(
-    binary: str, expected_version: str, label: str | None = None
+    binary: str,
+    expected_version: str,
+    label: str | None = None,
+    sqlglot: tuple[str, str] | None = None,
 ) -> tuple[str | None, dict[str, object]]:
     tool = label or binary
     path = shutil.which(binary)
@@ -140,7 +164,10 @@ def executable(
         assert actual_version == expected_version, (
             f"expected version {expected_version!r}, got {stdout.strip()!r}"
         )
-        return f"version {expected_version}"
+        if sqlglot is None:
+            return f"version {expected_version}"
+        check_sqlglot(resolved, sqlglot)
+        return f"version {expected_version}; SQLGlot {' '.join(sqlglot)}"
 
     status = run_command(tool, "version", [path, "--version"], check_version)
     return (path if status["valid"] else None), status
@@ -150,19 +177,43 @@ def json_payload(stdout: str) -> object:
     return json.loads(stdout)
 
 
+RAW_ORDERS_NODES = {
+    "seed.column_lineage_correctness.raw_orders",
+    "source.column_lineage_correctness.synthetic.raw_orders",
+}
+
+
 def dlin_upstream(stdout: str) -> str:
     payload = json_payload(stdout)
     assert isinstance(payload, list) and payload, "JSON result is empty"
     entry = next(item for item in payload if item.get("model") == "i01_deep_08")
     assert not entry.get("errors"), "query returned lineage errors"
-    column = next(column for column in entry["columns"] if column["column"] == "amount_double")
-    sources = column["lineage"]["known"]
-    assert any(
-        source.get("column") == "amount"
+    column = next(
+        column
+        for column in entry["output"]["columns"]
+        if column["name"]["ident"]["value"] == "amount_double"
+    )
+    lineage = column["lineage"]
+    if any(
+        source["column"]["value"] == "amount"
         and str(source.get("table", "")).split(".")[-1] == "raw_orders"
-        for source in sources
-    ), "raw_orders.amount was not found"
-    return "I01 query and raw_orders.amount source found"
+        for source in lineage["known"]
+    ):
+        return "I01 query and raw_orders.amount source found"
+    # The fixture seed and the source declared over it share the physical
+    # relation main.raw_orders, and a02 depends on both. dlin reports that
+    # physical column with the two candidate nodes instead of choosing one.
+    for unresolved in lineage["unresolved"]:
+        reason = unresolved["reason"]
+        resource = reason.get("resource") or {}
+        if (
+            reason.get("reason") == "ambiguous_model"
+            and resource.get("relation", {}).get("name", {}).get("value") == "raw_orders"
+            and resource.get("column", {}).get("value") == "amount"
+            and {c["unique_id"] for c in resource.get("candidates", [])} == RAW_ORDERS_NODES
+        ):
+            return "I01 query and raw_orders.amount found with its seed and source candidates"
+    raise AssertionError("raw_orders.amount was not found")
 
 
 def dlin_downstream(stdout: str) -> str:
@@ -256,7 +307,7 @@ def main() -> int:
     META_ARTIFACT_PATH.unlink(missing_ok=True)
     statuses: list[dict[str, object]] = []
 
-    dlin, status = executable("dlin", "0.2.4")
+    dlin, status = executable("dlin", "0.3.0-rc.1")
     statuses.append(status)
     if dlin:
         statuses.append(
@@ -307,7 +358,7 @@ def main() -> int:
             ]
         )
 
-    parrant, status = executable("parrant", "0.17.2")
+    parrant, status = executable("parrant", "0.21.1", sqlglot=("26.33.0", "pure"))
     statuses.append(status)
     if parrant:
         statuses.append(
@@ -354,7 +405,7 @@ def main() -> int:
             ]
         )
 
-    meta, status = executable("meta", "0.3.8", "dbt-meta")
+    meta, status = executable("meta", "0.3.10", "dbt-meta", sqlglot=("30.33.0", "compiled"))
     statuses.append(status)
     if meta:
         statuses.append(

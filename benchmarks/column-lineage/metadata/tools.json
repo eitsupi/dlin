@@ -8,10 +8,10 @@
   "comparison_targets": [
     {
       "name": "dlin",
-      "version": "0.2.4",
+      "version": "0.3.0-rc.1",
       "binary": "dlin",
       "version_command": "dlin --version",
-      "install": "uv tool install --reinstall dlin-cli==0.2.4",
+      "install": "uv tool install --reinstall dlin-cli==0.3.0rc1",
       "commands": {
         "upstream": "dlin column upstream i01_deep_08 --column amount_double --manifest-path artifacts/manifest.json --no-cache -o json",
         "downstream": "dlin column downstream i05_fanout_base --column amount --manifest-path artifacts/manifest.json --no-cache -o json"
@@ -30,10 +30,10 @@
     },
     {
       "name": "parrant",
-      "version": "0.17.2",
+      "version": "0.21.1",
       "binary": "parrant",
       "version_command": "parrant --version",
-      "install": "uv tool install --reinstall --with jinja2 parrant==0.17.2",
+      "install": "uv tool install --reinstall --with sqlglot==26.33.0 parrant==0.21.1",
       "commands": {
         "upstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select +i01_deep_08.amount_double --format json",
         "downstream": "parrant --manifest artifacts/manifest.json --catalog artifacts/catalog.json --select i05_fanout_base.amount+ --format json"
@@ -47,16 +47,15 @@
         "cache": "no preflight cache flag"
       },
       "limitations": [
-        "The released package may require the Jinja2 supplement included by the install command.",
         "The preflight requires parsed_ok models and rejects an output where every model failed to parse."
       ]
     },
     {
       "name": "dbt-meta",
-      "version": "0.3.8",
+      "version": "0.3.10",
       "binary": "meta",
       "version_command": "meta --version",
-      "install": "uv tool install --reinstall dbt-meta==0.3.8",
+      "install": "uv tool install --reinstall --with 'sqlglot[c]==30.33.0' dbt-meta==0.3.10",
       "commands": {
         "build": "meta lineage build --manifest artifacts/manifest.json --catalog artifacts/catalog.json --output results/local/preflight/dbt-meta-lineage.json --json --no-compile",
         "upstream": "meta lineage column --artifact results/local/preflight/dbt-meta-lineage.json --json i01_deep_08.amount_double",
