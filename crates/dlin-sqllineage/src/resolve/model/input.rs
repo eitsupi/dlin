@@ -512,6 +512,31 @@ impl OutputModels<'_, '_, '_> {
         (walk.into_lookup().unwrap_or(fallback), evidence)
     }
 
+    /// Find a column before falling back to the alias in the same clause.
+    /// An inner clause with an unknown competing column cannot prove a row
+    /// binding. An outer column cannot shadow an inner row alias.
+    pub(super) fn row_alias_column(
+        &mut self,
+        env: BindingEnv,
+        name: &Ident,
+    ) -> Option<(Option<InputLookup>, Evidence)> {
+        let mut evidence = Evidence::default();
+        for clause in self.graph.scopes.clause_envs(env) {
+            match self.clause_standing(clause, name, &mut evidence).0 {
+                Standing::Present(column) => return Some((Some(column), evidence)),
+                Standing::Possible { .. } => return None,
+                Standing::Absent => {}
+            }
+            if effective_bindings(clause, self.graph)
+                .iter()
+                .any(|(alias, _)| same_column_name(alias, name, self.graph.dialect))
+            {
+                return Some((None, evidence));
+            }
+        }
+        None
+    }
+
     fn settle(
         &mut self,
         standing: Standing,

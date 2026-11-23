@@ -5,9 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::super::binding::{
-    ReferenceTarget, ambiguous_qualified_origin, reference_target, scope_lists_column,
-};
+use super::super::binding::{ReferenceTarget, ambiguous_qualified_origin, reference_target};
 use super::super::target::{StarTarget, resolve_star_target};
 use super::choose::Choice;
 use super::input::{InputLookup, InputModel, Invalidity};
@@ -497,7 +495,11 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 field_elements(fields, &mut schema)
                     .unwrap_or_else(|| opaque(OpaqueReason::FieldPath(node_id)))
             }
-            StarTarget::Expr => opaque(OpaqueReason::Expression(node_id)),
+            StarTarget::Expr => {
+                let fields = self.struct_fields(&ValueId::Expr(node_id), &mut ShapeWalk::default());
+                field_elements(fields, &mut schema)
+                    .unwrap_or_else(|| opaque(OpaqueReason::Expression(node_id)))
+            }
             StarTarget::Ambiguous(_) => opaque(OpaqueReason::Ambiguous(node_id)),
         };
         let mut model = OutputModel::new(
@@ -586,14 +588,105 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
             ReferenceTarget::RowValueCandidate {
                 name,
-                binding: Some(binding @ (Binding::Cte(scope) | Binding::DerivedTable(scope))),
-            } if scope_lists_column(scope, name, graph) => {
-                self.binding_struct_fields(&binding, std::slice::from_ref(name), walk)
+                env,
+                binding: Some(binding),
+            } => {
+                if graph
+                    .scopes
+                    .ambiguous_binding_candidates(env, name)
+                    .is_some()
+                {
+                    return None;
+                }
+                self.row_candidate_fields(name, env, &binding, walk)
             }
             ReferenceTarget::RowValueCandidate { .. }
             | ReferenceTarget::Unbound { .. }
             | ReferenceTarget::None => None,
         }
+    }
+
+    /// A column with the alias's name takes precedence over the whole row.
+    /// Require enough schema knowledge to distinguish those bindings.
+    fn row_candidate_fields(
+        &mut self,
+        name: &Ident,
+        env: BindingEnv,
+        binding: &Binding,
+        walk: &mut ShapeWalk,
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
+        let (column, mut evidence) = self.row_alias_column(env, name)?;
+        if let Some(column) = column {
+            let value = match column {
+                InputLookup::Column { value, .. } => value,
+                InputLookup::Scope { scope, .. } if !self.is_value_table(scope) => {
+                    let model = self.scope(scope);
+                    let Choice::Column(_, slot) = model.choose(name) else {
+                        return None;
+                    };
+                    slot.value.clone()
+                }
+                _ => return None,
+            };
+            let (fields, inner) = self.struct_fields(&value, walk)?;
+            evidence.extend(&inner);
+            return Some((fields, evidence));
+        }
+
+        match binding {
+            Binding::Cte(scope) | Binding::DerivedTable(scope) if self.is_value_table(*scope) => {
+                return None;
+            }
+            Binding::VirtualSource(_) => return None,
+            _ => {}
+        }
+        evidence.extend(&self.binding_schema(binding));
+        let range = RangeRef {
+            index: 0,
+            name: name.clone(),
+            binding: binding.clone(),
+            anonymous: false,
+        };
+        let mut fields = self.binding_part(&range);
+        if fields.is_empty()
+            || fields
+                .iter()
+                .any(|field| matches!(field, OutputElement::Unknown(_)))
+        {
+            return None;
+        }
+        for field in &mut fields {
+            if let OutputElement::Column(slot) = field {
+                slot.ranges = Rc::from([]);
+                slot.candidate_ranges = Rc::from([]);
+                slot.origin = SlotOrigin::Defined;
+                // Catalog entries can specify a set of names without their order.
+                slot.position = slot
+                    .ordinal
+                    .map_or(PositionRange { min: 0, max: None }, PositionRange::exact);
+            }
+        }
+        Some((fields, evidence))
+    }
+
+    /// A value-table range variable denotes the value itself, not a new row.
+    fn is_value_table(&self, scope: ScopeId) -> bool {
+        let mut pending = vec![scope];
+        let mut seen = HashSet::new();
+        while let Some(scope) = pending.pop() {
+            if !seen.insert(scope) {
+                continue;
+            }
+            if self.graph.value_table_scopes.contains(&scope) {
+                return true;
+            }
+            match self.graph.scopes.output_plan(scope) {
+                OutputPlan::Delegate(child) => pending.push(*child),
+                OutputPlan::SetOperation { left, right, .. } => pending.extend([*left, *right]),
+                OutputPlan::Projection => {}
+            }
+        }
+        false
     }
 
     /// The fields of a value that is a STRUCT whose fields are known, as
@@ -619,10 +712,31 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 _ => return None,
             }
         };
-        let fields = match self.graph.struct_values.get(&node)? {
+        self.shape_fields(self.graph.struct_values.get(&node)?, walk)
+    }
+
+    fn shape_fields(
+        &mut self,
+        shape: &StructValue,
+        walk: &mut ShapeWalk,
+    ) -> Option<(Vec<OutputElement>, Evidence)> {
+        let fields = match shape {
             StructValue::Fields(fields) => fields,
             StructValue::Column(reference) => {
                 return self.reference_struct_fields(*reference, walk);
+            }
+            StructValue::AggregateElement { input, index } => {
+                let (mut fields, evidence) = self.shape_fields(input, walk)?;
+                let index: Rc<[NodeId]> = Rc::from(index.as_slice());
+                for field in &mut fields {
+                    if let OutputElement::Column(slot) = field {
+                        slot.value = ValueId::AggregateElement {
+                            field: Box::new(slot.value.clone()),
+                            index: index.clone(),
+                        };
+                    }
+                }
+                return Some((fields, evidence));
             }
         };
         let elements = fields

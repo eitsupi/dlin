@@ -187,6 +187,15 @@ impl Evaluator<'_, '_, '_> {
                 let (sources, _, transform) = self.expression(*node_id);
                 (sources, transform)
             }
+            ValueId::AggregateElement { field, index } => {
+                let (mut sources, _) = self.value(field);
+                let mut visited = HashSet::new();
+                for &node in index.iter() {
+                    let (index_sources, _, _) = collect_leaf_origins(node, self.cx, &mut visited);
+                    sources.extend(index_sources);
+                }
+                (sources, TransformKind::Aggregation)
+            }
             ValueId::Forward(id) => self.slot_value(*id),
             ValueId::SetMerged { op, left } => self.merged_slot_value(*op, *left),
             ValueId::SchemaDependent {

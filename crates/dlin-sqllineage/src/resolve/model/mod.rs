@@ -57,6 +57,11 @@ pub(super) enum ValueId {
     Physical { table: Rc<TableRef>, column: Ident },
     /// The expression of an output column or a REPLACE item.
     Expr(NodeId),
+    /// A field of an aggregated array element and the inputs selecting it.
+    AggregateElement {
+        field: Box<ValueId>,
+        index: Rc<[NodeId]>,
+    },
     /// A column that a CTE or derived table publishes, as its reader sees it.
     Forward(SlotId),
     /// A column a USING key takes from a CTE or derived table that lists no

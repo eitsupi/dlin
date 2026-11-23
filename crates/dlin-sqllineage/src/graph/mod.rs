@@ -8,7 +8,7 @@ use crate::types::TableLineage;
 use edge::{EdgeKind, RawEdge};
 use node::{NodeId, RawNode, StarBase, StarOptions};
 use scope::{BindingEnv, ScopeTree};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) struct RawGraph {
     pub dialect: Dialect,
@@ -19,6 +19,7 @@ pub(crate) struct RawGraph {
     /// What decides the fields of an output column that may be a STRUCT. A
     /// star over the column expands these.
     pub struct_values: HashMap<NodeId, StructValue>,
+    pub value_table_scopes: HashSet<scope::ScopeId>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
@@ -33,6 +34,11 @@ pub(crate) enum StructValue {
     /// A column read as it is, through this reference node: its fields are
     /// those of the column the reference names.
     Column(NodeId),
+    /// One element of an array aggregate, with the inputs selecting its index.
+    AggregateElement {
+        input: Box<Self>,
+        index: Vec<NodeId>,
+    },
 }
 
 impl RawGraph {
@@ -43,6 +49,7 @@ impl RawGraph {
             edges: Vec::new(),
             output_names: HashMap::new(),
             struct_values: HashMap::new(),
+            value_table_scopes: HashSet::new(),
             target_columns: Vec::new(),
             empty_projection: None,
             scopes: ScopeTree::new(dialect),

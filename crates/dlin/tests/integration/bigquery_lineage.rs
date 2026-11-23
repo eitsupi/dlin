@@ -853,3 +853,41 @@ fn repeated_projections_and_qualified_using_keys_are_fatal_ambiguities() {
         );
     }
 }
+
+#[test]
+fn aggregated_row_fields_distinguish_constants_and_duplicate_names() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "latest",
+            r#"WITH src AS (SELECT col_x, col_y FROM raw), picked AS (
+                SELECT ARRAY_AGG(t ORDER BY col_y DESC LIMIT 1)[OFFSET(0)] AS item FROM src t
+            ), expanded AS (SELECT item.*, 2 AS flag FROM picked)
+            SELECT col_x, flag FROM expanded"#,
+            &[],
+        ),
+        (
+            "duplicate",
+            r#"WITH src AS (SELECT col_x, col_y AS flag FROM raw), picked AS (
+                SELECT ARRAY_AGG(t ORDER BY col_x DESC LIMIT 1)[OFFSET(0)] AS item FROM src t
+            ), expanded AS (SELECT item.*, 2 AS flag FROM picked)
+            SELECT flag FROM expanded"#,
+            &[],
+        ),
+    ]);
+    let (status, reports) = column_upstream_json(&tmp, &["latest"]);
+    assert_eq!(status.code(), Some(0), "{reports}");
+    let flag = column_lineage(&reports, "latest", "flag");
+    assert_eq!(flag["status"], "complete");
+    assert!(known_sources(flag).is_empty());
+    let field = column_lineage(&reports, "latest", "col_x");
+    assert_eq!(field["status"], "complete");
+    assert_eq!(known_sources(field), ["raw.col_x"]);
+    assert_eq!(
+        reports[0]["output"]["columns"][0]["transformation"],
+        "aggregation"
+    );
+
+    let (status, reports) = column_upstream_json(&tmp, &["duplicate"]);
+    assert_eq!(status.code(), Some(1), "{reports}");
+    assert_eq!(reports[0]["errors"][0]["kind"], "column_ambiguous");
+}

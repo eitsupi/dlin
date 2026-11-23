@@ -371,7 +371,7 @@ impl Dialect {
     /// has no whole-row origin, so callers must retain honest uncertainty
     /// instead of fabricating a concrete `table.alias` source.
     pub(crate) const fn supports_relation_alias_row_value(self) -> bool {
-        matches!(self, Self::BigQuery | Self::PostgreSql)
+        matches!(self, Self::BigQuery | Self::PostgreSql | Self::DuckDb)
     }
 
     /// Whether an ordinary derived table in a FROM clause sees the FROM items

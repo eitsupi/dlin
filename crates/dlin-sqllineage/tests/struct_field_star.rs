@@ -496,3 +496,210 @@ fn repeated_projections_of_one_range_are_ambiguous_with_an_unknown_field_star() 
         );
     }
 }
+
+#[test]
+fn bigquery_aggregate_element_expands_row_fields_through_a_cte() {
+    for index in [
+        "OFFSET(0)",
+        "ORDINAL(1)",
+        "SAFE_OFFSET(0)",
+        "SAFE_ORDINAL(1)",
+        "0",
+    ] {
+        let sql = format!(
+            r#"WITH src AS (SELECT x, y, ts FROM raw),
+            picked AS (SELECT ARRAY_AGG(t ORDER BY ts DESC LIMIT 1)[{index}] AS item FROM src t),
+            forwarded AS (SELECT item AS value FROM picked)
+            SELECT value.* FROM forwarded"#
+        );
+        assert_eq!(
+            render(&sql, Dialect::BigQuery),
+            [
+                "x#0 C[raw.x] Aggregation",
+                "y#1 C[raw.y] Aggregation",
+                "ts#2 C[raw.ts] Aggregation",
+                "Closed"
+            ],
+            "{index}"
+        );
+    }
+}
+
+#[test]
+fn aggregate_element_keeps_only_each_field_and_the_index_inputs() {
+    assert_eq!(
+        render(
+            r#"WITH p AS (
+            SELECT ARRAY_AGG(STRUCT(a AS x, b AS y) ORDER BY ts DESC LIMIT 1)[SAFE_OFFSET(idx)] AS item
+            FROM src GROUP BY idx
+        )
+        SELECT item.* FROM p"#,
+            Dialect::BigQuery
+        ),
+        [
+            "x#0 C[src.a, src.idx] Aggregation",
+            "y#1 C[src.b, src.idx] Aggregation",
+            "Closed"
+        ]
+    );
+}
+
+#[test]
+fn equivalent_array_element_access_in_other_dialects() {
+    for (dialect, expr, star) in [
+        (Dialect::DuckDb, "array_agg(t ORDER BY x)[1]", "item.*"),
+        (Dialect::DuckDb, "list(t ORDER BY x)[1]", "item.*"),
+        (
+            Dialect::Spark,
+            "array_agg(struct(x AS x, y AS y))[0]",
+            "item.*",
+        ),
+        (
+            Dialect::Spark,
+            "collect_list(named_struct('x', x, 'y', y))[0]",
+            "item.*",
+        ),
+        (
+            Dialect::Databricks,
+            "element_at(array_agg(named_struct('x', x, 'y', y)), 1)",
+            "item.*",
+        ),
+    ] {
+        let sql = format!(
+            r#"WITH p AS (SELECT {expr} AS item FROM (SELECT x, y FROM src) t) SELECT {star} FROM p"#
+        );
+        assert_eq!(
+            render(&sql, dialect),
+            [
+                "x#0 C[src.x] Aggregation",
+                "y#1 C[src.y] Aggregation",
+                "Closed"
+            ],
+            "{dialect}: {sql}"
+        );
+    }
+}
+
+#[test]
+fn row_alias_fields_and_a_same_named_column_use_distinct_bindings() {
+    for (dialect, star) in [(Dialect::BigQuery, "item.*"), (Dialect::DuckDb, "item.*")] {
+        let sql = format!(
+            r#"WITH p AS (SELECT t AS item FROM (SELECT x, y FROM src) t) SELECT {star} FROM p"#
+        );
+        assert_eq!(
+            render(&sql, dialect),
+            ["x#0 C[src.x]", "y#1 C[src.y]", "Closed"],
+            "{dialect}"
+        );
+        let sql = format!(
+            r#"WITH p AS (SELECT t AS item FROM (SELECT x AS t, y FROM src) t) SELECT {star} FROM p"#
+        );
+        let analysis = analyze_one_with(&sql, dialect, None);
+        assert!(
+            matches!(analysis.output.shape, Shape::Open { .. }),
+            "{dialect}: {sql}"
+        );
+    }
+}
+
+#[test]
+fn unknown_and_scalar_elements_do_not_invent_struct_fields() {
+    for sql in [
+        r#"WITH p AS (SELECT ARRAY_AGG(t)[OFFSET(0)] AS item FROM src t), e AS (SELECT item.*, 2 AS flag FROM p) SELECT flag FROM e"#,
+        r#"WITH p AS (SELECT ARRAY_AGG(t)[0] AS item FROM UNNEST([1, 2]) t), e AS (SELECT item.*, 2 AS flag FROM p) SELECT flag FROM e"#,
+        r#"WITH v AS (SELECT AS VALUE 1), p AS (SELECT ARRAY_AGG(t)[0] AS item FROM v t), e AS (SELECT item.*, 2 AS flag FROM p) SELECT flag FROM e"#,
+        r#"WITH p AS (SELECT ARRAY_AGG(x)[0] AS item FROM src), e AS (SELECT item.*, 2 AS flag FROM p) SELECT flag FROM e"#,
+        r#"WITH p AS (SELECT fn(STRUCT(x AS flag))[0] AS item FROM src), e AS (SELECT item.*, 2 AS flag FROM p) SELECT flag FROM e"#,
+    ] {
+        let output = render(sql, Dialect::BigQuery);
+        assert!(output[0].contains("Unverified(flag:"), "{sql}: {output:?}");
+    }
+}
+
+#[test]
+fn aggregate_row_fields_survive_outer_join_nullability() {
+    let sql = r#"WITH p AS (
+        SELECT ARRAY_AGG(t)[SAFE_OFFSET(0)] AS item
+        FROM other LEFT JOIN (SELECT x, y FROM src) t ON TRUE
+    )
+    SELECT item.* FROM p"#;
+    // An unknown competing input could publish the name t.
+    assert!(matches!(
+        analyze_one_with(sql, Dialect::BigQuery, None).output.shape,
+        Shape::Open { .. }
+    ));
+    let sql = sql.replace("FROM other LEFT", "FROM (SELECT 1 AS k) other LEFT");
+    assert_eq!(
+        render(&sql, Dialect::BigQuery),
+        [
+            "x#0 C[src.x] Aggregation",
+            "y#1 C[src.y] Aggregation",
+            "Closed"
+        ]
+    );
+}
+
+#[test]
+fn postgres_composite_element_resolves_from_an_expression_star_ast() {
+    let sql = r#"WITH p AS (
+        SELECT (array_agg(t ORDER BY x))[1] AS item FROM (SELECT x, y FROM src) t
+    ) SELECT (item).* FROM p"#;
+    // sqlparser's PostgreSQL expression parser consumes the wildcard before
+    // the SELECT projection can recognize it. Exercise the equivalent AST
+    // with the PostgreSQL lineage rules.
+    assert!(dlin_sqllineage::parse(sql, Dialect::PostgreSql).is_err());
+    let analysis = dlin_sqllineage::parse(sql, Dialect::BigQuery)
+        .unwrap()
+        .analyze(&dlin_sqllineage::Analyzer::new(Dialect::PostgreSql))
+        .into_single()
+        .unwrap();
+    assert_eq!(
+        render_output(&analysis.output),
+        [
+            "x#0 C[src.x] Aggregation",
+            "y#1 C[src.y] Aggregation",
+            "Closed"
+        ]
+    );
+}
+
+#[test]
+fn an_outer_column_does_not_shadow_a_local_row_alias() {
+    let sql = r#"WITH outside AS (SELECT 1 AS t), src AS (SELECT x FROM raw)
+        SELECT (p.item).* FROM outside CROSS JOIN LATERAL
+            (SELECT (array_agg(t))[1] AS item FROM src t) p"#;
+    let analysis = dlin_sqllineage::parse(sql, Dialect::BigQuery)
+        .unwrap()
+        .analyze(&dlin_sqllineage::Analyzer::new(Dialect::PostgreSql))
+        .into_single()
+        .unwrap();
+    assert_eq!(
+        render_output(&analysis.output),
+        ["x#0 C[raw.x] Aggregation", "Closed"]
+    );
+}
+
+#[test]
+fn recursive_aggregate_element_shapes_do_not_loop() {
+    let sql = r#"WITH RECURSIVE a AS (SELECT item FROM b),
+        b AS (SELECT ARRAY_AGG(item)[OFFSET(0)] AS item FROM a)
+        SELECT a.item.* FROM a"#;
+    assert!(matches!(
+        analyze_one_with(sql, Dialect::BigQuery, None).output.shape,
+        Shape::Open { .. }
+    ));
+}
+
+#[test]
+fn aggregate_row_fields_can_come_from_an_exhaustive_catalog() {
+    let sql = r#"SELECT (ARRAY_AGG(t)[OFFSET(0)]).* FROM src t"#;
+    let catalog = common::KnownTables(&[("src", &["x", "y"])]);
+    assert_eq!(
+        render_output(&analyze_one_with(sql, Dialect::BigQuery, Some(&catalog)).output),
+        [
+            "x#0 C[src.x] Aggregation",
+            "y#1 C[src.y] Aggregation",
+            "Closed"
+        ]
+    );
+}

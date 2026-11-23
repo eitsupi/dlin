@@ -325,31 +325,7 @@ impl LineageBuilder {
                 for order in &func.within_group {
                     ancestors.extend(self.collect_ancestors(&order.expr));
                 }
-                // Those clauses still read the relations of their subqueries.
-                if let Some(filter) = &func.filter {
-                    self.scan_expr_for_tables(filter);
-                }
-                if let FunctionArguments::List(list) = &func.args {
-                    for clause in &list.clauses {
-                        match clause {
-                            ast::FunctionArgumentClause::Where(expr)
-                            | ast::FunctionArgumentClause::Limit(expr)
-                            | ast::FunctionArgumentClause::Having(ast::HavingBound(_, expr)) => {
-                                self.scan_expr_for_tables(expr);
-                            }
-                            ast::FunctionArgumentClause::OrderBy(orders) => {
-                                for order in orders {
-                                    self.scan_expr_for_tables(&order.expr);
-                                }
-                            }
-                            ast::FunctionArgumentClause::IgnoreOrRespectNulls(_)
-                            | ast::FunctionArgumentClause::OnOverflow(_)
-                            | ast::FunctionArgumentClause::Separator(_)
-                            | ast::FunctionArgumentClause::JsonNullClause(_)
-                            | ast::FunctionArgumentClause::JsonReturningClause(_) => {}
-                        }
-                    }
-                }
+                self.scan_function_selection_for_tables(func);
                 if let FunctionArguments::Subquery(q) = &func.args {
                     ancestors.extend(self.collect_subquery_value_inputs(q));
                 }
@@ -448,6 +424,34 @@ impl LineageBuilder {
     /// or it can be an unqualified top-level column (`payload.items[0]`). The
     /// scope binding, rather than rendered SQL text or dialect-specific names,
     /// is the structural distinction between those cases.
+    pub(super) fn scan_function_selection_for_tables(&mut self, func: &ast::Function) {
+        // Those clauses still read the relations of their subqueries.
+        if let Some(filter) = &func.filter {
+            self.scan_expr_for_tables(filter);
+        }
+        if let FunctionArguments::List(list) = &func.args {
+            for clause in &list.clauses {
+                match clause {
+                    ast::FunctionArgumentClause::Where(expr)
+                    | ast::FunctionArgumentClause::Limit(expr)
+                    | ast::FunctionArgumentClause::Having(ast::HavingBound(_, expr)) => {
+                        self.scan_expr_for_tables(expr);
+                    }
+                    ast::FunctionArgumentClause::OrderBy(orders) => {
+                        for order in orders {
+                            self.scan_expr_for_tables(&order.expr);
+                        }
+                    }
+                    ast::FunctionArgumentClause::IgnoreOrRespectNulls(_)
+                    | ast::FunctionArgumentClause::OnOverflow(_)
+                    | ast::FunctionArgumentClause::Separator(_)
+                    | ast::FunctionArgumentClause::JsonNullClause(_)
+                    | ast::FunctionArgumentClause::JsonReturningClause(_) => {}
+                }
+            }
+        }
+    }
+
     fn collect_compound_field_ancestors(
         &mut self,
         root: &Expr,

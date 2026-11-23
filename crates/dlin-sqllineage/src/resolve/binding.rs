@@ -34,7 +34,7 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sou
             candidates: Vec::new(),
         }),
         ReferenceTarget::Unqualified { name, env } => resolve_unqualified(name, env, cx),
-        ReferenceTarget::RowValueCandidate { name, binding } => {
+        ReferenceTarget::RowValueCandidate { name, binding, .. } => {
             resolve_row_value_candidate(name, binding, cx)
         }
         ReferenceTarget::None => match &graph.nodes[node_id] {
@@ -66,6 +66,7 @@ pub(super) enum ReferenceTarget<'g> {
     /// relation it names.
     RowValueCandidate {
         name: &'g Ident,
+        env: BindingEnv,
         binding: Option<Binding>,
     },
     /// Not a column reference.
@@ -101,6 +102,7 @@ pub(super) fn reference_target(node_id: NodeId, graph: &RawGraph) -> ReferenceTa
             ),
         RawNode::RowValueCandidate { name, env, binding } => ReferenceTarget::RowValueCandidate {
             name,
+            env: *env,
             binding: binding
                 .clone()
                 .or_else(|| graph.scopes.lookup(*env, name).cloned()),
