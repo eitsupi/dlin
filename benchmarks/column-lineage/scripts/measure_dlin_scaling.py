@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -231,10 +232,14 @@ def main() -> int:
         label, sep, path = item.partition("=")
         if not sep or not label or not path:
             parser.error(f"--dlin expects LABEL=PATH, got {item!r}")
+        if any(label == existing for existing, _ in binaries):
+            parser.error(f"--dlin label {label!r} is given more than once")
         resolved = shutil.which(path)
         if resolved is None:
             parser.error(f"dlin binary not found: {path}")
-        binaries.append((label, resolved))
+        # The binaries run from the benchmark directory, so a relative path
+        # is fixed against the directory the script was started from.
+        binaries.append((label, os.path.abspath(resolved)))
     if shutil.which("hyperfine") is None:
         parser.error("hyperfine is not on PATH")
     result = measure(binaries, args.profile or DEFAULT_PROFILES, args.runs, args.warmup)
