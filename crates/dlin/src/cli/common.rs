@@ -50,18 +50,24 @@ or HTML.
 Data sources:
   sql (default)   Interpret the Jinja in SQL files. No Python or dbt required.
                   Detects ref() and source() calls in SQL, plus exposures from YAML.
-                  Values come from the project, never from the environment: var() uses
-                  project vars or its default, env_var() uses its default, and execute
-                  is false as in dbt parsing. Values only known at run time (target,
-                  env_var() without a default) do not select dependencies.
+                  var() uses vars.yml or dbt_project.yml, then its default; CLI
+                  --vars overrides are not supported. env_var() uses its default and
+                  never reads the environment, so a different run-time value can
+                  select another dependency or branch. Values known only at run time
+                  (target, env_var() without a default, run_query() results) do not
+                  select dependencies; execute is false, as in dbt parsing.
+                  Dependencies selected through adapter.dispatch() or namespaced
+                  package macros (e.g. dbt_utils.*) may be missed; the nodes
+                  concerned are reported as partial (see dependency_analysis).
                   Generic tests (not_null, unique, etc.) are inferred from YAML declarations
                   with dlin-specific IDs — use manifest mode for exact dependency resolution.
-  manifest        Read a pre-compiled manifest.json for full accuracy. Requires
-                  `dbt compile` (or `dbt run`/`dbt build`) to have been run first.
-                  Use `dlin check-manifest` to verify freshness before querying.
+  manifest        Read a pre-compiled manifest.json, the dependency graph recorded by
+                  dbt. Requires `dbt compile` (or `dbt run`/`dbt build`) to have been
+                  run first. Use `dlin check-manifest` to verify freshness before querying.
 
-  Use sql mode for quick, local exploration without dbt setup. Switch to manifest
-  mode when you need complete test coverage or exact materialization info.
+  Use sql mode for quick, local exploration without dbt setup. For exact dbt test
+  IDs, materializations or run-time dependency choices, use a manifest compiled for
+  the environment you want to inspect.
 
 Stdin support:
   Accepts model names or file paths from stdin. File paths (detected by extension \

@@ -14,6 +14,65 @@ fn test_help_flag() {
     assert!(stdout.contains("--project-dir"));
 }
 
+fn long_help(args: &[&str]) -> String {
+    let output = Command::new(binary_path())
+        .args(args)
+        .arg("--help")
+        .output()
+        .expect("Failed to run binary");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn column_help_states_the_known_limitations() {
+    // Readers of either subcommand's help alone must learn what a result
+    // cannot show, and where to check it.
+    for args in [
+        &["column"][..],
+        &["column", "upstream"],
+        &["column", "downstream"],
+    ] {
+        let help = long_help(args);
+        for limitation in [
+            "Value dependencies only",
+            "row dependencies",
+            "leave lineage partial",
+            "inputs of sibling fields",
+            "across dbt model boundaries",
+            "treated as exhaustive",
+        ] {
+            assert!(
+                help.contains(limitation),
+                "{args:?} help lacks {limitation:?}"
+            );
+        }
+    }
+    let upstream = long_help(&["column", "upstream"]);
+    assert!(upstream.contains("output.columns[].lineage.status"));
+    assert!(upstream.contains("standard dbt layout"));
+    let downstream = long_help(&["column", "downstream"]);
+    assert!(downstream.contains("exploration[] lists gaps"));
+    assert!(downstream.contains("errors[]          diagnostics"));
+}
+
+#[test]
+fn top_level_help_states_the_sql_mode_limitations() {
+    let help = long_help(&[]);
+    for limitation in [
+        "--vars overrides are not supported",
+        "never reads the environment",
+        "run_query() results",
+        "adapter.dispatch()",
+        "dependency_analysis",
+    ] {
+        assert!(
+            help.contains(limitation),
+            "top-level help lacks {limitation:?}"
+        );
+    }
+}
+
 #[test]
 fn test_no_subcommand_shows_help() {
     let output = Command::new(binary_path())

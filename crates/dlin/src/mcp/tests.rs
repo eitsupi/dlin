@@ -136,6 +136,24 @@ fn tools_list_exposes_expected_tools() {
 }
 
 #[test]
+fn column_lineage_tool_states_the_known_limitations() {
+    let tool = tools()
+        .into_iter()
+        .find(|tool| tool["name"] == "get_column_lineage")
+        .unwrap();
+    let description = tool["description"].as_str().unwrap();
+    for limitation in [
+        "Only value dependencies",
+        "filters and join conditions",
+        "inputs of sibling fields",
+        "treated as exhaustive",
+        "Partial results may omit sources",
+    ] {
+        assert!(description.contains(limitation), "lacks {limitation:?}");
+    }
+}
+
+#[test]
 fn mcp_auto_detects_manifest_dialect() {
     let state = McpState::load(McpArgs {
         project_dir: column_lineage_fixture_project_dir(),
