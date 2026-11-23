@@ -193,6 +193,17 @@ pub(crate) enum Target {
     Unsupported(Expr),
 }
 
+impl Target {
+    /// Whether assigning to the target evaluates an expression.
+    pub(crate) fn evaluates(&self) -> bool {
+        match self {
+            Target::Name(_) | Target::Unsupported(_) => false,
+            Target::Tuple(targets) => targets.iter().any(Target::evaluates),
+            Target::Attr { .. } => true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct MacroDef {
     pub(crate) name: Arc<str>,

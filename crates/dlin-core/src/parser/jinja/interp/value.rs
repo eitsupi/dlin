@@ -280,6 +280,21 @@ impl State {
         }
     }
 
+    /// Move the state out, leaving an empty one. Used where a statement
+    /// continues on the moved state and the original is not read again, so
+    /// that the scopes and heap are not copied.
+    pub(crate) fn take(&mut self) -> State {
+        std::mem::replace(
+            self,
+            State::new(
+                Vec::new(),
+                BTreeMap::new(),
+                Output::Discard,
+                Causes::default(),
+            ),
+        )
+    }
+
     pub(crate) fn lookup(&self, name: &str) -> Option<&AValue> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
