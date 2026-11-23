@@ -21,6 +21,7 @@ mod slot;
 pub(super) use build::{ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
+pub(super) use input::RowAliasTarget;
 pub(super) use input::{InputLookup, RangeRef};
 pub(crate) use slot::OutputRef;
 pub(super) use slot::{Forwarding, SegmentId, SlotId};
@@ -57,6 +58,11 @@ pub(super) enum ValueId {
     Physical { table: Rc<TableRef>, column: Ident },
     /// The expression of an output column or a REPLACE item.
     Expr(NodeId),
+    /// A field of an aggregated array element and the inputs selecting it.
+    AggregateElement {
+        field: Box<ValueId>,
+        index: Rc<[NodeId]>,
+    },
     /// A column that a CTE or derived table publishes, as its reader sees it.
     Forward(SlotId),
     /// A column a USING key takes from a CTE or derived table that lists no
@@ -381,6 +387,7 @@ pub(super) struct NameIndex {
 
 #[derive(Debug)]
 pub(super) struct OutputModel {
+    pub(super) opaque_value_table: bool,
     pub elements: Vec<OutputElement>,
     pub names: NameIndex,
     pub width: Width,
@@ -435,6 +442,7 @@ impl OutputModel {
             Width::Exact(listed)
         };
         Self {
+            opaque_value_table: false,
             elements,
             names: NameIndex {
                 dialect,

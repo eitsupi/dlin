@@ -1,7 +1,7 @@
 use super::context::EvalContext;
 use super::lineage::virtual_column_origin;
 use super::model::InputLookup;
-use super::star::{input_name_sources, lookup_input, named_scope_sources};
+use super::star::{input_name_sources, lookup_input, named_scope_sources, row_alias_sources};
 use super::target::effective_bindings;
 
 use crate::catalog::ColumnPresence;
@@ -34,8 +34,8 @@ pub(super) fn resolve_node(node_id: NodeId, cx: &mut EvalContext<'_, '_>) -> Sou
             candidates: Vec::new(),
         }),
         ReferenceTarget::Unqualified { name, env } => resolve_unqualified(name, env, cx),
-        ReferenceTarget::RowValueCandidate { name, binding } => {
-            resolve_row_value_candidate(name, binding, cx)
+        ReferenceTarget::RowValueCandidate { name, env, binding } => {
+            row_alias_sources(env, name, binding, cx)
         }
         ReferenceTarget::None => match &graph.nodes[node_id] {
             RawNode::Unsupported { what } => {
@@ -66,7 +66,8 @@ pub(super) enum ReferenceTarget<'g> {
     /// relation it names.
     RowValueCandidate {
         name: &'g Ident,
-        binding: Option<Binding>,
+        env: BindingEnv,
+        binding: Option<&'g Binding>,
     },
     /// Not a column reference.
     None,
@@ -101,24 +102,13 @@ pub(super) fn reference_target(node_id: NodeId, graph: &RawGraph) -> ReferenceTa
             ),
         RawNode::RowValueCandidate { name, env, binding } => ReferenceTarget::RowValueCandidate {
             name,
-            binding: binding
-                .clone()
-                .or_else(|| graph.scopes.lookup(*env, name).cloned()),
+            env: *env,
+            binding: binding.as_ref(),
         },
         RawNode::Output { .. } | RawNode::Star { .. } | RawNode::Unsupported { .. } => {
             ReferenceTarget::None
         }
     }
-}
-
-/// Whether the CTE or derived table `scope` lists an output column `name`,
-/// which a relation alias of the same name then denotes.
-pub(super) fn scope_lists_column(scope: usize, name: &Ident, graph: &RawGraph) -> bool {
-    graph
-        .scopes
-        .output_columns(scope)
-        .iter()
-        .any(|column| column.name.column_key(graph.dialect) == name.column_key(graph.dialect))
 }
 
 pub(super) fn ambiguous_qualified_origin(node: NodeId, graph: &RawGraph) -> Option<Origin> {
@@ -159,50 +149,6 @@ pub(super) fn lookup_virtual_binding(
         .lookup(env, name)
         .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
         .cloned()
-}
-
-fn resolve_row_value_candidate(
-    name: &Ident,
-    binding: Option<Binding>,
-    cx: &mut EvalContext<'_, '_>,
-) -> Sources {
-    let graph = cx.graph;
-    let catalog = cx.catalog;
-    let row_value = || {
-        Sources::one(ColumnOrigin::Unresolved(Unresolved::RowValue {
-            alias: name.clone(),
-        }))
-    };
-    let Some(binding) = binding else {
-        return row_value();
-    };
-
-    match binding {
-        Binding::Table(table) => {
-            // Whether the relation has a column of this name decides between a
-            // column and a whole-row value either way.
-            let evidence = Evidence::relation(&table);
-            if let Some(owner) = catalog
-                .and_then(|catalog| catalog.resolve_column(name, std::slice::from_ref(&table)))
-            {
-                Sources::one(ColumnOrigin::Concrete {
-                    table: owner,
-                    column: name.clone(),
-                })
-                .relying_on(&evidence)
-            } else {
-                row_value().relying_on(&evidence)
-            }
-        }
-        Binding::Cte(target_scope) | Binding::DerivedTable(target_scope) => {
-            if scope_lists_column(target_scope, name, graph) {
-                resolve_through_scope(name, target_scope, cx)
-            } else {
-                row_value()
-            }
-        }
-        Binding::VirtualSource(_) => row_value(),
-    }
 }
 
 pub(super) fn resolve_captured_binding(

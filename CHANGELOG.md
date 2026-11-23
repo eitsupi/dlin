@@ -9,6 +9,8 @@
 
 ### Features
 
+- Expand fields of a single indexed element of an array aggregate over a known row or STRUCT, preserving each field's value lineage, including known STRUCT values from BigQuery value tables.
+
 - Select downstream resource types with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. Traversal uses the full graph in both SQL and manifest mode.
 
 ### Bug Fixes

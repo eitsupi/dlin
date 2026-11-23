@@ -118,6 +118,11 @@ pub(in crate::resolve) struct InputModel {
     pub(super) qualified_keys: Vec<(usize, Ident)>,
 }
 
+pub(in crate::resolve) enum RowAliasTarget {
+    Column(InputLookup),
+    Row(Binding),
+}
+
 /// What an unqualified name denotes among the relations of a FROM clause.
 #[derive(Debug, Clone)]
 pub(in crate::resolve) enum InputLookup {
@@ -510,6 +515,45 @@ impl OutputModels<'_, '_, '_> {
         let (standing, fallback) = self.clause_standing(first, name, &mut evidence);
         let walk = self.settle(standing, rest, name, &mut evidence);
         (walk.into_lookup().unwrap_or(fallback), evidence)
+    }
+
+    /// Resolve a bare name at the nearest query level that can bind it.
+    pub(in crate::resolve) fn row_alias_target(
+        &mut self,
+        env: BindingEnv,
+        name: &Ident,
+        captured: Option<&Binding>,
+    ) -> (Option<RowAliasTarget>, Evidence) {
+        let mut evidence = Evidence::default();
+        for clause in self.graph.scopes.clause_envs(env) {
+            let alias = effective_bindings(clause, self.graph)
+                .into_iter()
+                .find(|(alias, _)| same_column_name(alias, name, self.graph.dialect));
+            let row = || {
+                alias.clone().and_then(|(_, binding)| {
+                    self.graph
+                        .scopes
+                        .ambiguous_binding_candidates(clause, name)
+                        .is_none()
+                        .then_some(RowAliasTarget::Row(binding))
+                })
+            };
+            // GoogleSQL range variables override columns at the same level.
+            if self.graph.dialect == crate::Dialect::BigQuery && alias.is_some() {
+                return (row(), evidence);
+            }
+            match self.clause_standing(clause, name, &mut evidence).0 {
+                Standing::Present(column) => {
+                    return (Some(RowAliasTarget::Column(column)), evidence);
+                }
+                Standing::Possible { .. } => return (None, evidence),
+                Standing::Absent => {}
+            }
+            if alias.is_some() {
+                return (row(), evidence);
+            }
+        }
+        (captured.cloned().map(RowAliasTarget::Row), evidence)
     }
 
     fn settle(

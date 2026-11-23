@@ -1,6 +1,7 @@
 use sqlparser::ast::{
-    Expr, GroupByExpr, Join, JoinConstraint, JoinOperator, ObjectName, Select, SelectFlavor,
-    SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    AccessExpr, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Join,
+    JoinConstraint, JoinOperator, ObjectName, Select, SelectFlavor, SelectItem,
+    SelectItemQualifiedWildcardKind, Subscript, TableFactor, TableWithJoins,
     WildcardAdditionalOptions,
 };
 
@@ -20,6 +21,15 @@ use crate::{Ident, OutputName};
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
     pub(crate) fn visit_select(&mut self, select: &Select) {
+        if matches!(
+            select.value_table_mode,
+            Some(
+                sqlparser::ast::ValueTableMode::AsValue
+                    | sqlparser::ast::ValueTableMode::DistinctAsValue
+            )
+        ) {
+            self.graph.as_value_scopes.insert(self.current_scope);
+        }
         let input_mark = self.graph.tables.inputs.len();
         self.visit_from(&select.from);
         // Bind FROM first, but retain SQL clause order for read spellings:
@@ -130,16 +140,26 @@ impl LineageBuilder {
                     );
                 }
                 SelectItem::QualifiedWildcard(kind, options) => {
-                    let base = match kind {
+                    let (base, shape) = match kind {
                         SelectItemQualifiedWildcardKind::ObjectName(obj_name) => {
-                            StarBase::Qualified(Self::object_name_parts(obj_name))
+                            (StarBase::Qualified(Self::object_name_parts(obj_name)), None)
+                        }
+                        SelectItemQualifiedWildcardKind::Expr(expr)
+                            if self.dialect == crate::Dialect::PostgreSql
+                                || aggregate_element(expr, self.dialect).is_some() =>
+                        {
+                            let (ancestors, shape) = self.projected_value(expr);
+                            (StarBase::Expr(ancestors), shape)
                         }
                         SelectItemQualifiedWildcardKind::Expr(expr) => {
-                            StarBase::Expr(self.collect_ancestors(expr))
+                            (StarBase::Expr(self.collect_ancestors(expr)), None)
                         }
                     };
                     let star_options = self.star_options(options);
                     let star = self.graph.add_star(base, star_options, self.env());
+                    if let Some(shape) = shape {
+                        self.graph.struct_values.insert(star, shape);
+                    }
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
@@ -161,6 +181,19 @@ impl LineageBuilder {
         &mut self,
         expr: &Expr,
     ) -> (Vec<crate::graph::node::NodeId>, Option<StructValue>) {
+        if let Some((aggregate, input, index)) = aggregate_element(expr, self.dialect) {
+            let (mut ancestors, shape) = self.projected_value(input);
+            self.scan_function_selection_for_tables(aggregate);
+            let index = self.collect_ancestors(index);
+            ancestors.extend(index.iter().copied());
+            return (
+                ancestors,
+                shape.map(|input| StructValue::AggregateElement {
+                    input: Box::new(input),
+                    index,
+                }),
+            );
+        }
         let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
             let ancestors = self.collect_ancestors(expr);
             let column = match ancestors.as_slice() {
@@ -1083,6 +1116,95 @@ fn element_shape(expr: &Expr, dialect: crate::Dialect) -> ElementShape<'_> {
     }
 }
 
+fn without_parens(mut expr: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn plain_call(function: &Function, names: &[&str]) -> bool {
+    matches!(function.name.0.as_slice(), [part]
+        if part.as_ident().is_some_and(|name| name.quote_style.is_none()
+            && names.iter().any(|builtin| name.value.eq_ignore_ascii_case(builtin))))
+        && matches!(function.parameters, FunctionArguments::None)
+        && !function.uses_odbc_syntax
+        && function.over.is_none()
+        && function.within_group.is_empty()
+}
+
+fn positional_expr(arg: &FunctionArg) -> Option<&Expr> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Some(expr),
+        _ => None,
+    }
+}
+
+fn aggregate_element(expr: &Expr, dialect: crate::Dialect) -> Option<(&Function, &Expr, &Expr)> {
+    use crate::Dialect;
+    let names: &[_] = match dialect {
+        Dialect::BigQuery | Dialect::PostgreSql => &["array_agg"],
+        Dialect::DuckDb => &["array_agg", "list"],
+        Dialect::Spark | Dialect::Databricks => &["array_agg", "collect_list"],
+        _ => return None,
+    };
+    let (root, mut index) = match without_parens(expr) {
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            let [AccessExpr::Subscript(Subscript::Index { index })] = access_chain.as_slice()
+            else {
+                return None;
+            };
+            (&**root, index)
+        }
+        Expr::Function(access)
+            if matches!(dialect, Dialect::Spark | Dialect::Databricks)
+                && plain_call(access, &["element_at"])
+                && access.filter.is_none()
+                && access.null_treatment.is_none() =>
+        {
+            let FunctionArguments::List(list) = &access.args else {
+                return None;
+            };
+            let [array, index] = list.args.as_slice() else {
+                return None;
+            };
+            if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+                return None;
+            }
+            (positional_expr(array)?, positional_expr(index)?)
+        }
+        _ => return None,
+    };
+    if dialect == Dialect::BigQuery
+        && let Expr::Function(offset) = without_parens(index)
+        && plain_call(
+            offset,
+            &["offset", "ordinal", "safe_offset", "safe_ordinal"],
+        )
+        && let FunctionArguments::List(list) = &offset.args
+        && offset.filter.is_none()
+        && offset.null_treatment.is_none()
+        && list.duplicate_treatment.is_none()
+        && list.clauses.is_empty()
+        && let [position] = list.args.as_slice()
+    {
+        index = positional_expr(position)?;
+    }
+    let Expr::Function(aggregate) = without_parens(root) else {
+        return None;
+    };
+    if !plain_call(aggregate, names) {
+        return None;
+    }
+    let FunctionArguments::List(list) = &aggregate.args else {
+        return None;
+    };
+    let [input] = list.args.as_slice() else {
+        return None;
+    };
+    Some((aggregate, positional_expr(input)?, index))
+}
+
 /// The fields of a STRUCT that `expr` builds in place, with the expression
 /// of each: a STRUCT literal, or in `DuckDB` a struct literal (`{'a': 1}`)
 /// or `struct_pack(a := 1)`.
@@ -1090,6 +1212,38 @@ fn struct_value_fields(expr: &Expr, dialect: crate::Dialect) -> Option<Vec<(Iden
     match expr {
         Expr::Nested(inner) => struct_value_fields(inner, dialect),
         Expr::Struct { .. } => struct_literal_fields(expr, dialect),
+        Expr::Function(function)
+            if matches!(dialect, crate::Dialect::Spark | crate::Dialect::Databricks)
+                && plain_call(function, &["named_struct"]) =>
+        {
+            let FunctionArguments::List(list) = &function.args else {
+                return None;
+            };
+            if function.filter.is_some()
+                || function.null_treatment.is_some()
+                || list.duplicate_treatment.is_some()
+                || !list.clauses.is_empty()
+            {
+                return None;
+            }
+            let mut pairs = Vec::new();
+            let mut names = std::collections::HashSet::new();
+            let (args, remainder) = list.args.as_chunks::<2>();
+            for [name, field] in args {
+                let Expr::Value(value) = positional_expr(name)? else {
+                    return None;
+                };
+                let sqlparser::ast::Value::SingleQuotedString(name) = &value.value else {
+                    return None;
+                };
+                let name = Ident::unquoted(name.clone());
+                if !names.insert(name.column_key(dialect).into_owned()) {
+                    return None;
+                }
+                pairs.push((name, positional_expr(field)?));
+            }
+            (!pairs.is_empty() && remainder.is_empty()).then_some(pairs)
+        }
         Expr::Function(function) if dialect == crate::Dialect::DuckDb => {
             struct_pack_fields(function, dialect)
         }

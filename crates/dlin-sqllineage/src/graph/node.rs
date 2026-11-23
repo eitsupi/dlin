@@ -68,9 +68,7 @@ pub(crate) enum RawNode {
         binding: Option<Binding>,
     },
     /// A relation alias used where the dialect permits a whole-row value.
-    /// Resolution must distinguish this from a source-free expression: a
-    /// catalog or derived scope can still prove that the alias is an ordinary
-    /// physical/output column with the same name.
+    /// Resolution uses the SQL dialect's precedence for a competing column.
     RowValueCandidate {
         name: Ident,
         env: BindingEnv,
