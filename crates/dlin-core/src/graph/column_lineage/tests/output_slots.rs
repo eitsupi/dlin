@@ -1028,10 +1028,24 @@ fn a_session_shares_one_lineage_per_model() {
     let again = analysis.compute_column_lineage_internal(&model_id("base"));
     assert!(std::sync::Arc::ptr_eq(&first, &again));
 
+    let tables = |report: &ModelColumnLineage| -> Vec<String> {
+        report
+            .slot_named("a")
+            .lineage
+            .known()
+            .iter()
+            .map(|source| source.table.clone())
+            .collect()
+    };
+    assert_eq!(tables(&analysis.compute_column_lineage("top")), ["base"]);
+
     let report = analysis.compute_cross_model_column_lineage("top");
     assert_eq!(report.names(), ["a", "b"]);
+    assert_eq!(tables(&report), ["raw.t"]);
     assert!(std::sync::Arc::ptr_eq(
         &first,
         &analysis.compute_column_lineage_internal("base")
     ));
+    // Tracing rewrites a copy of the root, not the shared local lineage.
+    assert_eq!(tables(&analysis.compute_column_lineage("top")), ["base"]);
 }
