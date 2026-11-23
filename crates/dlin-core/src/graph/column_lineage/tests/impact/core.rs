@@ -788,3 +788,68 @@ fn test_column_impact_reconverging_dag_multi_path() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A base model and dependents whose SQL fails to parse, so each dependent
+/// adds a diagnostic to the impact report of `base.a`.
+fn failing_dependents_manifest() -> Manifest {
+    let mut nodes = serde_json::Map::new();
+    nodes.insert(
+        "model.proj.base".to_string(),
+        serde_json::json!({
+            "unique_id": "model.proj.base",
+            "name": "base",
+            "resource_type": "model",
+            "depends_on": {"nodes": []},
+            "compiled_code": "SELECT a FROM raw.t",
+            "columns": {},
+        }),
+    );
+    for index in 0..8 {
+        let unique_id = format!("model.proj.dependent_{index}");
+        nodes.insert(
+            unique_id.clone(),
+            serde_json::json!({
+                "unique_id": unique_id,
+                "name": format!("dependent_{index}"),
+                "resource_type": "model",
+                "depends_on": {"nodes": ["model.proj.base"]},
+                "compiled_code": "SELECT a FROM base WHERE (",
+                "columns": {},
+            }),
+        );
+    }
+    serde_json::from_value(serde_json::json!({"nodes": nodes, "sources": {}})).unwrap()
+}
+
+#[test]
+fn downstream_dependents_and_diagnostics_have_a_stable_order() {
+    // The manifest's nodes are a hash map, whose iteration order differs
+    // between maps. Each parse builds a new one, so the report must not
+    // depend on it.
+    let reports: Vec<_> = (0..8)
+        .map(|_| {
+            let manifest = failing_dependents_manifest();
+            let map = build_downstream_model_map(&manifest);
+            let dependents = map["model.proj.base"].clone();
+            let mut sorted = dependents.clone();
+            sorted.sort();
+            assert_eq!(dependents, sorted);
+            compute_column_impact(
+                &manifest,
+                "base",
+                "a",
+                DlinDialect::Generic,
+                &mut ColumnLineageCache::disabled(),
+            )
+            .errors
+            .iter()
+            .map(|error| error.what.clone())
+            .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(reports[0].len(), 8, "{:?}", reports[0]);
+    assert!(
+        reports.iter().all(|errors| errors == &reports[0]),
+        "{reports:?}"
+    );
+}
