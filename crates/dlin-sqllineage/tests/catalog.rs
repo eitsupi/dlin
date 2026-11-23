@@ -892,4 +892,15 @@ fn one_analysis_looks_up_each_relation_once() {
             .into_iter()
             .collect()
     );
+
+    // The entries live for one analysis: the next one asks the catalog again,
+    // so a catalog that changed in between is seen.
+    configured(&sql, Dialect::DuckDb, Some(&catalog));
+    let lookups = catalog.lookups.lock().unwrap().clone();
+    assert_eq!(
+        lookups,
+        [("t1".to_string(), 2), ("t2".to_string(), 2)]
+            .into_iter()
+            .collect()
+    );
 }
