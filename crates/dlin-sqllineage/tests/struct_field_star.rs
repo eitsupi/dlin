@@ -480,3 +480,19 @@ fn struct_constructor_of_another_dialect_is_not_assumed() {
         ["flag#0 P[ | Unverified(flag: cte e | )]", "Closed"]
     );
 }
+
+#[test]
+fn repeated_projections_of_one_range_are_ambiguous_with_an_unknown_field_star() {
+    for sql in [
+        r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.flag, c.flag, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+        r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.*, c.*, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT c.*, c.*, s.item.* FROM (SELECT 2 AS flag) c CROSS JOIN src AS s) SELECT flag FROM e"#,
+        r#"WITH c AS (SELECT 2 AS flag, 3 AS item), e AS (SELECT a.*, b.*, s.item.* FROM c a JOIN c b USING (flag, item) CROSS JOIN src AS s) SELECT flag FROM e"#,
+    ] {
+        let rendered = render(sql, Dialect::BigQuery);
+        assert!(
+            rendered[0].contains("Ambiguous(flag:"),
+            "{sql}: {rendered:?}"
+        );
+    }
+}

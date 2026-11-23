@@ -116,7 +116,7 @@ impl OutputModel {
         indexes.sort_unstable();
 
         let mut units: Vec<Unit> = Vec::new();
-        let mut collapsed: Vec<(usize, usize)> = Vec::new();
+        let mut collapsed: Vec<(usize, &Ident, usize)> = Vec::new();
         for index in indexes {
             let (ranges, merged) = match &self.elements[index] {
                 OutputElement::Column(slot) => (&slot.ranges, &slot.candidate_ranges),
@@ -125,12 +125,17 @@ impl OutputModel {
             let asked = asked_name(&self.elements[index], name);
             let listed = matches!(self.elements[index], OutputElement::Column(_));
             // The elements of a CTE or derived table are weighed by the model
-            // they were forwarded from, so one relation is one provider no
-            // matter how many elements it contributes.
+            // they were forwarded from. Group only occurrences of the same
+            // source name. Each listed projection still contributes a slot.
             if let [range] = &**ranges
+                && let Some(asked) = asked
                 && let Some((_, child)) = self.reads.iter().find(|(at, _)| *at == range.index)
             {
-                if let Some(&(_, at)) = collapsed.iter().find(|(owner, _)| *owner == range.index) {
+                if let Some(&(_, _, at)) = collapsed.iter().find(|(owner, source, _)| {
+                    *owner == range.index
+                        && source.column_key(self.names.dialect)
+                            == asked.column_key(self.names.dialect)
+                }) {
                     units[at].elements.push(index);
                     continue;
                 }
@@ -140,10 +145,9 @@ impl OutputModel {
                 // a segment, is the reader's. An element the reader defines
                 // asks nothing and is its own provider.
                 let own = || Unit::own(index, range.candidate().into_iter().collect(), listed);
-                let unit = match asked.map(|asked| child.choose(asked)) {
-                    None => Some(own()),
-                    Some(Choice::Absent) => None,
-                    Some(Choice::Ambiguous(inner)) => Some(match child.unverified(&inner) {
+                let unit = match child.choose(asked) {
+                    Choice::Absent => None,
+                    Choice::Ambiguous(inner) => Some(match child.unverified(&inner) {
                         // The relation leaves the name to columns it does not
                         // know, and so does its reader. A column it defines
                         // itself is read as the range's.
@@ -169,10 +173,10 @@ impl OutputModel {
                             uncertain: false,
                         },
                     }),
-                    Some(Choice::Column(..) | Choice::Possible(..)) => Some(own()),
+                    Choice::Column(..) | Choice::Possible(..) => Some(own()),
                 };
                 if let Some(unit) = unit {
-                    collapsed.push((range.index, units.len()));
+                    collapsed.push((range.index, asked, units.len()));
                     units.push(unit);
                     continue;
                 }
@@ -180,7 +184,6 @@ impl OutputModel {
             // A column several ranges merged is one provider, unless one of
             // those ranges is itself ambiguous about the name.
             let mut unit = Unit::own(index, Vec::new(), listed);
-            let mut known_contributor = false;
             for range in merged.iter() {
                 let inner = self
                     .reads
@@ -192,9 +195,6 @@ impl OutputModel {
                         _ => None,
                     });
                 let Some((child, inner)) = inner else {
-                    if listed {
-                        known_contributor = true;
-                    }
                     let candidate = range.candidate();
                     if listed {
                         unit.present.extend(candidate.clone());
@@ -209,15 +209,11 @@ impl OutputModel {
                     unit.candidates
                         .extend(present.iter().chain(&possible).cloned());
                     unit.present.extend(present);
-                    known_contributor |= inner.known > 0;
                     unit.uncertain = true;
                 } else {
                     unit.candidates.extend(inner.candidates);
                     unit.ambiguous = true;
                 }
-            }
-            if unit.uncertain {
-                unit.known = known_contributor;
             }
             units.push(unit);
         }
@@ -254,7 +250,17 @@ impl OutputModel {
         let mut candidates = Vec::new();
         let mut listed = Vec::new();
         let mut present: Vec<Candidate> = Vec::new();
-        let known = units.iter().filter(|unit| unit.known).count();
+        let known = units
+            .iter()
+            .map(|unit| {
+                let listed = unit
+                    .elements
+                    .iter()
+                    .filter(|&&index| matches!(self.elements[index], OutputElement::Column(_)))
+                    .count();
+                listed.max(usize::from(unit.known))
+            })
+            .sum();
         let possible = units.iter().any(|unit| !unit.known || unit.uncertain);
         let certain = known > 1 || !possible || units.iter().any(|unit| unit.ambiguous);
         let defined = units

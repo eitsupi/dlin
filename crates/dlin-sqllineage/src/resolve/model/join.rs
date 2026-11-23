@@ -120,12 +120,55 @@ pub(super) fn fold_join_columns(
     groups: Vec<Group>,
     merges: &[JoinMerge],
     dialect: Dialect,
-) -> Vec<OutputElement> {
+) -> (Vec<OutputElement>, Vec<(usize, Ident)>) {
     if merges.is_empty() {
-        return concat_groups(groups);
+        return (concat_groups(groups), Vec::new());
     }
     let original = groups.clone();
-    fold_groups(groups, merges, dialect).map_or_else(|| concat_groups(original), concat_groups)
+    let mut keys = Vec::new();
+    match fold_groups(groups, merges, dialect, &mut keys) {
+        Some(groups) => (concat_groups(groups), keys),
+        None => (concat_groups(original), Vec::new()),
+    }
+}
+
+/// Apply the join's proven keys to the columns exposed by one qualified star.
+pub(super) fn apply_qualified_keys(
+    elements: &mut Vec<OutputElement>,
+    keys: impl IntoIterator<Item = Ident>,
+    dialect: Dialect,
+) {
+    for key in keys {
+        // Trino publishes USING keys only under the join output, without the
+        // input qualifiers.
+        if dialect == Dialect::Trino {
+            elements.retain(|element| {
+                !matches!(element, OutputElement::Column(slot) if same_column_name(&slot.name, &key, dialect))
+            });
+            for element in elements.iter_mut() {
+                if let OutputElement::Unknown(segment) = element {
+                    segment.domain.removed.push(key.clone());
+                }
+            }
+            recompute_ordinals(elements);
+        } else if matches!(find_key(elements, &key, dialect), Some(KeyAt::Unlisted)) {
+            let side = take_key(elements, KeyAt::Unlisted, &key, dialect);
+            // The key exists, but its position within the unexpanded columns
+            // is unknown. Preserve its source without assigning an ordinal.
+            elements.push(OutputElement::Column(ColumnSlot {
+                id: None,
+                ordinal: None,
+                position: super::PositionRange { min: 0, max: None },
+                name: key.clone(),
+                output_name: OutputName::Explicit(key),
+                ranges: side.ranges,
+                candidate_ranges: side.candidate_ranges,
+                value: side.value,
+                origin: SlotOrigin::Defined,
+                structure: Evidence::default(),
+            }));
+        }
+    }
 }
 
 /// Lay the groups out one after another. A position relies on the schemas
@@ -335,6 +378,7 @@ fn fold_groups(
     mut groups: Vec<Group>,
     merges: &[JoinMerge],
     dialect: Dialect,
+    qualified_keys: &mut Vec<(usize, Ident)>,
 ) -> Option<Vec<Group>> {
     let mut seen = HashSet::new();
     if groups
@@ -436,6 +480,18 @@ fn fold_groups(
             }
             let left_side = take_key(&mut left_elements, left_at, &key, dialect);
             let right_side = take_key(&mut right_elements, right_at, &key, dialect);
+            for side in [&left_side, &right_side] {
+                // An unlisted key on a compound input can come from any
+                // one of its ranges. It proves no individual range's shape.
+                if let Some(range) = side.ranges.first()
+                    && side.ranges.iter().all(|other| other.index == range.index)
+                    && !qualified_keys.iter().any(|(index, name)| {
+                        *index == range.index && same_column_name(name, &key, dialect)
+                    })
+                {
+                    qualified_keys.push((range.index, key.clone()));
+                }
+            }
             let ranges = union_ranges(&left_side.ranges, &right_side.ranges);
             let candidate_ranges = match merge.kind {
                 JoinMergeKind::Left => left_side.candidate_ranges,

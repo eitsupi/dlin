@@ -13,7 +13,7 @@
 
 ### Bug Fixes
 
-- Column references that may overlap an unexpanded star now report partial lineage with a nonfatal diagnostic. Known duplicate names still cause an ambiguity error.
+- Column references that may overlap an unexpanded star now report partial lineage with a nonfatal diagnostic. Known duplicate names still cause an ambiguity error, including repeated star projections and join keys exposed by qualified stars.
 
 ## [0.3.0-beta.1] - 2026-11-22
 

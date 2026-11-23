@@ -824,3 +824,32 @@ fn downstream_preserves_the_requested_columns_binding_diagnostic() {
         );
     }
 }
+
+#[test]
+fn repeated_projections_and_qualified_using_keys_are_fatal_ambiguities() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "repeated_projection",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.flag, c.flag, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+            &[],
+        ),
+        (
+            "repeated_star",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.*, c.*, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+            &[],
+        ),
+        (
+            "qualified_using",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT a.*, c.flag FROM (SELECT * FROM unk_a) a JOIN (SELECT * FROM unk_b) b USING (flag) CROSS JOIN c) SELECT flag FROM e"#,
+            &[],
+        ),
+    ]);
+    for model in ["repeated_projection", "repeated_star", "qualified_using"] {
+        let (status, reports) = column_upstream_json(&tmp, &[model]);
+        assert_eq!(status.code(), Some(1), "{model}: {reports}");
+        assert_eq!(
+            reports[0]["errors"][0]["kind"], "column_ambiguous",
+            "{model}: {reports}"
+        );
+    }
+}
