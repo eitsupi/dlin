@@ -8,7 +8,7 @@ dbt model lineage CLI. Parses SQL files directly or reads a compiled `manifest.j
 
 Works for developers navigating live SQL files, analysts exploring a shared manifest, AI agents via CLI prompt or MCP server, and CI pipelines.
 
-Column-level lineage (`dlin column upstream` / `dlin column downstream`) requires a compiled `manifest.json` and is usable in practice while remaining Experimental for coverage reasons.
+Column-level lineage (`dlin column upstream` / `dlin column downstream`) requires a compiled `manifest.json`.
 
 ## Motivation
 
@@ -147,7 +147,7 @@ The SQL dialect for column lineage is detected from the manifest's `adapter_type
 - **Impact analysis with severity**: `dlin impact` scores downstream nodes and flags exposure reachability
 - **Composable**: stdin accepts model names or file paths; pipe with `jq`, `dlin list`, `git diff`, etc.
 - **Agent-friendly**: `--error-format json` emits structured `{"level","what","why","hint"}` on stderr; `--help` is designed for tool discovery
-- **Column-level lineage** (experimental): traces columns across models with transformation classification, reports partial results, where tracing stopped and the assumptions it relied on; requires `manifest.json`
+- **Column-level lineage**: traces columns across models with transformation classification, reports partial results, where tracing stopped and the assumptions it relied on; requires `manifest.json`
 
 ## Mermaid diagrams
 
@@ -281,9 +281,9 @@ dlin graph -o dot | dot -Tsvg > out.svg                # Graphviz rendering
 
 Output formats: ASCII (default), JSON, Mermaid, Graphviz DOT, Plain, SVG, HTML.
 
-## Column-level lineage (Experimental)
+## Column-level lineage
 
-`dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. Regression fixtures and real dbt project validation show that column-level lineage is usable in practice. Experimental reflects the Rust stack's shorter production history and remaining cross-dialect and complex-SQL coverage gaps, not a prototype-only status.
+`dlin column upstream` and `dlin column downstream` trace columns across models. They require a compiled `manifest.json`, so run `dbt compile` first. When a column cannot be traced completely, for example because of SQL syntax that is not supported yet or `SELECT *` over a relation whose columns are not known, the result is marked partial and says where and why tracing stopped instead of guessing; see [Known limitations](#known-limitations).
 
 Output is JSON by default; `-o plain` is easier to read, and `-o mermaid` / `-o dot` draw diagrams.
 

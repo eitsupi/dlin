@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changes
+
+- Column-level lineage is no longer Experimental. Results that cannot be traced completely are still reported as partial with the reason and the place where tracing stopped
+
 ### Bug Fixes
 
 - Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT.
