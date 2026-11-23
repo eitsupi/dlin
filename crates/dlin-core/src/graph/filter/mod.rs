@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::DbtLineageError;
 
-use super::dependency::{DependencyReason, NotAssessedScope};
-use super::exploration::{Exploration, ExplorationGap, ExplorationKind};
+use super::dependency::{DependencyReason, NotAssessedScope, ProjectGap, ProjectScope};
+use super::exploration::{Exploration, ExplorationGap, ExplorationKind, project_exploration_gaps};
 use super::types::*;
 
 /// Resolve a name with canonical ID, alias, label, and ID suffix precedence.
@@ -259,6 +259,7 @@ pub fn filter_graph(
     let focus_nodes = resolve_focus_nodes(graph, focus_models)?;
     filter_graph_by_indices(
         graph,
+        &[],
         &focus_nodes,
         upstream,
         downstream,
@@ -271,6 +272,7 @@ pub fn filter_graph(
 /// Filter a graph using focus indices already resolved in that graph.
 pub fn filter_graph_by_indices(
     graph: &LineageGraph,
+    project_gaps: &[ProjectGap],
     focus_nodes: &[NodeIndex],
     upstream: Option<usize>,
     downstream: Option<usize>,
@@ -316,6 +318,12 @@ pub fn filter_graph_by_indices(
                 keep_nodes.insert(idx);
             },
         );
+    }
+
+    if !focus_nodes.is_empty() && upstream != Some(0) {
+        gaps.extend(project_exploration_gaps(project_gaps, |scope| {
+            scope != ProjectScope::ManifestDependencies
+        }));
     }
 
     // Apply selector filter: intersect with BFS results (or use as base set)

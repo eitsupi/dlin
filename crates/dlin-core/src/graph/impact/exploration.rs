@@ -14,7 +14,9 @@ use petgraph::stable_graph::NodeIndex;
 use crate::graph::dependency::{
     DependencyReason, DependencyReasonCode, NodeDependencyReason, ProjectGap, ProjectScope,
 };
-use crate::graph::exploration::{Exploration, ExplorationGap, ExplorationKind};
+use crate::graph::exploration::{
+    Exploration, ExplorationGap, ExplorationKind, project_exploration_gaps,
+};
 use crate::graph::types::{LineageGraph, NodeType};
 
 /// Explore the model dependencies of the nodes reached from a source.
@@ -64,14 +66,7 @@ pub(crate) fn explore_model_dependencies(
             });
         }
     }
-    for gap in project_gaps {
-        match gap {
-            ProjectGap::NotAssessed { scope } => {
-                scopes.insert(*scope);
-            }
-            ProjectGap::InputSkipped { .. } => gaps.push(gap.clone().into()),
-        }
-    }
+    gaps.extend(project_exploration_gaps(project_gaps, |_| true));
     gaps.extend(
         scopes
             .into_iter()

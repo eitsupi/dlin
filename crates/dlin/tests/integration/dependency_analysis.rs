@@ -460,6 +460,27 @@ fn manifest_impact_traverses_edges_from_tests() {
         }"#,
     )
     .unwrap();
+    let graph = run(
+        tmp.path(),
+        &[
+            "graph",
+            "leaf",
+            "--source",
+            "manifest",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--no-cache",
+            "-u",
+            "1",
+            "-d",
+            "0",
+            "-o",
+            "json",
+            "-q",
+        ],
+    );
+    let graph: serde_json::Value = serde_json::from_slice(&graph.stdout).unwrap();
+    assert!(graph.get("exploration").is_none());
     let output = run(
         tmp.path(),
         &[
@@ -561,7 +582,7 @@ fn focused_graph_reports_upstream_gaps_before_output_projection() {
         &["graph", "root", "-u", "2", "-d", "0", "--verbose"],
     );
     let stderr = String::from_utf8_lossy(&text.stderr);
-    assert!(stderr.contains("upstream lineage exploration is incomplete at 1 node(s)"));
+    assert!(stderr.contains("upstream lineage exploration is incomplete (1 gap(s))"));
     assert!(stderr.contains(
         "upstream dependency gap at model.middle (depth 1): unsupported_macro_namespace"
     ));
@@ -585,4 +606,70 @@ fn closest_focus_determines_the_depth_of_each_gap() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["exploration"]["gaps"][0]["unique_id"], "model.middle");
     assert_eq!(value["exploration"]["gaps"][0]["depth"], 0);
+}
+
+#[test]
+fn focused_upstream_queries_report_skipped_project_inputs() {
+    let tmp = small_project(&[("models/bad.yml", "sources: [")]);
+    let graph = |options: &[&str]| {
+        let mut args = vec![
+            "graph",
+            "--source",
+            "sql",
+            "--no-cache",
+            "-o",
+            "json",
+            "--json-fields",
+            "unique_id,dependency_analysis",
+            "-q",
+        ];
+        args.extend(options);
+        serde_json::from_slice::<serde_json::Value>(&run(tmp.path(), &args).stdout).unwrap()
+    };
+    let focused = graph(&["customers", "-u", "1", "-d", "0"]);
+    assert_eq!(focused["nodes"].as_array().unwrap().len(), 2);
+    for node in focused["nodes"].as_array().unwrap() {
+        assert_eq!(node["dependency_analysis"]["status"], "complete");
+    }
+    assert_eq!(focused["exploration"]["status"], "incomplete");
+    assert_eq!(
+        focused["exploration"]["gaps"],
+        serde_json::json!([{
+            "type": "input_skipped",
+            "location": {"path": "models/bad.yml", "line": null},
+            "kind": "yaml",
+            "stage": "parse",
+            "failure": "parse_error"
+        }])
+    );
+
+    for projection in [&["--select", "missing"][..], &["--node-type", "source"][..]] {
+        let mut options = vec!["customers", "-u", "1", "-d", "0"];
+        options.extend(projection);
+        let filtered = graph(&options);
+        assert_eq!(filtered["nodes"], serde_json::json!([]));
+        assert_eq!(filtered["exploration"], focused["exploration"]);
+    }
+
+    for outside_scope in [
+        &["customers", "-u", "0", "-d", "0"][..],
+        &["orders", "-u", "0", "-d", "1"][..],
+        &[][..],
+    ] {
+        assert!(graph(outside_scope).get("exploration").is_none());
+    }
+    assert_eq!(
+        graph(&["customers", "-d", "0"])["exploration"],
+        focused["exploration"]
+    );
+
+    let text = run(
+        tmp.path(),
+        &["graph", "customers", "-u", "1", "-d", "0", "--verbose"],
+    );
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(stderr.contains("upstream lineage exploration is incomplete (1 gap(s))"));
+    assert!(stderr.contains(
+        "upstream exploration skipped input models/bad.yml at the parse step (parse error)"
+    ));
 }

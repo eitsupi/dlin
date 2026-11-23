@@ -61,6 +61,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
     let (filtered, exploration) = graph::filter::filter_graph_by_indices(
         dag,
+        build.project_gaps(),
         &focus_nodes,
         args.upstream,
         args.downstream,

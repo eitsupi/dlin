@@ -71,6 +71,20 @@ impl From<ProjectGap> for ExplorationGap {
     }
 }
 
+/// Convert skipped inputs and the unassessed scopes relevant to this query.
+pub(super) fn project_exploration_gaps(
+    gaps: &[ProjectGap],
+    includes_scope: impl Fn(ProjectScope) -> bool,
+) -> impl Iterator<Item = ExplorationGap> {
+    gaps.iter()
+        .filter(move |gap| match gap {
+            ProjectGap::InputSkipped { .. } => true,
+            ProjectGap::NotAssessed { scope } => includes_scope(*scope),
+        })
+        .cloned()
+        .map(ExplorationGap::from)
+}
+
 impl ExplorationGap {
     /// The `type` tag.
     pub fn code(&self) -> &'static str {

@@ -364,3 +364,26 @@ fn test_filter_multiple_focus_overlapping_neighborhoods() {
     assert!(labels.contains("dashboard"));
     assert_eq!(filtered.node_count(), 4);
 }
+
+#[test]
+fn upstream_exploration_reports_project_scopes_except_manifest_dependencies() {
+    let graph = make_test_graph();
+    let root = resolve_node_by_name(&graph, "orders").unwrap();
+    let project_gaps = [
+        ProjectGap::NotAssessed {
+            scope: ProjectScope::ManifestDependencies,
+        },
+        ProjectGap::NotAssessed {
+            scope: ProjectScope::SemanticDependencies,
+        },
+    ];
+    let (_, exploration) =
+        filter_graph_by_indices(&graph, &project_gaps, &[root], Some(1), Some(0), &[], false)
+            .unwrap();
+    assert_eq!(
+        exploration.unwrap().gaps(),
+        [ExplorationGap::NotAssessed {
+            scope: ProjectScope::SemanticDependencies,
+        }]
+    );
+}

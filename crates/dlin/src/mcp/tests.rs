@@ -1277,3 +1277,37 @@ fn lineage_exploration_is_depth_bounded_and_independent_of_page() {
     );
     assert_eq!(first["exploration"], second["exploration"]);
 }
+
+#[test]
+fn lineage_reports_skipped_sql_project_inputs_when_upstream_can_expand() {
+    use dlin_core::graph::builder::build_graph_report;
+    use dlin_core::parser::discovery::DiscoveredFiles;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("root.sql");
+    let yaml = tmp.path().join("broken.yml");
+    std::fs::write(&model, "select 1 as id").unwrap();
+    std::fs::write(&yaml, "sources: [").unwrap();
+    let mut state = state();
+    state.build = build_graph_report(
+        tmp.path(),
+        "project",
+        &DiscoveredFiles {
+            model_sql_files: vec![model],
+            yaml_files: vec![yaml],
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .unwrap();
+
+    let result = get_lineage(&json!({"models":["root"],"upstream_depth":1}), &state).unwrap();
+    assert_eq!(result["exploration"]["status"], "incomplete");
+    assert_eq!(result["exploration"]["gaps"][0]["type"], "input_skipped");
+    assert_eq!(
+        result["exploration"]["gaps"][0]["location"]["path"],
+        "broken.yml"
+    );
+    let result = get_lineage(&json!({"models":["root"],"upstream_depth":0}), &state).unwrap();
+    assert!(result.get("exploration").is_none());
+}

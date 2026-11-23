@@ -392,7 +392,9 @@ These synthetic results use artifacts derived from the real dbt fixture. Each ti
 
 For `graph`, `list`, and `impact`, an exact unique ID takes precedence. A short name prefers models when other node types share the name. If multiple candidates remain, the command reports their IDs and asks you to specify one. `--node-type` filters the output, and `--select` matches a set of nodes.
 
-When `graph` follows a focus upstream in SQL mode, it reports the reached nodes whose dependencies were not fully extracted, because they can hide part of the upstream lineage. The JSON output has an `exploration` object with each node's `unique_id`, its shortest `depth` from a focus, and the reasons. A node at the depth limit is not reported. `--node-type` and `--select` do not hide these reports. Other formats print a summary on stderr, and `--verbose` lists each node. The MCP `get_lineage` tool returns the same `exploration`. With a manifest, dependencies are taken as declared and nothing is reported.
+Focused SQL graph queries can report `exploration.status: "incomplete"` with upstream `gaps`. Consumer gaps give the node ID, its shortest depth from a focus, and the reasons. Consumers at the depth limit are excluded. Project gaps include skipped inputs and have no consumer or depth. Output filters do not hide diagnostics. Text formats summarize gaps on stderr, with details under `--verbose`.
+
+MCP `get_lineage` uses the same format. Manifest queries use the declared dependencies. The absence of `exploration` does not prove completeness.
 
 An SQL file path selects the node with that file path by unique ID, even when other packages have a model with the same name. If multiple nodes share the path, dlin reports their IDs so you can select one. YAML paths expand to resource names.
 
@@ -510,7 +512,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 
 A reason does not establish that an edge is wrong or that one is missing. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
 
-A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is a gap of every exploration that ran.
+A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is included in impact and in focused graph queries that can traverse upstream.
 
 ## Filtering
 

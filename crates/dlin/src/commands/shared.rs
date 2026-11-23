@@ -47,17 +47,21 @@ pub(super) fn warn_upstream_exploration(exploration: Option<&graph::exploration:
         return;
     };
     dlin_core::warn!(
-        "upstream lineage exploration is incomplete at {} node(s)",
+        "upstream lineage exploration is incomplete ({} gap(s))",
         exploration.gaps().len()
     );
-    if is_verbose() {
-        for gap in exploration.gaps() {
-            if let graph::exploration::ExplorationGap::UnresolvedDependencies {
+    if !is_verbose() {
+        return;
+    }
+    use graph::exploration::ExplorationGap;
+    let name = |value: serde_json::Value| value.as_str().unwrap_or_default().replace('_', " ");
+    for gap in exploration.gaps() {
+        match gap {
+            ExplorationGap::UnresolvedDependencies {
                 unique_id,
                 depth: Some(depth),
                 reasons,
-            } = gap
-            {
+            } => {
                 let codes: std::collections::BTreeSet<_> = reasons
                     .iter()
                     .map(|reason| reason.reason_code().as_str())
@@ -67,6 +71,26 @@ pub(super) fn warn_upstream_exploration(exploration: Option<&graph::exploration:
                     codes.into_iter().collect::<Vec<_>>().join(", ")
                 );
             }
+            ExplorationGap::InputSkipped {
+                location,
+                stage,
+                failure,
+                ..
+            } => {
+                dlin_core::warn!(
+                    "upstream exploration skipped input {} at the {} step ({})",
+                    location.path,
+                    name(serde_json::json!(stage)),
+                    name(serde_json::json!(failure)),
+                );
+            }
+            ExplorationGap::NotAssessed { scope } => {
+                dlin_core::warn!(
+                    "upstream exploration did not assess the {}",
+                    name(serde_json::json!(scope))
+                );
+            }
+            ExplorationGap::UnresolvedDependencies { depth: None, .. } => {}
         }
     }
 }

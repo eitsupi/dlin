@@ -8,7 +8,7 @@ Usage: dlin graph [OPTIONS] [MODEL]...
 
 Arguments:
   [MODEL]...
-          Model names to focus on (shows full lineage if omitted) Focused SQL queries can report upstream dependency gaps before output filtering. JSON includes exploration; other formats report gaps on stderr. Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity
+          Model names to focus on (shows full lineage if omitted) Focused SQL queries report upstream consumer and project gaps before output filtering. JSON includes exploration; other formats report gaps on stderr. Absence does not prove completeness. Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity
 
 Options:
       --error-format <ERROR_FORMAT>

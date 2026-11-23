@@ -125,8 +125,8 @@ Examples:
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
-    /// Focused SQL queries can report upstream dependency gaps before output filtering.
-    /// JSON includes exploration; other formats report gaps on stderr.
+    /// Focused SQL queries report upstream consumer and project gaps before output filtering.
+    /// JSON includes exploration; other formats report gaps on stderr. Absence does not prove completeness.
     /// Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
     pub model: Vec<String>,
 

@@ -54,7 +54,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_lineage",
-            "description": "Return the lineage subgraph around a set of models as nodes and directed edges. Use upstream_depth and downstream_depth to control traversal depth. An optional exploration field reports known upstream dependency gaps within the requested depth, even when their nodes are outside the current page. Manifest dependencies are used as declared.",
+            "description": "Return the lineage subgraph around a set of models as nodes and directed edges. Use upstream_depth and downstream_depth to control traversal depth. Optional exploration reports upstream gaps on consumer nodes and across the project, including skipped inputs. Gaps can appear even when the consumer is outside the current page. Absence of exploration does not establish completeness. Manifest dependencies are used as declared.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -419,6 +419,7 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     } else {
         graph::filter::filter_graph_by_indices(
             state.dag(),
+            state.build.project_gaps(),
             &focus_nodes,
             upstream,
             downstream,
