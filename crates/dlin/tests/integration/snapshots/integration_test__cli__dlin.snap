@@ -1,0 +1,111 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+A fast CLI tool for dbt model lineage analysis.
+
+Parses SQL files directly to extract ref() and source() dependencies (no dbt compile needed), or reads manifest.json for full-fidelity graphs. Outputs as ASCII, DOT, JSON, Mermaid, SVG, or HTML.
+
+Data sources:
+  sql (default)   Interpret the Jinja in SQL files. No Python or dbt required.
+                  Detects ref() and source() calls in SQL, plus exposures from YAML.
+                  var() uses vars.yml or dbt_project.yml, then its default; CLI
+                  --vars overrides are not supported. env_var() uses its default and
+                  never reads the environment, so a different run-time value can
+                  select another dependency or branch. Values known only at run time
+                  (target, env_var() without a default, run_query() results) do not
+                  select dependencies; execute is false, as in dbt parsing.
+                  Dependencies selected through adapter.dispatch() or namespaced
+                  package macros (e.g. dbt_utils.*) may be missed; the nodes
+                  concerned are reported as partial (see dependency_analysis).
+                  Generic tests (not_null, unique, etc.) are inferred from YAML declarations
+                  with dlin-specific IDs — use manifest mode for exact dependency resolution.
+  manifest        Read a pre-compiled manifest.json, the dependency graph recorded by
+                  dbt. Requires `dbt compile` (or `dbt run`/`dbt build`) to have been
+                  run first. Use `dlin check-manifest` to verify freshness before querying.
+
+  Use sql mode for quick, local exploration without dbt setup. For exact dbt test
+  IDs, materializations or run-time dependency choices, use a manifest compiled for
+  the environment you want to inspect.
+
+Stdin support:
+  Accepts model names or file paths from stdin. File paths (detected by extension or path separators) are resolved to model names automatically.
+
+Exit codes:
+  0   Success
+  1   Error (project not found, all specified models not found, etc.)
+
+Error format (--error-format):
+  text (default)  Human-readable with What/Why/Hint structure:
+                  Error: <what>
+                    Why: <why>     (when available)
+                    Hint: <hint>   (when available)
+  json            One JSON object per diagnostic on stderr, with at least
+                  {"level":"error","what":"...","why":...,"hint":...}
+                  why and hint are strings or null. Typed diagnostics add
+                  a "code" and fields of their own.
+                  Also settable via DLIN_ERROR_FORMAT=json
+
+Usage: dlin [OPTIONS] <COMMAND>
+
+Commands:
+  graph           Visualize dbt model lineage graph
+  list            List nodes in the dbt project (lightweight, no edges)
+  impact          Compute downstream impact analysis for a model (with severity scoring)
+  summary         Show project summary (node counts, manifest status, etc.)
+  column          Column-level lineage and impact analysis
+  debug           Low-level debugging tools for SQL parsing and lineage tracing
+  check-manifest  Check if manifest.json is up-to-date (detects stale and deleted files)
+  mcp             Run an MCP server over stdio for AI agents
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Examples:
+  dlin graph                                       # Full lineage (ASCII art)
+  dlin graph -o json                               # Full lineage as JSON
+  dlin graph orders -u 2 -d 1                      # orders with 2 upstream, 1 downstream
+  dlin graph -o json --json-full                   # JSON with all fields
+  dlin list -o json                                # List all node names as JSON
+  dlin list orders -o json --json-full             # Model details: path, description, columns, materialization
+  dlin list --search shipping                      # Search models by name or description (regex)
+  dlin list orders stg_orders -o json              # List specific models as JSON
+  dlin impact orders -o json                       # Downstream impact analysis
+  dlin summary                                     # Project overview (node counts, etc.)
+  dlin summary -o json                             # Project overview as JSON
+  dlin check-manifest || dbt compile               # Recompile if stale or files deleted
+  git diff --name-only main | dlin graph           # Lineage of changed files
+  dlin column upstream orders                      # Upstream: where do columns come from? (requires dbt compile)
+  dlin column downstream stg_orders --column order_id  # Downstream: what depends on this column? (requires dbt compile)

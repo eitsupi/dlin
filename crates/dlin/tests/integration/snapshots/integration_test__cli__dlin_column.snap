@@ -1,0 +1,74 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Column-level lineage and impact analysis.
+
+Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
+column analysis is split by direction — each subcommand covers one direction:
+
+  upstream    — traces where each output column's data came from
+  downstream  — finds which models/columns are affected by a column change
+
+There are no -u/-d depth flags; the full chain is always traversed in both cases.
+
+Unlike `dlin graph`/`dlin impact`, there is no --source flag — manifest.json is the only
+data source for column-level analysis.
+
+Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).
+Use `dlin check-manifest` to verify freshness before querying.
+
+Limitations:
+  - Value dependencies only: columns used only in filters and join
+    conditions (row dependencies) are not collected.
+  - Unknown columns behind SELECT *, unsupported SQL and ambiguous names
+    can make upstream lineage partial and downstream exploration incomplete.
+  - A STRUCT field can be traced to the inputs of the whole STRUCT, so a
+    complete result can include the inputs of sibling fields. This happens
+    across dbt model boundaries, and through CAST, CASE, set operations,
+    array subscripts or UNNEST of an array built elsewhere.
+  - A YAML column list used as a schema is treated as exhaustive. Results
+    that rely on it cite it in evidence[] in JSON and show an "assumes"
+    note in plain, Mermaid and DOT output.
+
+Usage: dlin column [OPTIONS] <COMMAND>
+
+Commands:
+  upstream    Compute column-level lineage for a model (traces upstream sources)
+  downstream  Analyze downstream column-level impact of changing a column
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  dlin column upstream orders                             # upstream: where do columns come from?
+  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?

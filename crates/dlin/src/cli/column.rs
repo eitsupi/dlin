@@ -13,7 +13,7 @@ pub struct ColumnArgs {
 pub enum ColumnCommand {
     /// Compute column-level lineage for a model (traces upstream sources)
     #[command(
-        long_about = "\
+        long_about = concat!("\
 Compute column-level lineage for one or more models.
 
 Direction: upstream only. Traces backward from a model's output columns to
@@ -38,10 +38,17 @@ Output columns:
   `Name` to select a quoted name). A name shared by several columns is reported
   as ambiguous and selects none of them.
 
+", column_limitations!(), "
+  In JSON, check output.columns[].lineage.status and lineage.unresolved[],
+  output.shape for unexpanded stars, boundaries[] for where tracing stopped,
+  and errors[] for diagnostics.
+
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line).
   File paths (detected by extension or path separator) are resolved to
-  model names using the dbt project configuration.
+  model names using the dbt project configuration. Without dbt_project.yml,
+  path inputs use the standard dbt layout; use model names with a standalone
+  manifest from a project with custom paths.
 
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:
@@ -64,8 +71,8 @@ Output format (-o/--output):
       subject         the dbt node or relation the schema describes
       origin          sql_output, catalog_artifact or yaml_declaration
       coverage        exhaustive or partial
-      coverage_basis  enumerated, assumed_by_yaml_policy (a YAML list assumed
-                      to be complete) or declared_enforced_contract
+      coverage_basis  enumerated, assumed_by_yaml_policy (a YAML list treated
+                      as exhaustive) or declared_enforced_contract
       order           proven or unknown
       enforcement     what is known about an enforced contract, or null
       derived_from[]  evidence an SQL output schema relied on for its columns
@@ -128,7 +135,7 @@ Output format (-o/--output):
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, fatal analysis errors, etc.)",
+  1   Error (model not found, no manifest, fatal analysis errors, etc.)"),
         after_long_help = "\
 Examples:
   # Column lineage for a single model (JSON output)
@@ -159,7 +166,7 @@ Examples:
 
     /// Analyze downstream column-level impact of changing a column
     #[command(
-        long_about = "\
+        long_about = concat!("\
 Analyze downstream column-level impact of changing a column.
 
 Direction: downstream only. Starting from a specific column, follows forward
@@ -176,6 +183,10 @@ There is no --source flag; manifest.json is the only data source (unlike
 
 Requires compiled SQL in manifest.json — run `dbt compile` first.
 Use `dlin check-manifest` to verify freshness before querying.
+
+", column_limitations!(), "
+  In JSON, possible[] lists unconfirmed targets, exploration[] lists gaps
+  that may hide further targets, and errors[] holds diagnostics.
 
 Output format (-o/--output):
   json (default)  JSON array per column:
@@ -203,6 +214,8 @@ Output format (-o/--output):
                       evidence[] of every exploration.
     evidence[]        the schema evidence the report cites, described as for
                       `dlin column upstream`
+    errors[]          diagnostics of the input column and of the models the
+                      search could not analyse
   plain           human-readable text with confirmed and possible counts, scope,
                   per-kind gaps and concrete paths. An \"assumes\" line names
                   each assumed column list and the conclusions that rely on it
@@ -213,7 +226,7 @@ Output format (-o/--output):
 
 Exit codes:
   0   Success
-  1   Error (model not found, no manifest, fatal analysis errors, etc.)",
+  1   Error (model not found, no manifest, fatal analysis errors, etc.)"),
         after_long_help = "\
 Examples:
   # Impact of changing a single column (JSON output)

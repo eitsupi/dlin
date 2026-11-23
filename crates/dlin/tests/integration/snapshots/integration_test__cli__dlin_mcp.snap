@@ -1,0 +1,64 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Run a Model Context Protocol (MCP) server over stdio.
+
+This exposes manifest-backed dlin analysis as typed JSON-RPC tools for MCP
+clients such as Claude Desktop. The server reads one JSON-RPC message per line
+from stdin and writes one JSON-RPC response per line to stdout.
+
+MCP uses manifest mode only. Run `dbt compile` first so target/manifest.json
+exists and contains compiled SQL for column lineage tools.
+
+Usage: dlin mcp [OPTIONS]
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --dialect <DIALECT>
+          SQL dialect for parsing compiled SQL in get_column_lineage.
+          
+          When omitted, the dialect is auto-detected from manifest.metadata.adapter_type.
+          Recognized dialects removed from the active backend fall back to Generic with a warning;
+          a missing, empty, or unknown adapter_type is an error.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  dlin mcp --project-dir /path/to/dbt/project --dialect bigquery
+  dlin mcp --project-dir /path/to/dbt/project --manifest-path target/manifest.json --dialect snowflake

@@ -1,0 +1,106 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Show a summary of the dbt project: node counts by type, edge count, variable definitions, and manifest.json freshness.
+
+Useful for onboarding, CI logs, and feeding project context to AI agents.
+
+Output formats:
+  text (default)  Human-readable summary
+  json            Structured JSON for programmatic use
+
+Manifest freshness is checked automatically when a manifest.json is found at the default location (<project-dir>/target/manifest.json) or at the path given by --manifest-path. The check detects both files newer than the manifest (stale) and files referenced in the manifest but missing from disk (deleted), using the same logic as `dlin check-manifest`.
+
+Usage: dlin summary [OPTIONS]
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --cache-dir <CACHE_DIR>
+          Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_CACHE_DIR=]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --no-cache
+          Disable the manifest analysis cache (always re-parse the manifest, results are not saved). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_NO_CACHE=]
+
+      --refresh-cache
+          Discard the existing manifest analysis cache and rebuild it. Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_REFRESH_CACHE=]
+
+  -o, --output <OUTPUT>
+          Output format: text (default) or json
+          
+          [default: text]
+          [possible values: text, json]
+
+      --source <SOURCE>
+          Data source for building the lineage graph.
+          
+            sql (default)   Parse SQL files directly — no dbt or Python required.
+                            Exposures and generic tests are detected from YAML with
+                            dlin-specific IDs; use manifest mode for exact test
+                            dependency resolution.
+            manifest        Use dbt manifest.json for full accuracy. Requires
+                            prior `dbt compile` (or `dbt run`/`dbt build`).
+
+          Possible values:
+          - sql:      Parse SQL files directly — no dbt/Python required. Exposures and generic tests are detected from YAML with dlin-specific IDs; use manifest mode for exact test dependency resolution
+          - manifest: Use dbt manifest.json — full accuracy, requires prior `dbt compile`
+          
+          [default: sql]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json.
+          
+          Default: <project-dir>/target/manifest.json
+
+  -q, --quiet
+          Suppress warning messages
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Quick project overview
+  dlin summary
+
+  # JSON output for AI agents
+  dlin summary -o json
+
+  # Use manifest as data source
+  dlin summary --source manifest

@@ -1,0 +1,73 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Parse a SQL statement using the production SQL parser and display the result.
+
+By default, shows the Rust Debug representation of the AST. Use --format to choose between AST debug output or JSON AST.
+
+This does not require a dbt project — it operates on raw SQL strings.
+
+Usage: dlin debug parse-sql [OPTIONS] [SQL]
+
+Arguments:
+  [SQL]
+          SQL string to parse (reads from stdin if omitted)
+
+Options:
+      --dialect <DIALECT>
+          SQL dialect for parsing (default: generic) Recognized dialects removed from the active backend fall back to Generic with a warning
+          
+          [default: generic]
+
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+      --format <FORMAT>
+          Output format: ast (Debug representation), json (JSON AST)
+
+          Possible values:
+          - ast:  Rust Debug representation of the AST
+          - json: JSON serialization of the AST
+          
+          [default: ast]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Show AST debug representation (default)
+  dlin debug parse-sql 'SELECT a, b FROM t'
+
+  # Show AST as JSON
+  dlin debug parse-sql 'SELECT a FROM t' --format json
+
+  # Parse with BigQuery dialect
+  dlin debug parse-sql 'SELECT CAST(x AS ARRAY<STRING>) FROM t' --dialect bigquery
+
+  # Parse from file via stdin
+  dlin debug parse-sql --dialect snowflake < compiled_query.sql

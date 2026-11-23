@@ -14,6 +14,47 @@ fn test_help_flag() {
     assert!(stdout.contains("--project-dir"));
 }
 
+/// The long help of a command. The environment is cleared, since clap shows
+/// the values of the environment variables that back options.
+fn long_help(args: &[&str]) -> String {
+    let output = Command::new(binary_path())
+        .env_clear()
+        .args(args)
+        .arg("--help")
+        .output()
+        .expect("Failed to run binary");
+    assert!(output.status.success(), "{args:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The help of every command is part of the interface that users and agents
+/// read, including its known limitations, so each one is a snapshot.
+#[test]
+fn help_of_every_command() {
+    for args in [
+        &[][..],
+        &["graph"],
+        &["list"],
+        &["impact"],
+        &["summary"],
+        &["column"],
+        &["column", "upstream"],
+        &["column", "downstream"],
+        &["debug"],
+        &["debug", "parse-sql"],
+        &["debug", "trace-column"],
+        &["check-manifest"],
+        &["mcp"],
+    ] {
+        let name = std::iter::once("dlin")
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join("_")
+            .replace('-', "_");
+        insta::assert_snapshot!(name, long_help(args));
+    }
+}
+
 #[test]
 fn test_no_subcommand_shows_help() {
     let output = Command::new(binary_path())

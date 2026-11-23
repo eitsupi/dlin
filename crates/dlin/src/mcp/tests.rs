@@ -136,6 +136,15 @@ fn tools_list_exposes_expected_tools() {
 }
 
 #[test]
+fn column_lineage_tool_states_the_known_limitations() {
+    let tool = tools()
+        .into_iter()
+        .find(|tool| tool["name"] == "get_column_lineage")
+        .unwrap();
+    insta::assert_snapshot!(tool["description"].as_str().unwrap(), @"Trace a column upstream or downstream using compiled SQL. Only value dependencies are traced; columns used only in filters and join conditions are not. A STRUCT field can be traced to the inputs of the whole STRUCT, for example across model boundaries, so a complete result can include the inputs of sibling fields. A YAML column list used as a schema is treated as exhaustive. Partial results may omit sources. Possible impacts are unconfirmed, and incomplete exploration may miss targets.");
+}
+
+#[test]
 fn mcp_auto_detects_manifest_dialect() {
     let state = McpState::load(McpArgs {
         project_dir: column_lineage_fixture_project_dir(),

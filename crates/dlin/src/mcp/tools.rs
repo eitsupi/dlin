@@ -85,7 +85,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_column_lineage",
-            "description": "Trace a column upstream or downstream using compiled SQL. Partial results may omit sources. Possible impacts are unconfirmed, and incomplete exploration may miss targets.",
+            "description": "Trace a column upstream or downstream using compiled SQL. Only value dependencies are traced; columns used only in filters and join conditions are not. A STRUCT field can be traced to the inputs of the whole STRUCT, for example across model boundaries, so a complete result can include the inputs of sibling fields. A YAML column list used as a schema is treated as exhaustive. Partial results may omit sources. Possible impacts are unconfirmed, and incomplete exploration may miss targets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

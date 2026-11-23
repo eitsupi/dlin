@@ -1,0 +1,193 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+List nodes in the dbt project (lightweight, no edges)
+
+Usage: dlin list [OPTIONS] [MODEL]...
+
+Arguments:
+  [MODEL]...
+          Model names to list (lists all nodes if omitted)
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --cache-dir <CACHE_DIR>
+          Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_CACHE_DIR=]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --no-cache
+          Disable the manifest analysis cache (always re-parse the manifest, results are not saved). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_NO_CACHE=]
+
+      --refresh-cache
+          Discard the existing manifest analysis cache and rebuild it. Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_REFRESH_CACHE=]
+
+  -o, --output <OUTPUT>
+          Output format: plain (default) or json
+          
+          [default: plain]
+          [possible values: plain, json]
+
+  -s, --select <SELECT>
+          Selector expression (comma-separated, OR logic).
+          All selectors support glob patterns (*, **, ?, []):
+          
+            tag:<pattern>     match nodes by tag
+            path:<pattern>    match by file path (prefix or glob)
+            <pattern>         match by model label
+
+      --search <PATTERN>
+          Filter nodes whose name or description matches the regex pattern (case-insensitive).
+          
+          Matching rules:
+            - Tested against model name and description field (OR within a single pattern)
+            - Plain text works as a simple substring match
+            - Repeating --search applies AND logic: all patterns must match
+          
+          Regex syntax (Rust regex, https://docs.rs/regex):
+            order|payment   match nodes containing 'order' or 'payment'
+            ^stg_           match nodes whose name starts with 'stg_'
+            (?-i)Order      opt out of case-insensitivity for this pattern
+          
+          Examples:
+            dlin list --search shipping
+            dlin list --search '^stg_'
+            dlin list --search 'order|payment'
+            dlin list --search staging --search customer   # AND: must match both
+
+      --node-type <NODE_TYPES>
+          Filter output by node type (comma-separated). Default: all types.
+          Available types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query.
+          
+          NOTE: In sql mode, generic tests are inferred from YAML declarations
+          with dlin-specific IDs. Use --source manifest for exact dependency resolution.
+
+      --source <SOURCE>
+          Data source for building the lineage graph.
+          
+            sql (default)   Parse SQL files directly — no dbt or Python required.
+                            Exposures and generic tests are detected from YAML with
+                            dlin-specific IDs; use manifest mode for exact test
+                            dependency resolution.
+            manifest        Use dbt manifest.json for full accuracy. Requires
+                            prior `dbt compile` (or `dbt run`/`dbt build`).
+
+          Possible values:
+          - sql:      Parse SQL files directly — no dbt/Python required. Exposures and generic tests are detected from YAML with dlin-specific IDs; use manifest mode for exact test dependency resolution
+          - manifest: Use dbt manifest.json — full accuracy, requires prior `dbt compile`
+          
+          [default: sql]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json.
+          
+          Default: <project-dir>/target/manifest.json
+
+      --json-fields <JSON_FIELDS>
+          Select which fields to include in JSON node output (comma-separated).
+          Only the specified fields are emitted; unspecified fields are omitted.
+          
+          Available fields:
+            unique_id, label, node_type, file_path, description,
+            materialization, tags, columns, sql_content, exposure,
+            dependency_analysis
+          
+          Default (when neither --json-fields nor --json-full is given):
+            unique_id, label, node_type, file_path, dependency_analysis
+          
+          The exposure field is an object containing label, type, url, maturity,
+          and owner; it is non-null only for exposure nodes and must be explicitly
+          requested via --json-fields or --json-full.
+          
+          dependency_analysis has a status, complete or partial, and unresolved,
+          a typed reason for each part of the node's own dependencies that could
+          not be analysed. It does not say whether the project as
+          a whole was analysed; see `dlin impact --help`.
+          
+          Note: sql_content reads raw SQL files on disk in sql mode, or
+          compiled_code from manifest.json in manifest mode (requires prior
+          `dbt compile`).
+
+      --json-full
+          Shorthand for specifying all available fields in --json-fields.
+          Cannot be combined with --json-fields.
+
+  -q, --quiet
+          Suppress warning messages
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # List all models and sources
+  dlin list
+
+  # List specific models
+  dlin list orders stg_orders
+
+  # List as JSON for programmatic use
+  dlin list -o json
+
+  # List only source nodes
+  dlin list --node-type source
+
+  # List models tagged 'finance'
+  dlin list -s tag:finance
+
+  # Search models by name or description (regex, case-insensitive)
+  dlin list --search shipping
+  dlin list --search '^stg_'                     # models whose name starts with stg_
+  dlin list --search 'order|payment'             # OR: name/description contains either
+  dlin list --search staging --search customer   # AND: must match both patterns
+  dlin list --search shipping -o json --json-full
+
+  # Count models (combine with standard tools)
+  dlin list --node-type model | wc -l
+
+  # Pipeline: get impacted models, then fetch their SQL
+  dlin impact orders -o json | jq -r '.[].impacted_nodes[].unique_id' | dlin list -o json --json-fields unique_id,sql_content
+
+  # List models from changed files
+  git diff --name-only main | dlin list -o json --json-fields unique_id,label
+
+  # Find models that expose a specific column name (jq)
+  dlin list -o json --json-full | jq '.[] | select(any(.columns[]; . == "order_id"))'
+
+  # Find models whose column name partially matches (jq)
+  dlin list -o json --json-full | jq '.[] | select(any(.columns[]; contains("_amount")))'

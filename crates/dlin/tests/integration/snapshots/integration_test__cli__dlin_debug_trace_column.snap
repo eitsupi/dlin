@@ -1,0 +1,73 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Trace a single column's upstream lineage through a SQL statement.
+
+Uses the production sqllineage engine to find where a column comes from. Optionally provide table schema information for more accurate resolution (especially needed for SELECT * expansion).
+
+This does not require a dbt project — it operates on raw SQL strings.
+
+Usage: dlin debug trace-column [OPTIONS] --column <COLUMN> [SQL]
+
+Arguments:
+  [SQL]
+          SQL string to parse (reads from stdin if omitted)
+
+Options:
+      --column <COLUMN>
+          Column name to trace
+
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+      --dialect <DIALECT>
+          SQL dialect for parsing (default: generic) Recognized dialects removed from the active backend fall back to Generic with a warning
+          
+          [default: generic]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --schema <SCHEMA>
+          Table schema definitions for accurate lineage resolution. Format: table1:col1,col2;table2:col3,col4
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Basic column trace
+  dlin debug trace-column 'SELECT t.id AS order_id FROM t' --column order_id
+
+  # With schema (table:col1,col2 format, semicolon-separated tables)
+  dlin debug trace-column \
+    'SELECT * FROM orders JOIN customers ON orders.cid = customers.id' \
+    --column cid \
+    --schema 'orders:id,cid,amount;customers:id,name'
+
+  # With explicit dialect
+  dlin debug trace-column 'SELECT a FROM t' --column a --dialect bigquery
+
+  # From file via stdin
+  dlin debug trace-column --column order_id --dialect snowflake < query.sql

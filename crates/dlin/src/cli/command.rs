@@ -181,7 +181,7 @@ Examples:
 
     /// Column-level lineage and impact analysis
     #[command(
-        long_about = "\
+        long_about = concat!("\
 Column-level lineage and impact analysis.
 
 Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
@@ -196,7 +196,9 @@ Unlike `dlin graph`/`dlin impact`, there is no --source flag — manifest.json i
 data source for column-level analysis.
 
 Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).
-Use `dlin check-manifest` to verify freshness before querying.",
+Use `dlin check-manifest` to verify freshness before querying.
+
+", column_limitations!()),
         after_long_help = "\
 Examples:
   dlin column upstream orders                             # upstream: where do columns come from?
